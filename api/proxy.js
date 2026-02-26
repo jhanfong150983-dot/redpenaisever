@@ -10,6 +10,8 @@ export const config = {
 
 import { getAuthUser } from '../server/_auth.js'
 import { getSupabaseAdmin } from '../server/_supabase.js'
+import { getEnvValue } from '../server/_env.js'
+import { runAiPipeline } from '../server/ai/orchestrator.js'
 import crypto from 'crypto'
 
 // 🆕 AnswerKey 緩存（按 user + hash 存儲）
@@ -228,9 +230,22 @@ export default async function handler(req, res) {
     return
   }
 
-  const apiKey = process.env.SECRET_API_KEY
+  const apiKey = getEnvValue('SECRET_API_KEY') || getEnvValue('SYSTEM_GEMINI_API_KEY')
   if (!apiKey) {
-    res.status(500).json({ error: 'Server API Key missing' })
+    const diagnostics = {
+      cwd: process.cwd(),
+      hasSecretApiKeyEnv: typeof process.env.SECRET_API_KEY === 'string',
+      secretApiKeyLength: String(process.env.SECRET_API_KEY || '').length,
+      hasSystemApiKeyEnv: typeof process.env.SYSTEM_GEMINI_API_KEY === 'string',
+      systemApiKeyLength: String(process.env.SYSTEM_GEMINI_API_KEY || '').length,
+      hasSecretApiKeyLocal: Boolean(getEnvValue('SECRET_API_KEY')),
+      hasSystemApiKeyLocal: Boolean(getEnvValue('SYSTEM_GEMINI_API_KEY'))
+    }
+    console.error('[proxy] API key missing diagnostics:', diagnostics)
+    res.status(500).json({
+      error: 'Server API Key missing (SECRET_API_KEY / SYSTEM_GEMINI_API_KEY)',
+      diagnostics
+    })
     return
   }
 
@@ -244,7 +259,7 @@ export default async function handler(req, res) {
     }
   }
 
-  const { model, contents, inkSessionId, answerKey, answerKeyRef, ...payload } = body || {}
+  const { model, contents, inkSessionId, answerKey, answerKeyRef, routeKey, ...payload } = body || {}
   if (!model || !Array.isArray(contents)) {
     res.status(400).json({ error: 'Missing model or contents' })
     return
@@ -281,11 +296,6 @@ export default async function handler(req, res) {
   if (resolvedAnswerKey) {
     processedContents = injectAnswerKeyToContents(contents, resolvedAnswerKey)
   }
-
-  const modelPath = String(model).startsWith('models/')
-    ? String(model)
-    : `models/${model}`
-  const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${apiKey}`
 
   let supabaseAdmin = null
   let currentBalance = 0
@@ -346,26 +356,29 @@ export default async function handler(req, res) {
   }
 
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: processedContents, ...payload })
+    const pipelineResult = await runAiPipeline({
+      apiKey,
+      model,
+      contents: processedContents,
+      payload,
+      requestedRouteKey: routeKey,
+      routeHint: {
+        hasResolvedAnswerKey: Boolean(resolvedAnswerKey),
+        hasAnswerKeyRef: Boolean(answerKeyRef),
+        hasAnswerKeyPayload: Boolean(answerKey)
+      }
     })
 
-    const text = await response.text()
-    let data = null
-    try {
-      data = JSON.parse(text)
-    } catch {
-      data = { raw: text }
-    }
+    const responseStatus = Number(pipelineResult.status) || 500
+    const responseOk = responseStatus >= 200 && responseStatus < 300
+    const data = pipelineResult.data
 
     // 🆕 返回 answerKeyHash 給前端（用於後續請求）
-    if (response.ok && answerKeyHash && data && typeof data === 'object') {
+    if (responseOk && answerKeyHash && data && typeof data === 'object') {
       data.answerKeyHash = answerKeyHash
     }
 
-    if (response.ok && data?.usageMetadata) {
+    if (responseOk && data?.usageMetadata) {
       try {
         const cost = computeInkPoints(data.usageMetadata)
         let inkSummary = null
@@ -452,8 +465,12 @@ export default async function handler(req, res) {
       }
     }
 
-    res.status(response.ok ? 200 : response.status).json(data)
+    res.status(responseStatus).json(data)
   } catch (error) {
+    if (Number(error?.status) === 504) {
+      res.status(504).json({ error: 'Gemini request timeout' })
+      return
+    }
     res.status(500).json({ error: 'Failed to fetch Gemini API' })
   }
 }

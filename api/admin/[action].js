@@ -1,6 +1,8 @@
 import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
+import { getEnvValue } from '../../server/_env.js'
+import { runAiPipeline } from '../../server/ai/orchestrator.js'
 
 const PENDING_TTL_MINUTES = 30
 const TAG_QUIET_MINUTES = 5
@@ -202,33 +204,48 @@ function buildIssueStats(submissions) {
 }
 
 function getSystemApiKey() {
-  return process.env.SYSTEM_GEMINI_API_KEY || process.env.SECRET_API_KEY || ''
+  const normalized =
+    getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY')
+  if (!normalized) {
+    console.error('[admin] API key missing diagnostics:', {
+      cwd: process.cwd(),
+      hasSecretApiKeyEnv: typeof process.env.SECRET_API_KEY === 'string',
+      secretApiKeyLength: String(process.env.SECRET_API_KEY || '').length,
+      hasSystemApiKeyEnv: typeof process.env.SYSTEM_GEMINI_API_KEY === 'string',
+      systemApiKeyLength: String(process.env.SYSTEM_GEMINI_API_KEY || '').length,
+      hasSecretApiKeyLocal: Boolean(getEnvValue('SECRET_API_KEY')),
+      hasSystemApiKeyLocal: Boolean(getEnvValue('SYSTEM_GEMINI_API_KEY'))
+    })
+  }
+  return normalized
 }
 
-async function callGeminiText(prompt) {
+async function callGeminiText(prompt, options = {}) {
   const apiKey = getSystemApiKey()
   if (!apiKey) {
     throw new Error('Server API Key missing')
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${TAG_MODEL}:generateContent?key=${apiKey}`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }]
-    })
+  const routeKey = typeof options.routeKey === 'string'
+    ? options.routeKey
+    : 'admin.tag_aggregation'
+  const model = typeof options.model === 'string' && options.model.trim()
+    ? options.model.trim()
+    : TAG_MODEL
+  const pipelineResult = await runAiPipeline({
+    apiKey,
+    model,
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    requestedRouteKey: routeKey,
+    routeHint: {
+      source: 'admin'
+    }
   })
 
-  const text = await response.text()
-  let data = null
-  try {
-    data = JSON.parse(text)
-  } catch {
-    data = { raw: text }
-  }
+  const data = pipelineResult.data
+  const ok = Number(pipelineResult.status) >= 200 && Number(pipelineResult.status) < 300
 
-  if (!response.ok) {
+  if (!ok) {
     const message = data?.error?.message || data?.error || 'Gemini request failed'
     throw new Error(message)
   }
