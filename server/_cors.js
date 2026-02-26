@@ -12,6 +12,14 @@ function parseOrigins() {
   if (siteUrl && !fromEnv.includes(siteUrl)) {
     fromEnv.push(siteUrl)
   }
+  const frontendUrl = normalizeOrigin(process.env.FRONTEND_URL || '')
+  if (frontendUrl && !fromEnv.includes(frontendUrl)) {
+    fromEnv.push(frontendUrl)
+  }
+  const backendUrl = normalizeOrigin(process.env.BACKEND_URL || '')
+  if (backendUrl && !fromEnv.includes(backendUrl)) {
+    fromEnv.push(backendUrl)
+  }
 
   return fromEnv
 }

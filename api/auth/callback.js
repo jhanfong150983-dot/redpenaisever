@@ -9,11 +9,15 @@ import {
 } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
 
-function getSiteUrl(req) {
+function getRequestOrigin(req) {
   const proto = req.headers?.['x-forwarded-proto'] || 'http'
   const host = req.headers?.host
-  if (!host) return process.env.SITE_URL || ''
+  if (!host) return ''
   return `${proto}://${host}`
+}
+
+function getFrontendUrl(req) {
+  return process.env.FRONTEND_URL || process.env.SITE_URL || getRequestOrigin(req)
 }
 
 export default async function handler(req, res) {
@@ -110,8 +114,8 @@ export default async function handler(req, res) {
 
     setAuthCookies(res, session, isSecureRequest(req))
 
-    const siteUrl = process.env.SITE_URL || getSiteUrl(req)
-    res.writeHead(302, { Location: siteUrl || '/' })
+    const frontendUrl = getFrontendUrl(req)
+    res.writeHead(302, { Location: frontendUrl || '/' })
     res.end()
   } catch (err) {
     clearOAuthCookies(res, isSecureRequest(req))
