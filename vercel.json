@@ -1,0 +1,17 @@
+{
+  "functions": {
+    "api/**/*.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
+  "env": {
+    "NODE_OPTIONS": "--no-deprecation"
+  },
+  "crons": [
+    {
+      "path": "/api/admin/aggregate-tags",
+      "schedule": "0 18 * * *"
+    }
+  ]
+}
