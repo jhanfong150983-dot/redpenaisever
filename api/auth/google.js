@@ -5,6 +5,7 @@ import {
   setOAuthCookies,
   isSecureRequest
 } from '../../server/_auth.js'
+import { getSupabaseUrl } from '../../server/_supabase.js'
 
 function getRequestOrigin(req) {
   const proto = req.headers?.['x-forwarded-proto'] || 'http'
@@ -26,7 +27,7 @@ export default async function handler(req, res) {
     return
   }
 
-  if (!process.env.SUPABASE_URL) {
+  if (!getSupabaseUrl()) {
     res.status(500).json({ error: 'Missing SUPABASE_URL' })
     return
   }

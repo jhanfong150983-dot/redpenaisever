@@ -1,5 +1,9 @@
 import crypto from 'crypto'
-import { getSupabaseAdmin, getSupabaseUrl } from './_supabase.js'
+import {
+  getSupabaseAdmin,
+  getSupabaseServiceRoleKey,
+  getSupabaseUrl
+} from './_supabase.js'
 
 const ACCESS_COOKIE = 'rp-access-token'
 const REFRESH_COOKIE = 'rp-refresh-token'
@@ -168,7 +172,7 @@ function base64Url(buffer) {
 
 export async function exchangeCodeForSession(code, verifier) {
   const supabaseUrl = getSupabaseUrl()
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const serviceRoleKey = getSupabaseServiceRoleKey()
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error('Supabase server credentials are missing')
   }

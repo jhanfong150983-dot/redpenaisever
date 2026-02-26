@@ -1,5 +1,21 @@
 function normalizeOrigin(origin) {
-  return String(origin || '').trim().replace(/\/+$/, '')
+  return String(origin || '')
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .replace(/\/+$/, '')
+}
+
+function isLoopbackOrigin(origin) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)
+}
+
+function isLocalRequestHost(req) {
+  const host = String(req.headers?.host || '').trim().toLowerCase()
+  return (
+    host.startsWith('localhost:') ||
+    host.startsWith('127.0.0.1:') ||
+    host.startsWith('[::1]:')
+  )
 }
 
 function parseOrigins() {
@@ -43,7 +59,9 @@ function setPreflightHeaders(req, res, origin) {
 export function handleCors(req, res) {
   const requestOrigin = normalizeOrigin(req.headers?.origin || '')
   const allowedOrigins = parseOrigins()
-  const isAllowed = requestOrigin && allowedOrigins.includes(requestOrigin)
+  const localDevAllowed = isLoopbackOrigin(requestOrigin) && isLocalRequestHost(req)
+  const isAllowed =
+    requestOrigin && (allowedOrigins.includes(requestOrigin) || localDevAllowed)
 
   setPreflightHeaders(req, res, isAllowed ? requestOrigin : '')
 
