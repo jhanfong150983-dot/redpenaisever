@@ -75,6 +75,169 @@ function validateGradingResponse(data) {
   return { warnings, metrics }
 }
 
+function validateGradingClassifyResponse(data) {
+  const warnings = []
+  const metrics = {}
+  const parsed = tryParseCandidateJson(data)
+  if (!parsed || typeof parsed !== 'object') {
+    warnings.push('GRADING_CLASSIFY_JSON_PARSE_FAILED')
+    return { warnings, metrics }
+  }
+
+  const alignedQuestions = Array.isArray(parsed.alignedQuestions) ? parsed.alignedQuestions : []
+  const visibleCount = alignedQuestions.filter((item) => item?.visible === true).length
+
+  metrics.alignedCount = alignedQuestions.length
+  metrics.visibleCount = visibleCount
+
+  if (alignedQuestions.length === 0) warnings.push('GRADING_CLASSIFY_ALIGNED_EMPTY')
+
+  return { warnings, metrics }
+}
+
+function validateGradingReadAnswerResponse(data) {
+  const warnings = []
+  const metrics = {}
+  const parsed = tryParseCandidateJson(data)
+  if (!parsed || typeof parsed !== 'object') {
+    warnings.push('GRADING_READ_ANSWER_JSON_PARSE_FAILED')
+    return { warnings, metrics }
+  }
+
+  const answers = Array.isArray(parsed.answers) ? parsed.answers : []
+  const readCount = answers.filter((item) => item?.status === 'read').length
+  const unreadableCount = answers.filter((item) => item?.status === 'unreadable').length
+  const blankCount = answers.filter((item) => item?.status === 'blank').length
+  const missingQuestionIdCount = answers.filter(
+    (item) => typeof item?.questionId !== 'string' || !item.questionId.trim()
+  ).length
+  const readEmptyAnswerCount = answers.filter((item) => {
+    if (item?.status !== 'read') return false
+    const raw = typeof item?.studentAnswerRaw === 'string' ? item.studentAnswerRaw.trim() : ''
+    return !raw || raw === '未作答' || raw === '無法辨識'
+  }).length
+
+  metrics.answerCount = answers.length
+  metrics.readCount = readCount
+  metrics.blankCount = blankCount
+  metrics.unreadableCount = unreadableCount
+  metrics.missingQuestionIdCount = missingQuestionIdCount
+  metrics.readEmptyAnswerCount = readEmptyAnswerCount
+
+  if (answers.length === 0) warnings.push('GRADING_READ_ANSWER_EMPTY')
+  if (missingQuestionIdCount > 0) warnings.push('GRADING_READ_ANSWER_QUESTION_ID_MISSING')
+  if (readEmptyAnswerCount > 0) warnings.push('GRADING_READ_ANSWER_EMPTY_RAW_VALUE')
+
+  return { warnings, metrics }
+}
+
+function validateGradingAccessorResponse(data) {
+  const warnings = []
+  const metrics = {}
+  const parsed = tryParseCandidateJson(data)
+  if (!parsed || typeof parsed !== 'object') {
+    warnings.push('GRADING_ACCESSOR_JSON_PARSE_FAILED')
+    return { warnings, metrics }
+  }
+
+  const scores = Array.isArray(parsed.scores) ? parsed.scores : []
+  const totalScore = toFiniteNumber(parsed.totalScore)
+  const scoreSum = scores.reduce((sum, item) => {
+    const score = toFiniteNumber(item?.score)
+    return sum + (score ?? 0)
+  }, 0)
+  const invalidRangeCount = scores.filter((item) => {
+    const score = toFiniteNumber(item?.score)
+    const maxScore = toFiniteNumber(item?.maxScore)
+    if (score === null || maxScore === null) return false
+    return score < 0 || score > maxScore
+  }).length
+
+  metrics.scoreCount = scores.length
+  metrics.totalScore = totalScore
+  metrics.scoreSum = scoreSum
+  metrics.invalidRangeCount = invalidRangeCount
+
+  if (scores.length === 0) warnings.push('GRADING_ACCESSOR_SCORES_EMPTY')
+  if (totalScore === null) warnings.push('GRADING_ACCESSOR_TOTAL_MISSING')
+  if (totalScore !== null && Math.abs(totalScore - scoreSum) > 1) {
+    warnings.push('GRADING_ACCESSOR_TOTAL_SCORE_MISMATCH')
+  }
+  if (invalidRangeCount > 0) warnings.push('GRADING_ACCESSOR_SCORE_OUT_OF_RANGE')
+
+  return { warnings, metrics }
+}
+
+function validateGradingLocateResponse(data) {
+  const warnings = []
+  const metrics = {}
+  const parsed = tryParseCandidateJson(data)
+  if (!parsed || typeof parsed !== 'object') {
+    warnings.push('GRADING_LOCATE_JSON_PARSE_FAILED')
+    return { warnings, metrics }
+  }
+
+  const locatedQuestions = Array.isArray(parsed.locatedQuestions)
+    ? parsed.locatedQuestions
+    : []
+
+  const hasValidBbox = (bbox) => {
+    if (!bbox || typeof bbox !== 'object') return false
+    const x = toFiniteNumber(bbox.x)
+    const y = toFiniteNumber(bbox.y)
+    const w = toFiniteNumber(bbox.w)
+    const h = toFiniteNumber(bbox.h)
+    if ([x, y, w, h].some((item) => item === null)) return false
+    if (w <= 0 || h <= 0) return false
+    return true
+  }
+
+  const withQuestionBboxCount = locatedQuestions.filter((item) =>
+    hasValidBbox(item?.questionBbox ?? item?.question_bbox)
+  ).length
+  const withAnswerBboxCount = locatedQuestions.filter((item) =>
+    hasValidBbox(item?.answerBbox ?? item?.answer_bbox)
+  ).length
+
+  metrics.locatedCount = locatedQuestions.length
+  metrics.withQuestionBboxCount = withQuestionBboxCount
+  metrics.withAnswerBboxCount = withAnswerBboxCount
+
+  if (locatedQuestions.length === 0) warnings.push('GRADING_LOCATE_EMPTY')
+  if (withQuestionBboxCount === 0 && withAnswerBboxCount === 0) {
+    warnings.push('GRADING_LOCATE_BBOX_EMPTY')
+  }
+
+  return { warnings, metrics }
+}
+
+function validateGradingExplainResponse(data) {
+  const warnings = []
+  const metrics = {}
+  const parsed = tryParseCandidateJson(data)
+  if (!parsed || typeof parsed !== 'object') {
+    warnings.push('GRADING_EXPLAIN_JSON_PARSE_FAILED')
+    return { warnings, metrics }
+  }
+
+  const details = Array.isArray(parsed.details) ? parsed.details : []
+  const mistakes = Array.isArray(parsed.mistakes) ? parsed.mistakes : []
+  const suggestions = Array.isArray(parsed.suggestions) ? parsed.suggestions : []
+  const missingReasonCount = details.filter(
+    (item) => typeof item?.reason !== 'string' || !item.reason.trim()
+  ).length
+
+  metrics.detailCount = details.length
+  metrics.mistakeCount = mistakes.length
+  metrics.suggestionCount = suggestions.length
+  metrics.missingReasonCount = missingReasonCount
+
+  if (details.length === 0) warnings.push('GRADING_EXPLAIN_DETAILS_EMPTY')
+  if (missingReasonCount > 0) warnings.push('GRADING_EXPLAIN_REASON_MISSING')
+
+  return { warnings, metrics }
+}
+
 function validateAnswerKeyResponse(data) {
   const warnings = []
   const metrics = {}
@@ -178,6 +341,16 @@ function validateUnknownResponse(data) {
 
 export function validateResponseByRoute(routeKey, data) {
   switch (routeKey) {
+    case AI_ROUTE_KEYS.GRADING_CLASSIFY:
+      return validateGradingClassifyResponse(data)
+    case AI_ROUTE_KEYS.GRADING_READ_ANSWER:
+      return validateGradingReadAnswerResponse(data)
+    case AI_ROUTE_KEYS.GRADING_ACCESSOR:
+      return validateGradingAccessorResponse(data)
+    case AI_ROUTE_KEYS.GRADING_LOCATE:
+      return validateGradingLocateResponse(data)
+    case AI_ROUTE_KEYS.GRADING_EXPLAIN:
+      return validateGradingExplainResponse(data)
     case AI_ROUTE_KEYS.GRADING_EVALUATE:
       return validateGradingResponse(data)
     case AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT:
@@ -191,4 +364,3 @@ export function validateResponseByRoute(routeKey, data) {
       return validateUnknownResponse(data)
   }
 }
-

@@ -16,8 +16,63 @@ function getRequestOrigin(req) {
   return `${proto}://${host}`
 }
 
+function sanitizeEnvUrl(value) {
+  if (typeof value !== 'string') return ''
+  return value.trim().replace(/^['"]|['"]$/g, '')
+}
+
 function getFrontendUrl(req) {
-  return process.env.FRONTEND_URL || process.env.SITE_URL || getRequestOrigin(req)
+  const frontendUrl = sanitizeEnvUrl(process.env.FRONTEND_URL)
+  if (frontendUrl) return frontendUrl
+
+  const siteUrl = sanitizeEnvUrl(process.env.SITE_URL)
+  const requestOrigin = getRequestOrigin(req)
+  const requestHost = String(req.headers?.host || '').toLowerCase()
+  const isLocalBackend =
+    requestHost.includes('localhost:3000') || requestHost.includes('127.0.0.1:3000')
+
+  // 開發環境保險：若未設定 FRONTEND_URL，且目前是本地後端，預設導回 Vite 前端
+  if (isLocalBackend) {
+    return 'http://localhost:5173'
+  }
+
+  return siteUrl || requestOrigin
+}
+
+function normalizeEntry(rawValue) {
+  const value = Array.isArray(rawValue) ? rawValue[0] : rawValue
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (normalized === 'teacher' || normalized === 'student') return normalized
+  return ''
+}
+
+function appendSetCookie(res, cookie) {
+  const existing = res.getHeader('Set-Cookie')
+  if (!existing) {
+    res.setHeader('Set-Cookie', [cookie])
+    return
+  }
+  if (Array.isArray(existing)) {
+    res.setHeader('Set-Cookie', [...existing, cookie])
+    return
+  }
+  res.setHeader('Set-Cookie', [existing, cookie])
+}
+
+function serializeClearLoginEntryCookie(secure) {
+  const sameSite = String(process.env.AUTH_COOKIE_SAME_SITE || 'Lax').trim() || 'Lax'
+  const domain = (process.env.AUTH_COOKIE_DOMAIN || '').trim()
+  const effectiveSecure = sameSite.toLowerCase() === 'none' ? true : secure
+  const parts = [
+    'rp-login-entry=',
+    'Max-Age=0',
+    'Path=/',
+    `SameSite=${sameSite}`
+  ]
+  if (domain) parts.push(`Domain=${domain}`)
+  if (effectiveSecure) parts.push('Secure')
+  parts.push('HttpOnly')
+  return parts.join('; ')
 }
 
 export default async function handler(req, res) {
@@ -31,6 +86,8 @@ export default async function handler(req, res) {
 
   const { code, error, error_description } = req.query || {}
   const codeValue = Array.isArray(code) ? code[0] : code
+  const cookies = parseCookies(req)
+  const entry = normalizeEntry(req.query?.entry) || normalizeEntry(cookies['rp-login-entry'])
   if (error) {
     res.status(400).json({ error: error_description || error })
     return
@@ -41,9 +98,9 @@ export default async function handler(req, res) {
     return
   }
 
-  const cookies = parseCookies(req)
+  const oauthCookies = parseCookies(req)
   const { verifier: verifierCookie } = getAuthCookieNames()
-  const verifier = cookies[verifierCookie]
+  const verifier = oauthCookies[verifierCookie]
 
   if (!verifier) {
     clearOAuthCookies(res, isSecureRequest(req))
@@ -114,8 +171,12 @@ export default async function handler(req, res) {
 
     setAuthCookies(res, session, isSecureRequest(req))
 
-    const frontendUrl = getFrontendUrl(req)
-    res.writeHead(302, { Location: frontendUrl || '/' })
+    const frontendUrl = getFrontendUrl(req) || '/'
+    const redirectLocation = entry
+      ? `${frontendUrl}${frontendUrl.includes('?') ? '&' : '?'}entry=${encodeURIComponent(entry)}`
+      : frontendUrl
+    appendSetCookie(res, serializeClearLoginEntryCookie(isSecureRequest(req)))
+    res.writeHead(302, { Location: redirectLocation })
     res.end()
   } catch (err) {
     clearOAuthCookies(res, isSecureRequest(req))

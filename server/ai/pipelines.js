@@ -24,6 +24,26 @@ const PIPELINE_REGISTRY = new Map([
     createPipeline(AI_ROUTE_KEYS.GRADING_EVALUATE, 'grading-evaluate-pipeline')
   ],
   [
+    AI_ROUTE_KEYS.GRADING_CLASSIFY,
+    createPipeline(AI_ROUTE_KEYS.GRADING_CLASSIFY, 'grading-classify-pipeline')
+  ],
+  [
+    AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+    createPipeline(AI_ROUTE_KEYS.GRADING_READ_ANSWER, 'grading-read-answer-pipeline')
+  ],
+  [
+    AI_ROUTE_KEYS.GRADING_ACCESSOR,
+    createPipeline(AI_ROUTE_KEYS.GRADING_ACCESSOR, 'grading-accessor-pipeline')
+  ],
+  [
+    AI_ROUTE_KEYS.GRADING_LOCATE,
+    createPipeline(AI_ROUTE_KEYS.GRADING_LOCATE, 'grading-locate-pipeline')
+  ],
+  [
+    AI_ROUTE_KEYS.GRADING_EXPLAIN,
+    createPipeline(AI_ROUTE_KEYS.GRADING_EXPLAIN, 'grading-explain-pipeline')
+  ],
+  [
     AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT,
     createPipeline(AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT, 'answer-key-extract-pipeline')
   ],
@@ -52,4 +72,3 @@ const PIPELINE_REGISTRY = new Map([
 export function getPipeline(routeKey) {
   return PIPELINE_REGISTRY.get(routeKey) || PIPELINE_REGISTRY.get(AI_ROUTE_KEYS.UNKNOWN)
 }
-

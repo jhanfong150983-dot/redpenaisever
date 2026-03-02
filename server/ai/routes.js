@@ -1,5 +1,10 @@
 export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_EVALUATE: 'grading.evaluate',
+  GRADING_CLASSIFY: 'grading.classify',
+  GRADING_READ_ANSWER: 'grading.read_answer',
+  GRADING_ACCESSOR: 'grading.accessor',
+  GRADING_LOCATE: 'grading.locate',
+  GRADING_EXPLAIN: 'grading.explain',
   ANSWER_KEY_EXTRACT: 'answer_key.extract',
   ANSWER_KEY_REANALYZE: 'answer_key.reanalyze',
   REPORT_TEACHER_SUMMARY: 'report.teacher_summary',
@@ -113,4 +118,3 @@ export function resolveRouteKey({
 
   return AI_ROUTE_KEYS.UNKNOWN
 }
-

@@ -2,6 +2,27 @@ import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin, resetSupabaseClient } from '../../server/_supabase.js'
 
+function getAuthMeLogLevel() {
+  const raw = String(process.env.AUTH_ME_LOG_LEVEL || '').trim().toLowerCase()
+  if (raw === 'off' || raw === 'basic' || raw === 'detail') return raw
+  return process.env.NODE_ENV === 'production' ? 'off' : 'basic'
+}
+
+function shouldLogAuthMe(configuredLevel, requiredLevel = 'basic') {
+  if (configuredLevel === 'off') return false
+  if (requiredLevel === 'detail') return configuredLevel === 'detail'
+  return configuredLevel === 'basic' || configuredLevel === 'detail'
+}
+
+function logAuthMe(configuredLevel, message, payload, requiredLevel = 'basic') {
+  if (!shouldLogAuthMe(configuredLevel, requiredLevel)) return
+  if (payload === undefined) {
+    console.log(`[AUTH-ME][${requiredLevel}] ${message}`)
+    return
+  }
+  console.log(`[AUTH-ME][${requiredLevel}] ${message}`, payload)
+}
+
 export default async function handler(req, res) {
   if (handleCors(req, res)) {
     return
@@ -12,23 +33,23 @@ export default async function handler(req, res) {
   }
 
   try {
+    const authMeLogLevel = getAuthMeLogLevel()
     const { user, accessToken } = await getAuthUser(req, res)
     if (!user) {
       res.status(401).json({ error: 'Unauthorized' })
       return
     }
 
-    // 詳細記錄用戶資訊
-    console.log('👤 用戶認證資訊:', {
+    logAuthMe(authMeLogLevel, 'authenticated user', {
       userId: user.id,
       email: user.email,
-      hasAccessToken: !!accessToken,
-      userKeys: Object.keys(user)
+      hasAccessToken: !!accessToken
     })
 
     let profile = null
     let profileLoaded = false
     let profileError = null
+    let studentContext = null
 
     // 重試機制：最多重試 2 次
     const maxRetries = 2
@@ -38,18 +59,15 @@ export default async function handler(req, res) {
         const supabaseDb = getSupabaseAdmin()
 
         if (attempt > 0) {
-          console.log(`🔁 重試 profile 查詢 (第 ${attempt + 1} 次)`)
-        } else {
-          console.log('🔍 查詢 profile:', user.id)
+          logAuthMe(authMeLogLevel, `profile query retry=${attempt + 1}`, {
+            userId: user.id
+          })
         }
 
-        // 詳細記錄查詢資訊
-        console.log('📊 查詢詳情:', {
+        logAuthMe(authMeLogLevel, 'profile query start', {
           userId: user.id,
-          userIdType: typeof user.id,
-          userIdLength: user.id?.length,
-          clientCreatedAt: supabaseDb?._createdAt || 'unknown'
-        })
+          attempt: attempt + 1
+        }, 'detail')
 
         const { data, error } = await supabaseDb
           .from('profiles')
@@ -57,14 +75,14 @@ export default async function handler(req, res) {
           .eq('id', user.id)
           .maybeSingle()
 
-        // 詳細記錄查詢結果
-        console.log('📊 查詢結果:', {
+        logAuthMe(authMeLogLevel, 'profile query result', {
+          userId: user.id,
+          attempt: attempt + 1,
           hasData: !!data,
           hasError: !!error,
-          dataKeys: data ? Object.keys(data) : [],
           errorCode: error?.code,
           errorMessage: error?.message
-        })
+        }, 'detail')
 
         if (error) {
           console.error('❌ Profile 查詢失敗:', {
@@ -85,7 +103,7 @@ export default async function handler(req, res) {
             continue
           }
         } else if (data) {
-          console.log('✅ Profile 載入成功:', {
+          logAuthMe(authMeLogLevel, 'profile loaded', {
             userId: user.id,
             attempt: attempt > 0 ? attempt + 1 : 1,
             hasName: !!data.name,
@@ -105,12 +123,12 @@ export default async function handler(req, res) {
           profileLoaded = true
           break // 成功，跳出重試迴圈
         } else {
-          console.warn('⚠️ Profile 不存在於資料庫:', user.id)
+          console.warn('[AUTH-ME] profile not found', user.id)
           profileError = 'Profile not found'
           break // 沒有資料，不需重試
         }
       } catch (error) {
-        console.error('❌ Profile 查詢例外:', {
+        console.error('[AUTH-ME] profile query exception', {
           userId: user.id,
           attempt: attempt + 1,
           error: error instanceof Error ? error.message : String(error),
@@ -144,6 +162,88 @@ export default async function handler(req, res) {
       )
     }
 
+    try {
+      const supabaseDb = getSupabaseAdmin()
+      const normalizedEmail =
+        typeof user.email === 'string' ? user.email.trim().toLowerCase() : ''
+      const hasValidStudentEmail = (row) => {
+        const studentEmail =
+          typeof row?.email === 'string' ? row.email.trim().toLowerCase() : ''
+        return Boolean(normalizedEmail) && Boolean(studentEmail) && studentEmail === normalizedEmail
+      }
+
+      const { data: linkedByAuthId, error: linkedByAuthIdError } = await supabaseDb
+        .from('students')
+        .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id')
+        .eq('auth_user_id', user.id)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      let linkedStudent = linkedByAuthId
+      if (linkedByAuthIdError) {
+        console.warn('⚠️ 讀取學生關聯失敗(auth_user_id):', linkedByAuthIdError.message)
+      }
+
+      if (linkedByAuthId && !hasValidStudentEmail(linkedByAuthId)) {
+        console.warn('⚠️ 學生關聯存在但 email 不匹配，忽略學生身份判定')
+      }
+
+      if (!linkedStudent && normalizedEmail) {
+        const { data: linkedByEmail, error: linkedByEmailError } = await supabaseDb
+          .from('students')
+          .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id')
+          .eq('email', normalizedEmail)
+          .order('updated_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (linkedByEmailError) {
+          console.warn('⚠️ 讀取學生關聯失敗(email):', linkedByEmailError.message)
+        } else if (linkedByEmail && hasValidStudentEmail(linkedByEmail)) {
+          linkedStudent = linkedByEmail
+
+          if (linkedByEmail.auth_user_id !== user.id) {
+            const { error: bindError } = await supabaseDb
+              .from('students')
+              .update({
+                auth_user_id: user.id,
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', linkedByEmail.id)
+              .eq('owner_id', linkedByEmail.owner_id)
+
+            if (bindError) {
+              console.warn('⚠️ 學生 email 綁定 auth_user_id 失敗:', bindError.message)
+            }
+          }
+        } else if (linkedByEmail) {
+          console.warn('⚠️ 學生 email 關聯資料不完整，忽略學生身份判定')
+        }
+      }
+
+      if (linkedStudent) {
+        studentContext = {
+          id: linkedStudent.id,
+          classroomId: linkedStudent.classroom_id,
+          seatNumber: linkedStudent.seat_number,
+          name: linkedStudent.name,
+          ownerId: linkedStudent.owner_id,
+          email: linkedStudent.email ?? null
+        }
+      }
+    } catch (studentResolveError) {
+      console.warn('⚠️ 讀取學生關聯例外:', studentResolveError)
+    }
+
+    const profileRole = profile?.role || 'user'
+    const resolvedRole =
+      profileRole === 'admin'
+        ? 'admin'
+        : studentContext
+          ? 'student'
+          : profileRole
+
     // 如果 profile 載入失敗，設定 Cache-Control 避免快取錯誤回應
     if (!profileLoaded) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
@@ -157,17 +257,19 @@ export default async function handler(req, res) {
         email: user.email,
         name: profile?.name || user.user_metadata?.full_name || user.user_metadata?.name || '',
         avatarUrl: profile?.avatar_url || user.user_metadata?.avatar_url || '',
-        role: profile?.role || 'user',
+        role: resolvedRole,
         permissionTier: profile?.permission_tier || 'basic',
         inkBalance:
           profileLoaded && typeof profile?.ink_balance === 'number'
             ? profile.ink_balance
-            : null
+            : null,
+        student: studentContext ?? undefined
       },
       // 除錯資訊：讓前端知道是否從資料庫載入成功
       _debug: {
         profileLoaded,
         profileError,
+        hasStudentContext: !!studentContext,
         dataSource: profileLoaded ? 'database' : 'oauth_metadata',
         timestamp: Date.now() // 加入時間戳，幫助除錯
       }

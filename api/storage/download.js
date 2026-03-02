@@ -24,6 +24,35 @@ function parseBooleanParam(value) {
   return false
 }
 
+function normalizePathParam(value) {
+  if (Array.isArray(value)) {
+    return normalizePathParam(value[0])
+  }
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim().replace(/^\/+/, '')
+  if (!trimmed) return ''
+  if (trimmed.includes('..')) return ''
+  return trimmed.split('?')[0].split('#')[0]
+}
+
+function extractSubmissionIdFromPath(path) {
+  const text = String(path || '').trim()
+  if (!text) return ''
+  const submissionMatch = text.match(/(?:^|\/)submissions\/([^/?#]+)\.webp(?:[?#]|$)/i)
+  if (submissionMatch && submissionMatch[1]) {
+    return String(submissionMatch[1]).trim()
+  }
+  const cropMatch = text.match(/^corrections\/crops\/([^/]+)\//i)
+  if (cropMatch && cropMatch[1]) {
+    return String(cropMatch[1]).trim()
+  }
+  return ''
+}
+
+function normalizeEmail(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : ''
+}
+
 async function isAdminUser(supabaseDb, userId) {
   const { data, error } = await supabaseDb
     .from('profiles')
@@ -52,12 +81,25 @@ export default async function handler(req, res) {
     }
 
     const submissionIdParam = req.query?.submissionId
-    const submissionId = Array.isArray(submissionIdParam)
+    let submissionId = Array.isArray(submissionIdParam)
       ? submissionIdParam[0]
       : submissionIdParam
+    const requestedPath = normalizePathParam(req.query?.path)
+    if (!submissionId && requestedPath) {
+      submissionId = extractSubmissionIdFromPath(requestedPath)
+    }
+
     if (!submissionId) {
       res.status(400).json({ error: 'Missing submissionId' })
       return
+    }
+
+    if (requestedPath) {
+      const pathSubmissionId = extractSubmissionIdFromPath(requestedPath)
+      if (!pathSubmissionId || pathSubmissionId !== submissionId) {
+        res.status(403).json({ error: 'Forbidden path access' })
+        return
+      }
     }
 
     // 後端始終使用 service role key 繞過 RLS
@@ -65,7 +107,7 @@ export default async function handler(req, res) {
 
     const { data: submission, error: submissionError } = await supabaseDb
       .from('submissions')
-      .select('id, owner_id, thumb_url')
+      .select('id, owner_id, student_id, thumb_url')
       .eq('id', submissionId)
       .maybeSingle()
 
@@ -85,6 +127,33 @@ export default async function handler(req, res) {
     } else if (isOwnerOverride && submission?.owner_id === requestedOwnerId) {
       // 管理員以他人身份檢視
       hasAccess = await isAdminUser(supabaseDb, user.id)
+    } else if (submission?.student_id && submission?.owner_id) {
+      // 學生本人可讀取自己的 submission 圖片
+      const { data: student, error: studentError } = await supabaseDb
+        .from('students')
+        .select('id, owner_id, auth_user_id, email')
+        .eq('id', submission.student_id)
+        .eq('owner_id', submission.owner_id)
+        .maybeSingle()
+
+      if (!studentError && student) {
+        const isLinkedByAuth = student.auth_user_id === user.id
+        const isLinkedByEmail =
+          Boolean(normalizeEmail(user.email)) &&
+          normalizeEmail(student.email) === normalizeEmail(user.email)
+
+        if (isLinkedByAuth || isLinkedByEmail) {
+          hasAccess = true
+
+          if (!isLinkedByAuth && isLinkedByEmail) {
+            await supabaseDb
+              .from('students')
+              .update({ auth_user_id: user.id, updated_at: new Date().toISOString() })
+              .eq('id', student.id)
+              .eq('owner_id', student.owner_id)
+          }
+        }
+      }
     }
 
     if (!submission || !hasAccess) {
@@ -92,23 +161,24 @@ export default async function handler(req, res) {
       return
     }
 
-    const wantsThumbnail = parseBooleanParam(
-      req.query?.thumbnail ?? req.query?.thumb ?? req.query?.thumbUrl
-    )
-
-    const normalizedThumbUrl = submission?.thumb_url ?? undefined
-
-    const originalPath = `submissions/${submissionId}.webp`
-    const thumbFallbackPath = `submissions/thumbs/${submissionId}.webp`
     const candidatePaths = []
-
-    if (wantsThumbnail) {
-      if (normalizedThumbUrl) {
-        candidatePaths.push(normalizedThumbUrl.replace(/^\/+/, ''))
+    if (requestedPath) {
+      candidatePaths.push(requestedPath)
+    } else {
+      const wantsThumbnail = parseBooleanParam(
+        req.query?.thumbnail ?? req.query?.thumb ?? req.query?.thumbUrl
+      )
+      const normalizedThumbUrl = submission?.thumb_url ?? undefined
+      const originalPath = `submissions/${submissionId}.webp`
+      const thumbFallbackPath = `submissions/thumbs/${submissionId}.webp`
+      if (wantsThumbnail) {
+        if (normalizedThumbUrl) {
+          candidatePaths.push(normalizedThumbUrl.replace(/^\/+/, ''))
+        }
+        candidatePaths.push(thumbFallbackPath)
       }
-      candidatePaths.push(thumbFallbackPath)
+      candidatePaths.push(originalPath)
     }
-    candidatePaths.push(originalPath)
 
     let data = null
     for (const candidate of candidatePaths) {

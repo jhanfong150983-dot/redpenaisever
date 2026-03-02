@@ -60,6 +60,27 @@ function getRuntimeEnv(name) {
   return loadLocalEnvCache()[name] || ''
 }
 
+function getSupabaseAdminLogLevel() {
+  const raw = String(process.env.SUPABASE_ADMIN_LOG_LEVEL || '').trim().toLowerCase()
+  if (raw === 'off' || raw === 'basic' || raw === 'detail') return raw
+  return 'off'
+}
+
+function shouldLogSupabaseAdmin(configuredLevel, requiredLevel = 'basic') {
+  if (configuredLevel === 'off') return false
+  if (requiredLevel === 'detail') return configuredLevel === 'detail'
+  return configuredLevel === 'basic' || configuredLevel === 'detail'
+}
+
+function logSupabaseAdmin(configuredLevel, message, payload, requiredLevel = 'basic') {
+  if (!shouldLogSupabaseAdmin(configuredLevel, requiredLevel)) return
+  if (payload === undefined) {
+    console.log(`[SUPABASE-ADMIN][${requiredLevel}] ${message}`)
+    return
+  }
+  console.log(`[SUPABASE-ADMIN][${requiredLevel}] ${message}`, payload)
+}
+
 /**
  * 獲取 Supabase Admin Client
  *
@@ -73,6 +94,7 @@ function getRuntimeEnv(name) {
  * - RLS 會干擾後端操作，造成不必要的錯誤
  */
 export function getSupabaseAdmin() {
+  const logLevel = getSupabaseAdminLogLevel()
   const supabaseUrl = getRuntimeEnv('SUPABASE_URL')
   const serviceRoleKey = getRuntimeEnv('SUPABASE_SERVICE_ROLE_KEY')
 
@@ -83,13 +105,13 @@ export function getSupabaseAdmin() {
   // 如果 client 太舊，重新建立
   const now = Date.now()
   if (cachedClient && clientCreatedAt && (now - clientCreatedAt > CLIENT_MAX_AGE)) {
-    console.log('🔄 Supabase client 已超過 5 分鐘，重新建立')
+    logSupabaseAdmin(logLevel, 'client expired; recreating')
     cachedClient = null
     clientCreatedAt = null
   }
 
   if (!cachedClient) {
-    console.log('🆕 建立新的 Supabase admin client')
+    logSupabaseAdmin(logLevel, 'create admin client')
     cachedClient = createClient(supabaseUrl, serviceRoleKey, {
       auth: {
         persistSession: false,
@@ -114,7 +136,8 @@ export function getSupabaseAdmin() {
  * 強制重新建立 Supabase client（當發生連線錯誤時使用）
  */
 export function resetSupabaseClient() {
-  console.log('♻️ 強制重置 Supabase client')
+  const logLevel = getSupabaseAdminLogLevel()
+  logSupabaseAdmin(logLevel, 'force reset admin client')
   cachedClient = null
   clientCreatedAt = null
 }

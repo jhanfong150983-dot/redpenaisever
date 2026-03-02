@@ -28,6 +28,53 @@ function computeAnswerKeyHash(answerKey) {
   return crypto.createHash('md5').update(json).digest('hex').slice(0, 16)
 }
 
+function normalizeAnswerKeyPayload(rawAnswerKey, logPrefix = '[proxy]') {
+  if (!rawAnswerKey) return null
+  if (typeof rawAnswerKey === 'object') return rawAnswerKey
+  if (typeof rawAnswerKey === 'string') {
+    const trimmed = rawAnswerKey.trim()
+    if (!trimmed) return null
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed && typeof parsed === 'object') return parsed
+      console.warn(`${logPrefix} answerKey-parse-failed reason=not_object`)
+      return null
+    } catch (error) {
+      console.warn(`${logPrefix} answerKey-parse-failed reason=invalid_json`)
+      return null
+    }
+  }
+  console.warn(`${logPrefix} answerKey-parse-failed reason=unsupported_type type=${typeof rawAnswerKey}`)
+  return null
+}
+
+function readSingleHeaderValue(value) {
+  if (Array.isArray(value)) return value[0]
+  return value
+}
+
+function normalizeGradingPipelineMode(rawMode) {
+  const mode = String(rawMode || '')
+    .trim()
+    .toLowerCase()
+  if (!mode) return null
+  if (['single', 'single-shot', 'legacy'].includes(mode)) return 'single'
+  if (['staged', '4stage', 'four-stage'].includes(mode)) return 'staged'
+  if (['auto', 'default'].includes(mode)) return 'auto'
+  return null
+}
+
+function normalizeReadAnswerSplitMode(rawValue) {
+  if (typeof rawValue === 'boolean') return rawValue
+  const value = String(rawValue || '')
+    .trim()
+    .toLowerCase()
+  if (!value) return null
+  if (['1', 'true', 'on', 'split', 'staged'].includes(value)) return true
+  if (['0', 'false', 'off', 'legacy', 'single', 'single-shot'].includes(value)) return false
+  return null
+}
+
 /**
  * 緩存 AnswerKey
  */
@@ -158,6 +205,20 @@ function computeInkPoints(usageMetadata) {
 // Session 有效期限：2 小時
 const SESSION_TTL_MINUTES = 120
 
+function createProxyRequestId(req) {
+  const headerRequestId = req?.headers?.['x-request-id']
+  if (typeof headerRequestId === 'string' && headerRequestId.trim()) {
+    return headerRequestId.trim().slice(0, 48)
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function maskUserId(userId) {
+  const raw = String(userId || '')
+  if (!raw) return 'anonymous'
+  return raw.length <= 8 ? raw : `${raw.slice(0, 4)}...${raw.slice(-4)}`
+}
+
 async function resolveInkSession(supabaseAdmin, userId, inkSessionId) {
   if (!inkSessionId) return { ok: false, reason: 'no_session_id' }
 
@@ -215,6 +276,9 @@ export default async function handler(req, res) {
     res.status(405).json({ error: 'Method Not Allowed' })
     return
   }
+  const requestId = createProxyRequestId(req)
+  const logPrefix = `[proxy][${requestId}]`
+  console.log(`${logPrefix} request-start method=${req.method}`)
 
   let user = null
   try {
@@ -226,9 +290,11 @@ export default async function handler(req, res) {
   }
 
   if (!user) {
+    console.warn(`${logPrefix} unauthorized`)
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
+  console.log(`${logPrefix} auth-ok user=${maskUserId(user.id)}`)
 
   const apiKey = getEnvValue('SECRET_API_KEY') || getEnvValue('SYSTEM_GEMINI_API_KEY')
   if (!apiKey) {
@@ -241,7 +307,7 @@ export default async function handler(req, res) {
       hasSecretApiKeyLocal: Boolean(getEnvValue('SECRET_API_KEY')),
       hasSystemApiKeyLocal: Boolean(getEnvValue('SYSTEM_GEMINI_API_KEY'))
     }
-    console.error('[proxy] API key missing diagnostics:', diagnostics)
+    console.error(`${logPrefix} api-key-missing diagnostics:`, diagnostics)
     res.status(500).json({
       error: 'Server API Key missing (SECRET_API_KEY / SYSTEM_GEMINI_API_KEY)',
       diagnostics
@@ -259,36 +325,80 @@ export default async function handler(req, res) {
     }
   }
 
-  const { model, contents, inkSessionId, answerKey, answerKeyRef, routeKey, ...payload } = body || {}
+  const {
+    model,
+    contents,
+    inkSessionId,
+    answerKey,
+    answerKeyRef,
+    routeKey,
+    gradingMode: requestedGradingMode,
+    readAnswerSplitMode: requestedReadAnswerSplitMode,
+    ...payload
+  } = body || {}
+  const normalizedAnswerKeyPayload = normalizeAnswerKeyPayload(answerKey, logPrefix)
+  const headerGradingMode = readSingleHeaderValue(req?.headers?.['x-grading-pipeline-mode'])
+  const envGradingMode = getEnvValue('AI_GRADING_PIPELINE_MODE') || process.env.AI_GRADING_PIPELINE_MODE
+  const gradingMode =
+    normalizeGradingPipelineMode(requestedGradingMode) ||
+    normalizeGradingPipelineMode(headerGradingMode) ||
+    normalizeGradingPipelineMode(envGradingMode) ||
+    'staged' // 預設使用分階段批改流程
+  const enableStagedGrading = gradingMode !== 'single'
+
+  const headerSplitMode = readSingleHeaderValue(req?.headers?.['x-read-answer-split-mode'])
+  const envSplitMode = getEnvValue('READ_ANSWER_SPLIT_MODE')
+  const readAnswerSplitMode =
+    normalizeReadAnswerSplitMode(requestedReadAnswerSplitMode) ??
+    normalizeReadAnswerSplitMode(headerSplitMode) ??
+    normalizeReadAnswerSplitMode(envSplitMode)
+
   if (!model || !Array.isArray(contents)) {
+    console.warn(`${logPrefix} bad-request missing model or contents`)
     res.status(400).json({ error: 'Missing model or contents' })
     return
   }
+  console.log(
+    `${logPrefix} request-body model=${model} routeKey=${routeKey || 'none'} hasAnswerKey=${Boolean(
+      answerKey
+    )} hasAnswerKeyRef=${Boolean(answerKeyRef)} answerKeyType=${answerKey ? typeof answerKey : 'none'} gradingMode=${gradingMode} staged=${enableStagedGrading} splitModeOverride=${
+      readAnswerSplitMode === null ? 'none' : readAnswerSplitMode
+    }`
+  )
 
   // 🆕 處理 AnswerKey 緩存邏輯
   let resolvedAnswerKey = null
   let answerKeyHash = null
   
-  if (answerKey) {
+  if (normalizedAnswerKeyPayload) {
     // 前端傳來完整 AnswerKey：緩存並返回 hash
-    answerKeyHash = computeAnswerKeyHash(answerKey)
-    cacheAnswerKey(user.id, answerKeyHash, answerKey)
-    resolvedAnswerKey = answerKey
+    answerKeyHash = computeAnswerKeyHash(normalizedAnswerKeyPayload)
+    cacheAnswerKey(user.id, answerKeyHash, normalizedAnswerKeyPayload)
+    resolvedAnswerKey = normalizedAnswerKeyPayload
     console.log(`📥 [AnswerKey] 收到完整 AnswerKey，hash=${answerKeyHash}`)
   } else if (answerKeyRef) {
     // 前端傳來 hash 引用：從緩存獲取
-    resolvedAnswerKey = getCachedAnswerKey(user.id, answerKeyRef)
+    const cachedAnswerKey = getCachedAnswerKey(user.id, answerKeyRef)
+    resolvedAnswerKey = normalizeAnswerKeyPayload(cachedAnswerKey, logPrefix)
     if (!resolvedAnswerKey) {
       console.warn(`⚠️ [AnswerKey] 緩存未命中 ref=${answerKeyRef}，請求前端重傳`)
       res.status(422).json({ 
-        error: 'AnswerKey cache miss', 
-        code: 'ANSWER_KEY_CACHE_MISS',
+        error: 'AnswerKey cache miss or invalid format',
+        code: 'ANSWER_KEY_CACHE_MISS_OR_INVALID',
         answerKeyRef 
       })
       return
     }
+    // 將舊格式（字串）緩存回寫為物件，避免後續再解析失敗
+    cacheAnswerKey(user.id, answerKeyRef, resolvedAnswerKey)
     answerKeyHash = answerKeyRef
     console.log(`📤 [AnswerKey] 使用緩存 AnswerKey，ref=${answerKeyRef}`)
+  } else if (answerKey) {
+    // 有傳 answerKey 但格式不合法（例如非法字串）
+    res.status(400).json({
+      error: 'Invalid answerKey format. Must be object or JSON-object string.'
+    })
+    return
   }
 
   // 🆕 如果有 AnswerKey，注入到 prompt 中
@@ -365,7 +475,14 @@ export default async function handler(req, res) {
       routeHint: {
         hasResolvedAnswerKey: Boolean(resolvedAnswerKey),
         hasAnswerKeyRef: Boolean(answerKeyRef),
-        hasAnswerKeyPayload: Boolean(answerKey)
+        hasAnswerKeyPayload: Boolean(normalizedAnswerKeyPayload)
+      },
+      internalContext: {
+        resolvedAnswerKey,
+        requestId,
+        enableStagedGrading,
+        gradingMode,
+        readAnswerSplitMode
       }
     })
 
@@ -465,8 +582,14 @@ export default async function handler(req, res) {
       }
     }
 
+    console.log(
+      `${logPrefix} response status=${responseStatus} resolvedRoute=${
+        pipelineResult.resolvedRouteKey
+      } pipeline=${pipelineResult.pipelineMeta?.pipeline || 'unknown'}`
+    )
     res.status(responseStatus).json(data)
   } catch (error) {
+    console.error(`${logPrefix} request-failed`, error)
     if (Number(error?.status) === 504) {
       res.status(504).json({ error: 'Gemini request timeout' })
       return
