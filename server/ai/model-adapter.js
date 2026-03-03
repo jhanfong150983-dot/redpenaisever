@@ -11,11 +11,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function get504RetryConfig() {
+function getRetryConfig() {
   const retryRaw = Number(process.env.GEMINI_504_RETRY_COUNT)
   const baseBackoffRaw = Number(process.env.GEMINI_504_RETRY_BACKOFF_MS)
 
-  // Retry twice on timeout by default (3 total attempts).
+  // Retry twice on timeout/overload by default (3 total attempts).
   const retryCount = Number.isFinite(retryRaw) ? Math.max(1, Math.round(retryRaw)) : 2
   const baseBackoffMs = Number.isFinite(baseBackoffRaw)
     ? Math.max(100, Math.round(baseBackoffRaw))
@@ -23,6 +23,8 @@ function get504RetryConfig() {
 
   return { retryCount, baseBackoffMs }
 }
+
+const RETRYABLE_STATUSES = new Set([503, 504])
 
 export async function callGeminiGenerateContent({
   apiKey,
@@ -35,7 +37,7 @@ export async function callGeminiGenerateContent({
     ? String(model)
     : `models/${model}`
   const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${apiKey}`
-  const { retryCount, baseBackoffMs } = get504RetryConfig()
+  const { retryCount, baseBackoffMs } = getRetryConfig()
   const hasTimeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
   const effectiveTimeoutMs = hasTimeout ? Math.max(1000, Number(timeoutMs)) : null
 
@@ -73,10 +75,10 @@ export async function callGeminiGenerateContent({
     const rawText = await response.text()
     const data = parseResponseBody(rawText)
 
-    if (Number(response.status) === 504 && attempt < retryCount) {
+    if (RETRYABLE_STATUSES.has(Number(response.status)) && attempt < retryCount) {
       const backoffMs = Math.min(baseBackoffMs * 2 ** attempt, 8000)
       console.warn(
-        `[ai-model-adapter] response status=504 retry=${attempt + 1}/${retryCount} waitMs=${backoffMs}`
+        `[ai-model-adapter] response status=${response.status} retry=${attempt + 1}/${retryCount} waitMs=${backoffMs}`
       )
       await sleep(backoffMs)
       continue
