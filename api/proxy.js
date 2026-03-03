@@ -4,8 +4,7 @@ import { handleCors } from '../server/_cors.js'
 
 // 強制使用 Node.js runtime，避免 Edge runtime 的限制
 export const config = {
-  runtime: 'nodejs',
-  maxDuration: 60  // 允許最多 60 秒（Vercel Pro 限制）
+  runtime: 'nodejs'
 }
 
 import { getAuthUser } from '../server/_auth.js'

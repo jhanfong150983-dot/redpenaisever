@@ -63,7 +63,7 @@ export async function runAiPipeline({
   payload = {},
   requestedRouteKey = null,
   routeHint = {},
-  timeoutMs = 55000,
+  timeoutMs,
   internalContext = {}
 }) {
   const normalizedRequestedRouteKey = normalizeRouteKey(requestedRouteKey)

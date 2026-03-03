@@ -29,19 +29,23 @@ export async function callGeminiGenerateContent({
   model,
   contents,
   payload = {},
-  timeoutMs = 55000
+  timeoutMs
 }) {
   const modelPath = String(model).startsWith('models/')
     ? String(model)
     : `models/${model}`
   const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${apiKey}`
   const { retryCount, baseBackoffMs } = get504RetryConfig()
+  const hasTimeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+  const effectiveTimeoutMs = hasTimeout ? Math.max(1000, Number(timeoutMs)) : null
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-    const controller = new AbortController()
-    const timeoutHandle = setTimeout(() => {
-      controller.abort()
-    }, Math.max(1000, timeoutMs))
+    const controller = hasTimeout ? new AbortController() : null
+    const timeoutHandle = hasTimeout
+      ? setTimeout(() => {
+          controller.abort()
+        }, effectiveTimeoutMs)
+      : null
 
     let response
     try {
@@ -49,7 +53,7 @@ export async function callGeminiGenerateContent({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents, ...payload }),
-        signal: controller.signal
+        ...(controller ? { signal: controller.signal } : {})
       })
     } catch (error) {
       if (error?.name === 'AbortError') {
@@ -61,7 +65,9 @@ export async function callGeminiGenerateContent({
       }
       throw error
     } finally {
-      clearTimeout(timeoutHandle)
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle)
+      }
     }
 
     const rawText = await response.text()
