@@ -25,26 +25,37 @@ function isLocalHostname(hostname) {
 }
 
 function getBackendUrl(req) {
-  const requestOrigin = getRequestOrigin(req)
-  if (requestOrigin) return requestOrigin
-
+  // Prefer explicitly configured URL so the OAuth callback domain matches
+  // where the browser originally sent the login request (e.g. a frontend
+  // proxy domain), preventing cross-domain cookie loss.
   const backendUrl = sanitizeEnvUrl(process.env.BACKEND_URL)
   const siteUrl = sanitizeEnvUrl(process.env.SITE_URL)
   const configured = backendUrl || siteUrl
-  if (!configured) return ''
 
-  try {
-    const reqUrl = new URL(requestOrigin)
-    const cfgUrl = new URL(configured)
-
-    if (isLocalHostname(cfgUrl.hostname) && !isLocalHostname(reqUrl.hostname)) {
-      return requestOrigin
+  if (configured) {
+    try {
+      const cfgUrl = new URL(configured)
+      const requestOrigin = getRequestOrigin(req)
+      // Fall through to request origin only when the configured URL is
+      // localhost but the actual request is coming from a real host.
+      if (isLocalHostname(cfgUrl.hostname) && requestOrigin) {
+        try {
+          const reqUrl = new URL(requestOrigin)
+          if (!isLocalHostname(reqUrl.hostname)) return requestOrigin
+        } catch {
+          // ignore
+        }
+      }
+      return configured
+    } catch {
+      return configured
     }
-  } catch {
-    return configured
   }
 
-  return configured
+  const requestOrigin = getRequestOrigin(req)
+  if (requestOrigin) return requestOrigin
+
+  return ''
 }
 
 function normalizeEntry(rawValue) {
