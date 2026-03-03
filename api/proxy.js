@@ -296,10 +296,17 @@ export default async function handler(req, res) {
   }
   console.log(`${logPrefix} auth-ok user=${maskUserId(user.id)}`)
 
-  const apiKey = getEnvValue('SECRET_API_KEY') || getEnvValue('SYSTEM_GEMINI_API_KEY')
+  // AI_ACTIVE_GEMINI_KEY=primary（預設）→ 用 SECRET_API_KEY，備援 SYSTEM_GEMINI_API_KEY
+  // AI_ACTIVE_GEMINI_KEY=secondary         → 用 SYSTEM_GEMINI_API_KEY，備援 SECRET_API_KEY
+  const activeGeminiKey = (getEnvValue('AI_ACTIVE_GEMINI_KEY') || 'primary').toLowerCase()
+  const apiKey =
+    activeGeminiKey === 'secondary'
+      ? (getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY'))
+      : (getEnvValue('SECRET_API_KEY') || getEnvValue('SYSTEM_GEMINI_API_KEY'))
   if (!apiKey) {
     const diagnostics = {
       cwd: process.cwd(),
+      activeGeminiKey,
       hasSecretApiKeyEnv: typeof process.env.SECRET_API_KEY === 'string',
       secretApiKeyLength: String(process.env.SECRET_API_KEY || '').length,
       hasSystemApiKeyEnv: typeof process.env.SYSTEM_GEMINI_API_KEY === 'string',
