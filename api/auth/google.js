@@ -26,11 +26,12 @@ function isLocalHostname(hostname) {
 
 function getBackendUrl(req) {
   const requestOrigin = getRequestOrigin(req)
+  if (requestOrigin) return requestOrigin
+
   const backendUrl = sanitizeEnvUrl(process.env.BACKEND_URL)
   const siteUrl = sanitizeEnvUrl(process.env.SITE_URL)
   const configured = backendUrl || siteUrl
-
-  if (!configured) return requestOrigin
+  if (!configured) return ''
 
   try {
     const reqUrl = new URL(requestOrigin)
