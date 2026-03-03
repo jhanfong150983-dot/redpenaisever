@@ -4,6 +4,12 @@ import { getSupabaseAdmin } from '../../server/_supabase.js'
 import { getEnvValue } from '../../server/_env.js'
 import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
+import {
+  isValidDsns,
+  getCampus1AccessToken,
+  fetchCampus1Classes,
+  fetchCampus1Students
+} from '../../server/_1campus.js'
 
 const TAG_QUIET_MINUTES = 5
 const DEFAULT_CORRECTION_ATTEMPT_LIMIT = 3
@@ -1535,12 +1541,29 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
       } else {
         pendingNotifications.correction_submitted.push({ assignmentId, studentId })
       }
-    } else if (isGraded) {
+    } else if (isGraded && existingState?.graded_once !== true) {
       pendingNotifications.grading_completed.push({ assignmentId, studentId })
     }
   }
 
   // Create aggregated notifications (one per assignment per event type)
+  const allNotifAssignmentIds = [
+    ...new Set(
+      Object.values(pendingNotifications).flat().map((r) => r.assignmentId)
+    )
+  ]
+  const assignmentTitleMap = new Map()
+  if (allNotifAssignmentIds.length > 0) {
+    const { data: assignmentRows } = await supabaseDb
+      .from('assignments')
+      .select('id, title')
+      .eq('owner_id', ownerId)
+      .in('id', allNotifAssignmentIds)
+    for (const row of assignmentRows || []) {
+      if (row.id && row.title) assignmentTitleMap.set(row.id, row.title)
+    }
+  }
+
   for (const [event, rows] of Object.entries(pendingNotifications)) {
     if (rows.length === 0) continue
     const byAssignment = new Map()
@@ -1552,7 +1575,12 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     for (const [aId, sIds] of byAssignment.entries()) {
       await createTeacherNotification(
         supabaseDb, ownerId, event,
-        { assignmentId: aId, count: sIds.length, studentIds: sIds },
+        {
+          assignmentId: aId,
+          assignmentTitle: assignmentTitleMap.get(aId) ?? undefined,
+          count: sIds.length,
+          studentIds: sIds
+        },
         preferences
       )
     }
@@ -4258,6 +4286,230 @@ async function handleReport(req, res) {
   }
 }
 
+// ============================================================
+// 1Campus 班級同步
+// ============================================================
+
+async function handleCampus1ClassroomSync(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const body = parseJsonBody(req)
+  const dsns = typeof body?.dsns === 'string' ? body.dsns.trim() : ''
+  const teacherID = typeof body?.teacherID === 'string' ? body.teacherID.trim() : ''
+
+  if (!dsns || !isValidDsns(dsns)) {
+    res.status(400).json({ error: 'Invalid dsns' })
+    return
+  }
+
+  const supabaseAdmin = getSupabaseAdmin()
+
+  // 確認此帳號確實有 1Campus 身份，且 teacherID 一致（防偽造請求）
+  const { data: identity, error: identityError } = await supabaseAdmin
+    .from('external_identities')
+    .select('provider_meta')
+    .eq('user_id', user.id)
+    .eq('provider', 'campus1')
+    .maybeSingle()
+
+  if (identityError || !identity) {
+    res.status(403).json({ error: '此帳號沒有 1Campus 身份' })
+    return
+  }
+
+  const storedTeacherID = String(identity.provider_meta?.teacherID || '')
+  if (!storedTeacherID || storedTeacherID !== teacherID) {
+    res.status(403).json({ error: 'teacherID 不符' })
+    return
+  }
+
+  // 取得有效的 OAuth access token
+  let accessToken
+  try {
+    accessToken = await getCampus1AccessToken(supabaseAdmin, user.id)
+  } catch (err) {
+    res.status(403).json({
+      error: err instanceof Error ? err.message : '無法取得 1Campus 授權'
+    })
+    return
+  }
+
+  // 取得班級列表
+  let classes
+  try {
+    classes = await fetchCampus1Classes(dsns, teacherID, accessToken)
+  } catch (err) {
+    res.status(502).json({ error: '取得 1Campus 班級失敗' })
+    return
+  }
+
+  if (!classes.length) {
+    res.status(200).json({ success: true, synced: 0, total: 0, classrooms: [] })
+    return
+  }
+
+  const results = []
+  const nowIso = new Date().toISOString()
+
+  for (const cls of classes) {
+    const providerClassId = String(cls.classID)
+    const className = String(cls.className || `班級 ${cls.classID}`).trim()
+
+    try {
+      // 查找現有的同步記錄
+      const { data: syncRecord } = await supabaseAdmin
+        .from('campus_classroom_sync')
+        .select('id, classroom_id')
+        .eq('owner_id', user.id)
+        .eq('provider', 'campus1')
+        .eq('provider_dsns', dsns)
+        .eq('provider_class_id', providerClassId)
+        .maybeSingle()
+
+      let classroomId
+
+      if (syncRecord?.classroom_id) {
+        // 已有對應班級：複用，更新班級名稱
+        classroomId = syncRecord.classroom_id
+        await supabaseAdmin
+          .from('classrooms')
+          .update({ name: className })
+          .eq('id', classroomId)
+          .eq('owner_id', user.id)
+      } else {
+        // 建立新班級
+        const { data: newClassroom, error: classroomError } =
+          await supabaseAdmin
+            .from('classrooms')
+            .insert({ owner_id: user.id, name: className, folder: '1Campus' })
+            .select('id')
+            .single()
+
+        if (classroomError) {
+          throw new Error(`建立班級失敗: ${classroomError.message}`)
+        }
+        classroomId = newClassroom.id
+      }
+
+      // 取得學生
+      const students = await fetchCampus1Students(dsns, providerClassId, accessToken)
+
+      // 轉換格式（seatNo → seat_number，studentName → name）
+      const normalizedStudents = students
+        .map((s) => ({
+          seat_number: Number(s.seatNo) || 0,
+          name: String(s.studentName || '').trim()
+        }))
+        .filter((s) => s.seat_number > 0 && s.name)
+
+      // 批次匯入學生（複用現有 RPC）
+      let studentCount = 0
+      if (normalizedStudents.length > 0) {
+        const { error: rpcError } = await supabaseAdmin.rpc(
+          'upsert_students_batch',
+          {
+            p_owner_id: user.id,
+            p_classroom_id: classroomId,
+            p_students: normalizedStudents
+          }
+        )
+        if (rpcError) throw new Error(`匯入學生失敗: ${rpcError.message}`)
+        studentCount = normalizedStudents.length
+      }
+
+      // 更新/建立同步記錄
+      const syncPayload = {
+        classroom_id: classroomId,
+        sync_status: 'success',
+        last_sync_at: nowIso,
+        provider_class_name: className,
+        last_student_count: studentCount,
+        updated_at: nowIso
+      }
+
+      if (syncRecord) {
+        await supabaseAdmin
+          .from('campus_classroom_sync')
+          .update(syncPayload)
+          .eq('id', syncRecord.id)
+      } else {
+        await supabaseAdmin.from('campus_classroom_sync').insert({
+          owner_id: user.id,
+          provider: 'campus1',
+          provider_dsns: dsns,
+          provider_class_id: providerClassId,
+          ...syncPayload
+        })
+      }
+
+      results.push({
+        classID: providerClassId,
+        className,
+        classroomId,
+        studentCount,
+        success: true
+      })
+    } catch (err) {
+      const errMessage = err instanceof Error ? err.message : String(err)
+
+      // 嘗試更新同步記錄為 error 狀態
+      try {
+        const { data: existingSyncRecord } = await supabaseAdmin
+          .from('campus_classroom_sync')
+          .select('id')
+          .eq('owner_id', user.id)
+          .eq('provider', 'campus1')
+          .eq('provider_dsns', dsns)
+          .eq('provider_class_id', providerClassId)
+          .maybeSingle()
+
+        if (existingSyncRecord) {
+          await supabaseAdmin
+            .from('campus_classroom_sync')
+            .update({ sync_status: 'error', last_error: errMessage, updated_at: nowIso })
+            .eq('id', existingSyncRecord.id)
+        } else {
+          await supabaseAdmin.from('campus_classroom_sync').insert({
+            owner_id: user.id,
+            provider: 'campus1',
+            provider_dsns: dsns,
+            provider_class_id: providerClassId,
+            provider_class_name: className,
+            sync_status: 'error',
+            last_error: errMessage
+          })
+        }
+      } catch {
+        // 記錄更新失敗不影響主流程
+      }
+
+      results.push({
+        classID: providerClassId,
+        className,
+        success: false,
+        error: errMessage
+      })
+    }
+  }
+
+  const synced = results.filter((r) => r.success).length
+  res.status(200).json({
+    success: synced > 0 || results.length === 0,
+    synced,
+    total: results.length,
+    classrooms: results
+  })
+}
+
 export default async function handler(req, res) {
   if (handleCors(req, res)) {
     return
@@ -4309,6 +4561,10 @@ export default async function handler(req, res) {
   }
   if (action === 'report') {
     await handleReport(req, res)
+    return
+  }
+  if (action === '1campus-classroom-sync') {
+    await handleCampus1ClassroomSync(req, res)
     return
   }
   res.status(404).json({ error: 'Not Found' })
