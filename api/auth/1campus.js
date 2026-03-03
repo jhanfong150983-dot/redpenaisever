@@ -355,6 +355,8 @@ async function handleOAuthInitiate(req, res) {
   appendSetCookie(res, stateCookie)
 
   const callbackUrl = getOAuthCallbackUrl(req)
+  console.log(`[1campus OAuth initiate] client_id=${clientId} redirect_uri=${callbackUrl} dsns=${dsns}`)
+
   const authUrl =
     `${CAMPUS1_OAUTH_AUTHORIZE}?` +
     new URLSearchParams({
