@@ -1,13 +1,19 @@
 /**
- * GET /api/auth/1campus?code=XXX&dsns=YYY
+ * GET /api/auth/1campus?code=XXX&dsns=YYY            → Phase 1: 1Campus SSO 入口
+ * GET /api/auth/1campus?__step=oauth&dsns=YYY         → Phase 2a: OAuth 授權啟動
+ * GET /api/auth/1campus?__step=oauth_callback&...     → Phase 2b: OAuth 授權回呼
  *
- * 1Campus SSO 入口處理器（Phase 1）
- * 流程：驗證 Identity Code → 查找/建立帳號 → 建立 Supabase Session → 設定 Cookie → Redirect
+ * 外部 URL 相容（透過 Vercel rewrites 轉入此 handler）：
+ *   /api/auth/1campus-oauth-callback → /api/auth/1campus?__step=oauth_callback
+ *   /api/oauth/callback              → /api/auth/1campus?__step=oauth_callback
  */
+import crypto from 'crypto'
 import { handleCors } from '../../server/_cors.js'
 import {
   setAuthCookies,
-  isSecureRequest
+  isSecureRequest,
+  parseCookies,
+  getAuthUser
 } from '../../server/_auth.js'
 import {
   getSupabaseAdmin,
@@ -19,12 +25,29 @@ import {
   isValidDsns,
   fetchCampus1Identity,
   buildCampus1VirtualEmail,
-  buildCampus1DisplayName
+  buildCampus1DisplayName,
+  exchangeCampus1OAuthCode,
+  fetchCampus1UserInfo
 } from '../../server/_1campus.js'
 
 // ============================================================
-// 工具函數
+// 常數
 // ============================================================
+
+const CAMPUS1_OAUTH_AUTHORIZE = 'https://auth.ischool.com.tw/oauth/authorize.php'
+const STATE_COOKIE_NAME = 'rp-campus1-state'
+const STATE_TTL_SECONDS = 600
+
+// ============================================================
+// 共用工具函數
+// ============================================================
+
+function getStringParam(req, name) {
+  const val = req.query?.[name]
+  if (typeof val === 'string') return val.trim()
+  if (Array.isArray(val)) return String(val[0] || '').trim()
+  return ''
+}
 
 function getFrontendUrl(req) {
   const frontendUrl = getEnvValue('FRONTEND_URL')
@@ -39,18 +62,70 @@ function getFrontendUrl(req) {
   return `${proto}://${host}`
 }
 
-function ssoErrorRedirect(res, req, errorCode) {
-  const frontendUrl = getFrontendUrl(req)
+function getOAuthCallbackUrl(req) {
+  const fromEnv = getEnvValue('CAMPUS1_OAUTH_CALLBACK')
+  if (fromEnv) return fromEnv
+
+  const proto = req.headers?.['x-forwarded-proto'] || 'http'
+  const host = req.headers?.host || 'localhost:3000'
+  // 使用 Vercel rewrite 相容的 URL（外部 OAuth 註冊使用此路徑）
+  return `${proto}://${host}/api/auth/1campus-oauth-callback`
+}
+
+function getCookieSettings(secure) {
+  const sameSite = getEnvValue('AUTH_COOKIE_SAME_SITE') || 'Lax'
+  const domain = (getEnvValue('AUTH_COOKIE_DOMAIN') || '').trim()
+  const effectiveSecure = sameSite.toLowerCase() === 'none' ? true : secure
+  return { sameSite, domain, effectiveSecure }
+}
+
+function appendSetCookie(res, cookie) {
+  const existing = res.getHeader('Set-Cookie')
+  if (!existing) {
+    res.setHeader('Set-Cookie', [cookie])
+  } else if (Array.isArray(existing)) {
+    res.setHeader('Set-Cookie', [...existing, cookie])
+  } else {
+    res.setHeader('Set-Cookie', [existing, cookie])
+  }
+}
+
+function serializeStateCookie(value, secure) {
+  const { sameSite, domain, effectiveSecure } = getCookieSettings(secure)
+  const parts = [
+    `${STATE_COOKIE_NAME}=${encodeURIComponent(value)}`,
+    `Max-Age=${STATE_TTL_SECONDS}`,
+    'Path=/',
+    `SameSite=${sameSite}`,
+    'HttpOnly'
+  ]
+  if (domain) parts.push(`Domain=${domain}`)
+  if (effectiveSecure) parts.push('Secure')
+  return parts.join('; ')
+}
+
+function clearStateCookie(res, secure) {
+  const { sameSite, domain, effectiveSecure } = getCookieSettings(secure)
+  const parts = [
+    `${STATE_COOKIE_NAME}=`,
+    'Max-Age=0',
+    'Path=/',
+    `SameSite=${sameSite}`,
+    'HttpOnly'
+  ]
+  if (domain) parts.push(`Domain=${domain}`)
+  if (effectiveSecure) parts.push('Secure')
+  appendSetCookie(res, parts.join('; '))
+}
+
+function ssoErrorRedirect(res, frontendUrl, errorCode) {
   res.writeHead(302, { Location: `${frontendUrl}?sso_error=${errorCode}` })
   res.end()
 }
 
-function getStringParam(req, name) {
-  const val = req.query?.[name]
-  if (typeof val === 'string') return val.trim()
-  if (Array.isArray(val)) return String(val[0] || '').trim()
-  return ''
-}
+// ============================================================
+// 共用 DB 工具
+// ============================================================
 
 /**
  * 建立 Supabase 使用者 Session（generateLink → verify OTP）
@@ -95,50 +170,42 @@ async function createSessionForEmail(email) {
 }
 
 // ============================================================
-// 主 Handler
+// Phase 1：1Campus SSO 入口
 // ============================================================
 
-export default async function handler(req, res) {
-  if (handleCors(req, res)) return
+async function handlePhase1(req, res) {
+  const frontendUrl = getFrontendUrl(req)
 
-  if (req.method !== 'GET') {
-    res.status(405).json({ error: 'Method Not Allowed' })
-    return
-  }
-
-  // ── 1. 驗證 URL 參數 ──────────────────────────────────────
   const code = getStringParam(req, 'code')
   const dsns = getStringParam(req, 'dsns')
 
   if (!code || code.length > 512) {
-    ssoErrorRedirect(res, req, 'invalid_params')
+    ssoErrorRedirect(res, frontendUrl, 'invalid_params')
     return
   }
 
   if (!dsns || !isValidDsns(dsns)) {
-    ssoErrorRedirect(res, req, 'invalid_params')
+    ssoErrorRedirect(res, frontendUrl, 'invalid_params')
     return
   }
 
-  // ── 2. 呼叫 1Campus Identity API ──────────────────────────
   let identity
   try {
     identity = await fetchCampus1Identity(dsns, code)
   } catch (err) {
     console.error('[1campus SSO] Identity API failed:', err?.message)
-    ssoErrorRedirect(res, req, 'identity_failed')
+    ssoErrorRedirect(res, frontendUrl, 'identity_failed')
     return
   }
 
-  // ── 3. 角色過濾（目前僅支援教師）────────────────────────────
   if (identity?.roleType !== 'teacher') {
-    ssoErrorRedirect(res, req, 'unsupported_role')
+    ssoErrorRedirect(res, frontendUrl, 'unsupported_role')
     return
   }
 
   const account = String(identity.account || '').trim()
   if (!account) {
-    ssoErrorRedirect(res, req, 'identity_failed')
+    ssoErrorRedirect(res, frontendUrl, 'identity_failed')
     return
   }
 
@@ -148,10 +215,8 @@ export default async function handler(req, res) {
   const supabaseAdmin = getSupabaseAdmin()
   const nowIso = new Date().toISOString()
 
-  // ── 4. 查找或建立帳號 ─────────────────────────────────────
   let userId
   try {
-    // 4a. 查 external_identities
     const { data: existingIdentity, error: identityError } =
       await supabaseAdmin
         .from('external_identities')
@@ -163,7 +228,6 @@ export default async function handler(req, res) {
     if (identityError) throw new Error('查詢身份記錄失敗')
 
     if (existingIdentity) {
-      // 已有記錄：更新 provider_meta，取得 user_id
       userId = existingIdentity.user_id
       const updatedMeta = {
         ...(existingIdentity.provider_meta || {}),
@@ -178,7 +242,6 @@ export default async function handler(req, res) {
         .eq('provider', 'campus1')
         .eq('provider_account', account)
     } else {
-      // 4b. 無記錄：查 profiles 看是否有虛擬 email 的舊帳號
       const { data: existingProfile } = await supabaseAdmin
         .from('profiles')
         .select('id')
@@ -186,10 +249,8 @@ export default async function handler(req, res) {
         .maybeSingle()
 
       if (existingProfile) {
-        // 已有虛擬 email 帳號但無 identity 記錄 → 補寫記錄
         userId = existingProfile.id
       } else {
-        // 全新使用者：建立 Supabase auth 帳號
         const { data: newUserData, error: createError } =
           await supabaseAdmin.auth.admin.createUser({
             email: virtualEmail,
@@ -200,7 +261,6 @@ export default async function handler(req, res) {
         if (createError) throw new Error(`建立帳號失敗: ${createError.message}`)
         userId = newUserData.user.id
 
-        // 建立 profiles 記錄
         const { error: profileError } = await supabaseAdmin
           .from('profiles')
           .insert({
@@ -218,7 +278,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // 寫入 external_identities
       const meta = { teacherID, displayName, dsns, lastLoginAt: nowIso }
       const { error: insertError } = await supabaseAdmin
         .from('external_identities')
@@ -234,40 +293,294 @@ export default async function handler(req, res) {
     }
   } catch (err) {
     console.error('[1campus SSO] findOrCreateUser failed:', err?.message)
-    ssoErrorRedirect(res, req, 'create_user_failed')
+    ssoErrorRedirect(res, frontendUrl, 'create_user_failed')
     return
   }
 
-  // ── 5. 建立 Session ─────────────────────────────────────
   let session
   try {
     session = await createSessionForEmail(virtualEmail)
     if (!session?.access_token) throw new Error('Session 缺少 access_token')
   } catch (err) {
     console.error('[1campus SSO] Session creation failed:', err?.message)
-    ssoErrorRedirect(res, req, 'session_failed')
+    ssoErrorRedirect(res, frontendUrl, 'session_failed')
     return
   }
 
-  // ── 6. 設定 Cookies ───────────────────────────────────────
   setAuthCookies(res, session, isSecureRequest(req))
 
-  // ── 7. Redirect ───────────────────────────────────────────
-  // 若有設定 OAuth（Phase 2），先走 OAuth 取得真實 email + Jasmine token
   const clientId = getEnvValue('CAMPUS1_CLIENT_ID')
-  const frontendUrl = getFrontendUrl(req)
-
   if (clientId) {
-    // Redirect 到 OAuth 啟動端點
-    const oauthParams = new URLSearchParams({ dsns })
+    // Redirect 到 Phase 2 OAuth 啟動（直接使用 __step 參數，不需獨立檔案）
+    const oauthParams = new URLSearchParams({ __step: 'oauth', dsns })
     res.writeHead(302, {
-      Location: `/api/auth/1campus-oauth?${oauthParams.toString()}`
+      Location: `/api/auth/1campus?${oauthParams.toString()}`
     })
   } else {
-    // Phase 1 only：直接導回前端
     res.writeHead(302, {
       Location: `${frontendUrl}?sso_provider=campus1`
     })
   }
   res.end()
+}
+
+// ============================================================
+// Phase 2a：OAuth 授權啟動
+// ============================================================
+
+async function handleOAuthInitiate(req, res) {
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const dsns = getStringParam(req, 'dsns')
+  if (!dsns || !isValidDsns(dsns)) {
+    res.status(400).json({ error: 'Invalid dsns' })
+    return
+  }
+
+  const clientId = getEnvValue('CAMPUS1_CLIENT_ID')
+  if (!clientId) {
+    res.status(503).json({ error: '1Campus OAuth 未設定' })
+    return
+  }
+
+  const nonce = crypto.randomBytes(16).toString('hex')
+  const stateData = JSON.stringify({ nonce, dsns, userId: user.id })
+  const stateB64 = Buffer.from(stateData).toString('base64url')
+
+  const stateCookie = serializeStateCookie(stateB64, isSecureRequest(req))
+  appendSetCookie(res, stateCookie)
+
+  const callbackUrl = getOAuthCallbackUrl(req)
+  const authUrl =
+    `${CAMPUS1_OAUTH_AUTHORIZE}?` +
+    new URLSearchParams({
+      client_id: clientId,
+      response_type: 'code',
+      redirect_uri: callbackUrl,
+      scope: 'User.Mail,jasmine',
+      state: stateB64
+    }).toString()
+
+  res.writeHead(302, { Location: authUrl })
+  res.end()
+}
+
+// ============================================================
+// Phase 2b：OAuth 授權回呼
+// ============================================================
+
+async function mergeCampus1IntoGoogleAccount(supabaseAdmin, oldUserId, googleUserId) {
+  const nowIso = new Date().toISOString()
+
+  await supabaseAdmin
+    .from('classrooms')
+    .update({ owner_id: googleUserId })
+    .eq('owner_id', oldUserId)
+
+  await supabaseAdmin
+    .from('students')
+    .update({ owner_id: googleUserId })
+    .eq('owner_id', oldUserId)
+
+  await supabaseAdmin
+    .from('campus_classroom_sync')
+    .update({ owner_id: googleUserId, updated_at: nowIso })
+    .eq('owner_id', oldUserId)
+
+  await supabaseAdmin
+    .from('external_identities')
+    .update({ user_id: googleUserId, updated_at: nowIso })
+    .eq('user_id', oldUserId)
+}
+
+async function handleOAuthCallback(req, res) {
+  const frontendUrl = getFrontendUrl(req)
+  const secure = isSecureRequest(req)
+
+  if (req.query?.error) {
+    clearStateCookie(res, secure)
+    res.writeHead(302, { Location: `${frontendUrl}?sso_error=oauth_error` })
+    res.end()
+    return
+  }
+
+  const code = getStringParam(req, 'code')
+  const state = getStringParam(req, 'state')
+
+  if (!code || !state) {
+    clearStateCookie(res, secure)
+    res.writeHead(302, { Location: `${frontendUrl}?sso_error=oauth_error` })
+    res.end()
+    return
+  }
+
+  const cookies = parseCookies(req)
+  const cookieStateRaw = cookies[STATE_COOKIE_NAME] || ''
+  const cookieState = cookieStateRaw ? decodeURIComponent(cookieStateRaw) : ''
+  clearStateCookie(res, secure)
+
+  if (!cookieState || cookieState !== state) {
+    res.writeHead(302, { Location: `${frontendUrl}?sso_error=oauth_error` })
+    res.end()
+    return
+  }
+
+  let stateData
+  try {
+    stateData = JSON.parse(Buffer.from(state, 'base64url').toString())
+  } catch {
+    res.writeHead(302, { Location: `${frontendUrl}?sso_error=oauth_error` })
+    res.end()
+    return
+  }
+
+  const { dsns, userId: campus1UserId } = stateData
+
+  if (!dsns || !isValidDsns(dsns) || !campus1UserId) {
+    res.writeHead(302, { Location: `${frontendUrl}?sso_error=oauth_error` })
+    res.end()
+    return
+  }
+
+  const supabaseAdmin = getSupabaseAdmin()
+  const callbackUrl = getOAuthCallbackUrl(req)
+
+  let tokenData
+  try {
+    tokenData = await exchangeCampus1OAuthCode(code, callbackUrl)
+  } catch (err) {
+    console.error('[1campus OAuth callback] Token exchange failed:', err?.message)
+    res.writeHead(302, { Location: `${frontendUrl}?sso_error=oauth_error` })
+    res.end()
+    return
+  }
+
+  const accessToken = tokenData.access_token
+  const refreshToken = tokenData.refresh_token
+  const expiresIn = tokenData.expires_in || 3600
+  const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString()
+
+  let realEmail = ''
+  try {
+    const userInfo = await fetchCampus1UserInfo(accessToken)
+    realEmail = typeof userInfo.mail === 'string' ? userInfo.mail.trim() : ''
+  } catch (err) {
+    console.warn('[1campus OAuth callback] UserInfo failed (non-blocking):', err?.message)
+  }
+
+  const { data: identityData, error: identityError } = await supabaseAdmin
+    .from('external_identities')
+    .select('provider_meta, provider_account')
+    .eq('user_id', campus1UserId)
+    .eq('provider', 'campus1')
+    .maybeSingle()
+
+  if (!identityError && identityData) {
+    const updatedMeta = {
+      ...(identityData.provider_meta || {}),
+      oauth_access_token: accessToken,
+      oauth_refresh_token: refreshToken,
+      oauth_token_expires_at: tokenExpiresAt,
+      ...(realEmail ? { real_email: realEmail } : {})
+    }
+    await supabaseAdmin
+      .from('external_identities')
+      .update({ provider_meta: updatedMeta, updated_at: new Date().toISOString() })
+      .eq('user_id', campus1UserId)
+      .eq('provider', 'campus1')
+  }
+
+  let finalUserId = campus1UserId
+
+  if (realEmail) {
+    try {
+      const { data: googleProfile } = await supabaseAdmin
+        .from('profiles')
+        .select('id, email')
+        .eq('email', realEmail)
+        .neq('id', campus1UserId)
+        .maybeSingle()
+
+      if (googleProfile) {
+        await mergeCampus1IntoGoogleAccount(
+          supabaseAdmin,
+          campus1UserId,
+          googleProfile.id
+        )
+        finalUserId = googleProfile.id
+
+        const newSession = await createSessionForEmail(realEmail)
+        if (newSession?.access_token) {
+          setAuthCookies(
+            res,
+            {
+              access_token: newSession.access_token,
+              refresh_token: newSession.refresh_token,
+              expires_in: newSession.expires_in || 3600
+            },
+            secure
+          )
+        }
+      }
+    } catch (err) {
+      console.error(
+        '[1campus OAuth callback] Email auto-match failed (non-blocking):',
+        err?.message
+      )
+    }
+
+    try {
+      await supabaseAdmin
+        .from('profiles')
+        .update({ email: realEmail, updated_at: new Date().toISOString() })
+        .eq('id', finalUserId)
+        .like('email', 'campus1.%')
+    } catch (err) {
+      console.warn('[1campus OAuth callback] Update real email failed:', err?.message)
+    }
+  }
+
+  const teacherID = String(identityData?.provider_meta?.teacherID || '')
+
+  const redirectParams = new URLSearchParams({
+    sso_provider: 'campus1',
+    sso_sync: '1',
+    sso_dsns: dsns
+  })
+  if (teacherID) redirectParams.set('sso_teacher_id', teacherID)
+
+  res.writeHead(302, { Location: `${frontendUrl}?${redirectParams.toString()}` })
+  res.end()
+}
+
+// ============================================================
+// 主 Handler（分派）
+// ============================================================
+
+export default async function handler(req, res) {
+  if (handleCors(req, res)) return
+
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+
+  const step = getStringParam(req, '__step')
+
+  if (step === 'oauth') {
+    await handleOAuthInitiate(req, res)
+    return
+  }
+
+  if (step === 'oauth_callback') {
+    await handleOAuthCallback(req, res)
+    return
+  }
+
+  // 預設：Phase 1 SSO 入口
+  await handlePhase1(req, res)
 }

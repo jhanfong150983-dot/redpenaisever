@@ -8,6 +8,16 @@
   "env": {
     "NODE_OPTIONS": "--no-deprecation"
   },
+  "rewrites": [
+    {
+      "source": "/api/auth/1campus-oauth-callback",
+      "destination": "/api/auth/1campus?__step=oauth_callback"
+    },
+    {
+      "source": "/api/oauth/callback",
+      "destination": "/api/auth/1campus?__step=oauth_callback"
+    }
+  ],
   "crons": [
     {
       "path": "/api/admin/aggregate-tags",
