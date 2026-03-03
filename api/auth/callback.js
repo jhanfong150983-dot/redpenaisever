@@ -122,6 +122,23 @@ export default async function handler(req, res) {
     return
   }
 
+  // 1Campus OAuth callback 偵測：
+  // 1Campus 廠商登記的 callback URL 是 /api/auth/callback，
+  // 透過偵測 rp-campus1-state cookie 判斷是否為 1Campus 流程，
+  // 若是則將所有 query 參數轉交 1Campus handler。
+  const routingCookies = parseCookies(req)
+  if (routingCookies['rp-campus1-state']) {
+    const params = new URLSearchParams()
+    const query = req.query || {}
+    for (const [key, val] of Object.entries(query)) {
+      params.set(key, Array.isArray(val) ? val[0] : String(val))
+    }
+    params.set('__step', 'oauth_callback')
+    res.writeHead(302, { Location: `/api/auth/1campus?${params.toString()}` })
+    res.end()
+    return
+  }
+
   const { code, error, error_description } = req.query || {}
   const codeValue = Array.isArray(code) ? code[0] : code
   const cookies = parseCookies(req)
