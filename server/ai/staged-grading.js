@@ -163,13 +163,13 @@ function parseCandidateJson(data) {
 function getReadAnswerLogMode() {
   const raw = String(process.env.READ_ANSWER_LOG_MODE || '').trim().toLowerCase()
   if (raw === 'off' || raw === 'schema' || raw === 'full') return raw
-  return process.env.NODE_ENV === 'production' ? 'off' : 'schema'
+  return 'schema' // 預設開啟 schema 模式，讓 Vercel log 看到每題學生答案
 }
 
 function getStagedLogLevel() {
   const raw = String(process.env.STAGED_GRADING_LOG_LEVEL || '').trim().toLowerCase()
   if (raw === 'off' || raw === 'basic' || raw === 'detail') return raw
-  return process.env.NODE_ENV === 'production' ? 'basic' : 'detail'
+  return 'detail' // 預設開啟 detail 模式，讓 Vercel log 看到逐題批改過程與結果
 }
 
 function isReadAnswerHardFailCloseEnabled() {

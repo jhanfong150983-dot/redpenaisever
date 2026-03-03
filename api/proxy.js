@@ -284,6 +284,7 @@ export default async function handler(req, res) {
     const result = await getAuthUser(req, res)
     user = result.user
   } catch (error) {
+    console.error(`${logPrefix} auth-check-failed`, error?.message || error)
     res.status(500).json({ error: 'Auth check failed' })
     return
   }
@@ -319,6 +320,7 @@ export default async function handler(req, res) {
     try {
       body = JSON.parse(body)
     } catch {
+      console.warn(`${logPrefix} bad-request invalid-json-body`)
       res.status(400).json({ error: 'Invalid JSON body' })
       return
     }
@@ -394,6 +396,7 @@ export default async function handler(req, res) {
     console.log(`📤 [AnswerKey] 使用緩存 AnswerKey，ref=${answerKeyRef}`)
   } else if (answerKey) {
     // 有傳 answerKey 但格式不合法（例如非法字串）
+    console.warn(`${logPrefix} bad-request invalid-answerKey-format type=${typeof answerKey}`)
     res.status(400).json({
       error: 'Invalid answerKey format. Must be object or JSON-object string.'
     })
@@ -418,6 +421,7 @@ export default async function handler(req, res) {
       .maybeSingle()
 
     if (profileError) {
+      console.error(`${logPrefix} profile-read-failed`, profileError?.message || profileError)
       res.status(500).json({ error: '讀取使用者點數失敗' })
       return
     }
@@ -441,6 +445,7 @@ export default async function handler(req, res) {
           } else if (sessionCheck.reason === 'not_found') {
             message = '批改會話不存在，請重新進入批改頁'
           }
+          console.warn(`${logPrefix} ink-session-invalid reason=${sessionCheck.reason} sessionId=${inkSessionId}`)
           res.status(409).json({ error: message })
           return
         }
@@ -456,10 +461,12 @@ export default async function handler(req, res) {
       const message = inkSessionId
         ? '批改會話已結束或點數不足，請重新進入或補充墨水'
         : '墨水不足，請先補充墨水'
+      console.warn(`${logPrefix} insufficient-ink balance=${currentBalance} hasSession=${Boolean(inkSessionId)}`)
       res.status(402).json({ error: message })
       return
     }
   } catch (error) {
+    console.error(`${logPrefix} ink-check-failed`, error?.message || error)
     res.status(500).json({ error: '點數檢查失敗' })
     return
   }
@@ -586,6 +593,26 @@ export default async function handler(req, res) {
         pipelineResult.resolvedRouteKey
       } pipeline=${pipelineResult.pipelineMeta?.pipeline || 'unknown'}`
     )
+
+    // 批改結果摘要 log（grading.evaluate 時才輸出）
+    if (responseOk && pipelineResult.resolvedRouteKey === 'grading.evaluate' && data) {
+      const details = Array.isArray(data.details) ? data.details : []
+      const correctCount = details.filter((d) => d.isCorrect === true).length
+      const wrongCount = details.length - correctCount
+      const perQ = details
+        .map((d) => `${d.questionId}:${d.isCorrect ? '✓' : '✗'}${d.score}/${d.maxScore}`)
+        .join(' ')
+      console.log(
+        `${logPrefix} grading-summary totalScore=${data.totalScore} questions=${details.length} correct=${correctCount} wrong=${wrongCount} needsReview=${Boolean(data.needsReview)}`
+      )
+      if (perQ) {
+        console.log(`${logPrefix} grading-per-question ${perQ}`)
+      }
+      if (Array.isArray(data.reviewReasons) && data.reviewReasons.length > 0) {
+        console.log(`${logPrefix} grading-review-reasons ${data.reviewReasons.join(' | ')}`)
+      }
+    }
+
     res.status(responseStatus).json(data)
   } catch (error) {
     console.error(`${logPrefix} request-failed`, error)
