@@ -9,8 +9,6 @@ const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 const READ_ANSWER_GENERATION_CONFIG = {
   generationConfig: {
     temperature: 0.3,
-    topK: 20,
-    topP: 0.85,
     thinkingConfig: {
       thinking_level: 'MINIMAL'
     }
