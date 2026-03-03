@@ -141,14 +141,14 @@ export default async function handler(req, res) {
   const verifier = oauthCookies[verifierCookie]
 
   if (!verifier) {
-    clearOAuthCookies(res, isSecureRequest(req))
+      clearOAuthCookies(res, isSecureRequest(req), req)
     res.status(400).json({ error: 'Missing OAuth verifier' })
     return
   }
 
   try {
     const session = await exchangeCodeForSession(codeValue, verifier)
-    clearOAuthCookies(res, isSecureRequest(req))
+      clearOAuthCookies(res, isSecureRequest(req), req)
 
     const user = session.user
     if (!user) {
@@ -207,7 +207,7 @@ export default async function handler(req, res) {
       return
     }
 
-    setAuthCookies(res, session, isSecureRequest(req))
+      setAuthCookies(res, session, isSecureRequest(req), req)
 
     const frontendUrl = getFrontendUrl(req) || '/'
     const redirectLocation = entry
@@ -217,7 +217,7 @@ export default async function handler(req, res) {
     res.writeHead(302, { Location: redirectLocation })
     res.end()
   } catch (err) {
-    clearOAuthCookies(res, isSecureRequest(req))
+    clearOAuthCookies(res, isSecureRequest(req), req)
     res.status(500).json({ error: err instanceof Error ? err.message : '登入失敗' })
   }
 }

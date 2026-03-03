@@ -10,6 +10,6 @@ export default async function handler(req, res) {
     return
   }
 
-  clearAuthCookies(res, isSecureRequest(req))
+  clearAuthCookies(res, isSecureRequest(req), req)
   res.status(200).json({ success: true })
 }

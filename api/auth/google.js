@@ -103,7 +103,7 @@ export default async function handler(req, res) {
   }
 
   const { verifier, challenge } = generateOAuthVerifier()
-  setOAuthCookies(res, { verifier }, isSecureRequest(req))
+  setOAuthCookies(res, { verifier }, isSecureRequest(req), req)
 
   const entry = normalizeEntry(req.query?.entry)
   if (entry) {

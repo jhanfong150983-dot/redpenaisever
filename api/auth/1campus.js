@@ -307,7 +307,7 @@ async function handlePhase1(req, res) {
     return
   }
 
-  setAuthCookies(res, session, isSecureRequest(req))
+  setAuthCookies(res, session, isSecureRequest(req), req)
 
   const clientId = getEnvValue('CAMPUS1_CLIENT_ID')
   if (clientId) {
@@ -522,7 +522,8 @@ async function handleOAuthCallback(req, res) {
               refresh_token: newSession.refresh_token,
               expires_in: newSession.expires_in || 3600
             },
-            secure
+            secure,
+            req
           )
         }
       }

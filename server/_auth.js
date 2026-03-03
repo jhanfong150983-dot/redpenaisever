@@ -42,6 +42,34 @@ function serializeCookie(name, value, options = {}) {
   return parts.join('; ')
 }
 
+function normalizeHostname(rawHost) {
+  return String(rawHost || '')
+    .trim()
+    .toLowerCase()
+    .replace(/:\d+$/, '')
+}
+
+function isCookieDomainMatch(hostname, cookieDomain) {
+  const host = normalizeHostname(hostname)
+  const domain = String(cookieDomain || '').trim().toLowerCase().replace(/^\./, '')
+  if (!host || !domain) return false
+  return host === domain || host.endsWith(`.${domain}`)
+}
+
+function resolveCookieDomain(configuredDomain, req) {
+  const domain = String(configuredDomain || '').trim()
+  if (!domain) return undefined
+
+  const requestHost = req?.headers?.host
+  if (!requestHost) return undefined
+
+  if (!isCookieDomainMatch(requestHost, domain)) {
+    return undefined
+  }
+
+  return domain
+}
+
 function appendSetCookie(res, cookie) {
   const existing = res.getHeader('Set-Cookie')
   if (!existing) {
@@ -61,10 +89,10 @@ export function isSecureRequest(req) {
   return process.env.NODE_ENV === 'production'
 }
 
-function getCookieSettings(secure) {
+function getCookieSettings(secure, req) {
   const rawSameSite = String(process.env.AUTH_COOKIE_SAME_SITE || 'Lax').trim()
   const sameSite = rawSameSite || 'Lax'
-  const domain = (process.env.AUTH_COOKIE_DOMAIN || '').trim() || undefined
+  const domain = resolveCookieDomain(process.env.AUTH_COOKIE_DOMAIN || '', req)
 
   // SameSite=None requires Secure by browser policy.
   const effectiveSecure =
@@ -79,8 +107,8 @@ function getCookieSettings(secure) {
   }
 }
 
-export function setAuthCookies(res, session, secure) {
-  const settings = getCookieSettings(secure)
+export function setAuthCookies(res, session, secure, req) {
+  const settings = getCookieSettings(secure, req)
   const accessCookie = serializeCookie(ACCESS_COOKIE, session.access_token, {
     httpOnly: true,
     secure: settings.secure,
@@ -99,8 +127,8 @@ export function setAuthCookies(res, session, secure) {
   appendSetCookie(res, refreshCookie)
 }
 
-export function clearAuthCookies(res, secure) {
-  const settings = getCookieSettings(secure)
+export function clearAuthCookies(res, secure, req) {
+  const settings = getCookieSettings(secure, req)
   const accessCookie = serializeCookie(ACCESS_COOKIE, '', {
     httpOnly: true,
     secure: settings.secure,
@@ -119,8 +147,8 @@ export function clearAuthCookies(res, secure) {
   appendSetCookie(res, refreshCookie)
 }
 
-export function setOAuthCookies(res, { verifier }, secure) {
-  const settings = getCookieSettings(secure)
+export function setOAuthCookies(res, { verifier }, secure, req) {
+  const settings = getCookieSettings(secure, req)
   const verifierCookie = serializeCookie(VERIFIER_COOKIE, verifier, {
     httpOnly: true,
     secure: settings.secure,
@@ -131,8 +159,8 @@ export function setOAuthCookies(res, { verifier }, secure) {
   appendSetCookie(res, verifierCookie)
 }
 
-export function clearOAuthCookies(res, secure) {
-  const settings = getCookieSettings(secure)
+export function clearOAuthCookies(res, secure, req) {
+  const settings = getCookieSettings(secure, req)
   const verifierCookie = serializeCookie(VERIFIER_COOKIE, '', {
     httpOnly: true,
     secure: settings.secure,
@@ -220,11 +248,11 @@ export async function getAuthUser(req, res) {
     })
 
     if (error || !data?.session || !data.user) {
-      clearAuthCookies(res, isSecureRequest(req))
+      clearAuthCookies(res, isSecureRequest(req), req)
       return { user: null, accessToken: null }
     }
 
-    setAuthCookies(res, data.session, isSecureRequest(req))
+    setAuthCookies(res, data.session, isSecureRequest(req), req)
     return {
       user: data.user,
       session: data.session,
@@ -232,6 +260,6 @@ export async function getAuthUser(req, res) {
     }
   }
 
-  clearAuthCookies(res, isSecureRequest(req))
+  clearAuthCookies(res, isSecureRequest(req), req)
   return { user: null, accessToken: null }
 }
