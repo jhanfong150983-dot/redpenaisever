@@ -14,8 +14,36 @@ function getRequestOrigin(req) {
   return `${proto}://${host}`
 }
 
+function sanitizeEnvUrl(value) {
+  if (typeof value !== 'string') return ''
+  return value.trim().replace(/^['"]|['"]$/g, '')
+}
+
+function isLocalHostname(hostname) {
+  const value = String(hostname || '').trim().toLowerCase()
+  return value === 'localhost' || value === '127.0.0.1'
+}
+
 function getBackendUrl(req) {
-  return process.env.BACKEND_URL || process.env.SITE_URL || getRequestOrigin(req)
+  const requestOrigin = getRequestOrigin(req)
+  const backendUrl = sanitizeEnvUrl(process.env.BACKEND_URL)
+  const siteUrl = sanitizeEnvUrl(process.env.SITE_URL)
+  const configured = backendUrl || siteUrl
+
+  if (!configured) return requestOrigin
+
+  try {
+    const reqUrl = new URL(requestOrigin)
+    const cfgUrl = new URL(configured)
+
+    if (isLocalHostname(cfgUrl.hostname) && !isLocalHostname(reqUrl.hostname)) {
+      return requestOrigin
+    }
+  } catch {
+    return configured
+  }
+
+  return configured
 }
 
 function normalizeEntry(rawValue) {

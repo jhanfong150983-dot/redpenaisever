@@ -21,22 +21,60 @@ function sanitizeEnvUrl(value) {
   return value.trim().replace(/^['"]|['"]$/g, '')
 }
 
+function isLocalHostname(hostname) {
+  const value = String(hostname || '').trim().toLowerCase()
+  return value === 'localhost' || value === '127.0.0.1'
+}
+
+function replaceHostnameKeepingPort(url, hostname) {
+  const parsed = new URL(url)
+  parsed.hostname = hostname
+  return parsed.toString().replace(/\/$/, '')
+}
+
 function getFrontendUrl(req) {
   const frontendUrl = sanitizeEnvUrl(process.env.FRONTEND_URL)
-  if (frontendUrl) return frontendUrl
+  const requestOrigin = getRequestOrigin(req)
+  const requestHost = String(req.headers?.host || '')
+
+  let requestHostname = ''
+  try {
+    requestHostname = new URL(requestOrigin).hostname
+  } catch {
+    requestHostname = requestHost.split(':')[0] || ''
+  }
+
+  if (frontendUrl) {
+    try {
+      const parsedFrontend = new URL(frontendUrl)
+      if (isLocalHostname(parsedFrontend.hostname) && !isLocalHostname(requestHostname)) {
+        return replaceHostnameKeepingPort(frontendUrl, requestHostname)
+      }
+      return frontendUrl
+    } catch {
+      return frontendUrl
+    }
+  }
 
   const siteUrl = sanitizeEnvUrl(process.env.SITE_URL)
-  const requestOrigin = getRequestOrigin(req)
-  const requestHost = String(req.headers?.host || '').toLowerCase()
-  const isLocalBackend =
-    requestHost.includes('localhost:3000') || requestHost.includes('127.0.0.1:3000')
+  if (siteUrl) {
+    try {
+      const parsedSite = new URL(siteUrl)
+      if (isLocalHostname(parsedSite.hostname) && !isLocalHostname(requestHostname)) {
+        return replaceHostnameKeepingPort(siteUrl, requestHostname)
+      }
+      return siteUrl
+    } catch {
+      return siteUrl
+    }
+  }
 
   // 開發環境保險：若未設定 FRONTEND_URL，且目前是本地後端，預設導回 Vite 前端
-  if (isLocalBackend) {
+  if (isLocalHostname(requestHostname) && requestHost.includes(':3000')) {
     return 'http://localhost:5173'
   }
 
-  return siteUrl || requestOrigin
+  return requestOrigin
 }
 
 function normalizeEntry(rawValue) {
