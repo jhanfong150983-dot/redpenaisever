@@ -24,15 +24,10 @@ function getRetryConfig() {
   return { retryCount, baseBackoffMs }
 }
 
-const RETRYABLE_STATUSES = new Set([503, 504])
-
-export async function callGeminiGenerateContent({
-  apiKey,
-  model,
-  contents,
-  payload = {},
-  timeoutMs
-}) {
+// Calls a single model. Returns { ok, status, data, modelPath, url, is503 }.
+// 504 is retried on the same model with exponential backoff.
+// 503 is NOT retried here — caller should switch to a fallback model.
+async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) {
   const modelPath = String(model).startsWith('models/')
     ? String(model)
     : `models/${model}`
@@ -60,7 +55,7 @@ export async function callGeminiGenerateContent({
     } catch (error) {
       if (error?.name === 'AbortError') {
         // Pipeline budget exhausted — throw immediately, no retry.
-        console.warn(`[ai-model-adapter] timeout status=504 budgetExhausted=true`)
+        console.warn(`[ai-model-adapter] timeout status=504 model=${model} budgetExhausted=true`)
         const timeoutError = new Error('Gemini request timeout')
         timeoutError.status = 504
         throw timeoutError
@@ -75,26 +70,76 @@ export async function callGeminiGenerateContent({
     const rawText = await response.text()
     const data = parseResponseBody(rawText)
 
-    if (RETRYABLE_STATUSES.has(Number(response.status)) && attempt < retryCount) {
+    // 503 = model overloaded — signal caller to switch to fallback model, don't retry same model.
+    if (Number(response.status) === 503) {
+      return { ok: false, status: 503, data, modelPath, url, is503: true }
+    }
+
+    // 504 = timeout — retry the same model with exponential backoff.
+    if (Number(response.status) === 504 && attempt < retryCount) {
       const backoffMs = Math.min(baseBackoffMs * 2 ** attempt, 8000)
       console.warn(
-        `[ai-model-adapter] response status=${response.status} retry=${attempt + 1}/${retryCount} waitMs=${backoffMs}`
+        `[ai-model-adapter] response status=504 model=${model} retry=${attempt + 1}/${retryCount} waitMs=${backoffMs}`
       )
       await sleep(backoffMs)
       continue
     }
 
-    return {
-      ok: response.ok,
-      status: response.status,
-      data,
-      modelPath,
-      url
-    }
+    return { ok: response.ok, status: response.status, data, modelPath, url }
   }
 
   // Defensive fallback; the loop should always return or throw earlier.
   const timeoutError = new Error('Gemini request timeout')
   timeoutError.status = 504
   throw timeoutError
+}
+
+// Calls Gemini with automatic model fallback on 503.
+// If the primary model returns 503, tries each model in fallbackModels in order.
+export async function callGeminiGenerateContent({
+  apiKey,
+  model,
+  contents,
+  payload = {},
+  timeoutMs,
+  fallbackModels = []
+}) {
+  const allModels = [model, ...fallbackModels]
+  let lastResult = null
+
+  for (let i = 0; i < allModels.length; i++) {
+    const currentModel = allModels[i]
+    if (i > 0) {
+      console.warn(
+        `[ai-model-adapter] 503-fallback switching to model=${currentModel} fallbackIndex=${i}`
+      )
+    }
+
+    const result = await callSingleModel({
+      apiKey,
+      model: currentModel,
+      contents,
+      payload,
+      timeoutMs
+    })
+    lastResult = result
+
+    if (result.is503 && i < allModels.length - 1) {
+      console.warn(
+        `[ai-model-adapter] 503 on model=${currentModel} will try fallback=${allModels[i + 1]}`
+      )
+      continue
+    }
+
+    // Success or no more fallbacks — strip internal flag and return.
+    const { is503, ...cleanResult } = result
+    return cleanResult
+  }
+
+  // All models returned 503.
+  console.warn(
+    `[ai-model-adapter] all models exhausted on 503 lastModel=${allModels[allModels.length - 1]}`
+  )
+  const { is503, ...cleanResult } = lastResult
+  return cleanResult
 }
