@@ -1189,6 +1189,10 @@ export async function runStagedGradingEvaluate({
 
   const classifyPrompt = buildClassifyPrompt(questionIds)
   logStageStart(pipelineRunId, 'classify')
+  console.log(
+    `[AI-5STAGE][${pipelineRunId}] classify-params model=${model} payloadKeys=${Object.keys(payload || {}).join(',') || 'none'}`,
+    { generationConfig: payload?.generationConfig ?? null }
+  )
   const classifyResponse = await executeStage({
     apiKey,
     model,
@@ -1202,7 +1206,8 @@ export async function runStagedGradingEvaluate({
   stageResponses.push(classifyResponse)
   if (!classifyResponse.ok) {
     console.warn(
-      `[AI-5STAGE][${pipelineRunId}] abort stage=classify status=${classifyResponse.status}`
+      `[AI-5STAGE][${pipelineRunId}] abort stage=classify status=${classifyResponse.status}`,
+      classifyResponse.data
     )
     return {
       status: classifyResponse.status,
