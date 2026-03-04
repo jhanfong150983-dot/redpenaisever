@@ -36,7 +36,7 @@ export default async function handler(req, res) {
     const authMeLogLevel = getAuthMeLogLevel()
     const { user, accessToken } = await getAuthUser(req, res)
     if (!user) {
-      res.status(401).json({ error: 'Unauthorized' })
+      res.status(200).json({ user: null })
       return
     }
 
