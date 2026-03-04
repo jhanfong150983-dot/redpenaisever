@@ -251,7 +251,7 @@ export async function getCampus1AccessToken(supabaseAdmin, userId) {
  */
 export async function fetchCampus1Classes(dsns, teacherID, accessToken) {
   const base = getJasmineApiBase()
-  const url = `${base}/${dsns}/teacher/${encodeURIComponent(String(teacherID))}/getClass`
+  const url = `${base}/${dsns}/getClass?teacherID=${encodeURIComponent(String(teacherID))}`
 
   console.log('[1campus] fetchCampus1Classes URL:', url)
   const response = await fetch(url, {
@@ -286,7 +286,7 @@ export async function fetchCampus1Classes(dsns, teacherID, accessToken) {
  */
 export async function fetchCampus1Students(dsns, classID, accessToken) {
   const base = getJasmineApiBase()
-  const url = `${base}/${dsns}/class/${encodeURIComponent(String(classID))}/getClassStudent`
+  const url = `${base}/${dsns}/getClassStudent?classID=${encodeURIComponent(String(classID))}`
 
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
