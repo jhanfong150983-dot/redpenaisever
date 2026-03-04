@@ -286,9 +286,11 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
 }
 
 // A5 輔助：正規化答案字串用於比對
-// - 去除 emoji、結尾方向箭頭、開頭選項前綴、外層括號
+// - 去除 emoji、勾選符號、結尾方向箭頭、開頭選項前綴、外層括號
 function normalizeAnswerForComparison(raw) {
   let s = String(raw ?? '').trim()
+  // 去除勾選/打叉符號（☑ ✓ ✔ ☒ ✗ ✘ □ ☐ 等）
+  s = s.replace(/[☑✓✔☒✗✘□☐☎✅❎]/gu, '').trim()
   // 去除 Unicode Emoji（Presentation 形式）
   s = s.replace(/\p{Emoji_Presentation}/gu, '').trim()
   // 去除結尾方向箭頭
