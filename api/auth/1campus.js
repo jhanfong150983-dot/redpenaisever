@@ -381,25 +381,40 @@ async function handleOAuthInitiate(req, res) {
 async function mergeCampus1IntoGoogleAccount(supabaseAdmin, oldUserId, googleUserId) {
   const nowIso = new Date().toISOString()
 
-  await supabaseAdmin
-    .from('classrooms')
-    .update({ owner_id: googleUserId })
-    .eq('owner_id', oldUserId)
-
-  await supabaseAdmin
-    .from('students')
-    .update({ owner_id: googleUserId })
-    .eq('owner_id', oldUserId)
-
-  await supabaseAdmin
-    .from('campus_classroom_sync')
-    .update({ owner_id: googleUserId, updated_at: nowIso })
-    .eq('owner_id', oldUserId)
-
+  // 搬移所有 owner_id 指向舊帳號的資料表
+  const ownerTables = [
+    'folders',
+    'assignments',
+    'submissions',
+    'classrooms',
+    'students',
+    'campus_classroom_sync',
+    'ability_aggregates',
+    'ability_dictionary',
+    'assignment_student_state',
+    'assignment_tag_aggregates',
+    'assignment_tag_state',
+    'correction_attempt_logs',
+    'correction_question_items',
+    'deleted_records',
+    'domain_tag_aggregates',
+    'tag_ability_map',
+    'tag_dictionary',
+    'tag_dictionary_state',
+    'teacher_notifications',
+    'teacher_preferences'
+  ]
+  for (const table of ownerTables) {
+    await supabaseAdmin.from(table).update({ owner_id: googleUserId }).eq('owner_id', oldUserId)
+  }
   await supabaseAdmin
     .from('external_identities')
     .update({ user_id: googleUserId, updated_at: nowIso })
     .eq('user_id', oldUserId)
+
+  // 所有資料搬移完畢後，刪除舊的 1Campus 虛擬帳號
+  await supabaseAdmin.from('profiles').delete().eq('id', oldUserId)
+  await supabaseAdmin.auth.admin.deleteUser(oldUserId)
 }
 
 async function handleOAuthCallback(req, res) {

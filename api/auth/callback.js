@@ -203,15 +203,45 @@ export default async function handler(req, res) {
       }
       query = supabaseAdmin.from('profiles').update(updatePayload).eq('id', user.id)
     } else {
-      // 新用戶：創建完整的 profile
+      // 新用戶：先檢查是否有同 email 的孤立 1Campus 帳號（先用 1Campus 登入，Phase 2 未找到 Google 帳號的情境）
+      const { data: orphanedProfile } = await supabaseAdmin
+        .from('profiles')
+        .select('id, role, permission_tier, ink_balance')
+        .eq('email', user.email)
+        .neq('id', user.id)
+        .maybeSingle()
+
+      if (orphanedProfile) {
+        // 找到孤立的 1Campus 帳號，將所有資料搬移到新 Google 帳號
+        const oldUserId = orphanedProfile.id
+        const ownerTables = [
+          'folders', 'assignments', 'submissions', 'classrooms', 'students',
+          'campus_classroom_sync', 'ability_aggregates', 'ability_dictionary',
+          'assignment_student_state', 'assignment_tag_aggregates', 'assignment_tag_state',
+          'correction_attempt_logs', 'correction_question_items', 'deleted_records',
+          'domain_tag_aggregates', 'tag_ability_map', 'tag_dictionary',
+          'tag_dictionary_state', 'teacher_notifications', 'teacher_preferences'
+        ]
+        for (const table of ownerTables) {
+          await supabaseAdmin.from(table).update({ owner_id: user.id }).eq('owner_id', oldUserId)
+        }
+        await supabaseAdmin
+          .from('external_identities')
+          .update({ user_id: user.id, updated_at: nowIso })
+          .eq('user_id', oldUserId)
+        await supabaseAdmin.from('profiles').delete().eq('id', oldUserId)
+        await supabaseAdmin.auth.admin.deleteUser(oldUserId).catch(() => {})
+      }
+
+      // 創建新 Google profile，若有孤立帳號則繼承其 permission_tier 與 ink_balance
       const insertPayload = {
         id: user.id,
         email: user.email,
         name: fullName,
         avatar_url: avatarUrl,
-        role: 'user',
-        permission_tier: 'basic',
-        ink_balance: 10,
+        role: orphanedProfile?.role || 'user',
+        permission_tier: orphanedProfile?.permission_tier || 'basic',
+        ink_balance: orphanedProfile?.ink_balance ?? 10,
         updated_at: nowIso
       }
       query = supabaseAdmin.from('profiles').insert(insertPayload)
