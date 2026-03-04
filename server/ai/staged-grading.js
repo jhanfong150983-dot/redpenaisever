@@ -816,16 +816,15 @@ function normalizeExplainResult(parsed, questionIds) {
   for (const questionId of questionIds) {
     const row = detailByQuestionId.get(questionId)
     if (!row) continue
-    const reason = ensureString(row?.reason, '').trim()
+    const studentGuidance = ensureString(row?.studentGuidance, '').trim()
     const mistakeTypeCodes = Array.isArray(row?.mistakeTypeCodes)
       ? row.mistakeTypeCodes.filter((code) => typeof code === 'string' && code.trim())
       : undefined
     details.push({
       questionId,
-      reason,
+      studentGuidance: studentGuidance || undefined,
       mistakeType: ensureString(row?.mistakeType, '').trim() || undefined,
-      mistakeTypeCodes: mistakeTypeCodes && mistakeTypeCodes.length > 0 ? mistakeTypeCodes : undefined,
-      advise: ensureString(row?.advise, '').trim() || undefined
+      mistakeTypeCodes: mistakeTypeCodes && mistakeTypeCodes.length > 0 ? mistakeTypeCodes : undefined
     })
   }
 
@@ -1148,7 +1147,7 @@ function buildExplainPrompt(
     : []
 
   return `
-You are stage Explain. Produce teaching feedback for wrong answers only.
+You are stage Explain. Your job is to generate STUDENT-FACING guidance for wrong answers.
 
 Domain: ${JSON.stringify(domainHint || null)}
 Wrong question IDs: ${JSON.stringify(explainQuestionIds)}
@@ -1164,9 +1163,17 @@ ${JSON.stringify(wrongScores)}
 
 Rules:
 - details[] must only include IDs from wrong question IDs list.
-- Focus on why the student got it wrong and how to improve.
-- reason must NOT reveal the correct answer text, option, or number.
-- Never write phrases like "correct answer is ...", "應為 ...", "答案是 ...".
+- studentGuidance is the MOST IMPORTANT field. It will be shown directly to the student.
+- studentGuidance guidelines:
+  1. Write in Traditional Chinese (繁體中文).
+  2. Reference the question stem or topic so the student knows which question you mean.
+  3. Give a specific, concrete hint about WHERE the student went wrong (e.g. "這題問的是東南亞國家，你可以再想想地圖上各國的相對位置").
+  4. NEVER reveal the correct answer. NEVER say "正確答案是...", "應為...", "答案是...", or similar.
+  5. Encourage the student to think again or review a specific concept.
+  6. Keep it 1-3 sentences, warm but educational.
+- mistakeType and mistakeTypeCodes: classify the type of mistake.
+- weaknesses: list the student's weak areas (for learning analytics, not shown to student).
+- suggestions: list remedial suggestions (for learning analytics, not shown to student).
 - Return strict JSON only.
 
 Output:
@@ -1174,13 +1181,11 @@ Output:
   "details": [
     {
       "questionId": "string",
-      "reason": "explanation of the mistake",
+      "studentGuidance": "學生引導語句（參考題幹、具體提示、不給答案）",
       "mistakeType": "concept|calculation|condition|blank|unreadable",
-      "mistakeTypeCodes": ["calculation", "unit"],
-      "advise": "one-line teaching hint for this student"
+      "mistakeTypeCodes": ["calculation", "unit"]
     }
   ],
-  "mistakes": [],
   "weaknesses": [],
   "suggestions": []
 }
@@ -1302,9 +1307,6 @@ function buildFinalGradingResult({
       score: hasMismatch ? 0 : toFiniteNumber(score?.score) ?? 0,
       maxScore: toFiniteNumber(score?.maxScore) ?? Math.max(0, toFiniteNumber(question?.maxScore) ?? 0),
       reason:
-        (hasMismatch ? '學生計算過程與最終答案不一致，請特別注意' : '') ||
-        ensureString(explain?.reason, '').trim() ||
-        ensureString(score?.feedbackBrief, '').trim() ||
         ensureString(score?.scoringReason, '').trim() ||
         (score?.isCorrect ? '答案正確' : '需人工複核'),
       confidence: clampInt(score?.scoreConfidence, 0, 100, 0),
@@ -1325,6 +1327,7 @@ function buildFinalGradingResult({
     }
     // Explain 新增欄位
     if (explain?.mistakeTypeCodes) row.mistakeTypeCodes = explain.mistakeTypeCodes
+    if (explain?.studentGuidance) row.studentGuidance = explain.studentGuidance
 
     const questionBbox =
       normalizeBboxRef(locate?.questionBbox) ||
