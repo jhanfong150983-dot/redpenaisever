@@ -1644,11 +1644,16 @@ export async function runStagedGradingPhaseA({
     const classifyRow = classifyAligned.find((q) => q.questionId === questionId)
     const consistencyStatus =
       read1 && read2 ? computeConsistencyStatus(read1, read2) : 'unstable'
-    // 非 stable 題目附上 crop 圖供老師審查
+    // 非 stable 題目附上 crop 圖供老師審查；map_fill 無 crop，改附全圖
+    const isMapFill = classifyRow?.questionType === 'map_fill'
     const cropData = consistencyStatus !== 'stable' ? cropByQuestionId.get(questionId) : undefined
-    const answerCropImageUrl = cropData
-      ? `data:${cropData.mimeType};base64,${cropData.data}`
-      : undefined
+    let answerCropImageUrl
+    if (cropData) {
+      answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+    } else if (consistencyStatus !== 'stable' && isMapFill && inlineImages.length > 0) {
+      const fullImg = inlineImages[0].inlineData
+      answerCropImageUrl = `data:${fullImg.mimeType};base64,${fullImg.data}`
+    }
     return {
       questionId,
       consistencyStatus,
