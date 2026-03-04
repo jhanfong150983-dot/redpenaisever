@@ -209,7 +209,8 @@ async function handlePhase1(req, res) {
     return
   }
 
-  const teacherID = String(identity.teacherID || '').trim()
+  const teacherID = identity.teacherID != null && identity.teacherID !== '' ? String(identity.teacherID).trim() : ''
+  console.log('[1campus Phase1] identity fields:', { account, teacherID, roleType: identity.roleType })
   const displayName = buildCampus1DisplayName(identity)
   const virtualEmail = buildCampus1VirtualEmail(account, dsns)
   const supabaseAdmin = getSupabaseAdmin()
@@ -548,13 +549,16 @@ async function handleOAuthCallback(req, res) {
   }
 
   const teacherID = String(identityData?.provider_meta?.teacherID || '')
+  const providerAccount = String(identityData?.provider_account || '')
 
   const redirectParams = new URLSearchParams({
     sso_provider: 'campus1',
     sso_sync: '1',
     sso_dsns: dsns
   })
-  if (teacherID) redirectParams.set('sso_teacher_id', teacherID)
+  // 帶 sso_teacher_id（teacherID 優先，否則用 provider_account）
+  const syncId = teacherID || providerAccount
+  if (syncId) redirectParams.set('sso_teacher_id', syncId)
 
   res.writeHead(302, { Location: `${frontendUrl}?${redirectParams.toString()}` })
   res.end()

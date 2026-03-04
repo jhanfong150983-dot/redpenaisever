@@ -4304,7 +4304,6 @@ async function handleCampus1ClassroomSync(req, res) {
 
   const body = parseJsonBody(req)
   const dsns = typeof body?.dsns === 'string' ? body.dsns.trim() : ''
-  const teacherID = typeof body?.teacherID === 'string' ? body.teacherID.trim() : ''
 
   if (!dsns || !isValidDsns(dsns)) {
     res.status(400).json({ error: 'Invalid dsns' })
@@ -4313,10 +4312,10 @@ async function handleCampus1ClassroomSync(req, res) {
 
   const supabaseAdmin = getSupabaseAdmin()
 
-  // 確認此帳號確實有 1Campus 身份，且 teacherID 一致（防偽造請求）
+  // 確認此帳號確實有 1Campus 身份
   const { data: identity, error: identityError } = await supabaseAdmin
     .from('external_identities')
-    .select('provider_meta')
+    .select('provider_meta, provider_account')
     .eq('user_id', user.id)
     .eq('provider', 'campus1')
     .maybeSingle()
@@ -4326,9 +4325,15 @@ async function handleCampus1ClassroomSync(req, res) {
     return
   }
 
-  const storedTeacherID = String(identity.provider_meta?.teacherID || '')
-  if (!storedTeacherID || storedTeacherID !== teacherID) {
-    res.status(403).json({ error: 'teacherID 不符' })
+  // 從 DB 取 teacherID（不從 request 驗證，以防 teacherID 為空或格式不同）
+  const storedTeacherID = String(identity.provider_meta?.teacherID || '').trim()
+  const providerAccount = String(identity.provider_account || '').trim()
+  const effectiveTeacherID = storedTeacherID || providerAccount
+
+  console.log('[1campus sync] effectiveTeacherID:', effectiveTeacherID, '(storedTeacherID:', storedTeacherID, ', account:', providerAccount, ')')
+
+  if (!effectiveTeacherID) {
+    res.status(403).json({ error: '無法取得 teacherID，請重新從 1Campus 登入' })
     return
   }
 
@@ -4346,8 +4351,9 @@ async function handleCampus1ClassroomSync(req, res) {
   // 取得班級列表
   let classes
   try {
-    classes = await fetchCampus1Classes(dsns, teacherID, accessToken)
+    classes = await fetchCampus1Classes(dsns, effectiveTeacherID, accessToken)
   } catch (err) {
+    console.error('[1campus sync] fetchCampus1Classes failed:', err?.message, '(effectiveTeacherID:', effectiveTeacherID, ')')
     res.status(502).json({ error: '取得 1Campus 班級失敗' })
     return
   }
