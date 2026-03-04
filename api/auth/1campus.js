@@ -209,8 +209,10 @@ async function handlePhase1(req, res) {
     return
   }
 
-  const teacherID = identity.teacherID != null && identity.teacherID !== '' ? String(identity.teacherID).trim() : ''
-  console.log('[1campus Phase1] identity fields:', { account, teacherID, roleType: identity.roleType })
+  // teacherID 可能在頂層或嵌套於 teacher 物件中（依 1campus API 版本而異）
+  const rawTeacherID = identity.teacherID ?? identity.teacher?.teacherID ?? null
+  const teacherID = rawTeacherID != null && rawTeacherID !== '' ? String(rawTeacherID).trim() : ''
+  console.log('[1campus Phase1] identity fields:', { account, teacherID, roleType: identity.roleType, rawTeacherID })
   const displayName = buildCampus1DisplayName(identity)
   const virtualEmail = buildCampus1VirtualEmail(account, dsns)
   const supabaseAdmin = getSupabaseAdmin()

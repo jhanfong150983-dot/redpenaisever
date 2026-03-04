@@ -74,8 +74,8 @@ export function buildCampus1VirtualEmail(account, dsns) {
  */
 export function buildCampus1DisplayName(identity) {
   return (
-    String(identity?.teacherName || '').trim() ||
-    String(identity?.studentName || '').trim() ||
+    String(identity?.teacherName || identity?.teacher?.teacherName || '').trim() ||
+    String(identity?.studentName || identity?.student?.studentName || '').trim() ||
     String(identity?.account || '').trim() ||
     '使用者'
   )
