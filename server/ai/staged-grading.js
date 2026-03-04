@@ -1367,15 +1367,13 @@ function buildFinalGradingResult({
 
   const reviewReasons = []
   if (stageMeta.classify.coverage < 1) {
-    const percent = Math.round(stageMeta.classify.coverage * 100)
-    reviewReasons.push(`Question alignment coverage ${percent}%`)
+    const missing = questionIds.length - Math.round(stageMeta.classify.coverage * questionIds.length)
+    reviewReasons.push(`有 ${missing} 題未被辨識到，可能漏批`)
   }
   if (unreadableCount > 0) {
-    reviewReasons.push(`Unreadable answers: ${unreadableCount}`)
+    reviewReasons.push(`有 ${unreadableCount} 題答案無法辨識，建議人工確認`)
   }
-  for (const warning of stageWarnings) {
-    reviewReasons.push(warning)
-  }
+  // stageWarnings 僅記錄於 log，不推送給老師
 
   return {
     totalScore,
