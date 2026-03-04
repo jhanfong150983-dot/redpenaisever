@@ -4329,6 +4329,7 @@ async function handleCampus1ClassroomSync(req, res) {
     .maybeSingle()
 
   if (identityError || !identity) {
+    console.warn('[1campus sync] 找不到 external_identities userId=', user.id, 'error=', identityError?.message)
     res.status(403).json({ error: '此帳號沒有 1Campus 身份' })
     return
   }
@@ -4337,8 +4338,11 @@ async function handleCampus1ClassroomSync(req, res) {
   const storedTeacherID = String(identity.provider_meta?.teacherID || '').trim()
   const providerAccount = String(identity.provider_account || '').trim()
   const effectiveTeacherID = storedTeacherID || providerAccount
+  const hasOAuthToken = !!identity.provider_meta?.oauth_access_token
 
+  console.log('[1campus sync] user.id:', user.id, 'dsns:', dsns)
   console.log('[1campus sync] effectiveTeacherID:', effectiveTeacherID, '(storedTeacherID:', storedTeacherID, ', account:', providerAccount, ')')
+  console.log('[1campus sync] hasOAuthToken:', hasOAuthToken)
 
   if (!effectiveTeacherID) {
     res.status(403).json({ error: '無法取得 teacherID，請重新從 1Campus 登入' })
@@ -4349,7 +4353,9 @@ async function handleCampus1ClassroomSync(req, res) {
   let accessToken
   try {
     accessToken = await getCampus1AccessToken(supabaseAdmin, user.id)
+    console.log('[1campus sync] got access token, length:', accessToken?.length)
   } catch (err) {
+    console.error('[1campus sync] getCampus1AccessToken failed:', err?.message)
     res.status(403).json({
       error: err instanceof Error ? err.message : '無法取得 1Campus 授權'
     })

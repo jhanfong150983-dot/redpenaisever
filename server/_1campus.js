@@ -253,23 +253,27 @@ export async function fetchCampus1Classes(dsns, teacherID, accessToken) {
   const base = getJasmineApiBase()
   const url = `${base}/${dsns}/teacher/${encodeURIComponent(String(teacherID))}/getClass`
 
+  console.log('[1campus] fetchCampus1Classes URL:', url)
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
   })
 
+  console.log('[1campus] fetchCampus1Classes status:', response.status)
+
   // 404 = 該老師無班級資料，視為空陣列
   if (response.status === 404) {
-    console.log('[1campus] getClass 404（無班級資料）dsns=', dsns, 'teacherID=', teacherID)
     return []
   }
 
   if (!response.ok) {
     const text = await response.text().catch(() => '')
+    console.error('[1campus] fetchCampus1Classes error body:', text.slice(0, 400))
     throw new Error(`Jasmine getClass failed ${response.status}: ${text.slice(0, 200)}`)
   }
 
   const json = await response.json()
+  console.log('[1campus] fetchCampus1Classes raw json keys:', Object.keys(json || {}))
   return Array.isArray(json?.data?.class) ? json.data.class : []
 }
 
