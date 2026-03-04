@@ -1,7 +1,11 @@
 import { getPipeline } from './pipelines.js'
 import { callGeminiGenerateContent } from './model-adapter.js'
 import { AI_ROUTE_KEYS, normalizeRouteKey, resolveRouteKey } from './routes.js'
-import { runStagedGradingEvaluate } from './staged-grading.js'
+import {
+  runStagedGradingEvaluate,
+  runStagedGradingPhaseA,
+  runStagedGradingPhaseB
+} from './staged-grading.js'
 
 async function executeSinglePipelineCall({
   apiKey,
@@ -82,13 +86,65 @@ export async function runAiPipeline({
   const shouldRunStagedGrading =
     resolvedRouteKey === AI_ROUTE_KEYS.GRADING_EVALUATE &&
     internalContext?.enableStagedGrading !== false
+  const isPhaseA = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A
+  const isPhaseB = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B
+
   console.log(
     `${logPrefix} start requestedRoute=${
       normalizedRequestedRouteKey || 'none'
     } resolvedRoute=${resolvedRouteKey} model=${model} staged=${shouldRunStagedGrading}`
   )
 
-  if (shouldRunStagedGrading) {
+  if (isPhaseA) {
+    console.log(`${logPrefix} phase-a route=${resolvedRouteKey}`)
+    try {
+      pipelineResult = await runStagedGradingPhaseA({
+        apiKey, model, contents, payload, routeHint, internalContext
+      })
+      // Wrap phaseA result so it travels through the standard pipeline response shape
+      if (pipelineResult?.phaseAComplete) {
+        const phaseAData = { phaseAComplete: true, ...pipelineResult }
+        // Strip _internal (has raw crop images), but preserve essential fields for Phase B as _phaseContext
+        const _internal = phaseAData._internal || {}
+        delete phaseAData._internal
+        phaseAData._phaseContext = {
+          answerKey: _internal.answerKey,
+          questionIds: _internal.questionIds,
+          classifyResult: _internal.classifyResult,
+          readAnswerResult: _internal.readAnswerResult,
+          pipelineRunId: _internal.pipelineRunId,
+          stagedLogLevel: _internal.stagedLogLevel
+          // cropByQuestionId deliberately excluded (base64 images are too large for round-trip)
+        }
+        pipelineResult = {
+          status: 200,
+          data: { candidates: [{ content: { parts: [{ text: JSON.stringify(phaseAData) }] } }] },
+          pipelineMeta: { pipeline: 'grading-phase-a', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+        }
+      }
+    } catch (error) {
+      console.warn(`${logPrefix} phase-a crashed`, error)
+      pipelineResult = null
+    }
+  } else if (isPhaseB) {
+    console.log(`${logPrefix} phase-b route=${resolvedRouteKey}`)
+    try {
+      // phaseAResult can come from internalContext (server-internal) or from payload (client-submitted)
+      const phaseAResult = internalContext?.phaseAResult ?? payload?.phaseAResult
+      const finalAnswers = payload?.finalAnswers ?? internalContext?.finalAnswers ?? []
+      if (!phaseAResult) {
+        throw new Error('phase-b requires phaseAResult (in payload or internalContext)')
+      }
+      pipelineResult = await runStagedGradingPhaseB({
+        apiKey, model, contents, payload, routeHint, internalContext,
+        phaseAResult,
+        finalAnswers
+      })
+    } catch (error) {
+      console.warn(`${logPrefix} phase-b crashed`, error)
+      pipelineResult = null
+    }
+  } else if (shouldRunStagedGrading) {
     console.log(`${logPrefix} staged-enabled route=${resolvedRouteKey} model=${model}`)
     try {
       pipelineResult = await runStagedGradingEvaluate({
@@ -107,7 +163,7 @@ export async function runAiPipeline({
   }
 
   if (!pipelineResult) {
-    if (shouldRunStagedGrading) {
+    if (shouldRunStagedGrading || isPhaseA || isPhaseB) {
       console.warn(`${logPrefix} staged-unavailable fallback=single-shot`)
     }
     console.log(`${logPrefix} single-shot route=${resolvedRouteKey}`)

@@ -244,6 +244,27 @@ export default async function handler(req, res) {
           ? 'student'
           : profileRole
 
+    let campus1Binding = null
+    try {
+      const supabaseDb = getSupabaseAdmin()
+      const { data: campus1Data } = await supabaseDb
+        .from('external_identities')
+        .select('provider_account, provider_dsns, provider_meta')
+        .eq('user_id', user.id)
+        .eq('provider', 'campus1')
+        .maybeSingle()
+
+      if (campus1Data) {
+        campus1Binding = {
+          account: campus1Data.provider_account,
+          dsns: campus1Data.provider_dsns,
+          displayName: campus1Data.provider_meta?.displayName || ''
+        }
+      }
+    } catch (err) {
+      console.warn('[AUTH-ME] campus1 binding query failed:', err?.message)
+    }
+
     // 如果 profile 載入失敗，設定 Cache-Control 避免快取錯誤回應
     if (!profileLoaded) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
@@ -263,7 +284,8 @@ export default async function handler(req, res) {
           profileLoaded && typeof profile?.ink_balance === 'number'
             ? profile.ink_balance
             : null,
-        student: studentContext ?? undefined
+        student: studentContext ?? undefined,
+        campus1Binding: campus1Binding ?? undefined
       },
       // 除錯資訊：讓前端知道是否從資料庫載入成功
       _debug: {

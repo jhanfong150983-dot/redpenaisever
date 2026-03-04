@@ -344,6 +344,7 @@ export function validateResponseByRoute(routeKey, data) {
     case AI_ROUTE_KEYS.GRADING_CLASSIFY:
       return validateGradingClassifyResponse(data)
     case AI_ROUTE_KEYS.GRADING_READ_ANSWER:
+    case AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER:
       return validateGradingReadAnswerResponse(data)
     case AI_ROUTE_KEYS.GRADING_ACCESSOR:
       return validateGradingAccessorResponse(data)
@@ -352,6 +353,8 @@ export function validateResponseByRoute(routeKey, data) {
     case AI_ROUTE_KEYS.GRADING_EXPLAIN:
       return validateGradingExplainResponse(data)
     case AI_ROUTE_KEYS.GRADING_EVALUATE:
+    case AI_ROUTE_KEYS.GRADING_PHASE_A:
+    case AI_ROUTE_KEYS.GRADING_PHASE_B:
       return validateGradingResponse(data)
     case AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT:
     case AI_ROUTE_KEYS.ANSWER_KEY_REANALYZE:

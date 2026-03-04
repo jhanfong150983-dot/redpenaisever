@@ -94,8 +94,16 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
   throw timeoutError
 }
 
+function stripThinkingConfig(payload) {
+  if (!payload?.generationConfig?.thinkingConfig) return payload
+  const { thinkingConfig: _removed, ...restGenConfig } = payload.generationConfig
+  return { ...payload, generationConfig: restGenConfig }
+}
+
 // Calls Gemini with automatic model fallback on 503.
 // If the primary model returns 503, tries each model in fallbackModels in order.
+// thinkingConfig is stripped from the payload for fallback models, as they may
+// use different thinking APIs or not support it at all.
 export async function callGeminiGenerateContent({
   apiKey,
   model,
@@ -109,6 +117,7 @@ export async function callGeminiGenerateContent({
 
   for (let i = 0; i < allModels.length; i++) {
     const currentModel = allModels[i]
+    const effectivePayload = i > 0 ? stripThinkingConfig(payload) : payload
     if (i > 0) {
       console.warn(
         `[ai-model-adapter] 503-fallback switching to model=${currentModel} fallbackIndex=${i}`
@@ -119,7 +128,7 @@ export async function callGeminiGenerateContent({
       apiKey,
       model: currentModel,
       contents,
-      payload,
+      payload: effectivePayload,
       timeoutMs
     })
     lastResult = result

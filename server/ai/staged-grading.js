@@ -4,8 +4,10 @@ import { AI_ROUTE_KEYS } from './routes.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
-// ReadAnswer must be deterministic: temperature=0 + topK=1 forces greedy decoding.
-// This prevents the model from "solving" or "normalizing" student answers across runs.
+// ReadAnswer must be deterministic: low temperature prevents the model from
+// "solving" or "normalizing" student answers across runs.
+// thinking_level=MINIMAL: gemini-3-flash-preview defaults to HIGH which is slow;
+// fallback models (e.g. gemini-2.5-flash) will have thinkingConfig stripped automatically.
 const READ_ANSWER_GENERATION_CONFIG = {
   generationConfig: {
     temperature: 0.3,
@@ -244,6 +246,98 @@ function extractInlineImages(contents) {
     if (images.length > 0) return images
   }
   return []
+}
+
+// A2: 用 Sharp 裁切 base64 inline image，回傳裁切後的 inlineData
+// bbox 為 normalized [0,1] 座標；失敗時回傳 null（fallback 全圖）
+async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
+  if (!bbox || !imageBase64) return null
+  try {
+    const { default: sharp } = await import('sharp')
+    const imageBuffer = Buffer.from(imageBase64, 'base64')
+    const metadata = await sharp(imageBuffer).metadata()
+    const { width, height } = metadata
+    if (!width || !height) return null
+
+    const x = Math.max(0, Math.round(bbox.x * width))
+    const y = Math.max(0, Math.round(bbox.y * height))
+    const w = Math.min(width - x, Math.max(1, Math.round(bbox.w * width)))
+    const h = Math.min(height - y, Math.max(1, Math.round(bbox.h * height)))
+    if (w <= 0 || h <= 0) return null
+
+    const cropBuffer = await sharp(imageBuffer)
+      .extract({ left: x, top: y, width: w, height: h })
+      .jpeg({ quality: 90 })
+      .toBuffer()
+
+    return { data: cropBuffer.toString('base64'), mimeType: 'image/jpeg' }
+  } catch (err) {
+    console.warn('[staged-grading] cropInlineImageByBbox failed:', err?.message)
+    return null
+  }
+}
+
+// A5 輔助：正規化答案字串用於比對
+// - 去除 emoji、結尾方向箭頭、開頭選項前綴、外層括號
+function normalizeAnswerForComparison(raw) {
+  let s = String(raw ?? '').trim()
+  // 去除 Unicode Emoji（Presentation 形式）
+  s = s.replace(/\p{Emoji_Presentation}/gu, '').trim()
+  // 去除結尾方向箭頭
+  s = s.replace(/[↗↘↙↖→←↑↓⬆⬇⬅➡]+$/u, '').trim()
+  // 去除開頭「(A) 文字」中的選項前綴（後面有空白+其他內容才移除）
+  s = s.replace(/^\([A-Za-z]\)\s+/u, '').trim()
+  // 整個字串是「(D)」→「D」
+  s = s.replace(/^\(([A-Za-z])\)$/u, '$1').trim()
+  // 正規化多餘空白
+  s = s.replace(/\s+/g, ' ').trim()
+  return s
+}
+
+// A5 輔助：字元集 Jaccard 相似度（0..1）
+function computeStringSimilarity(a, b) {
+  if (a === b) return 1
+  const setA = new Set([...a])
+  const setB = new Set([...b])
+  const intersection = [...setA].filter((c) => setB.has(c)).length
+  const union = new Set([...setA, ...setB]).size
+  return union === 0 ? 1 : intersection / union
+}
+
+// A5: 純邏輯一致性比對（不耗 token）
+// read1/read2: { status: 'read'|'blank'|'unreadable', studentAnswerRaw: string }
+function computeConsistencyStatus(read1, read2) {
+  const s1 = ensureString(read1?.status, '').toLowerCase()
+  const s2 = ensureString(read2?.status, '').toLowerCase()
+  // 兩者皆空白 → 一致（都沒作答）
+  if (s1 === 'blank' && s2 === 'blank') return 'stable'
+  if (s1 !== 'read' || s2 !== 'read') return 'unstable'
+  const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
+  const a2 = normalizeAnswerForComparison(ensureString(read2?.studentAnswerRaw, ''))
+  if (a1 === a2) return 'stable'
+  // 長答案：字元相似度 ≥ 0.75 視為一致（應對語意相近但措辭不同的描述）
+  const longer = Math.max(a1.length, a2.length)
+  if (longer >= 6 && computeStringSimilarity(a1, a2) >= 0.75) return 'stable'
+  return 'diff'
+}
+
+// 將老師確認的 finalAnswers 陣列轉換為 readAnswerResult 格式（供 Accessor 使用）
+function finalAnswersToReadAnswerResult(finalAnswers) {
+  const answers = Array.isArray(finalAnswers)
+    ? finalAnswers.map((a) => {
+        const raw = ensureString(a?.finalStudentAnswer, '').trim()
+        let status
+        if (!raw || raw === '未作答') status = 'blank'
+        else if (raw === '無法辨識') status = 'unreadable'
+        else status = 'read'
+        return {
+          questionId: ensureString(a?.questionId, '').trim(),
+          studentAnswerRaw: raw || (status === 'blank' ? '未作答' : '無法辨識'),
+          status
+        }
+      })
+    : []
+  return { answers }
 }
 
 function mapByQuestionId(items, itemToQuestionId) {
@@ -705,10 +799,15 @@ function normalizeExplainResult(parsed, questionIds) {
     const row = detailByQuestionId.get(questionId)
     if (!row) continue
     const reason = ensureString(row?.reason, '').trim()
+    const mistakeTypeCodes = Array.isArray(row?.mistakeTypeCodes)
+      ? row.mistakeTypeCodes.filter((code) => typeof code === 'string' && code.trim())
+      : undefined
     details.push({
       questionId,
       reason,
-      mistakeType: ensureString(row?.mistakeType, '').trim() || undefined
+      mistakeType: ensureString(row?.mistakeType, '').trim() || undefined,
+      mistakeTypeCodes: mistakeTypeCodes && mistakeTypeCodes.length > 0 ? mistakeTypeCodes : undefined,
+      advise: ensureString(row?.advise, '').trim() || undefined
     })
   }
 
@@ -757,7 +856,7 @@ function normalizeLocateResult(parsed, questionIds) {
 function buildClassifyPrompt(questionIds) {
   return `
 You are stage CLASSIFY.
-Task: identify which question IDs are visible on this student submission image, and classify each visible question's type.
+Task: identify which question IDs are visible on this student submission image, classify each visible question's type, and locate each visible question's answer region.
 
 Allowed question IDs:
 ${JSON.stringify(questionIds)}
@@ -767,12 +866,20 @@ Rules:
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地..."). Otherwise questionType="other".
+- For visible=true questions, output answerBbox: the normalized [0,1] bounding box of the student's ANSWER AREA ONLY (exclude the question stem).
+  Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
+  If the answer area cannot be determined, omit answerBbox.
 - Return strict JSON only.
 
 Output:
 {
   "alignedQuestions": [
-    { "questionId": "string", "visible": true, "questionType": "word_problem" }
+    {
+      "questionId": "string",
+      "visible": true,
+      "questionType": "word_problem",
+      "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 }
+    }
   ]
 }
 `.trim()
@@ -961,7 +1068,9 @@ Output:
     {
       "questionId": "string",
       "reason": "explanation of the mistake",
-      "mistakeType": "concept|calculation|condition|blank|unreadable"
+      "mistakeType": "concept|calculation|condition|blank|unreadable",
+      "mistakeTypeCodes": ["calculation", "unit"],
+      "advise": "one-line teaching hint for this student"
     }
   ],
   "mistakes": [],
@@ -1030,7 +1139,8 @@ function buildFinalGradingResult({
   accessorResult,
   explainResult,
   stageWarnings,
-  stageMeta
+  stageMeta,
+  consistencyById
 }) {
   const keyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const answerById = mapByQuestionId(readAnswerResult.answers, (item) => item?.questionId)
@@ -1058,6 +1168,7 @@ function buildFinalGradingResult({
     const explain = explainById.get(questionId)
     const classify = classifyById.get(questionId)
     const locate = locateById.get(questionId)
+    const consistency = consistencyById?.get(questionId)
 
     if (answer?.status === 'unreadable') unreadableCount += 1
 
@@ -1083,6 +1194,16 @@ function buildFinalGradingResult({
       needExplain: score?.needExplain === true || score?.isCorrect !== true,
       studentFinalAnswer: ensureString(score?.studentFinalAnswer, '').trim() || undefined
     }
+
+    // Phase A 一致性欄位（若有）
+    if (consistency) {
+      row.consistencyStatus = consistency.consistencyStatus
+      row.readAnswer1 = consistency.readAnswer1
+      row.readAnswer2 = consistency.readAnswer2
+      if (consistency.finalAnswerSource) row.finalAnswerSource = consistency.finalAnswerSource
+    }
+    // Explain 新增欄位
+    if (explain?.mistakeTypeCodes) row.mistakeTypeCodes = explain.mistakeTypeCodes
 
     const questionBbox =
       normalizeBboxRef(locate?.questionBbox) ||
@@ -1139,7 +1260,10 @@ function buildFinalGradingResult({
   }
 }
 
-export async function runStagedGradingEvaluate({
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase A: 一致性預處理 (A1 Classify → A2 Crop → A3/A4 ReadAnswer×2 → A5 Consistency)
+// ─────────────────────────────────────────────────────────────────────────────
+export async function runStagedGradingPhaseA({
   apiKey,
   model,
   contents,
@@ -1151,47 +1275,31 @@ export async function runStagedGradingEvaluate({
   const stagedLogLevel = getStagedLogLevel()
   const answerKey = internalContext?.resolvedAnswerKey
   if (!answerKey || typeof answerKey !== 'object') {
-    logStaged(pipelineRunId, stagedLogLevel, 'skip reason=missing_answer_key')
+    logStaged(pipelineRunId, stagedLogLevel, 'PhaseA skip reason=missing_answer_key')
     return null
   }
-
   const questionIds = normalizeQuestionIdList(answerKey)
   if (questionIds.length === 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'skip reason=empty_question_ids')
+    logStaged(pipelineRunId, stagedLogLevel, 'PhaseA skip reason=empty_question_ids')
     return null
   }
-
   const inlineImages = extractInlineImages(contents)
   if (inlineImages.length === 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'skip reason=missing_submission_image')
+    logStaged(pipelineRunId, stagedLogLevel, 'PhaseA skip reason=missing_submission_image')
     return null
   }
   const submissionImageParts = [inlineImages[0]]
-
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    `begin model=${model} questionCount=${questionIds.length}`,
-    {
-      routeHint,
-      hasDomainHint: Boolean(internalContext?.domainHint)
-    }
-  )
+  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length}`)
 
   const stageResponses = []
   const stageWarnings = []
-
   const pipelineStartedAt = Date.now()
   const PIPELINE_BUDGET_MS = 250_000
-  const getRemainingBudget = () =>
-    Math.max(1000, PIPELINE_BUDGET_MS - (Date.now() - pipelineStartedAt))
+  const getRemainingBudget = () => Math.max(1000, PIPELINE_BUDGET_MS - (Date.now() - pipelineStartedAt))
 
+  // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
   const classifyPrompt = buildClassifyPrompt(questionIds)
   logStageStart(pipelineRunId, 'classify')
-  console.log(
-    `[AI-5STAGE][${pipelineRunId}] classify-params model=${model} payloadKeys=${Object.keys(payload || {}).join(',') || 'none'}`,
-    { generationConfig: payload?.generationConfig ?? null }
-  )
   const classifyResponse = await executeStage({
     apiKey,
     model,
@@ -1204,10 +1312,6 @@ export async function runStagedGradingEvaluate({
   logStageEnd(pipelineRunId, 'classify', classifyResponse)
   stageResponses.push(classifyResponse)
   if (!classifyResponse.ok) {
-    console.warn(
-      `[AI-5STAGE][${pipelineRunId}] abort stage=classify status=${classifyResponse.status}`,
-      classifyResponse.data
-    )
     return {
       status: classifyResponse.status,
       data: classifyResponse.data,
@@ -1221,46 +1325,49 @@ export async function runStagedGradingEvaluate({
     }
   }
   if (classifyResponse.warnings.length > 0) {
-    stageWarnings.push(...classifyResponse.warnings.map((item) => `[classify] ${item}`))
+    stageWarnings.push(...classifyResponse.warnings.map((w) => `[classify] ${w}`))
   }
   const classifyParsed = parseCandidateJson(classifyResponse.data)
   if (!classifyParsed || typeof classifyParsed !== 'object') {
-    throw new Error('staged classify parse failed')
+    throw new Error('PhaseA classify parse failed')
   }
   const classifyResult = normalizeClassifyResult(classifyParsed, questionIds)
-  const classifyAligned = Array.isArray(classifyResult.alignedQuestions)
-    ? classifyResult.alignedQuestions
-    : []
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'classify normalized-summary',
-    {
-      coverage: classifyResult.coverage,
-      alignedCount: classifyAligned.length,
-      visibleCount: classifyAligned.filter((item) => item.visible === true).length,
-      unmappedCount: Array.isArray(classifyResult.unmappedQuestionIds)
-        ? classifyResult.unmappedQuestionIds.length
-        : 0
-    }
-  )
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'classify normalized-details',
-    classifyAligned,
-    'detail'
-  )
+  const classifyAligned = classifyResult.alignedQuestions
+  logStaged(pipelineRunId, stagedLogLevel, 'classify normalized-summary', {
+    coverage: classifyResult.coverage,
+    visibleCount: classifyAligned.filter((q) => q.visible).length,
+    bboxCount: classifyAligned.filter((q) => q.answerBbox).length
+  })
 
-  // Identify word_problem questions for mismatch detection
   const wordProblemIds = classifyAligned
-    .filter((item) => item.visible && item.questionType === 'word_problem')
-    .map((item) => item.questionId)
+    .filter((q) => q.visible && q.questionType === 'word_problem')
+    .map((q) => q.questionId)
 
-  const readAnswerLogMode = getReadAnswerLogMode()
-  let readAnswerResult = { answers: [] }
+  // ── A2: CROP (server-side, per question, optional) ────────────────────────
+  const cropByQuestionId = new Map()
+  const visibleWithBbox = classifyAligned.filter((q) => q.visible && q.answerBbox)
+  if (visibleWithBbox.length > 0) {
+    const mainInlineData = inlineImages[0].inlineData
+    const cropResults = await Promise.all(
+      visibleWithBbox.map(async (q) => {
+        const cropData = await cropInlineImageByBbox(
+          mainInlineData.data,
+          mainInlineData.mimeType,
+          q.answerBbox
+        )
+        return { questionId: q.questionId, cropData }
+      })
+    )
+    for (const { questionId, cropData } of cropResults) {
+      if (cropData) cropByQuestionId.set(questionId, cropData)
+    }
+    logStaged(pipelineRunId, stagedLogLevel, 'crop summary', {
+      attempted: visibleWithBbox.length,
+      succeeded: cropByQuestionId.size
+    })
+  }
 
-  // Run main ReadAnswer AND FinalAnswerOnly (for word problems) in parallel
+  // ── A3 + A4: ReadAnswer + reReadAnswer IN PARALLEL ────────────────────────
   const readAnswerPrompt = buildReadAnswerPrompt(classifyResult)
   const parallelCalls = [
     executeStage({
@@ -1271,12 +1378,18 @@ export async function runStagedGradingEvaluate({
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
       stageContents: [{ role: 'user', parts: [{ text: readAnswerPrompt }, ...submissionImageParts] }]
+    }),
+    executeStage({
+      apiKey,
+      model,
+      payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+      timeoutMs: getRemainingBudget(),
+      routeHint,
+      routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+      stageContents: [{ role: 'user', parts: [{ text: readAnswerPrompt }, ...submissionImageParts] }]
     })
   ]
   if (wordProblemIds.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer mode=with_final_answer_check', {
-      wordProblemCount: wordProblemIds.length
-    })
     parallelCalls.push(
       executeStage({
         apiKey,
@@ -1293,57 +1406,39 @@ export async function runStagedGradingEvaluate({
         ]
       })
     )
-  } else {
-    logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer mode=standard')
   }
-
-  logStageStart(pipelineRunId, 'ReadAnswer')
-  const [readAnswerResponse, finalAnswerOnlyResponse] = await Promise.all(parallelCalls)
+  logStageStart(pipelineRunId, 'ReadAnswer+reReadAnswer')
+  const [readAnswerResponse, reReadAnswerResponse, finalAnswerOnlyResponse] =
+    await Promise.all(parallelCalls)
   logStageEnd(pipelineRunId, 'ReadAnswer', readAnswerResponse)
-  stageResponses.push(readAnswerResponse)
+  logStageEnd(pipelineRunId, 'reReadAnswer', reReadAnswerResponse)
+  stageResponses.push(readAnswerResponse, reReadAnswerResponse)
+
   if (!readAnswerResponse.ok) {
-    console.warn(
-      `[AI-5STAGE][${pipelineRunId}] abort stage=ReadAnswer status=${readAnswerResponse.status}`
-    )
     return {
       status: readAnswerResponse.status,
       data: readAnswerResponse.data,
       pipelineMeta: {
         pipeline: STAGED_PIPELINE_NAME,
-        prepareLatencyMs: classifyResponse.prepareLatencyMs + readAnswerResponse.prepareLatencyMs,
-        modelLatencyMs: classifyResponse.modelLatencyMs + readAnswerResponse.modelLatencyMs,
-        warnings: [...classifyResponse.warnings, ...readAnswerResponse.warnings],
+        prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
+        modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
+        warnings: stageResponses.flatMap((r) => r.warnings || []),
         metrics: { stage: 'read_answer' }
       }
     }
   }
   if (readAnswerResponse.warnings.length > 0) {
-    stageWarnings.push(...readAnswerResponse.warnings.map((item) => `[ReadAnswer] ${item}`))
+    stageWarnings.push(...readAnswerResponse.warnings.map((w) => `[ReadAnswer] ${w}`))
   }
   const readAnswerParsed = parseCandidateJson(readAnswerResponse.data)
   if (!readAnswerParsed || typeof readAnswerParsed !== 'object') {
-    throw new Error('staged read_answer parse failed')
+    throw new Error('PhaseA read_answer parse failed')
   }
-  if (readAnswerLogMode !== 'off') {
-    const schemaPreview = toReadAnswerSchemaPreview(readAnswerParsed)
-    console.log(
-      `[AI-5STAGE][${pipelineRunId}] ReadAnswer schema output=${JSON.stringify(schemaPreview)}`
-    )
-    if (readAnswerLogMode === 'full') {
-      const rawText = extractCandidateText(readAnswerResponse.data)
-      console.log(
-        `[AI-5STAGE][${pipelineRunId}] ReadAnswer raw text=${truncateLogText(rawText, 6000)}`
-      )
-      console.log(
-        `[AI-5STAGE][${pipelineRunId}] ReadAnswer parsed json=${truncateLogText(
-          JSON.stringify(readAnswerParsed),
-          6000
-        )}`
-      )
-    }
-  }
+  const reReadAnswerParsed = reReadAnswerResponse?.ok
+    ? parseCandidateJson(reReadAnswerResponse.data)
+    : null
 
-  // Mismatch detection: compare calculation conclusion vs separately-read final answer line
+  // Mismatch detection for word problems (A3 calc result vs FinalAnswerOnly)
   const mismatchIds = new Set()
   if (wordProblemIds.length > 0 && finalAnswerOnlyResponse?.ok) {
     const finalOnlyParsed = parseCandidateJson(finalAnswerOnlyResponse.data)
@@ -1352,22 +1447,18 @@ export async function runStagedGradingEvaluate({
         Array.isArray(finalOnlyParsed.answers) ? finalOnlyParsed.answers : [],
         (item) => item?.questionId
       )
-      const mainAnswersRaw = Array.isArray(readAnswerParsed?.answers) ? readAnswerParsed.answers : []
-      const mainById = mapByQuestionId(mainAnswersRaw, (item) => item?.questionId)
-
+      const mainById = mapByQuestionId(
+        Array.isArray(readAnswerParsed?.answers) ? readAnswerParsed.answers : [],
+        (item) => item?.questionId
+      )
       for (const questionId of wordProblemIds) {
         const mainRow = mainById.get(questionId)
         const finalOnlyRow = finalOnlyById.get(questionId)
         if (!mainRow || !finalOnlyRow) continue
         if (finalOnlyRow.status === 'blank' || finalOnlyRow.status === 'unreadable') continue
-
         const calcResult = extractLastEquationResult(ensureString(mainRow.studentAnswerRaw, ''))
         const finalNum = extractAnswerNumber(ensureString(finalOnlyRow.studentAnswerRaw, ''))
         if (calcResult && finalNum && calcResult !== finalNum) {
-          // Mismatch detected: retry FinalAnswerOnly once for this question
-          console.log(
-            `[AI-5STAGE][${pipelineRunId}] mismatch detected questionId=${questionId} calc=${calcResult} finalAnswer=${finalNum} — retrying`
-          )
           const retryResponse = await executeStage({
             apiKey,
             model,
@@ -1399,12 +1490,8 @@ export async function runStagedGradingEvaluate({
               stageWarnings.push(
                 `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} calc=${calcResult} stated=${retryNum}`
               )
-              console.warn(
-                `[AI-5STAGE][${pipelineRunId}] mismatch confirmed questionId=${questionId} calc=${calcResult} stated=${retryNum}`
-              )
             }
           } else {
-            // Retry call failed — flag conservatively
             mismatchIds.add(questionId)
             stageWarnings.push(
               `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} calc=${calcResult} stated=${finalNum}`
@@ -1415,47 +1502,119 @@ export async function runStagedGradingEvaluate({
     }
   }
 
-  readAnswerResult = normalizeReadAnswerResult(readAnswerParsed, questionIds, mismatchIds)
+  // Normalize read1 with mismatch flags & unordered remap
+  let readAnswerResult = normalizeReadAnswerResult(readAnswerParsed, questionIds, mismatchIds)
   const unorderedRemap = remapReadAnswersForUnorderedGroups(answerKey, readAnswerResult)
-  readAnswerResult = {
-    ...readAnswerResult,
-    answers: unorderedRemap.answers
-  }
-  if (unorderedRemap.stats.length > 0) {
-    logStaged(
+  readAnswerResult = { ...readAnswerResult, answers: unorderedRemap.answers }
+
+  // Normalize read2 (independent — no mismatch flags)
+  const reReadAnswerResult = reReadAnswerParsed
+    ? normalizeReadAnswerResult(reReadAnswerParsed, questionIds, new Set())
+    : { answers: [] }
+
+  // ── A5: CONSISTENCY CHECK (pure logic) ───────────────────────────────────
+  const read1ById = mapByQuestionId(readAnswerResult.answers, (item) => item?.questionId)
+  const read2ById = mapByQuestionId(reReadAnswerResult.answers, (item) => item?.questionId)
+
+  const questionResults = questionIds.map((questionId) => {
+    const read1 = read1ById.get(questionId)
+    const read2 = read2ById.get(questionId)
+    const classifyRow = classifyAligned.find((q) => q.questionId === questionId)
+    const consistencyStatus =
+      read1 && read2 ? computeConsistencyStatus(read1, read2) : 'unstable'
+    // 非 stable 題目附上 crop 圖供老師審查
+    const cropData = consistencyStatus !== 'stable' ? cropByQuestionId.get(questionId) : undefined
+    const answerCropImageUrl = cropData
+      ? `data:${cropData.mimeType};base64,${cropData.data}`
+      : undefined
+    return {
+      questionId,
+      consistencyStatus,
+      readAnswer1: {
+        status: read1?.status ?? 'unreadable',
+        studentAnswer: read1?.studentAnswerRaw ?? '無法辨識'
+      },
+      readAnswer2: {
+        status: read2?.status ?? 'unreadable',
+        studentAnswer: read2?.studentAnswerRaw ?? '無法辨識'
+      },
+      answerCropImageUrl,
+      answerBbox: classifyRow?.answerBbox ?? null,
+      hasCropImage: cropByQuestionId.has(questionId),
+      calculationAnswerMismatch: read1?.calculationAnswerMismatch === true
+    }
+  })
+
+  const stableCount = questionResults.filter((q) => q.consistencyStatus === 'stable').length
+  const diffCount = questionResults.filter((q) => q.consistencyStatus === 'diff').length
+  const unstableCount = questionResults.filter((q) => q.consistencyStatus === 'unstable').length
+  logStaged(pipelineRunId, stagedLogLevel, 'PhaseA consistency summary', {
+    stableCount,
+    diffCount,
+    unstableCount
+  })
+
+  return {
+    phaseAComplete: true,
+    questionResults,
+    stableCount,
+    diffCount,
+    unstableCount,
+    _internal: {
+      answerKey,
+      questionIds,
+      classifyResult,
+      readAnswerResult,
+      stageResponses,
+      stageWarnings,
       pipelineRunId,
       stagedLogLevel,
-      'unordered-group remap',
-      unorderedRemap.stats
-    )
-  }
-
-  if (readAnswerLogMode !== 'off') {
-    console.log(`[AI-5STAGE][${pipelineRunId}] ReadAnswer normalized=${JSON.stringify(readAnswerResult)}`)
-  }
-  const readAnswers = Array.isArray(readAnswerResult.answers) ? readAnswerResult.answers : []
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'ReadAnswer normalized-summary',
-    {
-      answerCount: readAnswers.length,
-      readCount: readAnswers.filter((item) => item.status === 'read').length,
-      blankCount: readAnswers.filter((item) => item.status === 'blank').length,
-      unreadableCount: readAnswers.filter((item) => item.status === 'unreadable').length
+      cropByQuestionId
     }
-  )
-  logStaged(
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase B: 正式批改 (B1 Accessor → B2 Explain)
+// finalAnswers: [{ questionId, finalStudentAnswer, finalAnswerSource }]
+// ─────────────────────────────────────────────────────────────────────────────
+export async function runStagedGradingPhaseB({
+  apiKey,
+  model,
+  contents,
+  payload = {},
+  routeHint = {},
+  internalContext = {},
+  phaseAResult,
+  finalAnswers
+}) {
+  // Accept _internal (server-internal path) or _phaseContext (client round-trip path)
+  const internalState = phaseAResult?._internal || phaseAResult?._phaseContext
+  if (!internalState) {
+    throw new Error('runStagedGradingPhaseB: phaseAResult._internal or _phaseContext is required')
+  }
+  const {
+    answerKey,
+    questionIds,
+    classifyResult,
+    stageResponses,
+    stageWarnings,
     pipelineRunId,
-    stagedLogLevel,
-    'ReadAnswer normalized-details',
-    readAnswers,
-    'detail'
-  )
+    stagedLogLevel
+  } = internalState
 
-  // ReadAnswer is transcription-only: no equation-vs-final consistency checks here.
+  const inlineImages = extractInlineImages(contents)
+  const submissionImageParts = inlineImages.length > 0 ? [inlineImages[0]] : []
 
-  const accessorPrompt = buildAccessorPrompt(answerKey, readAnswerResult)
+  const phaseBStartedAt = Date.now()
+  const PHASE_B_BUDGET_MS = 180_000
+  const getRemainingBudget = () => Math.max(1000, PHASE_B_BUDGET_MS - (Date.now() - phaseBStartedAt))
+
+  // 將老師確認的 finalAnswers 轉為 readAnswerResult 格式
+  const finalReadAnswerResult = finalAnswersToReadAnswerResult(finalAnswers)
+
+  // ── B1: ACCESSOR ─────────────────────────────────────────────────────────
+  const accessorPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult)
   logStageStart(pipelineRunId, 'Accessor')
   const accessorResponse = await executeStage({
     apiKey,
@@ -1469,149 +1628,38 @@ export async function runStagedGradingEvaluate({
   logStageEnd(pipelineRunId, 'Accessor', accessorResponse)
   stageResponses.push(accessorResponse)
   if (!accessorResponse.ok) {
-    console.warn(
-      `[AI-5STAGE][${pipelineRunId}] abort stage=Accessor status=${accessorResponse.status}`
-    )
     return {
       status: accessorResponse.status,
       data: accessorResponse.data,
       pipelineMeta: {
         pipeline: STAGED_PIPELINE_NAME,
-        prepareLatencyMs:
-          stageResponses.reduce((sum, stage) => sum + (Number(stage.prepareLatencyMs) || 0), 0),
-        modelLatencyMs:
-          stageResponses.reduce((sum, stage) => sum + (Number(stage.modelLatencyMs) || 0), 0),
-        warnings: stageResponses.flatMap((stage) => stage.warnings || []),
+        prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
+        modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
+        warnings: stageResponses.flatMap((r) => r.warnings || []),
         metrics: { stage: 'accessor' }
       }
     }
   }
   if (accessorResponse.warnings.length > 0) {
-    stageWarnings.push(...accessorResponse.warnings.map((item) => `[Accessor] ${item}`))
+    stageWarnings.push(...accessorResponse.warnings.map((w) => `[Accessor] ${w}`))
   }
   const accessorParsed = parseCandidateJson(accessorResponse.data)
   if (!accessorParsed || typeof accessorParsed !== 'object') {
-    throw new Error('staged accessor parse failed')
+    throw new Error('PhaseB accessor parse failed')
   }
-  const accessorResult = normalizeAccessorResult(accessorParsed, answerKey, readAnswerResult.answers)
+  const accessorResult = normalizeAccessorResult(accessorParsed, answerKey, finalReadAnswerResult.answers)
   const accessorScores = Array.isArray(accessorResult.scores) ? accessorResult.scores : []
   const explainQuestionIds = accessorScores
-    .filter((item) => item?.isCorrect !== true || item?.needExplain === true)
-    .map((item) => ensureString(item?.questionId).trim())
-    .filter((item) => item.length > 0)
+    .filter((s) => s?.isCorrect !== true || s?.needExplain === true)
+    .map((s) => ensureString(s?.questionId).trim())
+    .filter(Boolean)
 
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'Assessor normalized-summary',
-    {
-      scoreCount: accessorScores.length,
-      totalScore: accessorResult.totalScore,
-      correctCount: accessorScores.filter((item) => item.isCorrect === true).length,
-      wrongCount: accessorScores.filter((item) => item.isCorrect !== true).length,
-      needExplainCount: explainQuestionIds.length
-    }
-  )
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'Assessor normalized-details',
-    accessorScores.map((item) => ({
-      questionId: item.questionId,
-      isCorrect: item.isCorrect,
-      score: item.score,
-      maxScore: item.maxScore,
-      errorType: item.errorType,
-      needExplain: item.needExplain,
-      studentFinalAnswer: item.studentFinalAnswer,
-      scoringReason: item.scoringReason,
-      feedbackBrief: item.feedbackBrief
-    })),
-    'detail'
-  )
-
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'Explain targets',
-    {
-      explainQuestionIds
-    }
-  )
-
-  const locateQuestionIds = [...new Set(explainQuestionIds)]
-  let locateResult = { locatedQuestions: [] }
-  if (locateQuestionIds.length > 0) {
-    const locatePrompt = buildLocatePrompt(locateQuestionIds)
-    logStageStart(pipelineRunId, 'locate')
-    const locateResponse = await executeStage({
-      apiKey,
-      model,
-      payload,
-      timeoutMs: getRemainingBudget(),
-      routeHint,
-      routeKey: AI_ROUTE_KEYS.GRADING_LOCATE,
-      stageContents: [{ role: 'user', parts: [{ text: locatePrompt }, ...submissionImageParts] }]
-    })
-    logStageEnd(pipelineRunId, 'locate', locateResponse)
-    stageResponses.push(locateResponse)
-
-    if (!locateResponse.ok) {
-      stageWarnings.push(`[locate] status=${locateResponse.status}`)
-      logStaged(
-        pipelineRunId,
-        stagedLogLevel,
-        `skip stage=locate reason=response_status_${locateResponse.status}`
-      )
-    } else {
-      if (locateResponse.warnings.length > 0) {
-        stageWarnings.push(...locateResponse.warnings.map((item) => `[locate] ${item}`))
-      }
-      const locateParsed = parseCandidateJson(locateResponse.data)
-      if (locateParsed && typeof locateParsed === 'object') {
-        locateResult = normalizeLocateResult(locateParsed, locateQuestionIds)
-      } else {
-        stageWarnings.push('[locate] JSON_PARSE_FAILED')
-      }
-    }
-  } else {
-    logStaged(
-      pipelineRunId,
-      stagedLogLevel,
-      'skip stage=locate reason=no_target_questions'
-    )
-  }
-
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'Locate normalized-summary',
-    {
-      targetCount: locateQuestionIds.length,
-      locatedCount: Array.isArray(locateResult.locatedQuestions)
-        ? locateResult.locatedQuestions.length
-        : 0
-    }
-  )
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'Locate normalized-details',
-    Array.isArray(locateResult.locatedQuestions) ? locateResult.locatedQuestions : [],
-    'detail'
-  )
-
-  let explainResult = {
-    details: [],
-    mistakes: [],
-    weaknesses: [],
-    suggestions: []
-  }
-
+  // ── B2: EXPLAIN (僅限 isFullScore=false) ─────────────────────────────────
+  let explainResult = { details: [], mistakes: [], weaknesses: [], suggestions: [] }
   if (explainQuestionIds.length > 0) {
     const explainPrompt = buildExplainPrompt(
       answerKey,
-      readAnswerResult,
+      finalReadAnswerResult,
       accessorResult,
       explainQuestionIds,
       internalContext?.domainHint
@@ -1624,113 +1672,63 @@ export async function runStagedGradingEvaluate({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_EXPLAIN,
-      stageContents: [{ role: 'user', parts: [{ text: explainPrompt }] }]
+      stageContents: [{ role: 'user', parts: [{ text: explainPrompt }, ...submissionImageParts] }]
     })
     logStageEnd(pipelineRunId, 'explain', explainResponse)
     stageResponses.push(explainResponse)
-    if (!explainResponse.ok) {
-      console.warn(
-        `[AI-5STAGE][${pipelineRunId}] abort stage=explain status=${explainResponse.status}`
-      )
-      return {
-        status: explainResponse.status,
-        data: explainResponse.data,
-        pipelineMeta: {
-          pipeline: STAGED_PIPELINE_NAME,
-          prepareLatencyMs:
-            stageResponses.reduce((sum, stage) => sum + (Number(stage.prepareLatencyMs) || 0), 0),
-          modelLatencyMs:
-            stageResponses.reduce((sum, stage) => sum + (Number(stage.modelLatencyMs) || 0), 0),
-          warnings: stageResponses.flatMap((stage) => stage.warnings || []),
-          metrics: { stage: 'explain' }
-        }
+    if (explainResponse.ok) {
+      if (explainResponse.warnings.length > 0) {
+        stageWarnings.push(...explainResponse.warnings.map((w) => `[explain] ${w}`))
       }
+      const explainParsed = parseCandidateJson(explainResponse.data)
+      if (explainParsed && typeof explainParsed === 'object') {
+        explainResult = normalizeExplainResult(explainParsed, explainQuestionIds)
+      }
+    } else {
+      stageWarnings.push(`[explain] status=${explainResponse.status}`)
     }
-    if (explainResponse.warnings.length > 0) {
-      stageWarnings.push(...explainResponse.warnings.map((item) => `[explain] ${item}`))
-    }
-    const explainParsed = parseCandidateJson(explainResponse.data)
-    if (!explainParsed || typeof explainParsed !== 'object') {
-      throw new Error('staged explain parse failed')
-    }
-    explainResult = normalizeExplainResult(explainParsed, explainQuestionIds)
   } else {
-    logStaged(
-      pipelineRunId,
-      stagedLogLevel,
-      'skip stage=explain reason=no_wrong_questions'
-    )
+    logStaged(pipelineRunId, stagedLogLevel, 'skip stage=explain reason=no_wrong_questions')
   }
 
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'Explain normalized-summary',
-    {
-      detailCount: explainResult.details.length,
-      mistakeCount: explainResult.mistakes.length,
-      weaknessCount: explainResult.weaknesses.length,
-      suggestionCount: explainResult.suggestions.length
+  // 建立 consistencyById（從 phaseAResult，並注入 finalAnswerSource）
+  const consistencyById = mapByQuestionId(phaseAResult.questionResults, (item) => item?.questionId)
+  if (Array.isArray(finalAnswers)) {
+    for (const fa of finalAnswers) {
+      const qId = ensureString(fa?.questionId, '').trim()
+      if (!qId) continue
+      const existing = consistencyById.get(qId)
+      if (existing && fa.finalAnswerSource) {
+        consistencyById.set(qId, { ...existing, finalAnswerSource: fa.finalAnswerSource })
+      }
     }
-  )
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'Explain normalized-details',
-    explainResult.details,
-    'detail'
-  )
+  }
 
+  // 組裝最終結果（含 consistency 欄位）
   const finalResult = buildFinalGradingResult({
     answerKey,
-    readAnswerResult,
+    readAnswerResult: finalReadAnswerResult,
     accessorResult,
     explainResult,
     stageWarnings,
     stageMeta: {
       classify: classifyResult,
-      locate: locateResult
-    }
+      locate: { locatedQuestions: [] }
+    },
+    consistencyById
   })
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'final merged-summary',
-    {
-      totalScore: finalResult.totalScore,
-      detailCount: Array.isArray(finalResult.details) ? finalResult.details.length : 0,
-      mistakesCount: Array.isArray(finalResult.mistakes) ? finalResult.mistakes.length : 0,
-      needsReview: finalResult.needsReview === true,
-      reviewReasonsCount: Array.isArray(finalResult.reviewReasons)
-        ? finalResult.reviewReasons.length
-        : 0
-    }
-  )
-  logStaged(
-    pipelineRunId,
-    stagedLogLevel,
-    'final merged-details',
-    Array.isArray(finalResult.details)
-      ? finalResult.details.map((item) => ({
-          questionId: item.questionId,
-          studentAnswer: item.studentAnswer,
-          isCorrect: item.isCorrect,
-          score: item.score,
-          maxScore: item.maxScore,
-          reason: item.reason,
-          errorType: item.errorType,
-          needExplain: item.needExplain,
-          studentFinalAnswer: item.studentFinalAnswer
-        }))
-      : [],
-    'detail'
-  )
+
+  logStaged(pipelineRunId, stagedLogLevel, 'PhaseB final summary', {
+    totalScore: finalResult.totalScore,
+    detailCount: Array.isArray(finalResult.details) ? finalResult.details.length : 0,
+    needsReview: finalResult.needsReview
+  })
 
   const usageMetadata = aggregateUsageMetadata(stageResponses)
   const stagedResponse = serializeCandidateJson(finalResult)
   if (usageMetadata) stagedResponse.usageMetadata = usageMetadata
   stagedResponse.stagedPipeline = {
-    version: 'v1',
+    version: 'v2-phase-b',
     stages: stageResponses.map((stage) => ({
       routeKey: stage.routeKey,
       pipeline: stage.pipelineName,
@@ -1740,30 +1738,8 @@ export async function runStagedGradingEvaluate({
     }))
   }
 
-  const prepareLatencyMs = stageResponses.reduce(
-    (sum, stage) => sum + (Number(stage.prepareLatencyMs) || 0),
-    0
-  )
-  const modelLatencyMs = stageResponses.reduce(
-    (sum, stage) => sum + (Number(stage.modelLatencyMs) || 0),
-    0
-  )
-  const stageNameMap = {
-    [AI_ROUTE_KEYS.GRADING_CLASSIFY]: 'classify',
-    [AI_ROUTE_KEYS.GRADING_READ_ANSWER]: 'ReadAnswer',
-    [AI_ROUTE_KEYS.GRADING_ACCESSOR]: 'Accessor',
-    [AI_ROUTE_KEYS.GRADING_LOCATE]: 'locate',
-    [AI_ROUTE_KEYS.GRADING_EXPLAIN]: 'explain'
-  }
-  const stageSummary = stageResponses
-    .map((s) => `${stageNameMap[s.routeKey] ?? s.routeKey}=${s.modelLatencyMs}ms`)
-    .join(' ')
-  const totalElapsed = Date.now() - pipelineStartedAt
-  console.log(`[AI-5STAGE][${pipelineRunId}] stage-timing ${stageSummary} totalElapsed=${totalElapsed}ms`)
-  console.log(
-    `[AI-5STAGE][${pipelineRunId}] complete totalPrepareMs=${prepareLatencyMs} totalModelMs=${modelLatencyMs} totalScore=${finalResult.totalScore} needsReview=${finalResult.needsReview}`
-  )
-
+  const prepareLatencyMs = stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0)
+  const modelLatencyMs = stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0)
   return {
     status: 200,
     data: stagedResponse,
@@ -1775,9 +1751,44 @@ export async function runStagedGradingEvaluate({
       metrics: {
         stageCount: stageResponses.length,
         classifyCoverage: classifyResult.coverage,
-        unansweredCount: readAnswerResult.answers.filter((item) => item.status !== 'read').length
+        unansweredCount: finalReadAnswerResult.answers.filter((a) => a.status !== 'read').length
       }
     }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 完整流程 (向後兼容)：Phase A 後自動採用 read1 作為 finalStudentAnswer，再執行 Phase B
+// ─────────────────────────────────────────────────────────────────────────────
+export async function runStagedGradingEvaluate({
+  apiKey,
+  model,
+  contents,
+  payload = {},
+  routeHint = {},
+  internalContext = {}
+}) {
+  // Phase A: Classify + Crop + ReadAnswer×2 + Consistency
+  const phaseAResult = await runStagedGradingPhaseA({
+    apiKey, model, contents, payload, routeHint, internalContext
+  })
+  if (!phaseAResult) return null
+  // Phase A 若回傳 HTTP 錯誤（非正常 phaseAComplete 結果）直接回傳
+  if (phaseAResult.status && !phaseAResult.phaseAComplete) return phaseAResult
+
+  // Auto-confirm: 全自動模式下以 read1 作為 finalStudentAnswer（無老師決策關卡）
+  const finalAnswers = phaseAResult.questionResults.map((qr) => ({
+    questionId: qr.questionId,
+    finalStudentAnswer: qr.readAnswer1.studentAnswer,
+    finalAnswerSource: 'ai_read1'
+  }))
+
+  // Phase B: Accessor + Explain
+  return runStagedGradingPhaseB({
+    apiKey, model, contents, payload, routeHint, internalContext,
+    phaseAResult,
+    finalAnswers
+  })
+}
+
 
