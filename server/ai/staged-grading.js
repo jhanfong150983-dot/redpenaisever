@@ -1064,7 +1064,11 @@ Rules:
   - correctCount = number of positions where the student wrote the correct name.
   - score = Math.round(correctCount / totalPositions * maxScore).
   - isCorrect = (score === maxScore).
-  - In scoringReason, state how many positions were correct (e.g. "5/8 positions correct") without revealing which specific answers were wrong.
+  - scoringReason MUST explain which positions the student answered incorrectly by describing the error pattern (e.g. "學生將位置C和位置D填反，其他位置正確"). Do NOT just say "X/Y correct". Describe WHAT went wrong so the teacher understands.
+- scoringReason must clearly explain WHY the answer is correct or incorrect. Write in Traditional Chinese.
+  - For correct answers: briefly confirm (e.g. "答案完全正確").
+  - For incorrect answers: describe the specific error pattern (e.g. "學生將九州寫成九洲，同音異字", "學生填寫的國名與實際位置不符").
+  - NEVER just state a score count like "9/11 correct".
 - scoringReason and feedbackBrief must NOT reveal the correct answer text, option, or number.
 - Never write phrases like "correct answer is ...", "應為 ...", "答案是 ...".
 - Return strict JSON only.

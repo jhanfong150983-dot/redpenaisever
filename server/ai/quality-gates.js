@@ -224,7 +224,11 @@ function validateGradingExplainResponse(data) {
   const mistakes = Array.isArray(parsed.mistakes) ? parsed.mistakes : []
   const suggestions = Array.isArray(parsed.suggestions) ? parsed.suggestions : []
   const missingReasonCount = details.filter(
-    (item) => typeof item?.reason !== 'string' || !item.reason.trim()
+    (item) => {
+      const hasReason = typeof item?.reason === 'string' && item.reason.trim()
+      const hasGuidance = typeof item?.studentGuidance === 'string' && item.studentGuidance.trim()
+      return !hasReason && !hasGuidance
+    }
   ).length
 
   metrics.detailCount = details.length
