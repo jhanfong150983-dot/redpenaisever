@@ -2410,15 +2410,38 @@ async function handleSync(req, res) {
         })
       })
 
-      const folders = (foldersResult.data || []).map((row) =>
-        compactObject({
-          id: row.id,
-          name: row.name,
-          type: row.type,
-          classroomId: row.classroom_id ?? undefined,
-          updatedAt: toMillis(row.updated_at) ?? undefined
+      // 孤立 folders：assignment 類型但 classroomId 不存在，或 classroom 類型但 classroomId 指向不存在的班級
+      const orphanedFolderIds = (foldersResult.data || [])
+        .filter((row) => {
+          if (row.type === 'assignment' && row.classroom_id) {
+            return !validClassroomIds.has(row.classroom_id)
+          }
+          return false
         })
-      )
+        .map((row) => row.id)
+
+      if (orphanedFolderIds.length > 0) {
+        console.warn(`[sync GET] 清除 ${orphanedFolderIds.length} 筆孤立 folders:`, orphanedFolderIds)
+        await supabaseDb.from('folders').delete().in('id', orphanedFolderIds).eq('owner_id', ownerId)
+        for (const id of orphanedFolderIds) {
+          if (!deletedSets.folders.has(id)) {
+            deleted.folders.push({ id, deletedAt: Date.now() })
+            deletedSets.folders.add(id)
+          }
+        }
+      }
+
+      const folders = (foldersResult.data || [])
+        .filter((row) => !orphanedFolderIds.includes(row.id))
+        .map((row) =>
+          compactObject({
+            id: row.id,
+            name: row.name,
+            type: row.type,
+            classroomId: row.classroom_id ?? undefined,
+            updatedAt: toMillis(row.updated_at) ?? undefined
+          })
+        )
 
       res.status(200).json({
         classrooms: classrooms.filter((row) => !deletedSets.classrooms.has(row.id)),
