@@ -1092,6 +1092,44 @@ Output:
 `.trim()
 }
 
+function buildConsistencyJudgePrompt(diffItems) {
+  const items = diffItems.map((q) => ({
+    questionId: q.questionId,
+    read1: q.readAnswer1.studentAnswer,
+    read2: q.readAnswer2.studentAnswer
+  }))
+
+  return `
+You are a consistency judge. Two independent OCR readings of the same student handwritten answer are given.
+Determine if they represent MEANINGFULLY DIFFERENT content, or just minor OCR/formatting variations.
+
+IMPORTANT:
+- "Truly different" means the MEANING or CONTENT differs (different words, numbers, names, or answers).
+- "NOT truly different" means the differences are only in formatting, spacing, punctuation, character width (full/half), or trivial OCR noise.
+- For map/diagram answers with multiple labels: compare the SET of position-to-name mappings. Minor formatting differences in positions or separators are NOT truly different.
+- Examples of NOT truly different:
+  - "\u6cf0\u570b" vs "\u6cf0\u570b " (trailing space)
+  - "A:\u6cf0\u570b" vs "A: \u6cf0\u570b" (space after colon)
+  - "\u7b54:15" vs "\u7b54: 15" (space)
+  - "\u4f4d\u7f6eA:\u6cf0\u570b,\u4f4d\u7f6eB:\u8d8a\u5357" vs "\u4f4d\u7f6eA: \u6cf0\u570b, \u4f4d\u7f6eB: \u8d8a\u5357" (formatting)
+- Examples of truly different:
+  - "\u6cf0\u570b" vs "\u79e6\u570b" (different content)
+  - "15" vs "16" (different number)
+  - "\u8d8a\u5357" vs "\u8d8a\u96e3" (different character)
+  - "\u4f4d\u7f6eA:\u6cf0\u570b" vs "\u4f4d\u7f6eA:\u8d8a\u5357" (different answer)
+
+Questions to judge:
+${JSON.stringify(items, null, 1)}
+
+Return strict JSON only:
+{
+  "judgments": [
+    { "questionId": "string", "trulyDifferent": true, "reason": "\u77ed\u539f\u56e0\uff08\u7e41\u9ad4\u4e2d\u6587\uff09" }
+  ]
+}
+`.trim()
+}
+
 function buildExplainPrompt(
   answerKey,
   readAnswerResult,
@@ -1657,6 +1695,8 @@ export async function runStagedGradingPhaseA({
     return {
       questionId,
       consistencyStatus,
+      consistencyReason: undefined,
+      questionType: classifyRow?.questionType ?? 'other',
       readAnswer1: {
         status: read1?.status ?? 'unreadable',
         studentAnswer: read1?.studentAnswerRaw ?? '無法辨識'
@@ -1671,6 +1711,54 @@ export async function runStagedGradingPhaseA({
       calculationAnswerMismatch: read1?.calculationAnswerMismatch === true
     }
   })
+
+  // ── A5.5: AI CONSISTENCY JUDGE (non-single-choice diff 題目讓 AI 判斷是否真的不一致) ──
+  const diffForJudge = questionResults.filter(
+    (q) => q.consistencyStatus === 'diff' && q.questionType !== 'single_choice'
+  )
+  if (diffForJudge.length > 0) {
+    try {
+      const judgePrompt = buildConsistencyJudgePrompt(diffForJudge)
+      logStageStart(pipelineRunId, 'consistencyJudge')
+      const judgeResponse = await executeStage({
+        apiKey,
+        model,
+        payload,
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_CONSISTENCY_JUDGE,
+        stageContents: [{ role: 'user', parts: [{ text: judgePrompt }] }]
+      })
+      logStageEnd(pipelineRunId, 'consistencyJudge', judgeResponse)
+      stageResponses.push(judgeResponse)
+      if (judgeResponse.ok) {
+        const judgeParsed = parseCandidateJson(judgeResponse.data)
+        const judgments = Array.isArray(judgeParsed?.judgments) ? judgeParsed.judgments : []
+        for (const j of judgments) {
+          const qId = ensureString(j?.questionId).trim()
+          const qr = questionResults.find((q) => q.questionId === qId)
+          if (!qr) continue
+          qr.consistencyReason = ensureString(j?.reason, '').slice(0, 200) || undefined
+          if (j?.trulyDifferent === false) {
+            qr.consistencyStatus = 'stable'
+            logStaged(pipelineRunId, stagedLogLevel, 'consistencyJudge promoted to stable', {
+              questionId: qId,
+              reason: qr.consistencyReason
+            })
+          } else {
+            logStaged(pipelineRunId, stagedLogLevel, 'consistencyJudge confirmed diff', {
+              questionId: qId,
+              reason: qr.consistencyReason
+            })
+          }
+        }
+      }
+    } catch (judgeErr) {
+      logStaged(pipelineRunId, stagedLogLevel, 'consistencyJudge failed (fallback to original diff)', {
+        error: judgeErr?.message
+      })
+    }
+  }
 
   const stableCount = questionResults.filter((q) => q.consistencyStatus === 'stable').length
   const diffCount = questionResults.filter((q) => q.consistencyStatus === 'diff').length
