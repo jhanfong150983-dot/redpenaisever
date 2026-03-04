@@ -1645,7 +1645,7 @@ export async function runStagedGradingPhaseB({
     timeoutMs: getRemainingBudget(),
     routeHint,
     routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
-    stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }] }]
+    stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }, ...submissionImageParts] }]
   })
   logStageEnd(pipelineRunId, 'Accessor', accessorResponse)
   stageResponses.push(accessorResponse)
