@@ -2315,29 +2315,51 @@ async function handleSync(req, res) {
         })
       )
 
-      const students = (studentsResult.data || []).map((row) => ({
-        id: row.id,
-        classroomId: row.classroom_id,
-        seatNumber: row.seat_number,
-        name: row.name,
-        email: row.email ?? undefined,
-        authUserId: row.auth_user_id ?? undefined,
-        updatedAt: toMillis(row.updated_at) ?? undefined
-      }))
+      const validClassroomIds = new Set((classroomsResult.data || []).map((r) => r.id))
 
-      const assignments = (assignmentsResult.data || []).map((row) =>
-        compactObject({
+      const students = (studentsResult.data || [])
+        .filter((row) => validClassroomIds.has(row.classroom_id))
+        .map((row) => ({
           id: row.id,
           classroomId: row.classroom_id,
-          title: row.title,
-          totalPages: row.total_pages,
-          domain: row.domain ?? undefined,
-          folder: row.folder ?? undefined,
-          priorWeightTypes: row.prior_weight_types ?? undefined,
-          answerKey: row.answer_key ?? undefined,
+          seatNumber: row.seat_number,
+          name: row.name,
+          email: row.email ?? undefined,
+          authUserId: row.auth_user_id ?? undefined,
           updatedAt: toMillis(row.updated_at) ?? undefined
-        })
-      )
+        }))
+
+      // 孤立作業（classroom 不存在）：從回應中移除並清理 Supabase
+      const orphanedAssignmentIds = (assignmentsResult.data || [])
+        .filter((row) => !validClassroomIds.has(row.classroom_id))
+        .map((row) => row.id)
+
+      if (orphanedAssignmentIds.length > 0) {
+        console.warn(`[sync GET] 清除 ${orphanedAssignmentIds.length} 筆孤立作業:`, orphanedAssignmentIds)
+        await supabaseDb.from('assignments').delete().in('id', orphanedAssignmentIds).eq('owner_id', ownerId)
+        for (const id of orphanedAssignmentIds) {
+          if (!deletedSets.assignments.has(id)) {
+            deleted.assignments.push({ id, deletedAt: Date.now() })
+            deletedSets.assignments.add(id)
+          }
+        }
+      }
+
+      const assignments = (assignmentsResult.data || [])
+        .filter((row) => validClassroomIds.has(row.classroom_id))
+        .map((row) =>
+          compactObject({
+            id: row.id,
+            classroomId: row.classroom_id,
+            title: row.title,
+            totalPages: row.total_pages,
+            domain: row.domain ?? undefined,
+            folder: row.folder ?? undefined,
+            priorWeightTypes: row.prior_weight_types ?? undefined,
+            answerKey: row.answer_key ?? undefined,
+            updatedAt: toMillis(row.updated_at) ?? undefined
+          })
+        )
 
       const submissions = (submissionsResult.data || []).map((row) => {
         const createdAt = row.created_at ? Date.parse(row.created_at) : null
