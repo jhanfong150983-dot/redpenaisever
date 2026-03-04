@@ -2185,7 +2185,10 @@ async function handleSync(req, res) {
         supabaseDb.from('classrooms').select('*').eq('owner_id', ownerId),
         supabaseDb.from('students').select('*').eq('owner_id', ownerId),
         supabaseDb.from('assignments').select('*').eq('owner_id', ownerId),
-        supabaseDb.from('submissions').select('*').eq('owner_id', ownerId),
+        supabaseDb
+          .from('submissions')
+          .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at')
+          .eq('owner_id', ownerId),
         supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
         supabaseDb
           .from('deleted_records')
