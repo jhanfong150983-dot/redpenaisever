@@ -624,7 +624,7 @@ function normalizeClassifyResult(parsed, questionIds) {
     const row = byQuestionId.get(questionId)
     const visible = row?.visible === true
     const qt = row?.questionType
-    const questionType = qt === 'word_problem' ? 'word_problem' : qt === 'single_choice' ? 'single_choice' : 'other'
+    const questionType = qt === 'word_problem' ? 'word_problem' : qt === 'single_choice' ? 'single_choice' : qt === 'map_fill' ? 'map_fill' : 'other'
     alignedQuestions.push({
       questionId,
       visible,
@@ -872,21 +872,23 @@ function normalizeLocateResult(parsed, questionIds) {
 }
 
 function buildClassifyPrompt(questionIds, answerKeyQuestions) {
-  // 從 answerKey 萃取 referenceBbox 提示
   const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
-  const hasAnyReferenceBbox = questions.some((q) => q?.referenceBbox)
-  const referenceHints = hasAnyReferenceBbox
-    ? questions
-        .filter((q) => q?.referenceBbox && questionIds.includes(ensureString(q?.id).trim()))
-        .map((q) => ({
-          questionId: ensureString(q.id).trim(),
-          expectedAnswer: ensureString(q.answer ?? q.referenceAnswer, '').slice(0, 30),
-          referenceBbox: q.referenceBbox
-        }))
-    : []
 
-  const referenceSection = referenceHints.length > 0
-    ? `\n\nREFERENCE POSITIONS from the answer key image (approximate — the student's photo may differ in angle/scale/rotation):\n${JSON.stringify(referenceHints, null, 1)}\n\nIMPORTANT: These are HINTS only. You MUST look at the actual student image to find the real answer locations.\n- If the student wrote their answer near a reference position, use the ACTUAL position you see (adjust/fine-tune the bbox).\n- If the student wrote their answer in a completely different location, use the position where they actually wrote it.\n- If there is no printed question number on the image, use the reference positions to identify which questionId corresponds to which spatial location.\n- referenceBbox is a SUGGESTION, not a command. You have full authority to override it based on what you see.`
+  // Detect map_fill questions from answerKey heuristics:
+  // Type 2 + acceptableAnswers >= 3 + referenceAnswer length > 30
+  const mapFillIds = questions
+    .filter((q) => {
+      const qId = ensureString(q?.id).trim()
+      if (!questionIds.includes(qId)) return false
+      const isType2 = q?.type === 2
+      const hasMultipleAcceptable = Array.isArray(q?.acceptableAnswers) && q.acceptableAnswers.length >= 3
+      const hasLongReference = typeof q?.referenceAnswer === 'string' && q.referenceAnswer.length > 30
+      return isType2 && hasMultipleAcceptable && hasLongReference
+    })
+    .map((q) => ensureString(q.id).trim())
+
+  const mapFillSection = mapFillIds.length > 0
+    ? `\n\nMAP-FILL QUESTIONS (地圖填圖題):\nThe following question IDs are map-fill type: ${JSON.stringify(mapFillIds)}\n- For these questions, set questionType="map_fill" and visible=true.\n- Do NOT output answerBbox for map_fill questions (the entire image is the answer area).\n- These questions cover the ENTIRE image — there are no individual bounding boxes.`
     : ''
 
   return `
@@ -895,16 +897,17 @@ Task: identify which question IDs are visible on this student submission image, 
 
 Allowed question IDs:
 ${JSON.stringify(questionIds)}
-${referenceSection}
+${mapFillSection}
 
 Rules:
 - Use only the allowed question IDs above.
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
+- questionType="map_fill" if the question ID is listed in MAP-FILL QUESTIONS above.
 - questionType="single_choice" if the question has labeled options (A/B/C/D or 甲/乙/丙/丁) and the student selects exactly one option (circle, tick, or fill-in).
 - questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...").
 - Otherwise questionType="other".
-- For visible=true questions, output answerBbox: the normalized [0,1] bounding box of the student's ANSWER AREA ONLY (exclude the question stem).
+- For visible=true questions (except map_fill), output answerBbox: the normalized [0,1] bounding box of the student's ANSWER AREA ONLY (exclude the question stem).
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
   If the answer area cannot be determined, omit answerBbox.
 - Return strict JSON only.
@@ -955,7 +958,7 @@ Output:
 }
 
 
-function buildReadAnswerPrompt(classifyResult, hasSpatialHints) {
+function buildReadAnswerPrompt(classifyResult) {
   const visibleQuestions = Array.isArray(classifyResult?.alignedQuestions)
     ? classifyResult.alignedQuestions.filter((q) => q.visible)
     : []
@@ -963,11 +966,14 @@ function buildReadAnswerPrompt(classifyResult, hasSpatialHints) {
   const singleChoiceIds = visibleQuestions
     .filter((q) => q.questionType === 'single_choice')
     .map((q) => q.questionId)
+  const mapFillIds = visibleQuestions
+    .filter((q) => q.questionType === 'map_fill')
+    .map((q) => q.questionId)
   const singleChoiceNote = singleChoiceIds.length > 0
     ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
     : ''
-  const spatialNote = hasSpatialHints
-    ? `\n\nSPATIAL WORKSHEET NOTE: This is a map/diagram worksheet where questions correspond to spatial positions (e.g. country names on a map, organ labels on a diagram). Each question's crop shows the area where the student should have written a label or name. Read the handwritten text exactly as the student wrote it.`
+  const mapFillNote = mapFillIds.length > 0
+    ? `\nMAP-FILL questions (地圖填圖題): ${JSON.stringify(mapFillIds)}`
     : ''
   return `
 You are a dumb OCR scanner with NO mathematical knowledge. You cannot add, subtract, multiply, or divide. You only see shapes of characters on paper and copy them exactly.
@@ -999,7 +1005,17 @@ REQUIRED:
 - Empty answer area → status="blank", studentAnswerRaw="未作答"  ← CORRECT
 - Student drew typhoon at 23.5°N 121°E → "在23.5°N與121°E交點處畫出颱風符號", status="read"  ← CORRECT
 - Single-choice: student circled B → output "B", status="read"  ← CORRECT
-${spatialNote}
+${mapFillNote ? `
+MAP-FILL RULE (地圖填圖題):
+- For question IDs in MAP-FILL list, scan the ENTIRE image.
+- Find ALL handwritten labels/text the student wrote on the map/diagram.
+- For each label, describe its approximate position on the map AND the text written.
+- Output format: "位置A: 泰國, 位置B: 越南, 位置C: 緬甸, ..." (use the position markers or spatial descriptions from the image).
+- If the image has printed position markers (A, B, C, ①, ②, etc.), use those as position identifiers.
+- If no printed markers, use spatial descriptions like "左上方", "中間偏右", "右下角".
+- Include ALL student-written text, even if misspelled.
+- status="read" if any handwritten text found, status="blank" if none.
+` : ''}
 
 Return:
 {
@@ -1043,6 +1059,13 @@ Rules:
 - errorType: calculation|copying|unit|concept|blank|unreadable|none.
 - If question has orderMode="unordered" and shares unorderedGroupId with sibling questions:
   - evaluate as a bag (order-insensitive matching) within that group.
+- MAP-FILL SCORING (地圖填圖題): If the AnswerKey question has acceptableAnswers (list of correct names) AND a long referenceAnswer describing positions:
+  - The student's answer contains position:name pairs (e.g. "位置A: 泰國, 位置B: 越南").
+  - Compare each student-labeled position+name against the referenceAnswer's position→name mapping.
+  - correctCount = number of positions where the student wrote the correct name.
+  - score = Math.round(correctCount / totalPositions * maxScore).
+  - isCorrect = (score === maxScore).
+  - In scoringReason, state how many positions were correct (e.g. "5/8 positions correct") without revealing which specific answers were wrong.
 - scoringReason and feedbackBrief must NOT reveal the correct answer text, option, or number.
 - Never write phrases like "correct answer is ...", "應為 ...", "答案是 ...".
 - Return strict JSON only.
@@ -1406,7 +1429,7 @@ export async function runStagedGradingPhaseA({
 
   // ── A2: CROP (server-side, per question, optional) ────────────────────────
   const cropByQuestionId = new Map()
-  const visibleWithBbox = classifyAligned.filter((q) => q.visible && q.answerBbox)
+  const visibleWithBbox = classifyAligned.filter((q) => q.visible && q.answerBbox && q.questionType !== 'map_fill')
   if (visibleWithBbox.length > 0) {
     const mainInlineData = inlineImages[0].inlineData
     const cropResults = await Promise.all(
@@ -1463,8 +1486,7 @@ export async function runStagedGradingPhaseA({
     return [{ role: 'user', parts }]
   }
 
-  const hasSpatialHints = answerKeyQuestions.some((q) => q?.referenceBbox)
-  const readAnswerPrompt = buildReadAnswerPrompt(classifyResult, hasSpatialHints)
+  const readAnswerPrompt = buildReadAnswerPrompt(classifyResult)
   logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', {
     croppedQuestions: visibleWithCrop.length,
     fullImageQuestions: visibleWithoutCrop.length
