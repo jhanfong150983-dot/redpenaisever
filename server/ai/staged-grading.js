@@ -678,9 +678,8 @@ Rules:
 1. Ignore ALL lines above the final answer line (calculation steps, intermediate results).
 2. Do NOT calculate or verify — copy exactly what you see character by character.
 3. If no A:/答:/Ans: line → status="blank", studentAnswerRaw="未作答".
-4. If the line is unclear or contains only drawings/marks/symbols → status="unreadable", studentAnswerRaw="無法辨識".
-5. LANGUAGE RULE: Output ONLY the language the student used. NEVER output English descriptions.
-6. Return strict JSON only.
+4. If the line is unclear → status="unreadable", studentAnswerRaw="無法辨識".
+5. Return strict JSON only.
 
 Return:
 {
@@ -943,8 +942,8 @@ ABSOLUTE RULES (never break these):
 4. Copy wrong calculations exactly as written. If the student wrote "6+3=8", output "6+3=8".
 5. Include ALL lines the student wrote, including lines starting with "A:", "答:", "Ans:" — these contain the final answer and must NOT be dropped.
 6. The final answer line (A:, 答:, Ans:, or the last line with a number) MUST be copied digit-by-digit exactly as the student wrote it. Even if you believe the number is mathematically wrong, copy it exactly. You are NOT allowed to verify or correct it.
-7. LANGUAGE RULE: Output ONLY the language the student used. If the student wrote in Chinese/numbers/symbols, output Chinese/numbers/symbols. NEVER output English descriptions or translations of what you see — not even if the answer is a drawing, diagram, or map mark. You are an OCR scanner, not an interpreter.
-8. DRAWING/DIAGRAM RULE: If the student's answer area contains a drawing, arrow, symbol, or non-textual mark (no readable characters), output status="unreadable", studentAnswerRaw="無法辨識". NEVER describe the drawing in words.
+7. LANGUAGE RULE: Always describe or transcribe in Traditional Chinese (繁體中文). NEVER output English descriptions. If the student drew something on a map or diagram, describe what you see in Chinese (e.g., "在23.5°N與121°E交點處畫出颱風符號"). If the student wrote text in another language, transcribe it exactly.
+8. DRAWING/DIAGRAM RULE: If the student's answer is a drawing, mark, or symbol on a map/diagram (no written text), describe in Chinese what was drawn and where (location, coordinates, type of mark). Use status="read" with a Chinese description. Only use status="unreadable" if you truly cannot determine anything about the answer.
 
 FINAL ANSWER LINE PROTOCOL:
 When you reach the line starting with "A:", "答:", or "Ans:":
@@ -965,6 +964,8 @@ FORBIDDEN (examples of what you must NEVER do):
 REQUIRED (examples of correct behavior):
 - Student wrote "A: 6.12 cm²" → you output "A: 6.12 cm²"  ← CORRECT
 - Student wrote "6+3=8" → you output "6+3=8"               ← CORRECT
+- Student drew a typhoon symbol at 23.5°N, 121°E on a map → you output "在23.5°N與121°E交點處畫出颱風符號", status="read"  ← CORRECT
+- Student drew a typhoon symbol at 23.5°N, 121°E on a map → you output "Student marked a dot at 121°E, 23.5°N"  ← FORBIDDEN (English description)
 
 Return:
 {
