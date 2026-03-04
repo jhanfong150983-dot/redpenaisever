@@ -871,13 +871,31 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
-function buildClassifyPrompt(questionIds) {
+function buildClassifyPrompt(questionIds, answerKeyQuestions) {
+  // 從 answerKey 萃取 referenceBbox 提示
+  const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
+  const hasAnyReferenceBbox = questions.some((q) => q?.referenceBbox)
+  const referenceHints = hasAnyReferenceBbox
+    ? questions
+        .filter((q) => q?.referenceBbox && questionIds.includes(ensureString(q?.id).trim()))
+        .map((q) => ({
+          questionId: ensureString(q.id).trim(),
+          expectedAnswer: ensureString(q.answer ?? q.referenceAnswer, '').slice(0, 30),
+          referenceBbox: q.referenceBbox
+        }))
+    : []
+
+  const referenceSection = referenceHints.length > 0
+    ? `\n\nREFERENCE POSITIONS from the answer key image (approximate — the student's photo may differ in angle/scale/rotation):\n${JSON.stringify(referenceHints, null, 1)}\n\nIMPORTANT: These are HINTS only. You MUST look at the actual student image to find the real answer locations.\n- If the student wrote their answer near a reference position, use the ACTUAL position you see (adjust/fine-tune the bbox).\n- If the student wrote their answer in a completely different location, use the position where they actually wrote it.\n- If there is no printed question number on the image, use the reference positions to identify which questionId corresponds to which spatial location.\n- referenceBbox is a SUGGESTION, not a command. You have full authority to override it based on what you see.`
+    : ''
+
   return `
 You are stage CLASSIFY.
 Task: identify which question IDs are visible on this student submission image, classify each visible question's type, and locate each visible question's answer region.
 
 Allowed question IDs:
 ${JSON.stringify(questionIds)}
+${referenceSection}
 
 Rules:
 - Use only the allowed question IDs above.
@@ -937,7 +955,7 @@ Output:
 }
 
 
-function buildReadAnswerPrompt(classifyResult) {
+function buildReadAnswerPrompt(classifyResult, hasSpatialHints) {
   const visibleQuestions = Array.isArray(classifyResult?.alignedQuestions)
     ? classifyResult.alignedQuestions.filter((q) => q.visible)
     : []
@@ -947,6 +965,9 @@ function buildReadAnswerPrompt(classifyResult) {
     .map((q) => q.questionId)
   const singleChoiceNote = singleChoiceIds.length > 0
     ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
+    : ''
+  const spatialNote = hasSpatialHints
+    ? `\n\nSPATIAL WORKSHEET NOTE: This is a map/diagram worksheet where questions correspond to spatial positions (e.g. country names on a map, organ labels on a diagram). Each question's crop shows the area where the student should have written a label or name. Read the handwritten text exactly as the student wrote it.`
     : ''
   return `
 You are a dumb OCR scanner with NO mathematical knowledge. You cannot add, subtract, multiply, or divide. You only see shapes of characters on paper and copy them exactly.
@@ -978,6 +999,7 @@ REQUIRED:
 - Empty answer area → status="blank", studentAnswerRaw="未作答"  ← CORRECT
 - Student drew typhoon at 23.5°N 121°E → "在23.5°N與121°E交點處畫出颱風符號", status="read"  ← CORRECT
 - Single-choice: student circled B → output "B", status="read"  ← CORRECT
+${spatialNote}
 
 Return:
 {
@@ -1336,7 +1358,8 @@ export async function runStagedGradingPhaseA({
   const getRemainingBudget = () => Math.max(1000, PIPELINE_BUDGET_MS - (Date.now() - pipelineStartedAt))
 
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
-  const classifyPrompt = buildClassifyPrompt(questionIds)
+  const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+  const classifyPrompt = buildClassifyPrompt(questionIds, answerKeyQuestions)
   logStageStart(pipelineRunId, 'classify')
   const classifyResponse = await executeStage({
     apiKey,
@@ -1440,7 +1463,8 @@ export async function runStagedGradingPhaseA({
     return [{ role: 'user', parts }]
   }
 
-  const readAnswerPrompt = buildReadAnswerPrompt(classifyResult)
+  const hasSpatialHints = answerKeyQuestions.some((q) => q?.referenceBbox)
+  const readAnswerPrompt = buildReadAnswerPrompt(classifyResult, hasSpatialHints)
   logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', {
     croppedQuestions: visibleWithCrop.length,
     fullImageQuestions: visibleWithoutCrop.length
