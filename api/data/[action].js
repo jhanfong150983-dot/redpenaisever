@@ -2859,6 +2859,29 @@ async function handleSync(req, res) {
         if (result.error) throw new Error(result.error.message)
       }
 
+      // 資料夾協調：用戶端為真（client is truth）
+      // 刪除雲端存在但用戶端未傳入的資料夾（代表用戶已刪除）
+      const clientFolderIds = new Set(folders.filter((f) => f?.id).map((f) => f.id))
+      const { data: serverFolders, error: serverFoldersError } = await supabaseDb
+        .from('folders')
+        .select('id')
+        .eq('owner_id', user.id)
+      if (serverFoldersError) throw new Error(serverFoldersError.message)
+
+      const staleFolderIds = (serverFolders || [])
+        .map((r) => r.id)
+        .filter((id) => !clientFolderIds.has(id))
+
+      if (staleFolderIds.length > 0) {
+        console.warn(`[sync POST] 清除 ${staleFolderIds.length} 筆用戶已刪除的 folders:`, staleFolderIds)
+        const { error: deleteError } = await supabaseDb
+          .from('folders')
+          .delete()
+          .in('id', staleFolderIds)
+          .eq('owner_id', user.id)
+        if (deleteError) throw new Error(deleteError.message)
+      }
+
       res.status(200).json({ success: true })
     } catch (err) {
       res.status(500).json({
