@@ -289,6 +289,13 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
 // - 去除 emoji、勾選符號、結尾方向箭頭、開頭選項前綴、外層括號
 function normalizeAnswerForComparison(raw) {
   let s = String(raw ?? '').trim()
+  // 勾選文字描述 → 只取選項字母
+  // "勾選(A)" / "選擇(B)" / "已選(C)" → "A"/"B"/"C"
+  const prefixCheckMatch = s.match(/^(?:勾選|選擇|已選|選了?|打勾選?)\s*\(([A-D甲乙丙丁])\)/u)
+  if (prefixCheckMatch) return prefixCheckMatch[1]
+  // "(A)有打勾符號" / "(A)已選" / "(A)勾" → "A"
+  const suffixCheckMatch = s.match(/^\(([A-D甲乙丙丁])\)\s*(?:有打勾符號|已選|有勾|勾選|打勾|勾)/u)
+  if (suffixCheckMatch) return suffixCheckMatch[1]
   // 去除勾選/打叉符號（☑ ✓ ✔ ☒ ✗ ✘ □ ☐ 等）
   s = s.replace(/[☑✓✔☒✗✘□☐☎✅❎]/gu, '').trim()
   // 去除 Unicode Emoji（Presentation 形式）
@@ -616,7 +623,8 @@ function normalizeClassifyResult(parsed, questionIds) {
   for (const questionId of questionIds) {
     const row = byQuestionId.get(questionId)
     const visible = row?.visible === true
-    const questionType = row?.questionType === 'word_problem' ? 'word_problem' : 'other'
+    const qt = row?.questionType
+    const questionType = qt === 'word_problem' ? 'word_problem' : qt === 'single_choice' ? 'single_choice' : 'other'
     alignedQuestions.push({
       questionId,
       visible,
@@ -875,7 +883,9 @@ Rules:
 - Use only the allowed question IDs above.
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
-- questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地..."). Otherwise questionType="other".
+- questionType="single_choice" if the question has labeled options (A/B/C/D or 甲/乙/丙/丁) and the student selects exactly one option (circle, tick, or fill-in).
+- questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...").
+- Otherwise questionType="other".
 - For visible=true questions, output answerBbox: the normalized [0,1] bounding box of the student's ANSWER AREA ONLY (exclude the question stem).
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
   If the answer area cannot be determined, omit answerBbox.
@@ -928,14 +938,22 @@ Output:
 
 
 function buildReadAnswerPrompt(classifyResult) {
-  const visibleIds = Array.isArray(classifyResult?.alignedQuestions)
-    ? classifyResult.alignedQuestions.filter((q) => q.visible).map((q) => q.questionId)
+  const visibleQuestions = Array.isArray(classifyResult?.alignedQuestions)
+    ? classifyResult.alignedQuestions.filter((q) => q.visible)
     : []
+  const visibleIds = visibleQuestions.map((q) => q.questionId)
+  const singleChoiceIds = visibleQuestions
+    .filter((q) => q.questionType === 'single_choice')
+    .map((q) => q.questionId)
+  const singleChoiceNote = singleChoiceIds.length > 0
+    ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
+    : ''
   return `
 You are a dumb OCR scanner with NO mathematical knowledge. You cannot add, subtract, multiply, or divide. You only see shapes of characters on paper and copy them exactly.
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
+${singleChoiceNote}
 
 RULES:
 1. DO NOT solve, calculate, verify, or correct anything.
@@ -944,19 +962,22 @@ RULES:
 4. BLANK: If the student wrote nothing (answer area is empty or only has the pre-printed "A:" label with nothing after it) → status="blank", studentAnswerRaw="未作答".
 5. UNREADABLE: If text exists but is too unclear to read → status="unreadable", studentAnswerRaw="無法辨識".
 6. TEXT ANSWER: Copy the student's written text character-by-character. Include the final answer line (A:, 答:, Ans:) exactly as written.
-7. DRAWING ANSWER (map/diagram marks): If the student drew or marked something on a map/diagram (a new pen mark not part of the pre-printed image), describe in Traditional Chinese what was drawn and where → status="read". Example: "在23.5°N與121°E交點處畫出颱風符號". If only pre-printed content is visible with no student mark → status="blank".
-8. LANGUAGE: Always output in Traditional Chinese (繁體中文). NEVER output English descriptions.
-9. Return strict JSON only. No markdown, no commentary.
+7. SINGLE-CHOICE: For questions listed in SINGLE-CHOICE above, studentAnswerRaw must be exactly ONE letter (A/B/C/D or 甲/乙/丙/丁). If the student circled/ticked/filled option B → output "B". Do NOT include the full option text.
+8. DRAWING ANSWER (map/diagram marks): If the student drew or marked something on a map/diagram (a new pen mark not part of the pre-printed image), describe in Traditional Chinese what was drawn and where → status="read". Example: "在23.5°N與121°E交點處畫出颱風符號". If only pre-printed content is visible with no student mark → status="blank".
+9. LANGUAGE: Always output in Traditional Chinese (繁體中文). NEVER output English descriptions.
+10. Return strict JSON only. No markdown, no commentary.
 
 FORBIDDEN:
 - "A: 6.12 cm²" → output "A: 6.24 cm²"  ← FORBIDDEN (corrected)
 - Empty answer area → output any text  ← FORBIDDEN (should be blank)
 - Drawing answer → output English description  ← FORBIDDEN
+- Single-choice question → output "(B) 太平洋" instead of just "B"  ← FORBIDDEN
 
 REQUIRED:
 - "A: 6.12 cm²" → output "A: 6.12 cm²", status="read"  ← CORRECT
 - Empty answer area → status="blank", studentAnswerRaw="未作答"  ← CORRECT
 - Student drew typhoon at 23.5°N 121°E → "在23.5°N與121°E交點處畫出颱風符號", status="read"  ← CORRECT
+- Single-choice: student circled B → output "B", status="read"  ← CORRECT
 
 Return:
 {
