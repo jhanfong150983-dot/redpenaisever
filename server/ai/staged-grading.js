@@ -937,41 +937,26 @@ You are a dumb OCR scanner with NO mathematical knowledge. You cannot add, subtr
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
 
-ABSOLUTE RULES (never break these):
-1. DO NOT solve, calculate, verify, or correct anything. You are mathematically blind.
-2. DO NOT normalize symbols (× vs x, ÷ vs /, − vs -).
-3. DO NOT add or remove digits, units, decimals, or parentheses.
-4. Copy wrong calculations exactly as written. If the student wrote "6+3=8", output "6+3=8".
-5. Include ALL lines the student wrote, including lines starting with "A:", "答:", "Ans:" — these contain the final answer and must NOT be dropped.
-6. The final answer line (A:, 答:, Ans:, or the last line with a number) MUST be copied digit-by-digit exactly as the student wrote it. Even if you believe the number is mathematically wrong, copy it exactly. You are NOT allowed to verify or correct it.
-7. LANGUAGE RULE: Always describe or transcribe in Traditional Chinese (繁體中文). NEVER output English descriptions. If the student wrote text in another language, transcribe it exactly.
-8. DRAWING/DIAGRAM RULE — CRITICAL BLANK DISTINCTION:
-   - The answer area may contain pre-printed content (map, grid, axes, question text). This is NOT the student's answer.
-   - ONLY if the student has ACTIVELY added a new pen mark (dot, symbol, line, drawing) that was NOT pre-printed → status="read", describe in Chinese what was drawn and where (e.g., "在23.5°N與121°E交點處畫出颱風符號").
-   - If the student made NO mark and only pre-printed content is visible → status="blank", studentAnswerRaw="未作答".
-   - If you cannot distinguish whether a mark was student-added or pre-printed → status="unreadable".
-
-FINAL ANSWER LINE PROTOCOL:
-When you reach the line starting with "A:", "答:", or "Ans:":
-1. STOP reading the calculation lines above. They do not exist.
-2. Read ONLY the characters physically written in this line, one by one.
-3. If you see: A  :  (space)  6  .  1  2  (space)  c  m  ²  → output exactly: "A: 6.12 cm²"
-4. The final answer line is INDEPENDENT of the calculation. Never compare them.
-
-7. If any part of the answer is unclear or ambiguous → status="unreadable", studentAnswerRaw="無法辨識".
-8. If nothing is written → status="blank", studentAnswerRaw="未作答".
+RULES:
+1. DO NOT solve, calculate, verify, or correct anything.
+2. DO NOT normalize symbols (× vs x, ÷ vs /, − vs -). Copy exactly.
+3. Copy wrong calculations exactly as written. "6+3=8" → output "6+3=8".
+4. BLANK: If the student wrote nothing (answer area is empty or only has the pre-printed "A:" label with nothing after it) → status="blank", studentAnswerRaw="未作答".
+5. UNREADABLE: If text exists but is too unclear to read → status="unreadable", studentAnswerRaw="無法辨識".
+6. TEXT ANSWER: Copy the student's written text character-by-character. Include the final answer line (A:, 答:, Ans:) exactly as written.
+7. DRAWING ANSWER (map/diagram marks): If the student drew or marked something on a map/diagram (a new pen mark not part of the pre-printed image), describe in Traditional Chinese what was drawn and where → status="read". Example: "在23.5°N與121°E交點處畫出颱風符號". If only pre-printed content is visible with no student mark → status="blank".
+8. LANGUAGE: Always output in Traditional Chinese (繁體中文). NEVER output English descriptions.
 9. Return strict JSON only. No markdown, no commentary.
 
-FORBIDDEN (examples of what you must NEVER do):
-- Student wrote "A: 6.12 cm²" → you output "A: 6.24 cm²"  ← FORBIDDEN (you corrected the answer)
-- Student wrote "6+3=8" → you output "6+3=9"               ← FORBIDDEN (you corrected the answer)
-- Student wrote "÷2=6.12" → you output "÷2=6.24"           ← FORBIDDEN (you corrected the answer)
+FORBIDDEN:
+- "A: 6.12 cm²" → output "A: 6.24 cm²"  ← FORBIDDEN (corrected)
+- Empty answer area → output any text  ← FORBIDDEN (should be blank)
+- Drawing answer → output English description  ← FORBIDDEN
 
-REQUIRED (examples of correct behavior):
-- Student wrote "A: 6.12 cm²" → you output "A: 6.12 cm²"  ← CORRECT
-- Student wrote "6+3=8" → you output "6+3=8"               ← CORRECT
-- Student drew a typhoon symbol at 23.5°N, 121°E on a map → you output "在23.5°N與121°E交點處畫出颱風符號", status="read"  ← CORRECT
-- Student drew a typhoon symbol at 23.5°N, 121°E on a map → you output "Student marked a dot at 121°E, 23.5°N"  ← FORBIDDEN (English description)
+REQUIRED:
+- "A: 6.12 cm²" → output "A: 6.12 cm²", status="read"  ← CORRECT
+- Empty answer area → status="blank", studentAnswerRaw="未作答"  ← CORRECT
+- Student drew typhoon at 23.5°N 121°E → "在23.5°N與121°E交點處畫出颱風符號", status="read"  ← CORRECT
 
 Return:
 {
@@ -1098,6 +1083,20 @@ Output:
 `.trim()
 }
 
+// Gemini generateContent API 合法欄位白名單（其他欄位送出會導致 INVALID_ARGUMENT）
+const GEMINI_PAYLOAD_KEYS = new Set([
+  'generationConfig', 'systemInstruction', 'safetySettings',
+  'tools', 'toolConfig', 'cachedContent', 'thinkingConfig'
+])
+function filterPayloadForGemini(payload) {
+  if (!payload || typeof payload !== 'object') return {}
+  const filtered = {}
+  for (const key of GEMINI_PAYLOAD_KEYS) {
+    if (payload[key] !== undefined) filtered[key] = payload[key]
+  }
+  return filtered
+}
+
 async function executeStage({
   apiKey,
   model,
@@ -1123,7 +1122,7 @@ async function executeStage({
     apiKey,
     model: preparedRequest.model,
     contents: preparedRequest.contents,
-    payload: preparedRequest.payload,
+    payload: filterPayloadForGemini(preparedRequest.payload),
     timeoutMs,
     fallbackModels: ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
   })
