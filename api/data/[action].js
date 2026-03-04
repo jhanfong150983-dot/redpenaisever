@@ -2730,11 +2730,19 @@ async function handleSync(req, res) {
       )
 
       if (submissionRows.length > 0) {
-        const result = await supabaseDb
-          .from('submissions')
-          .upsert(submissionRows, { onConflict: 'id' })
-        if (result.error) throw new Error(result.error.message)
-        await applySubmissionStateTransitions(supabaseDb, user.id, submissionRows)
+        // Batch upsert to avoid hitting Supabase request body size limits (large grading_result JSONs)
+        const SUBMISSION_BATCH = 50
+        for (let i = 0; i < submissionRows.length; i += SUBMISSION_BATCH) {
+          const batch = submissionRows.slice(i, i + SUBMISSION_BATCH)
+          const result = await supabaseDb
+            .from('submissions')
+            .upsert(batch, { onConflict: 'id' })
+          if (result.error) throw new Error(result.error.message)
+        }
+        // applySubmissionStateTransitions may download/crop images — make it non-fatal during bulk sync
+        await applySubmissionStateTransitions(supabaseDb, user.id, submissionRows).catch(
+          (err) => console.warn('[sync] applySubmissionStateTransitions failed (non-fatal):', err?.message)
+        )
       }
 
       const touchedAssignments = new Set(
@@ -4357,6 +4365,8 @@ async function handleCampus1ClassroomSync(req, res) {
     res.status(502).json({ error: '取得 1Campus 班級失敗' })
     return
   }
+
+  console.log('[1campus sync] fetchCampus1Classes returned', classes.length, 'classes')
 
   if (!classes.length) {
     res.status(200).json({ success: true, synced: 0, total: 0, classrooms: [] })
