@@ -2361,7 +2361,30 @@ async function handleSync(req, res) {
           })
         )
 
-      const submissions = (submissionsResult.data || []).map((row) => {
+      const validAssignmentIds = new Set((assignmentsResult.data || [])
+        .filter((r) => validClassroomIds.has(r.classroom_id))
+        .map((r) => r.id)
+      )
+
+      // 孤立 submissions（assignment 不存在）：從回應中移除並清理 Supabase
+      const orphanedSubmissionIds = (submissionsResult.data || [])
+        .filter((row) => !validAssignmentIds.has(row.assignment_id))
+        .map((row) => row.id)
+
+      if (orphanedSubmissionIds.length > 0) {
+        console.warn(`[sync GET] 清除 ${orphanedSubmissionIds.length} 筆孤立 submissions:`, orphanedSubmissionIds)
+        await supabaseDb.from('submissions').delete().in('id', orphanedSubmissionIds).eq('owner_id', ownerId)
+        for (const id of orphanedSubmissionIds) {
+          if (!deletedSets.submissions.has(id)) {
+            deleted.submissions.push({ id, deletedAt: Date.now() })
+            deletedSets.submissions.add(id)
+          }
+        }
+      }
+
+      const submissions = (submissionsResult.data || [])
+        .filter((row) => validAssignmentIds.has(row.assignment_id))
+        .map((row) => {
         const createdAt = row.created_at ? Date.parse(row.created_at) : null
         const gradedAt = toNumber(row.graded_at)
         const updatedAt = toMillis(row.updated_at)
