@@ -942,8 +942,12 @@ ABSOLUTE RULES (never break these):
 4. Copy wrong calculations exactly as written. If the student wrote "6+3=8", output "6+3=8".
 5. Include ALL lines the student wrote, including lines starting with "A:", "答:", "Ans:" — these contain the final answer and must NOT be dropped.
 6. The final answer line (A:, 答:, Ans:, or the last line with a number) MUST be copied digit-by-digit exactly as the student wrote it. Even if you believe the number is mathematically wrong, copy it exactly. You are NOT allowed to verify or correct it.
-7. LANGUAGE RULE: Always describe or transcribe in Traditional Chinese (繁體中文). NEVER output English descriptions. If the student drew something on a map or diagram, describe what you see in Chinese (e.g., "在23.5°N與121°E交點處畫出颱風符號"). If the student wrote text in another language, transcribe it exactly.
-8. DRAWING/DIAGRAM RULE: If the student's answer is a drawing, mark, or symbol on a map/diagram (no written text), describe in Chinese what was drawn and where (location, coordinates, type of mark). Use status="read" with a Chinese description. Only use status="unreadable" if you truly cannot determine anything about the answer.
+7. LANGUAGE RULE: Always describe or transcribe in Traditional Chinese (繁體中文). NEVER output English descriptions. If the student wrote text in another language, transcribe it exactly.
+8. DRAWING/DIAGRAM RULE — CRITICAL BLANK DISTINCTION:
+   - The answer area may contain pre-printed content (map, grid, axes, question text). This is NOT the student's answer.
+   - ONLY if the student has ACTIVELY added a new pen mark (dot, symbol, line, drawing) that was NOT pre-printed → status="read", describe in Chinese what was drawn and where (e.g., "在23.5°N與121°E交點處畫出颱風符號").
+   - If the student made NO mark and only pre-printed content is visible → status="blank", studentAnswerRaw="未作答".
+   - If you cannot distinguish whether a mark was student-added or pre-printed → status="unreadable".
 
 FINAL ANSWER LINE PROTOCOL:
 When you reach the line starting with "A:", "答:", or "Ans:":
