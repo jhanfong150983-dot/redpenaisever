@@ -250,6 +250,8 @@ function extractInlineImages(contents) {
 
 // A2: 用 Sharp 裁切 base64 inline image，回傳裁切後的 inlineData
 // bbox 為 normalized [0,1] 座標；失敗時回傳 null（fallback 全圖）
+// BBOX_PAD: 向外擴張比例（相對於圖寬/高），補償 Classify bbox 偏小的情況
+const BBOX_PAD = 0.03
 async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
   if (!bbox || !imageBase64) return null
   try {
@@ -259,10 +261,16 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
     const { width, height } = metadata
     if (!width || !height) return null
 
-    const x = Math.max(0, Math.round(bbox.x * width))
-    const y = Math.max(0, Math.round(bbox.y * height))
-    const w = Math.min(width - x, Math.max(1, Math.round(bbox.w * width)))
-    const h = Math.min(height - y, Math.max(1, Math.round(bbox.h * height)))
+    // 向外擴張 BBOX_PAD，並 clamp 在 [0,1]
+    const px = Math.max(0, bbox.x - BBOX_PAD)
+    const py = Math.max(0, bbox.y - BBOX_PAD)
+    const px2 = Math.min(1, bbox.x + bbox.w + BBOX_PAD)
+    const py2 = Math.min(1, bbox.y + bbox.h + BBOX_PAD)
+
+    const x = Math.round(px * width)
+    const y = Math.round(py * height)
+    const w = Math.min(width - x, Math.max(1, Math.round((px2 - px) * width)))
+    const h = Math.min(height - y, Math.max(1, Math.round((py2 - py) * height)))
     if (w <= 0 || h <= 0) return null
 
     const cropBuffer = await sharp(imageBuffer)
@@ -670,8 +678,9 @@ Rules:
 1. Ignore ALL lines above the final answer line (calculation steps, intermediate results).
 2. Do NOT calculate or verify — copy exactly what you see character by character.
 3. If no A:/答:/Ans: line → status="blank", studentAnswerRaw="未作答".
-4. If the line is unclear → status="unreadable", studentAnswerRaw="無法辨識".
-5. Return strict JSON only.
+4. If the line is unclear or contains only drawings/marks/symbols → status="unreadable", studentAnswerRaw="無法辨識".
+5. LANGUAGE RULE: Output ONLY the language the student used. NEVER output English descriptions.
+6. Return strict JSON only.
 
 Return:
 {
@@ -934,6 +943,8 @@ ABSOLUTE RULES (never break these):
 4. Copy wrong calculations exactly as written. If the student wrote "6+3=8", output "6+3=8".
 5. Include ALL lines the student wrote, including lines starting with "A:", "答:", "Ans:" — these contain the final answer and must NOT be dropped.
 6. The final answer line (A:, 答:, Ans:, or the last line with a number) MUST be copied digit-by-digit exactly as the student wrote it. Even if you believe the number is mathematically wrong, copy it exactly. You are NOT allowed to verify or correct it.
+7. LANGUAGE RULE: Output ONLY the language the student used. If the student wrote in Chinese/numbers/symbols, output Chinese/numbers/symbols. NEVER output English descriptions or translations of what you see — not even if the answer is a drawing, diagram, or map mark. You are an OCR scanner, not an interpreter.
+8. DRAWING/DIAGRAM RULE: If the student's answer area contains a drawing, arrow, symbol, or non-textual mark (no readable characters), output status="unreadable", studentAnswerRaw="無法辨識". NEVER describe the drawing in words.
 
 FINAL ANSWER LINE PROTOCOL:
 When you reach the line starting with "A:", "答:", or "Ans:":
@@ -1597,11 +1608,15 @@ export async function runStagedGradingPhaseB({
     answerKey,
     questionIds,
     classifyResult,
-    stageResponses,
-    stageWarnings,
+    stageResponses: _inheritedStageResponses,
+    stageWarnings: _inheritedStageWarnings,
     pipelineRunId,
     stagedLogLevel
   } = internalState
+  // _phaseContext (client round-trip path) does not carry Phase A stageResponses/Warnings;
+  // initialise fresh arrays so Phase B latency/warnings are tracked independently.
+  const stageResponses = Array.isArray(_inheritedStageResponses) ? [..._inheritedStageResponses] : []
+  const stageWarnings = Array.isArray(_inheritedStageWarnings) ? [..._inheritedStageWarnings] : []
 
   const inlineImages = extractInlineImages(contents)
   const submissionImageParts = inlineImages.length > 0 ? [inlineImages[0]] : []
