@@ -4425,15 +4425,16 @@ async function handleCampus1ClassroomSync(req, res) {
       // 取得學生
       const students = await fetchCampus1Students(dsns, providerClassId, accessToken)
 
-      // 轉換格式（seatNo → seat_number，studentName → name）
+      // 轉換格式（seatNo → seat_number，studentName → name，mail → email）
       const normalizedStudents = students
         .map((s) => ({
           seat_number: Number(s.seatNo) || 0,
-          name: String(s.studentName || '').trim()
+          name: String(s.studentName || '').trim(),
+          email: typeof s.mail === 'string' && s.mail.trim() ? s.mail.trim() : null
         }))
         .filter((s) => s.seat_number > 0 && s.name)
 
-      // 批次匯入學生（複用現有 RPC）
+      // 批次匯入學生（複用現有 RPC，只傳 seat_number + name）
       let studentCount = 0
       if (normalizedStudents.length > 0) {
         const { error: rpcError } = await supabaseAdmin.rpc(
@@ -4441,11 +4442,25 @@ async function handleCampus1ClassroomSync(req, res) {
           {
             p_owner_id: user.id,
             p_classroom_id: classroomId,
-            p_students: normalizedStudents
+            p_students: normalizedStudents.map(({ seat_number, name }) => ({ seat_number, name }))
           }
         )
         if (rpcError) throw new Error(`匯入學生失敗: ${rpcError.message}`)
         studentCount = normalizedStudents.length
+
+        // 若有 email（jasmine.contact scope 開通後），單獨更新
+        const studentsWithEmail = normalizedStudents.filter((s) => s.email)
+        if (studentsWithEmail.length > 0) {
+          for (const s of studentsWithEmail) {
+            await supabaseAdmin
+              .from('students')
+              .update({ email: s.email, updated_at: nowIso })
+              .eq('owner_id', user.id)
+              .eq('classroom_id', classroomId)
+              .eq('seat_number', s.seat_number)
+          }
+          console.log('[1campus sync] updated email for', studentsWithEmail.length, 'students')
+        }
       }
 
       // 更新/建立同步記錄
