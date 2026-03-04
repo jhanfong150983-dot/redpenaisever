@@ -258,8 +258,15 @@ export async function fetchCampus1Classes(dsns, teacherID, accessToken) {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
   })
 
+  // 404 = 該老師無班級資料，視為空陣列
+  if (response.status === 404) {
+    console.log('[1campus] getClass 404（無班級資料）dsns=', dsns, 'teacherID=', teacherID)
+    return []
+  }
+
   if (!response.ok) {
-    throw new Error(`Jasmine getClass failed ${response.status}`)
+    const text = await response.text().catch(() => '')
+    throw new Error(`Jasmine getClass failed ${response.status}: ${text.slice(0, 200)}`)
   }
 
   const json = await response.json()
@@ -282,8 +289,15 @@ export async function fetchCampus1Students(dsns, classID, accessToken) {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
   })
 
+  // 404 = 該班級無學生資料，視為空陣列
+  if (response.status === 404) {
+    console.log('[1campus] getClassStudent 404（無學生資料）dsns=', dsns, 'classID=', classID)
+    return []
+  }
+
   if (!response.ok) {
-    throw new Error(`Jasmine getClassStudent failed ${response.status}`)
+    const text = await response.text().catch(() => '')
+    throw new Error(`Jasmine getClassStudent failed ${response.status}: ${text.slice(0, 200)}`)
   }
 
   const json = await response.json()

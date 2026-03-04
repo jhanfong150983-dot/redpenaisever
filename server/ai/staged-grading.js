@@ -959,7 +959,7 @@ RULES:
 1. DO NOT solve, calculate, verify, or correct anything.
 2. DO NOT normalize symbols (× vs x, ÷ vs /, − vs -). Copy exactly.
 3. Copy wrong calculations exactly as written. "6+3=8" → output "6+3=8".
-4. BLANK: If the student wrote nothing (answer area is empty or only has the pre-printed "A:" label with nothing after it) → status="blank", studentAnswerRaw="未作答".
+4. BLANK: If the student wrote nothing → status="blank", studentAnswerRaw="未作答". This includes: empty area, only pre-printed label ("A:", "答:", underlines, boxes, grids), or only pre-printed background art. ONLY handwritten/drawn student marks count as non-blank.
 5. UNREADABLE: If text exists but is too unclear to read → status="unreadable", studentAnswerRaw="無法辨識".
 6. TEXT ANSWER: Copy the student's written text character-by-character. Include the final answer line (A:, 答:, Ans:) exactly as written.
 7. SINGLE-CHOICE: For questions listed in SINGLE-CHOICE above, studentAnswerRaw must be exactly ONE letter (A/B/C/D or 甲/乙/丙/丁). If the student circled/ticked/filled option B → output "B". Do NOT include the full option text.
@@ -1406,7 +1406,45 @@ export async function runStagedGradingPhaseA({
   }
 
   // ── A3 + A4: ReadAnswer + reReadAnswer IN PARALLEL ────────────────────────
+  // Build crop-aware image parts: send per-question crop images when available,
+  // so the AI sees only each question's answer area instead of the full page.
+  const visibleWithCrop = classifyAligned.filter((q) => q.visible && cropByQuestionId.has(q.questionId))
+  const visibleWithoutCrop = classifyAligned.filter((q) => q.visible && !cropByQuestionId.has(q.questionId))
+
+  function buildReadAnswerStageContents(prompt) {
+    if (visibleWithCrop.length === 0) {
+      // No crops available — fall back to full image
+      return [{ role: 'user', parts: [{ text: prompt }, ...submissionImageParts] }]
+    }
+    // Explain the image layout to the model
+    const structureNote = [
+      '',
+      'IMAGE STRUCTURE: Each question is followed by a CROP IMAGE showing only that question\'s answer area.',
+      '- "[QuestionId]" tag → the immediately following image is that question\'s cropped answer region.',
+      '- Read ONLY from the crop image for that question. Ignore any text outside the crop.',
+      visibleWithoutCrop.length > 0
+        ? `- Questions without a crop (read from [FULL PAGE] image at the end): ${visibleWithoutCrop.map((q) => q.questionId).join(', ')}`
+        : '- All visible questions have a crop image.'
+    ].join('\n')
+
+    const parts = [{ text: prompt + structureNote }]
+    for (const q of visibleWithCrop) {
+      const cropData = cropByQuestionId.get(q.questionId)
+      parts.push({ text: `[${q.questionId}]` })
+      parts.push({ inlineData: { mimeType: cropData.mimeType, data: cropData.data } })
+    }
+    if (visibleWithoutCrop.length > 0) {
+      parts.push({ text: '[FULL PAGE]' })
+      parts.push(submissionImageParts[0])
+    }
+    return [{ role: 'user', parts }]
+  }
+
   const readAnswerPrompt = buildReadAnswerPrompt(classifyResult)
+  logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', {
+    croppedQuestions: visibleWithCrop.length,
+    fullImageQuestions: visibleWithoutCrop.length
+  })
   const parallelCalls = [
     executeStage({
       apiKey,
@@ -1415,7 +1453,7 @@ export async function runStagedGradingPhaseA({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-      stageContents: [{ role: 'user', parts: [{ text: readAnswerPrompt }, ...submissionImageParts] }]
+      stageContents: buildReadAnswerStageContents(readAnswerPrompt)
     }),
     executeStage({
       apiKey,
@@ -1424,7 +1462,7 @@ export async function runStagedGradingPhaseA({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-      stageContents: [{ role: 'user', parts: [{ text: readAnswerPrompt }, ...submissionImageParts] }]
+      stageContents: buildReadAnswerStageContents(readAnswerPrompt)
     })
   ]
   if (wordProblemIds.length > 0) {
