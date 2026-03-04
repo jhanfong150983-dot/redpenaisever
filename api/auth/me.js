@@ -50,6 +50,7 @@ export default async function handler(req, res) {
     let profileLoaded = false
     let profileError = null
     let studentContext = null
+    let studentContexts = []
 
     // 重試機制：最多重試 2 次
     const maxRetries = 2
@@ -172,66 +173,77 @@ export default async function handler(req, res) {
         return Boolean(normalizedEmail) && Boolean(studentEmail) && studentEmail === normalizedEmail
       }
 
-      const { data: linkedByAuthId, error: linkedByAuthIdError } = await supabaseDb
-        .from('students')
-        .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id')
-        .eq('auth_user_id', user.id)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-
-      let linkedStudent = linkedByAuthId
-      if (linkedByAuthIdError) {
-        console.warn('⚠️ 讀取學生關聯失敗(auth_user_id):', linkedByAuthIdError.message)
-      }
-
-      if (linkedByAuthId && !hasValidStudentEmail(linkedByAuthId)) {
-        console.warn('⚠️ 學生關聯存在但 email 不匹配，忽略學生身份判定')
-      }
-
-      if (!linkedStudent && normalizedEmail) {
-        const { data: linkedByEmail, error: linkedByEmailError } = await supabaseDb
+      // 同時查詢 auth_user_id 和 email 匹配的所有學生記錄（支援多教室）
+      const [linkedByAuthIdResult, linkedByEmailResult] = await Promise.all([
+        supabaseDb
           .from('students')
-          .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id')
-          .eq('email', normalizedEmail)
-          .order('updated_at', { ascending: false })
-          .limit(1)
-          .maybeSingle()
+          .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
+          .eq('auth_user_id', user.id)
+          .order('updated_at', { ascending: false }),
+        normalizedEmail
+          ? supabaseDb
+              .from('students')
+              .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
+              .eq('email', normalizedEmail)
+              .order('updated_at', { ascending: false })
+          : Promise.resolve({ data: [], error: null })
+      ])
 
-        if (linkedByEmailError) {
-          console.warn('⚠️ 讀取學生關聯失敗(email):', linkedByEmailError.message)
-        } else if (linkedByEmail && hasValidStudentEmail(linkedByEmail)) {
-          linkedStudent = linkedByEmail
+      if (linkedByAuthIdResult.error) {
+        console.warn('⚠️ 讀取學生關聯失敗(auth_user_id):', linkedByAuthIdResult.error.message)
+      }
+      if (linkedByEmailResult.error) {
+        console.warn('⚠️ 讀取學生關聯失敗(email):', linkedByEmailResult.error.message)
+      }
 
-          if (linkedByEmail.auth_user_id !== user.id) {
-            const { error: bindError } = await supabaseDb
+      // 用 Map 根據 owner_id::id 去重合併
+      const mergedRows = new Map()
+      for (const row of linkedByAuthIdResult.data || []) {
+        if (!hasValidStudentEmail(row)) continue
+        mergedRows.set(`${row.owner_id}::${row.id}`, row)
+      }
+      for (const row of linkedByEmailResult.data || []) {
+        if (!hasValidStudentEmail(row)) continue
+        mergedRows.set(`${row.owner_id}::${row.id}`, row)
+      }
+
+      const linkedStudents = Array.from(mergedRows.values())
+        .sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime())
+
+      // 批次綁定 auth_user_id（所有缺少綁定的記錄）
+      const bindTargets = linkedStudents.filter((row) => row.auth_user_id !== user.id)
+      if (bindTargets.length) {
+        const nowIso = new Date().toISOString()
+        const bindResults = await Promise.all(
+          bindTargets.map((row) =>
+            supabaseDb
               .from('students')
               .update({
                 auth_user_id: user.id,
-                updated_at: new Date().toISOString()
+                updated_at: nowIso
               })
-              .eq('id', linkedByEmail.id)
-              .eq('owner_id', linkedByEmail.owner_id)
-
-            if (bindError) {
-              console.warn('⚠️ 學生 email 綁定 auth_user_id 失敗:', bindError.message)
-            }
-          }
-        } else if (linkedByEmail) {
-          console.warn('⚠️ 學生 email 關聯資料不完整，忽略學生身份判定')
+              .eq('id', row.id)
+              .eq('owner_id', row.owner_id)
+          )
+        )
+        const bindError = bindResults.find((r) => r.error)
+        if (bindError?.error) {
+          console.warn('⚠️ 學生 email 綁定 auth_user_id 失敗:', bindError.error.message)
         }
       }
 
-      if (linkedStudent) {
-        studentContext = {
-          id: linkedStudent.id,
-          classroomId: linkedStudent.classroom_id,
-          seatNumber: linkedStudent.seat_number,
-          name: linkedStudent.name,
-          ownerId: linkedStudent.owner_id,
-          email: linkedStudent.email ?? null
-        }
-      }
+      // 建立 studentContexts 陣列
+      studentContexts = linkedStudents.map((s) => ({
+        id: s.id,
+        classroomId: s.classroom_id,
+        seatNumber: s.seat_number,
+        name: s.name,
+        ownerId: s.owner_id,
+        email: s.email ?? null
+      }))
+
+      // studentContext = 第一筆（向後相容）
+      studentContext = studentContexts[0] || null
     } catch (studentResolveError) {
       console.warn('⚠️ 讀取學生關聯例外:', studentResolveError)
     }
@@ -285,6 +297,7 @@ export default async function handler(req, res) {
             ? profile.ink_balance
             : null,
         student: studentContext ?? undefined,
+        students: studentContexts.length ? studentContexts : undefined,
         campus1Binding: campus1Binding ?? undefined
       },
       // 除錯資訊：讓前端知道是否從資料庫載入成功

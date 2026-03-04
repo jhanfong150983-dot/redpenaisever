@@ -4157,36 +4157,62 @@ async function handleStudentCorrections(req, res) {
 
   const supabaseDb = getSupabaseAdmin()
   try {
-    const studentContext = await resolveStudentContextByAuthUser(
+    const studentContexts = await resolveStudentContextsByAuthUser(
       supabaseDb,
       user.id,
       user.email
     )
-    if (!studentContext) {
+    if (!studentContexts.length) {
       res.status(403).json({ error: 'Student account is not linked' })
       return
     }
 
-    let query = supabaseDb
-      .from('correction_question_items')
-      .select(
-        'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, accessor_result, status, updated_at'
-      )
-      .eq('owner_id', studentContext.ownerId)
-      .eq('student_id', studentContext.id)
-      .eq('status', 'open')
-      .order('attempt_no', { ascending: false })
+    // 如果有指定 classroomKey，找到對應的 context；否則查詢所有 contexts
+    const requestedKey =
+      typeof req.query?.classroomKey === 'string'
+        ? req.query.classroomKey.trim()
+        : ''
 
-    if (assignmentId) {
-      query = query.eq('assignment_id', assignmentId)
+    const targetContexts = requestedKey
+      ? studentContexts.filter(
+          (ctx) => buildStudentClassroomKey(ctx) === requestedKey
+        )
+      : studentContexts
+
+    if (requestedKey && !targetContexts.length) {
+      res.status(403).json({ error: 'Student is not in the specified classroom' })
+      return
     }
 
-    const { data, error } = await query
-    if (error) throw new Error(error.message)
+    // 查詢所有匹配 context 的訂正題目
+    const allItems = []
+    for (const ctx of targetContexts) {
+      let query = supabaseDb
+        .from('correction_question_items')
+        .select(
+          'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, accessor_result, status, updated_at'
+        )
+        .eq('owner_id', ctx.ownerId)
+        .eq('student_id', ctx.id)
+        .eq('status', 'open')
+        .order('attempt_no', { ascending: false })
+
+      if (assignmentId) {
+        query = query.eq('assignment_id', assignmentId)
+      }
+
+      const { data, error } = await query
+      if (error) throw new Error(error.message)
+
+      for (const item of data || []) {
+        allItems.push({ ...item, _classroomKey: buildStudentClassroomKey(ctx), _studentId: ctx.id })
+      }
+    }
 
     res.status(200).json({
-      studentId: studentContext.id,
-      items: (data || []).map((item) =>
+      studentId: targetContexts[0]?.id ?? studentContexts[0].id,
+      classroomKey: requestedKey || buildStudentClassroomKey(studentContexts[0]),
+      items: allItems.map((item) =>
         {
           const accessor = item.accessor_result && typeof item.accessor_result === 'object'
             ? item.accessor_result
@@ -4218,7 +4244,8 @@ async function handleStudentCorrections(req, res) {
             questionBbox: normalizeBbox(accessor?.question_bbox),
             answerBbox: normalizeBbox(accessor?.answer_bbox),
             status: item.status,
-            updatedAt: toMillis(item.updated_at) ?? undefined
+            updatedAt: toMillis(item.updated_at) ?? undefined,
+            classroomKey: item._classroomKey || undefined
           })
         }
       )
