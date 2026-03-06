@@ -354,6 +354,7 @@ async function handlePhase1(req, res) {
 
   // 學生不需要 OAuth Phase 2（Jasmine API 權限），直接導向前端
   if (isStudent) {
+    console.log('[1campus Phase1] Student → skip OAuth, redirect to frontend')
     res.writeHead(302, {
       Location: `${frontendUrl}?sso_provider=campus1`
     })
@@ -362,13 +363,17 @@ async function handlePhase1(req, res) {
   }
 
   const clientId = getEnvValue('CAMPUS1_CLIENT_ID')
+  console.log('[1campus Phase1] clientId exists?', !!clientId, 'clientId length:', clientId?.length, 'dsns:', dsns)
   if (clientId) {
     // Redirect 到 Phase 2 OAuth 啟動（直接使用 __step 參數，不需獨立檔案）
     const oauthParams = new URLSearchParams({ __step: 'oauth', dsns })
+    const phase2Url = `/api/auth/1campus?${oauthParams.toString()}`
+    console.log('[1campus Phase1] → Phase 2 redirect:', phase2Url)
     res.writeHead(302, {
-      Location: `/api/auth/1campus?${oauthParams.toString()}`
+      Location: phase2Url
     })
   } else {
+    console.log('[1campus Phase1] → No CLIENT_ID, skip OAuth, redirect to frontend')
     res.writeHead(302, {
       Location: `${frontendUrl}?sso_provider=campus1`
     })
