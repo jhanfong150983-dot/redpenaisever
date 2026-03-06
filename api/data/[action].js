@@ -7,8 +7,8 @@ import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import {
   isValidDsns,
   getJasmineAccessToken,
-  fetchCampus1Classes,
-  fetchCampus1Students
+  fetchCampus1Courses,
+  fetchCampus1CourseStudents
 } from '../../server/_1campus.js'
 
 const TAG_QUIET_MINUTES = 5
@@ -4496,23 +4496,54 @@ async function handleCampus1ClassroomSync(req, res) {
     return
   }
 
-  // 取得班級列表
-  let classes
+  // 使用 getCourseStudent 一次取得班級 + 學生 + email
+  let courseStudents
   try {
-    classes = await fetchCampus1Classes(dsns, effectiveTeacherID, accessToken)
+    courseStudents = await fetchCampus1CourseStudents(dsns, effectiveTeacherID, accessToken)
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
-    console.error('[1campus sync] fetchCampus1Classes failed:', errMsg, '(effectiveTeacherID:', effectiveTeacherID, ')')
+    console.error('[1campus sync] fetchCampus1CourseStudents failed:', errMsg, '(effectiveTeacherID:', effectiveTeacherID, ')')
     res.status(502).json({
-      error: '取得 1Campus 班級失敗',
-      debug: { step: 'fetchCampus1Classes', detail: errMsg, effectiveTeacherID, dsns, tokenLength: accessToken?.length }
+      error: '取得 1Campus 課程學生失敗',
+      debug: { step: 'fetchCampus1CourseStudents', detail: errMsg, effectiveTeacherID, dsns, tokenLength: accessToken?.length }
     })
     return
   }
 
-  console.log('[1campus sync] fetchCampus1Classes returned', classes.length, 'classes')
+  console.log('[1campus sync] fetchCampus1CourseStudents returned', courseStudents.length, 'courses')
 
-  if (!classes.length) {
+  // 依班級分組（同一個 classID 可能出現在多個 course 中）
+  const classByID = {}
+  for (const course of courseStudents) {
+    const classInfo = course.class || {}
+    const classID = String(classInfo.classID || course.courseID || '').trim()
+    if (!classID) continue
+
+    if (!classByID[classID]) {
+      classByID[classID] = {
+        classID,
+        className: String(classInfo.className || course.courseName || `班級 ${classID}`).trim(),
+        gradeYear: classInfo.gradeYear ?? null,
+        students: []
+      }
+    }
+
+    const students = Array.isArray(course.student) ? course.student : []
+    for (const s of students) {
+      // 避免重複學生（同一個 classID 下可能來自多個 course）
+      const existing = classByID[classID].students.find(
+        (ex) => ex.seatNo === s.seatNo && ex.studentName === s.studentName
+      )
+      if (!existing) {
+        classByID[classID].students.push(s)
+      }
+    }
+  }
+
+  const groupedClasses = Object.values(classByID)
+  console.log('[1campus sync] grouped into', groupedClasses.length, 'unique classes')
+
+  if (!groupedClasses.length) {
     res.status(200).json({ success: true, synced: 0, total: 0, classrooms: [] })
     return
   }
@@ -4520,9 +4551,9 @@ async function handleCampus1ClassroomSync(req, res) {
   const results = []
   const nowIso = new Date().toISOString()
 
-  for (const cls of classes) {
-    const providerClassId = String(cls.classID)
-    const className = String(cls.className || `班級 ${cls.classID}`).trim()
+  for (const cls of groupedClasses) {
+    const providerClassId = cls.classID
+    const className = cls.className
 
     try {
       // 查找現有的同步記錄
@@ -4538,7 +4569,6 @@ async function handleCampus1ClassroomSync(req, res) {
       let classroomId
 
       if (syncRecord?.classroom_id) {
-        // 已有對應班級：複用，更新班級名稱
         classroomId = syncRecord.classroom_id
         await supabaseAdmin
           .from('classrooms')
@@ -4546,7 +4576,6 @@ async function handleCampus1ClassroomSync(req, res) {
           .eq('id', classroomId)
           .eq('owner_id', user.id)
       } else {
-        // 建立新班級
         const { data: newClassroom, error: classroomError } =
           await supabaseAdmin
             .from('classrooms')
@@ -4560,20 +4589,18 @@ async function handleCampus1ClassroomSync(req, res) {
         classroomId = newClassroom.id
       }
 
-      // 取得學生
-      const students = await fetchCampus1Students(dsns, providerClassId, accessToken)
-
-      // 轉換格式（seatNo → seat_number，studentName → name，mail → email，studentID → provider_student_id）
-      const normalizedStudents = students
+      // 轉換學生格式（getCourseStudent 回傳 seatNo, studentName, studentNumber, studentAcc, email）
+      const normalizedStudents = cls.students
         .map((s) => ({
           seat_number: Number(s.seatNo) || 0,
           name: String(s.studentName || '').trim(),
-          email: typeof s.mail === 'string' && s.mail.trim() ? s.mail.trim() : null,
-          provider_student_id: s.studentID != null && String(s.studentID).trim() ? String(s.studentID).trim() : null
+          email: typeof s.email === 'string' && s.email.trim() ? s.email.trim() : null,
+          provider_student_id: s.studentID != null && String(s.studentID).trim() ? String(s.studentID).trim() : null,
+          student_number: s.studentNumber != null ? String(s.studentNumber).trim() : null
         }))
         .filter((s) => s.seat_number > 0 && s.name)
 
-      // 批次匯入學生（複用現有 RPC，只傳 seat_number + name）
+      // 批次匯入學生
       let studentCount = 0
       if (normalizedStudents.length > 0) {
         const { error: rpcError } = await supabaseAdmin.rpc(
@@ -4640,7 +4667,6 @@ async function handleCampus1ClassroomSync(req, res) {
     } catch (err) {
       const errMessage = err instanceof Error ? err.message : String(err)
 
-      // 嘗試更新同步記錄為 error 狀態
       try {
         const { data: existingSyncRecord } = await supabaseAdmin
           .from('campus_classroom_sync')
@@ -4750,11 +4776,11 @@ async function handleCampus1Debug(req, res) {
       return
     }
 
-    // Step 3: 直接呼叫 Jasmine getClass 並回傳原始回應
+    // Step 3: 呼叫 getCourseStudent 取得班級 + 學生 + email
     const jasmineBase = process.env.CAMPUS1_JASMINE_API_BASE || 'https://devapi.1campus.net/api/jasmine'
-    const getClassUrl = `${jasmineBase}/${dsns}/getClass?teacherID=${encodeURIComponent(teacherID)}`
+    const getCourseStudentUrl = `${jasmineBase}/${dsns}/getCourseStudent?teacherID=${encodeURIComponent(teacherID)}`
     try {
-      const rawResp = await fetch(getClassUrl, {
+      const rawResp = await fetch(getCourseStudentUrl, {
         headers: { Authorization: `Bearer ${accessToken}` },
         signal: AbortSignal.timeout(15000)
       })
@@ -4762,42 +4788,58 @@ async function handleCampus1Debug(req, res) {
       let rawJson = null
       try { rawJson = JSON.parse(rawText) } catch { /* not JSON */ }
 
-      const classList = rawJson?.class ?? rawJson?.data?.class ?? []
-      const classes = Array.isArray(classList) ? classList : []
-      result.steps.push({
-        step: 'getClass',
-        ok: rawResp.ok,
-        httpStatus: rawResp.status,
-        url: getClassUrl,
-        classCount: classes.length,
-        classes: classes.slice(0, 5).map((c) => ({ classID: c.classID, className: c.className, gradeYear: c.gradeYear })),
-        rawKeys: rawJson ? Object.keys(rawJson) : null,
-        rawDataKeys: rawJson?.data ? Object.keys(rawJson.data) : null,
-        rawSnippet: rawText.slice(0, 800)
-      })
+      const courses = rawJson?.course ?? rawJson?.data?.course ?? []
+      const courseList = Array.isArray(courses) ? courses : []
 
-      // Step 4: 如果有班級，測試第一個班級的學生列表
-      if (classes.length > 0) {
-        try {
-          const students = await fetchCampus1Students(dsns, classes[0].classID, accessToken)
-          result.steps.push({
-            step: 'getClassStudent',
-            ok: true,
-            classID: classes[0].classID,
-            studentCount: students.length,
-            sample: students.slice(0, 3).map((s) => ({
-              studentID: s.studentID,
-              studentName: s.studentName,
-              seatNo: s.seatNo,
-              mail: s.mail || null
-            }))
-          })
-        } catch (err) {
-          result.steps.push({ step: 'getClassStudent', ok: false, error: err?.message })
+      // 依班級分組
+      const classByID = {}
+      for (const course of courseList) {
+        const classInfo = course.class || {}
+        const classID = String(classInfo.classID || course.courseID || '')
+        if (!classID) continue
+        if (!classByID[classID]) {
+          classByID[classID] = {
+            classID,
+            className: classInfo.className || course.courseName || '',
+            gradeYear: classInfo.gradeYear ?? null,
+            students: []
+          }
+        }
+        const students = Array.isArray(course.student) ? course.student : []
+        for (const s of students) {
+          const exists = classByID[classID].students.find(
+            (ex) => ex.seatNo === s.seatNo && ex.studentName === s.studentName
+          )
+          if (!exists) classByID[classID].students.push(s)
         }
       }
+
+      const groupedClasses = Object.values(classByID)
+
+      result.steps.push({
+        step: 'getCourseStudent',
+        ok: rawResp.ok,
+        httpStatus: rawResp.status,
+        url: getCourseStudentUrl,
+        courseCount: courseList.length,
+        uniqueClassCount: groupedClasses.length,
+        classes: groupedClasses.slice(0, 5).map((c) => ({
+          classID: c.classID,
+          className: c.className,
+          gradeYear: c.gradeYear,
+          studentCount: c.students.length,
+          sampleStudents: c.students.slice(0, 3).map((s) => ({
+            seatNo: s.seatNo,
+            studentName: s.studentName,
+            studentNumber: s.studentNumber,
+            email: s.email || null
+          }))
+        })),
+        rawKeys: rawJson ? Object.keys(rawJson) : null,
+        rawSnippet: rawText.slice(0, 1200)
+      })
     } catch (err) {
-      result.steps.push({ step: 'getClass', ok: false, error: err?.message, url: getClassUrl })
+      result.steps.push({ step: 'getCourseStudent', ok: false, error: err?.message, url: getCourseStudentUrl })
     }
 
     res.status(200).json(result)

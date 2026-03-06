@@ -267,7 +267,7 @@ export async function getJasmineAccessToken() {
     grant_type: 'client_credentials',
     client_id: clientId,
     client_secret: clientSecret,
-    scope: 'jasmine'
+    scope: 'jasmine jasmine.contact'
   })
 
   const response = await fetch(TOKEN_URL, {
@@ -299,73 +299,70 @@ export async function getJasmineAccessToken() {
 // ============================================================
 
 /**
- * 取得老師的班級列表
+ * 取得老師的課程列表（含班級資訊）
+ * 使用 getCourse API，回傳結構：{ course: [{ courseID, courseName, class: { classID, className, gradeYear, teacher }, teacher: [...] }] }
  * @param {string} dsns - 學校網域
  * @param {string|number} teacherID - 老師 ID
- * @param {string} accessToken - OAuth access token
- * @returns {Promise<Array<{ classID, className, gradeYear }>>}
+ * @param {string} accessToken - Jasmine access token
+ * @returns {Promise<Array>} course 陣列
  */
-export async function fetchCampus1Classes(dsns, teacherID, accessToken) {
+export async function fetchCampus1Courses(dsns, teacherID, accessToken) {
   const base = getJasmineApiBase()
-  const url = `${base}/${dsns}/getClass?teacherID=${encodeURIComponent(String(teacherID))}`
+  const url = `${base}/${dsns}/getCourse?teacherID=${encodeURIComponent(String(teacherID))}`
 
-  console.log('[1campus] fetchCampus1Classes URL:', url)
+  console.log('[1campus] fetchCampus1Courses URL:', url)
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
   })
 
-  console.log('[1campus] fetchCampus1Classes status:', response.status)
+  console.log('[1campus] fetchCampus1Courses status:', response.status)
 
-  // 404 = 該老師無班級資料，視為空陣列
-  if (response.status === 404) {
-    return []
-  }
+  if (response.status === 404) return []
 
   if (!response.ok) {
     const text = await response.text().catch(() => '')
-    console.error('[1campus] fetchCampus1Classes error body:', text.slice(0, 400))
-    throw new Error(`Jasmine getClass failed ${response.status}: ${text.slice(0, 200)}`)
+    console.error('[1campus] fetchCampus1Courses error body:', text.slice(0, 400))
+    throw new Error(`Jasmine getCourse failed ${response.status}: ${text.slice(0, 200)}`)
   }
 
   const json = await response.json()
-  console.log('[1campus] fetchCampus1Classes raw json keys:', Object.keys(json || {}))
-  // API 回傳 {"class": [...]} — 頂層，不在 data 下
-  const classes = json?.class ?? json?.data?.class ?? []
-  return Array.isArray(classes) ? classes : []
+  console.log('[1campus] fetchCampus1Courses raw json keys:', Object.keys(json || {}))
+  const courses = json?.course ?? json?.data?.course ?? []
+  return Array.isArray(courses) ? courses : []
 }
 
 /**
- * 取得班級的學生列表
+ * 取得老師課程的學生列表（含 email）
+ * 使用 getCourseStudent API，回傳結構：
+ * { course: [{ courseID, class: { classID, className }, student: [{ seatNo, studentName, studentNumber, studentAcc, email }] }] }
  * @param {string} dsns - 學校網域
- * @param {string|number} classID - 班級 ID
- * @param {string} accessToken - OAuth access token
- * @returns {Promise<Array<{ studentID, studentName, seatNo, studentNumber }>>}
+ * @param {string|number} teacherID - 老師 ID
+ * @param {string} accessToken - Jasmine access token（需 jasmine.contact scope 才有 email）
+ * @returns {Promise<Array>} course 陣列（每個 course 含 student[]）
  */
-export async function fetchCampus1Students(dsns, classID, accessToken) {
+export async function fetchCampus1CourseStudents(dsns, teacherID, accessToken) {
   const base = getJasmineApiBase()
-  const url = `${base}/${dsns}/getClassStudent?classID=${encodeURIComponent(String(classID))}`
+  const url = `${base}/${dsns}/getCourseStudent?teacherID=${encodeURIComponent(String(teacherID))}`
 
+  console.log('[1campus] fetchCampus1CourseStudents URL:', url)
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
   })
 
-  // 404 = 該班級無學生資料，視為空陣列
-  if (response.status === 404) {
-    console.log('[1campus] getClassStudent 404（無學生資料）dsns=', dsns, 'classID=', classID)
-    return []
-  }
+  console.log('[1campus] fetchCampus1CourseStudents status:', response.status)
+
+  if (response.status === 404) return []
 
   if (!response.ok) {
     const text = await response.text().catch(() => '')
-    throw new Error(`Jasmine getClassStudent failed ${response.status}: ${text.slice(0, 200)}`)
+    console.error('[1campus] fetchCampus1CourseStudents error body:', text.slice(0, 400))
+    throw new Error(`Jasmine getCourseStudent failed ${response.status}: ${text.slice(0, 200)}`)
   }
 
   const json = await response.json()
-  console.log('[1campus] fetchCampus1Students raw json keys:', Object.keys(json || {}))
-  // API 回傳頂層結構，嘗試多種路徑
-  const classList = json?.class ?? json?.data?.class ?? []
-  const firstClass = Array.isArray(classList) ? classList[0] : null
-  return firstClass?.student ?? json?.student ?? []
+  console.log('[1campus] fetchCampus1CourseStudents raw json keys:', Object.keys(json || {}))
+  const courses = json?.course ?? json?.data?.course ?? []
+  return Array.isArray(courses) ? courses : []
 }
