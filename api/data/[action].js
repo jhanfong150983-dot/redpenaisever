@@ -4590,14 +4590,20 @@ async function handleCampus1ClassroomSync(req, res) {
       }
 
       // 轉換學生格式（getCourseStudent 回傳 seatNo, studentName, studentNumber, studentAcc, email）
+      // email 可能在 email 或 studentAcc 欄位
       const normalizedStudents = cls.students
-        .map((s) => ({
-          seat_number: Number(s.seatNo) || 0,
-          name: String(s.studentName || '').trim(),
-          email: typeof s.email === 'string' && s.email.trim() ? s.email.trim() : null,
-          provider_student_id: s.studentID != null && String(s.studentID).trim() ? String(s.studentID).trim() : null,
-          student_number: s.studentNumber != null ? String(s.studentNumber).trim() : null
-        }))
+        .map((s) => {
+          const rawEmail = (typeof s.email === 'string' && s.email.trim()) ? s.email.trim()
+            : (typeof s.studentAcc === 'string' && s.studentAcc.trim()) ? s.studentAcc.trim()
+            : null
+          return {
+            seat_number: Number(s.seatNo) || 0,
+            name: String(s.studentName || '').trim(),
+            email: rawEmail,
+            provider_student_id: s.studentID != null && String(s.studentID).trim() ? String(s.studentID).trim() : null,
+            student_number: s.studentNumber != null ? String(s.studentNumber).trim() : null
+          }
+        })
         .filter((s) => s.seat_number > 0 && s.name)
 
       // 批次匯入學生
@@ -4832,7 +4838,9 @@ async function handleCampus1Debug(req, res) {
             seatNo: s.seatNo,
             studentName: s.studentName,
             studentNumber: s.studentNumber,
-            email: s.email || null
+            studentID: s.studentID || null,
+            studentAcc: s.studentAcc || null,
+            email: s.email || s.studentAcc || null
           }))
         })),
         rawKeys: rawJson ? Object.keys(rawJson) : null,
