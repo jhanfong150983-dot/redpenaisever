@@ -239,6 +239,62 @@ export async function getCampus1AccessToken(supabaseAdmin, userId) {
 }
 
 // ============================================================
+// Jasmine API Token（client_credentials 模式）
+// ============================================================
+
+// 記憶體快取（serverless 函數生命週期內有效）
+let _jasmineTokenCache = { token: '', expiresAt: 0 }
+
+/**
+ * 用 client_credentials 取得 Jasmine API 專用 access token
+ * 這是伺服器對伺服器的 token，不需要使用者授權
+ * @returns {Promise<string>} 有效的 access_token
+ */
+export async function getJasmineAccessToken() {
+  // 快取仍有效（60 秒緩衝）→ 直接回傳
+  if (_jasmineTokenCache.token && Date.now() < _jasmineTokenCache.expiresAt - 60_000) {
+    return _jasmineTokenCache.token
+  }
+
+  const clientId = getEnvValue('CAMPUS1_CLIENT_ID')
+  const clientSecret = getEnvValue('CAMPUS1_CLIENT_SECRET')
+
+  if (!clientId || !clientSecret) {
+    throw new Error('1Campus OAuth credentials not configured (CAMPUS1_CLIENT_ID / CAMPUS1_CLIENT_SECRET)')
+  }
+
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: clientId,
+    client_secret: clientSecret,
+    scope: 'jasmine'
+  })
+
+  const response = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  })
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`Jasmine client_credentials token failed ${response.status}: ${text.slice(0, 200)}`)
+  }
+
+  const tokenData = await response.json()
+  const expiresIn = tokenData.expires_in || 3600
+
+  _jasmineTokenCache = {
+    token: tokenData.access_token,
+    expiresAt: Date.now() + expiresIn * 1000
+  }
+
+  console.log('[1campus] Got Jasmine client_credentials token, expires_in:', expiresIn)
+  return tokenData.access_token
+}
+
+// ============================================================
 // Phase 2：Jasmine API（班級 / 學生資料）
 // ============================================================
 

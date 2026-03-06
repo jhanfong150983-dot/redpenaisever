@@ -6,7 +6,7 @@ import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import {
   isValidDsns,
-  getCampus1AccessToken,
+  getJasmineAccessToken,
   fetchCampus1Classes,
   fetchCampus1Students
 } from '../../server/_1campus.js'
@@ -4481,17 +4481,17 @@ async function handleCampus1ClassroomSync(req, res) {
     return
   }
 
-  // 取得有效的 OAuth access token
+  // 取得 Jasmine API 專用 token（client_credentials 模式，不依賴用戶 OAuth）
   let accessToken
   try {
-    accessToken = await getCampus1AccessToken(supabaseAdmin, user.id)
-    console.log('[1campus sync] got access token, length:', accessToken?.length)
+    accessToken = await getJasmineAccessToken()
+    console.log('[1campus sync] got Jasmine token, length:', accessToken?.length)
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
-    console.error('[1campus sync] getCampus1AccessToken failed:', errMsg)
-    res.status(403).json({
-      error: errMsg || '無法取得 1Campus 授權',
-      debug: { step: 'getCampus1AccessToken', effectiveTeacherID, dsns }
+    console.error('[1campus sync] getJasmineAccessToken failed:', errMsg)
+    res.status(502).json({
+      error: errMsg || '無法取得 Jasmine API 授權',
+      debug: { step: 'getJasmineAccessToken', effectiveTeacherID, dsns }
     })
     return
   }
@@ -4739,19 +4739,13 @@ async function handleCampus1Debug(req, res) {
     const dsns = meta.dsns
     const teacherID = String(meta.teacherID || identity.provider_account || '').trim()
 
-    if (!meta.oauth_access_token) {
-      result.steps.push({ step: 'token', ok: false, error: '沒有 OAuth token（未完成 Phase 2）' })
-      res.status(200).json(result)
-      return
-    }
-
-    // Step 2: 取得 access token（含自動刷新）
+    // Step 2: 取得 Jasmine API token（client_credentials 模式）
     let accessToken
     try {
-      accessToken = await getCampus1AccessToken(supabaseAdmin, user.id)
-      result.steps.push({ step: 'token', ok: true, tokenLength: accessToken?.length })
+      accessToken = await getJasmineAccessToken()
+      result.steps.push({ step: 'jasmine_token', ok: true, tokenLength: accessToken?.length, mode: 'client_credentials' })
     } catch (err) {
-      result.steps.push({ step: 'token', ok: false, error: err?.message })
+      result.steps.push({ step: 'jasmine_token', ok: false, error: err?.message })
       res.status(200).json(result)
       return
     }
