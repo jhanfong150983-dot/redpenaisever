@@ -4487,9 +4487,11 @@ async function handleCampus1ClassroomSync(req, res) {
     accessToken = await getCampus1AccessToken(supabaseAdmin, user.id)
     console.log('[1campus sync] got access token, length:', accessToken?.length)
   } catch (err) {
-    console.error('[1campus sync] getCampus1AccessToken failed:', err?.message)
+    const errMsg = err instanceof Error ? err.message : String(err)
+    console.error('[1campus sync] getCampus1AccessToken failed:', errMsg)
     res.status(403).json({
-      error: err instanceof Error ? err.message : '無法取得 1Campus 授權'
+      error: errMsg || '無法取得 1Campus 授權',
+      debug: { step: 'getCampus1AccessToken', effectiveTeacherID, dsns }
     })
     return
   }
@@ -4499,8 +4501,12 @@ async function handleCampus1ClassroomSync(req, res) {
   try {
     classes = await fetchCampus1Classes(dsns, effectiveTeacherID, accessToken)
   } catch (err) {
-    console.error('[1campus sync] fetchCampus1Classes failed:', err?.message, '(effectiveTeacherID:', effectiveTeacherID, ')')
-    res.status(502).json({ error: '取得 1Campus 班級失敗' })
+    const errMsg = err instanceof Error ? err.message : String(err)
+    console.error('[1campus sync] fetchCampus1Classes failed:', errMsg, '(effectiveTeacherID:', effectiveTeacherID, ')')
+    res.status(502).json({
+      error: '取得 1Campus 班級失敗',
+      debug: { step: 'fetchCampus1Classes', detail: errMsg, effectiveTeacherID, dsns, tokenLength: accessToken?.length }
+    })
     return
   }
 
@@ -4683,6 +4689,113 @@ async function handleCampus1ClassroomSync(req, res) {
   })
 }
 
+// ============================================================
+// 1Campus Debug（暫時診斷用，確認 Jasmine API 可用後可移除）
+// ============================================================
+async function handleCampus1Debug(req, res) {
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const supabaseAdmin = getSupabaseAdmin()
+  const result = { userId: user.id, steps: [] }
+
+  // Step 1: 查 external_identities
+  try {
+    const { data: identity, error } = await supabaseAdmin
+      .from('external_identities')
+      .select('provider_meta, provider_account')
+      .eq('user_id', user.id)
+      .eq('provider', 'campus1')
+      .maybeSingle()
+
+    if (error) {
+      result.steps.push({ step: 'identity', ok: false, error: error.message })
+      res.status(200).json(result)
+      return
+    }
+    if (!identity) {
+      result.steps.push({ step: 'identity', ok: false, error: '找不到 campus1 身份記錄' })
+      res.status(200).json(result)
+      return
+    }
+
+    const meta = identity.provider_meta || {}
+    result.steps.push({
+      step: 'identity',
+      ok: true,
+      account: identity.provider_account,
+      teacherID: meta.teacherID || null,
+      studentID: meta.studentID || null,
+      roleType: meta.roleType || null,
+      dsns: meta.dsns || null,
+      hasOAuthToken: !!meta.oauth_access_token,
+      tokenExpiresAt: meta.oauth_token_expires_at || null,
+      hasRefreshToken: !!meta.oauth_refresh_token
+    })
+
+    const dsns = meta.dsns
+    const teacherID = String(meta.teacherID || identity.provider_account || '').trim()
+
+    if (!meta.oauth_access_token) {
+      result.steps.push({ step: 'token', ok: false, error: '沒有 OAuth token（未完成 Phase 2）' })
+      res.status(200).json(result)
+      return
+    }
+
+    // Step 2: 取得 access token（含自動刷新）
+    let accessToken
+    try {
+      accessToken = await getCampus1AccessToken(supabaseAdmin, user.id)
+      result.steps.push({ step: 'token', ok: true, tokenLength: accessToken?.length })
+    } catch (err) {
+      result.steps.push({ step: 'token', ok: false, error: err?.message })
+      res.status(200).json(result)
+      return
+    }
+
+    // Step 3: 測試 fetchCampus1Classes
+    try {
+      const classes = await fetchCampus1Classes(dsns, teacherID, accessToken)
+      result.steps.push({
+        step: 'getClass',
+        ok: true,
+        classCount: classes.length,
+        classes: classes.map((c) => ({ classID: c.classID, className: c.className, gradeYear: c.gradeYear }))
+      })
+
+      // Step 4: 如果有班級，測試第一個班級的學生列表
+      if (classes.length > 0) {
+        try {
+          const students = await fetchCampus1Students(dsns, classes[0].classID, accessToken)
+          result.steps.push({
+            step: 'getClassStudent',
+            ok: true,
+            classID: classes[0].classID,
+            studentCount: students.length,
+            sample: students.slice(0, 3).map((s) => ({
+              studentID: s.studentID,
+              studentName: s.studentName,
+              seatNo: s.seatNo,
+              mail: s.mail || null
+            }))
+          })
+        } catch (err) {
+          result.steps.push({ step: 'getClassStudent', ok: false, error: err?.message })
+        }
+      }
+    } catch (err) {
+      result.steps.push({ step: 'getClass', ok: false, error: err?.message })
+    }
+
+    res.status(200).json(result)
+  } catch (err) {
+    res.status(500).json({ error: err?.message, steps: result.steps })
+  }
+}
+
 export default async function handler(req, res) {
   if (handleCors(req, res)) {
     return
@@ -4738,6 +4851,10 @@ export default async function handler(req, res) {
   }
   if (action === '1campus-classroom-sync') {
     await handleCampus1ClassroomSync(req, res)
+    return
+  }
+  if (action === '1campus-debug') {
+    await handleCampus1Debug(req, res)
     return
   }
   res.status(404).json({ error: 'Not Found' })
