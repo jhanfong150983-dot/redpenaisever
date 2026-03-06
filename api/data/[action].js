@@ -4750,14 +4750,29 @@ async function handleCampus1Debug(req, res) {
       return
     }
 
-    // Step 3: 測試 fetchCampus1Classes
+    // Step 3: 直接呼叫 Jasmine getClass 並回傳原始回應
+    const jasmineBase = process.env.CAMPUS1_JASMINE_API_BASE || 'https://devapi.1campus.net/api/jasmine'
+    const getClassUrl = `${jasmineBase}/${dsns}/getClass?teacherID=${encodeURIComponent(teacherID)}`
     try {
-      const classes = await fetchCampus1Classes(dsns, teacherID, accessToken)
+      const rawResp = await fetch(getClassUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(15000)
+      })
+      const rawText = await rawResp.text()
+      let rawJson = null
+      try { rawJson = JSON.parse(rawText) } catch { /* not JSON */ }
+
+      const classes = Array.isArray(rawJson?.data?.class) ? rawJson.data.class : []
       result.steps.push({
         step: 'getClass',
-        ok: true,
+        ok: rawResp.ok,
+        httpStatus: rawResp.status,
+        url: getClassUrl,
         classCount: classes.length,
-        classes: classes.map((c) => ({ classID: c.classID, className: c.className, gradeYear: c.gradeYear }))
+        classes: classes.slice(0, 5).map((c) => ({ classID: c.classID, className: c.className, gradeYear: c.gradeYear })),
+        rawKeys: rawJson ? Object.keys(rawJson) : null,
+        rawDataKeys: rawJson?.data ? Object.keys(rawJson.data) : null,
+        rawSnippet: rawText.slice(0, 800)
       })
 
       // Step 4: 如果有班級，測試第一個班級的學生列表
@@ -4781,7 +4796,7 @@ async function handleCampus1Debug(req, res) {
         }
       }
     } catch (err) {
-      result.steps.push({ step: 'getClass', ok: false, error: err?.message })
+      result.steps.push({ step: 'getClass', ok: false, error: err?.message, url: getClassUrl })
     }
 
     res.status(200).json(result)
