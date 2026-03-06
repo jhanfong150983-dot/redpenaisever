@@ -4546,12 +4546,13 @@ async function handleCampus1ClassroomSync(req, res) {
       // 取得學生
       const students = await fetchCampus1Students(dsns, providerClassId, accessToken)
 
-      // 轉換格式（seatNo → seat_number，studentName → name，mail → email）
+      // 轉換格式（seatNo → seat_number，studentName → name，mail → email，studentID → provider_student_id）
       const normalizedStudents = students
         .map((s) => ({
           seat_number: Number(s.seatNo) || 0,
           name: String(s.studentName || '').trim(),
-          email: typeof s.mail === 'string' && s.mail.trim() ? s.mail.trim() : null
+          email: typeof s.mail === 'string' && s.mail.trim() ? s.mail.trim() : null,
+          provider_student_id: s.studentID != null && String(s.studentID).trim() ? String(s.studentID).trim() : null
         }))
         .filter((s) => s.seat_number > 0 && s.name)
 
@@ -4569,18 +4570,21 @@ async function handleCampus1ClassroomSync(req, res) {
         if (rpcError) throw new Error(`匯入學生失敗: ${rpcError.message}`)
         studentCount = normalizedStudents.length
 
-        // 若有 email（jasmine.contact scope 開通後），單獨更新
-        const studentsWithEmail = normalizedStudents.filter((s) => s.email)
-        if (studentsWithEmail.length > 0) {
-          for (const s of studentsWithEmail) {
+        // 更新 email 和 provider_student_id（upsert_students_batch 不處理這兩個欄位）
+        const studentsNeedUpdate = normalizedStudents.filter((s) => s.email || s.provider_student_id)
+        if (studentsNeedUpdate.length > 0) {
+          for (const s of studentsNeedUpdate) {
+            const updatePayload = { updated_at: nowIso }
+            if (s.email) updatePayload.email = s.email
+            if (s.provider_student_id) updatePayload.provider_student_id = s.provider_student_id
             await supabaseAdmin
               .from('students')
-              .update({ email: s.email, updated_at: nowIso })
+              .update(updatePayload)
               .eq('owner_id', user.id)
               .eq('classroom_id', classroomId)
               .eq('seat_number', s.seat_number)
           }
-          console.log('[1campus sync] updated email for', studentsWithEmail.length, 'students')
+          console.log('[1campus sync] updated extra fields for', studentsNeedUpdate.length, 'students')
         }
       }
 

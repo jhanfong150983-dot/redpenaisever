@@ -198,21 +198,24 @@ async function handlePhase1(req, res) {
     return
   }
 
-  if (identity?.roleType !== 'teacher') {
+  if (identity?.roleType !== 'teacher' && identity?.roleType !== 'student') {
     ssoErrorRedirect(res, frontendUrl, 'unsupported_role')
     return
   }
 
+  const isStudent = identity.roleType === 'student'
   const account = String(identity.account || '').trim()
   if (!account) {
     ssoErrorRedirect(res, frontendUrl, 'identity_failed')
     return
   }
 
-  // teacherID 可能在頂層或嵌套於 teacher 物件中（依 1campus API 版本而異）
+  // teacherID / studentID 可能在頂層或嵌套物件中（依 1campus API 版本而異）
   const rawTeacherID = identity.teacherID ?? identity.teacher?.teacherID ?? null
   const teacherID = rawTeacherID != null && rawTeacherID !== '' ? String(rawTeacherID).trim() : ''
-  console.log('[1campus Phase1] identity fields:', { account, teacherID, roleType: identity.roleType, rawTeacherID })
+  const rawStudentID = identity.studentID ?? identity.student?.studentID ?? null
+  const studentID = rawStudentID != null && rawStudentID !== '' ? String(rawStudentID).trim() : ''
+  console.log('[1campus Phase1] identity fields:', { account, teacherID, studentID, roleType: identity.roleType })
   const displayName = buildCampus1DisplayName(identity)
   const virtualEmail = buildCampus1VirtualEmail(account, dsns)
   const supabaseAdmin = getSupabaseAdmin()
@@ -234,9 +237,10 @@ async function handlePhase1(req, res) {
       userId = existingIdentity.user_id
       const updatedMeta = {
         ...(existingIdentity.provider_meta || {}),
-        teacherID,
+        ...(isStudent ? { studentID } : { teacherID }),
         displayName,
         dsns,
+        roleType: identity.roleType,
         lastLoginAt: nowIso
       }
       await supabaseAdmin
@@ -272,7 +276,7 @@ async function handlePhase1(req, res) {
             name: displayName,
             role: 'user',
             permission_tier: 'basic',
-            ink_balance: 10,
+            ink_balance: isStudent ? 0 : 10,
             updated_at: nowIso
           })
 
@@ -281,7 +285,13 @@ async function handlePhase1(req, res) {
         }
       }
 
-      const meta = { teacherID, displayName, dsns, lastLoginAt: nowIso }
+      const meta = {
+        ...(isStudent ? { studentID } : { teacherID }),
+        displayName,
+        dsns,
+        roleType: identity.roleType,
+        lastLoginAt: nowIso
+      }
       const { error: insertError } = await supabaseAdmin
         .from('external_identities')
         .insert({
@@ -300,6 +310,36 @@ async function handlePhase1(req, res) {
     return
   }
 
+  // 學生：用 provider_student_id 綁定 auth_user_id
+  if (isStudent && studentID) {
+    try {
+      const { data: matchedStudents } = await supabaseAdmin
+        .from('students')
+        .select('id, owner_id, auth_user_id')
+        .eq('provider_student_id', studentID)
+
+      if (matchedStudents && matchedStudents.length > 0) {
+        const needsBind = matchedStudents.filter((s) => s.auth_user_id !== userId)
+        if (needsBind.length > 0) {
+          await Promise.all(
+            needsBind.map((s) =>
+              supabaseAdmin
+                .from('students')
+                .update({ auth_user_id: userId, updated_at: nowIso })
+                .eq('id', s.id)
+                .eq('owner_id', s.owner_id)
+            )
+          )
+          console.log(`[1campus SSO] Bound student auth_user_id for ${needsBind.length} records (studentID=${studentID})`)
+        }
+      } else {
+        console.log(`[1campus SSO] No student records found for provider_student_id=${studentID}`)
+      }
+    } catch (err) {
+      console.warn('[1campus SSO] Student binding failed (non-blocking):', err?.message)
+    }
+  }
+
   let session
   try {
     session = await createSessionForEmail(virtualEmail)
@@ -311,6 +351,15 @@ async function handlePhase1(req, res) {
   }
 
   setAuthCookies(res, session, isSecureRequest(req), req)
+
+  // 學生不需要 OAuth Phase 2（Jasmine API 權限），直接導向前端
+  if (isStudent) {
+    res.writeHead(302, {
+      Location: `${frontendUrl}?sso_provider=campus1`
+    })
+    res.end()
+    return
+  }
 
   const clientId = getEnvValue('CAMPUS1_CLIENT_ID')
   if (clientId) {
