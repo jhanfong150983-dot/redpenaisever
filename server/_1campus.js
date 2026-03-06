@@ -330,7 +330,9 @@ export async function fetchCampus1Classes(dsns, teacherID, accessToken) {
 
   const json = await response.json()
   console.log('[1campus] fetchCampus1Classes raw json keys:', Object.keys(json || {}))
-  return Array.isArray(json?.data?.class) ? json.data.class : []
+  // API 回傳 {"class": [...]} — 頂層，不在 data 下
+  const classes = json?.class ?? json?.data?.class ?? []
+  return Array.isArray(classes) ? classes : []
 }
 
 /**
@@ -361,6 +363,9 @@ export async function fetchCampus1Students(dsns, classID, accessToken) {
   }
 
   const json = await response.json()
-  // 回傳路徑：data.class[0].student[]
-  return json?.data?.class?.[0]?.student ?? []
+  console.log('[1campus] fetchCampus1Students raw json keys:', Object.keys(json || {}))
+  // API 回傳頂層結構，嘗試多種路徑
+  const classList = json?.class ?? json?.data?.class ?? []
+  const firstClass = Array.isArray(classList) ? classList[0] : null
+  return firstClass?.student ?? json?.student ?? []
 }

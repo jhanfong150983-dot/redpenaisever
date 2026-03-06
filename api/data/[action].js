@@ -4762,7 +4762,8 @@ async function handleCampus1Debug(req, res) {
       let rawJson = null
       try { rawJson = JSON.parse(rawText) } catch { /* not JSON */ }
 
-      const classes = Array.isArray(rawJson?.data?.class) ? rawJson.data.class : []
+      const classList = rawJson?.class ?? rawJson?.data?.class ?? []
+      const classes = Array.isArray(classList) ? classList : []
       result.steps.push({
         step: 'getClass',
         ok: rawResp.ok,
