@@ -4576,10 +4576,12 @@ async function handleCampus1ClassroomSync(req, res) {
           .eq('id', classroomId)
           .eq('owner_id', user.id)
       } else {
+        // 生成與前端相同格式的 ID（timestamp-random）
+        const generatedId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
         const { data: newClassroom, error: classroomError } =
           await supabaseAdmin
             .from('classrooms')
-            .insert({ owner_id: user.id, name: className, folder: '1Campus' })
+            .insert({ id: generatedId, owner_id: user.id, name: className, folder: '1Campus' })
             .select('id')
             .single()
 
