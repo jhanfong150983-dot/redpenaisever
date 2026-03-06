@@ -882,7 +882,7 @@ function buildStudentClassroomKey(context) {
 async function resolveStudentContextsByAuthUser(supabaseDb, authUserId, authEmail = '') {
   const normalizedEmail =
     typeof authEmail === 'string' ? authEmail.trim().toLowerCase() : ''
-  if (!normalizedEmail) return []
+  if (!authUserId && !normalizedEmail) return []
 
   const hasValidStudentEmail = (row) => {
     const studentEmail =
@@ -890,18 +890,28 @@ async function resolveStudentContextsByAuthUser(supabaseDb, authUserId, authEmai
     return Boolean(normalizedEmail) && Boolean(studentEmail) && studentEmail === normalizedEmail
   }
 
-  const [linkedByAuthIdResult, linkedByEmailResult] = await Promise.all([
+  // 查詢 1: 透過 auth_user_id 直接比對（包含 1Campus SSO 綁定的學生）
+  // 查詢 2: 透過 email 比對（一般系統登入的學生）
+  const queries = [
     supabaseDb
       .from('students')
       .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
       .eq('auth_user_id', authUserId)
-      .order('updated_at', { ascending: false }),
-    supabaseDb
-      .from('students')
-      .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
-      .eq('email', normalizedEmail)
       .order('updated_at', { ascending: false })
-  ])
+  ]
+  if (normalizedEmail) {
+    queries.push(
+      supabaseDb
+        .from('students')
+        .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
+        .eq('email', normalizedEmail)
+        .order('updated_at', { ascending: false })
+    )
+  }
+
+  const results = await Promise.all(queries)
+  const linkedByAuthIdResult = results[0]
+  const linkedByEmailResult = results[1] || { data: [], error: null }
 
   if (linkedByAuthIdResult.error) {
     throw new Error(linkedByAuthIdResult.error.message)
@@ -911,10 +921,11 @@ async function resolveStudentContextsByAuthUser(supabaseDb, authUserId, authEmai
   }
 
   const mergedRows = new Map()
+  // auth_user_id 比對的結果：不需要 email 驗證（1Campus SSO 綁定的學生可能沒有匹配的 email）
   for (const row of linkedByAuthIdResult.data || []) {
-    if (!hasValidStudentEmail(row)) continue
     mergedRows.set(`${row.owner_id}::${row.id}`, row)
   }
+  // email 比對的結果：需要 email 驗證
   for (const row of linkedByEmailResult.data || []) {
     if (!hasValidStudentEmail(row)) continue
     mergedRows.set(`${row.owner_id}::${row.id}`, row)

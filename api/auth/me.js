@@ -198,10 +198,11 @@ export default async function handler(req, res) {
 
       // 用 Map 根據 owner_id::id 去重合併
       const mergedRows = new Map()
+      // auth_user_id 匹配：不需 email 驗證（1Campus SSO 綁定的學生沒有匹配 email）
       for (const row of linkedByAuthIdResult.data || []) {
-        if (!hasValidStudentEmail(row)) continue
         mergedRows.set(`${row.owner_id}::${row.id}`, row)
       }
+      // email 匹配：需要 email 驗證
       for (const row of linkedByEmailResult.data || []) {
         if (!hasValidStudentEmail(row)) continue
         mergedRows.set(`${row.owner_id}::${row.id}`, row)
