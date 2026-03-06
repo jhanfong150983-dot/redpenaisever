@@ -342,7 +342,21 @@ async function handlePhase1(req, res) {
 
   let session
   try {
-    session = await createSessionForEmail(virtualEmail)
+    // 如果 userId（來自 external_identities）與 virtualEmail 的 Supabase 用戶不同
+    // （merge 後 identity.user_id → Google user），需要用真實 email 建立 session
+    let sessionEmail = virtualEmail
+    const { data: userProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('email')
+      .eq('id', userId)
+      .maybeSingle()
+
+    if (userProfile?.email && userProfile.email !== virtualEmail) {
+      sessionEmail = userProfile.email
+      console.log('[1campus SSO] Using merged profile email for session:', sessionEmail)
+    }
+
+    session = await createSessionForEmail(sessionEmail)
     if (!session?.access_token) throw new Error('Session 缺少 access_token')
   } catch (err) {
     console.error('[1campus SSO] Session creation failed:', err?.message)
@@ -546,14 +560,36 @@ async function handleOAuthCallback(req, res) {
     console.warn('[1campus OAuth callback] UserInfo failed (non-blocking):', err?.message)
   }
 
-  const { data: identityData, error: identityError } = await supabaseAdmin
-    .from('external_identities')
-    .select('provider_meta, provider_account')
-    .eq('user_id', campus1UserId)
-    .eq('provider', 'campus1')
-    .maybeSingle()
+  // 查找 identity：先用 user_id，fallback 用 dsns + provider（merge 後 user_id 可能已變）
+  let identityData = null
+  {
+    const { data, error } = await supabaseAdmin
+      .from('external_identities')
+      .select('provider_meta, provider_account, user_id')
+      .eq('user_id', campus1UserId)
+      .eq('provider', 'campus1')
+      .maybeSingle()
 
-  if (!identityError && identityData) {
+    if (!error && data) {
+      identityData = data
+    } else {
+      // fallback：merge 後 user_id 已改，用 dsns 找
+      console.log('[1campus OAuth callback] identity not found by user_id, trying dsns fallback')
+      const { data: fallback } = await supabaseAdmin
+        .from('external_identities')
+        .select('provider_meta, provider_account, user_id')
+        .eq('provider', 'campus1')
+        .eq('provider_dsns', dsns)
+        .maybeSingle()
+
+      if (fallback) {
+        identityData = fallback
+        console.log('[1campus OAuth callback] found identity via dsns, actual user_id:', fallback.user_id)
+      }
+    }
+  }
+
+  if (identityData) {
     const updatedMeta = {
       ...(identityData.provider_meta || {}),
       oauth_access_token: accessToken,
@@ -561,14 +597,20 @@ async function handleOAuthCallback(req, res) {
       oauth_token_expires_at: tokenExpiresAt,
       ...(realEmail ? { real_email: realEmail } : {})
     }
+    // 用 identity 實際的 user_id 更新（可能與 campus1UserId 不同）
     await supabaseAdmin
       .from('external_identities')
       .update({ provider_meta: updatedMeta, updated_at: new Date().toISOString() })
-      .eq('user_id', campus1UserId)
+      .eq('user_id', identityData.user_id)
       .eq('provider', 'campus1')
+
+    console.log('[1campus OAuth callback] saved OAuth tokens for user_id:', identityData.user_id)
+  } else {
+    console.error('[1campus OAuth callback] identity not found at all, tokens NOT saved!')
   }
 
-  let finalUserId = campus1UserId
+  // 使用 identity 的實際 user_id（merge 後可能與 campus1UserId 不同）
+  let finalUserId = identityData?.user_id || campus1UserId
 
   if (realEmail) {
     try {
@@ -576,7 +618,7 @@ async function handleOAuthCallback(req, res) {
         .from('profiles')
         .select('id, email')
         .eq('email', realEmail)
-        .neq('id', campus1UserId)
+        .neq('id', finalUserId)
         .maybeSingle()
 
       if (googleProfile) {
