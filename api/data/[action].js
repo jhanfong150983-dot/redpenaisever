@@ -4512,36 +4512,37 @@ async function handleCampus1ClassroomSync(req, res) {
 
   console.log('[1campus sync] fetchCampus1CourseStudents returned', courseStudents.length, 'courses')
 
-  // 依班級分組（同一個 classID 可能出現在多個 course 中）
-  const classByID = {}
+  // 依課程（courseID）分組，每個課程對應一個班級卡片
+  // 同一班級上多科（如五年四班國語、五年四班數學）會產生不同卡片，名稱加上科目
+  const classByCourseID = {}
   for (const course of courseStudents) {
     const classInfo = course.class || {}
-    const classID = String(classInfo.classID || course.courseID || '').trim()
-    if (!classID) continue
+    const courseID = String(course.courseID || '').trim()
+    const classID = String(classInfo.classID || '').trim()
+    const key = courseID || classID
+    if (!key) continue
 
-    if (!classByID[classID]) {
-      classByID[classID] = {
-        classID,
-        className: String(classInfo.className || course.courseName || `班級 ${classID}`).trim(),
-        gradeYear: classInfo.gradeYear ?? null,
-        students: []
-      }
+    const baseClassName = String(classInfo.className || '').trim()
+    const courseName = String(course.courseName || '').trim()
+    // 有科目名稱時：「五年四班(國語)」；否則直接用班級名稱
+    let displayName
+    if (baseClassName && courseName) {
+      displayName = `${baseClassName}(${courseName})`
+    } else {
+      displayName = baseClassName || courseName || `課程 ${key}`
     }
 
-    const students = Array.isArray(course.student) ? course.student : []
-    for (const s of students) {
-      // 避免重複學生（同一個 classID 下可能來自多個 course）
-      const existing = classByID[classID].students.find(
-        (ex) => ex.seatNo === s.seatNo && ex.studentName === s.studentName
-      )
-      if (!existing) {
-        classByID[classID].students.push(s)
-      }
+    classByCourseID[key] = {
+      courseID: key,
+      classID,
+      className: displayName,
+      gradeYear: classInfo.gradeYear ?? null,
+      students: Array.isArray(course.student) ? course.student : []
     }
   }
 
-  const groupedClasses = Object.values(classByID)
-  console.log('[1campus sync] grouped into', groupedClasses.length, 'unique classes')
+  const groupedClasses = Object.values(classByCourseID)
+  console.log('[1campus sync] grouped into', groupedClasses.length, 'courses (one classroom per course)')
 
   if (!groupedClasses.length) {
     res.status(200).json({ success: true, synced: 0, total: 0, classrooms: [] })
@@ -4552,7 +4553,7 @@ async function handleCampus1ClassroomSync(req, res) {
   const nowIso = new Date().toISOString()
 
   for (const cls of groupedClasses) {
-    const providerClassId = cls.classID
+    const providerClassId = cls.courseID
     const className = cls.className
 
     try {
