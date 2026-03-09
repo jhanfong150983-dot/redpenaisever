@@ -370,7 +370,7 @@ async function handlePhase1(req, res) {
   if (isStudent) {
     console.log('[1campus Phase1] Student → skip OAuth, redirect to frontend')
     res.writeHead(302, {
-      Location: `${frontendUrl}?sso_provider=campus1`
+      Location: `${frontendUrl}?sso_provider=campus1&entry=student`
     })
     res.end()
     return
