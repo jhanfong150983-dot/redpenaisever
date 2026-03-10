@@ -4524,13 +4524,9 @@ async function handleCampus1ClassroomSync(req, res) {
 
     const baseClassName = String(classInfo.className || '').trim()
     const courseName = String(course.courseName || '').trim()
-    // 有科目名稱時：「五年四班(國語)」；否則直接用班級名稱
-    let displayName
-    if (baseClassName && courseName) {
-      displayName = `${baseClassName}(${courseName})`
-    } else {
-      displayName = baseClassName || courseName || `課程 ${key}`
-    }
+    // 科目名稱通常已包含班級名稱（如「五年6班_智慧探究家：科技創新任務課程」）
+    // 直接用 courseName；若無則退回 baseClassName
+    const displayName = courseName || baseClassName || `課程 ${key}`
 
     classByCourseID[key] = {
       courseID: key,
