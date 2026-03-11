@@ -4427,6 +4427,54 @@ async function handleReport(req, res) {
 }
 
 // ============================================================
+// Grading Results（批改詳情補抓）
+// ============================================================
+
+async function handleGradingResults(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const assignmentId =
+    typeof req.query?.assignmentId === 'string' ? req.query.assignmentId.trim() : ''
+  if (!assignmentId) {
+    res.status(400).json({ error: 'Missing assignmentId' })
+    return
+  }
+
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const { data, error } = await supabaseDb
+      .from('submissions')
+      .select('id, grading_result')
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .eq('status', 'graded')
+      .not('grading_result', 'is', null)
+
+    if (error) throw new Error(error.message)
+
+    const result = {}
+    for (const row of data || []) {
+      if (row.id && row.grading_result) {
+        result[row.id] = row.grading_result
+      }
+    }
+
+    res.status(200).json({ gradingResults: result })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '載入批改詳情失敗' })
+  }
+}
+
+// ============================================================
 // 1Campus 班級同步
 // ============================================================
 
@@ -4906,6 +4954,10 @@ export default async function handler(req, res) {
   }
   if (action === 'report') {
     await handleReport(req, res)
+    return
+  }
+  if (action === 'grading-results') {
+    await handleGradingResults(req, res)
     return
   }
   if (action === '1campus-classroom-sync') {
