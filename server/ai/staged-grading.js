@@ -1003,6 +1003,8 @@ RULES:
 5. UNREADABLE: If text exists but is too unclear to read → status="unreadable", studentAnswerRaw="無法辨識".
 6. TEXT ANSWER: Copy the student's written text character-by-character. Include the final answer line (A:, 答:, Ans:) exactly as written.
 7. SINGLE-CHOICE: For questions listed in SINGLE-CHOICE above, studentAnswerRaw must be exactly ONE letter (A/B/C/D or 甲/乙/丙/丁). If the student circled/ticked/filled option B → output "B". Do NOT include the full option text.
+   CRITICAL — CROP BOUNDARY: A single-choice answer is only valid if the student made a visible mark (circle, fill, tick, cross) DIRECTLY ON or beside one of THIS question's own printed options (e.g., ○A ○B ○C ○D or 甲乙丙丁). If the crop image shows a letter that is physically below this question's option row — meaning it is likely the answer written for a different (neighboring) question — do NOT include it. If no option of THIS question has any student mark, status="blank".
+   SELF-CHECK: Before outputting a non-blank answer, confirm "Is this mark physically next to one of this question's own options?" If no → blank.
 8. MULTI-CHECK: For questions listed in MULTI-CHECK above, studentAnswerRaw must be comma-separated selected options with NO spaces.
    - If options have printed labels (numbers/letters/symbols like ①②③, A/B/C, 1/2/3): use those labels. Example: "①,③" or "A,C,D" or "1,3".
    - If options have NO labels (blank boxes): use position descriptions. Example: "左側,中間" or "第1個,第3個".
@@ -1050,6 +1052,94 @@ Return:
     {
       "questionId": "string",
       "studentAnswerRaw": "exact text as written",
+      "status": "read|blank|unreadable"
+    }
+  ]
+}
+`.trim()
+}
+
+// Read2 uses a "skeptic" persona: default-blank unless there is unambiguous evidence.
+// This creates structural asymmetry with Read1 so that AI hallucinations surface as "diff".
+function buildReReadAnswerPrompt(classifyResult) {
+  const visibleQuestions = Array.isArray(classifyResult?.alignedQuestions)
+    ? classifyResult.alignedQuestions.filter((q) => q.visible)
+    : []
+  const visibleIds = visibleQuestions.map((q) => q.questionId)
+  const singleChoiceIds = visibleQuestions
+    .filter((q) => q.questionType === 'single_choice')
+    .map((q) => q.questionId)
+  const multiCheckIds = visibleQuestions
+    .filter((q) => q.questionType === 'multi_check')
+    .map((q) => q.questionId)
+  const fillBlankIds = visibleQuestions
+    .filter((q) => q.questionType === 'fill_blank')
+    .map((q) => q.questionId)
+  const mapFillIds = visibleQuestions
+    .filter((q) => q.questionType === 'map_fill')
+    .map((q) => q.questionId)
+  const singleChoiceNote = singleChoiceIds.length > 0
+    ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
+    : ''
+  const multiCheckNote = multiCheckIds.length > 0
+    ? `\nMULTI-CHECK questions: ${JSON.stringify(multiCheckIds)}`
+    : ''
+  const fillBlankNote = fillBlankIds.length > 0
+    ? `\nFILL-BLANK questions: ${JSON.stringify(fillBlankIds)}`
+    : ''
+  const mapFillNote = mapFillIds.length > 0
+    ? `\nMAP-FILL questions: ${JSON.stringify(mapFillIds)}`
+    : ''
+
+  return `
+You are a strict blank-detector and second-opinion verifier.
+Your job is to INDEPENDENTLY verify each question's answer with maximum skepticism.
+
+Visible question IDs on this image:
+${JSON.stringify(visibleIds)}
+${singleChoiceNote}${multiCheckNote}${fillBlankNote}
+
+== CORE MINDSET ==
+DEFAULT ASSUMPTION: Every question is BLANK until proven otherwise.
+You must find clear, unambiguous, deliberate student handwriting INSIDE the designated answer space for this specific question before outputting a non-blank answer.
+
+== BLANK DECISION RULES (apply strictly) ==
+- If the designated answer space (blank line, box, circle options area) is empty → BLANK.
+- If you see handwriting but are not sure it belongs to THIS question (could be for a neighboring question) → BLANK.
+- If there is any doubt about whether a mark is intentional → BLANK.
+- Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count as a student answer.
+- ONLY deliberate, fresh student marks (pen/pencil strokes added by the student) count.
+
+== SINGLE-CHOICE RULE ==
+A selection is valid ONLY when ALL of these are true:
+1. There is a visible mark (circle, fill, cross, tick, underline) made by the student.
+2. The mark is physically attached to or surrounding one of THIS question's own printed options.
+3. The mark is clearly in this question's option row — not in the row above or below (which may belong to another question).
+If any condition fails → BLANK.
+SELF-CHECK before outputting: "Can I see a student mark ON one of this question's own options?" If no → blank.
+
+== FILL-BLANK RULE ==
+Only copy text that is physically written on the answer line(s) belonging to THIS question.
+Text that appears on a line belonging to a different question → ignore.
+Empty answer line → "_". All lines empty → BLANK.
+
+== DRAWING/MAP RULE ==
+Only report marks that are clearly drawn by the student on the map/diagram for THIS question's scope.
+If uncertain whether a mark is pre-printed or student-drawn → BLANK.
+
+== COPY RULES (when non-blank) ==
+- Copy exactly, character by character. Do NOT correct or normalize.
+- Output in Traditional Chinese (繁體中文) for descriptions.
+- NEVER solve or calculate.
+
+Return strict JSON only. No markdown.
+
+Output:
+{
+  "answers": [
+    {
+      "questionId": "string",
+      "studentAnswerRaw": "exact text OR 未作答 OR 無法辨識",
       "status": "read|blank|unreadable"
     }
   ]
@@ -1208,6 +1298,7 @@ ${JSON.stringify(wrongScores)}
 - ABSOLUTELY FORBIDDEN: "正確答案是", "應為", "答案是", "正確的是", or any phrase that directly or indirectly states the correct answer.
 - Do NOT say "請再想想" alone — always pair it with a specific direction to think about.
 - 2–4 sentences. Warm, encouraging, and specific.
+- SPECIAL RULE — unreadable answer: If the student answer has status "unreadable" (老師標記為「無法辨識」), the studentGuidance MUST start with "老師無法辨識你的字跡，" and then kindly tell the student to write more clearly next time. Do NOT mention what the correct answer is. Set mistakeType to "unreadable".
 
 == OTHER FIELDS ==
 - mistakeType / mistakeTypeCodes: classify the mistake type.
@@ -1547,7 +1638,9 @@ export async function runStagedGradingPhaseA({
       '',
       'IMAGE STRUCTURE: Each question is followed by a CROP IMAGE showing only that question\'s answer area.',
       '- "[QuestionId]" tag → the immediately following image is that question\'s cropped answer region.',
-      '- Read ONLY from the crop image for that question. Ignore any text outside the crop.',
+      '- Read ONLY the answer for THAT question from its crop. The crop may include edges of neighboring questions — ignore those.',
+      '- CRITICAL: If the crop\'s PRIMARY answer space (blank line, box, circle options) for this question is EMPTY, output blank — even if you see handwriting from an adjacent question elsewhere in the crop.',
+      '- NEVER carry over an answer from a neighboring question into this question\'s slot.',
       visibleWithoutCrop.length > 0
         ? `- Questions without a crop (read from [FULL PAGE] image at the end): ${visibleWithoutCrop.map((q) => q.questionId).join(', ')}`
         : '- All visible questions have a crop image.'
@@ -1567,6 +1660,7 @@ export async function runStagedGradingPhaseA({
   }
 
   const readAnswerPrompt = buildReadAnswerPrompt(classifyResult)
+  const reReadAnswerPrompt = buildReReadAnswerPrompt(classifyResult)
   logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', {
     croppedQuestions: visibleWithCrop.length,
     fullImageQuestions: visibleWithoutCrop.length
@@ -1588,7 +1682,7 @@ export async function runStagedGradingPhaseA({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-      stageContents: buildReadAnswerStageContents(readAnswerPrompt)
+      stageContents: buildReadAnswerStageContents(reReadAnswerPrompt)
     })
   ]
   if (wordProblemIds.length > 0) {
