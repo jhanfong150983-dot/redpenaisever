@@ -4216,7 +4216,14 @@ async function handleStudentSubmission(req, res) {
 
     if (mode === 'correction') {
       const status = String(currentState?.status || '')
-      if (!['correction_required', 'correction_in_progress', 'correction_pending_review'].includes(status)) {
+      if (status === 'correction_in_progress') {
+        res.status(409).json({
+          error: 'AI 批改中，請等待結果後再重新送出',
+          code: 'GRADING_IN_PROGRESS'
+        })
+        return
+      }
+      if (!['correction_required', 'correction_pending_review'].includes(status)) {
         res.status(409).json({
           error: '目前作業未進入可訂正狀態',
           code: 'INVALID_CORRECTION_STATE'
