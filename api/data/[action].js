@@ -3963,7 +3963,8 @@ async function handleStudentSubmission(req, res) {
 
     const latestSubmission = latestSubmissionRows?.[0]
     if (latestSubmission?.id && latestSubmission.id !== submissionId) {
-      const latestIsGraded = latestSubmission.graded_at !== null && latestSubmission.graded_at !== undefined
+      const latestIsGraded = (latestSubmission.graded_at !== null && latestSubmission.graded_at !== undefined) ||
+        String(latestSubmission.status || '').toLowerCase() === 'graded'
       if (!latestIsGraded) {
         await supabaseDb
           .from('deleted_records')
