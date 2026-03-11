@@ -1700,14 +1700,50 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
   const answerKey = normalizeJsonLike(assignment.answer_key)
   const keyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
 
+  // Fetch original per-question scores from last graded submission
+  const originalScoreMap = {}
+  try {
+    const { data: stateRow } = await supabaseDb
+      .from('assignment_student_state')
+      .select('last_graded_submission_id')
+      .eq('assignment_id', submission.assignment_id)
+      .eq('student_id', submission.student_id)
+      .single()
+    if (stateRow?.last_graded_submission_id) {
+      const { data: lastSub } = await supabaseDb
+        .from('submissions')
+        .select('grading_result')
+        .eq('id', stateRow.last_graded_submission_id)
+        .single()
+      const lastResult = normalizeJsonLike(lastSub?.grading_result)
+      const lastDetails = Array.isArray(lastResult?.details) ? lastResult.details : []
+      for (const d of lastDetails) {
+        if (d?.questionId) {
+          originalScoreMap[String(d.questionId)] = {
+            score: Number(d.score ?? 0),
+            maxScore: Number(d.maxScore ?? 1)
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[RECHECK] Could not fetch original scores:', e?.message)
+  }
+
   const itemsWithAnswers = correctionItems.map((item) => {
     const keyQ = keyQuestions.find((q) => String(q.id || '').trim() === item.question_id)
+    const orig = originalScoreMap[item.question_id] || { score: 0, maxScore: 1 }
     return {
       questionId: item.question_id,
       questionText: item.question_text || '',
       mistakeReason: item.mistake_reason || '',
       hintGiven: item.hint_text || '',
-      correctAnswer: keyQ?.answer || ''
+      correctAnswer: keyQ?.answer || '',
+      type: keyQ?.type ?? 1,
+      acceptableAnswers: Array.isArray(keyQ?.acceptableAnswers) ? keyQ.acceptableAnswers : [],
+      referenceAnswer: keyQ?.referenceAnswer || '',
+      maxScore: Number(keyQ?.maxScore ?? 1),
+      originalScore: orig.score
     }
   })
 

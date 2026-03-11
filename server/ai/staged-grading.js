@@ -2063,13 +2063,20 @@ Check each answer and decide if it is now correct.
 Image mapping (in order, match by index):
 ${imageMapping}
 
-Wrong questions context:
-${JSON.stringify(itemsWithAnswers)}
+Wrong questions context (JSON):
+${JSON.stringify(itemsWithAnswers, null, 2)}
+
+GRADING RULES per question type:
+- type=1 (unique answer): student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
+- type=2 (multiple acceptable answers): student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
+- type=3 (performance/partial scoring, maxScore>1):
+    * If originalScore=0: student must show clear understanding. Judge based on referenceAnswer.
+    * If originalScore>0: if the new answer shows ANY improvement over the previous attempt, mark passed=true. Be generous.
 
 Instructions for each question:
 1. Find the corresponding image using the mapping above.
 2. Carefully read the student's new answer from that image.
-3. Compare to correctAnswer. Be lenient: accept minor spacing, punctuation, or formatting differences.
+3. Apply the grading rule for that question's type.
 4. If passed=false, write newGuidance — a NEW hint different from hintGiven. Approach from a different angle.
 
 STRICT RULES for newGuidance:
