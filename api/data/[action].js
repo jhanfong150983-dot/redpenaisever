@@ -1119,6 +1119,7 @@ async function writeCorrectionQuestionItems(
 ) {
   if (!Number.isFinite(attemptNo) || attemptNo < 0) return
 
+  // Only resolve 'open' items — leave 'disputed' items in place for teacher review
   await supabaseDb
     .from('correction_question_items')
     .update({
@@ -1456,8 +1457,35 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
 
     if (source === 'student_correction') {
       correctionAttemptCount += 1
+
+      await writeCorrectionQuestionItems(
+        supabaseDb,
+        ownerId,
+        assignmentId,
+        studentId,
+        correctionAttemptCount,
+        mistakes,
+        {
+          sourceSubmissionId: row.id,
+          sourceImageUrl: row.image_url
+        }
+      )
+
+      // Check if any disputed items remain (not resolved by teacher yet)
+      const { count: disputedCount } = await supabaseDb
+        .from('correction_question_items')
+        .select('id', { count: 'exact', head: true })
+        .eq('owner_id', ownerId)
+        .eq('assignment_id', assignmentId)
+        .eq('student_id', studentId)
+        .eq('status', 'disputed')
+
       if (!hasMistakes) {
-        status = 'correction_passed'
+        // All recheck questions passed — but disputed ones may still be pending teacher review
+        status = (disputedCount ?? 0) > 0 ? 'correction_pending_review' : 'correction_passed'
+        if (status === 'correction_pending_review') {
+          lastStatusReason = '訂正照片已全部通過，有申訴題目待老師審閱'
+        }
       } else if (correctionAttemptCount >= correctionAttemptLimit) {
         status = 'correction_failed'
         lastStatusReason = '學生自主訂正超過次數限制，需教師協助'
@@ -1472,26 +1500,13 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
         studentId,
         correctionAttemptCount,
         row.id,
-        !hasMistakes
+        status === 'correction_passed' || status === 'correction_pending_review'
           ? 'pass'
           : status === 'correction_failed'
             ? 'failed'
             : 'retry',
         row.grading_result,
         mistakes.length
-      )
-
-      await writeCorrectionQuestionItems(
-        supabaseDb,
-        ownerId,
-        assignmentId,
-        studentId,
-        correctionAttemptCount,
-        mistakes,
-        {
-          sourceSubmissionId: row.id,
-          sourceImageUrl: row.image_url
-        }
       )
     } else {
       if (hasMistakes) {
@@ -1826,7 +1841,7 @@ async function handleCorrectionDashboard(req, res) {
         .select('student_id, status')
         .eq('owner_id', user.id)
         .eq('assignment_id', assignmentId)
-        .eq('status', 'open')
+        .in('status', ['open', 'disputed'])
     ])
 
     if (studentsResult.error) throw new Error(studentsResult.error.message)
@@ -1838,12 +1853,20 @@ async function handleCorrectionDashboard(req, res) {
       stateByStudentId.set(row.student_id, row)
     }
     const openCountByStudentId = new Map()
+    const disputedCountByStudentId = new Map()
     for (const row of correctionsResult.data || []) {
       if (!row.student_id) continue
-      openCountByStudentId.set(
-        row.student_id,
-        (openCountByStudentId.get(row.student_id) || 0) + 1
-      )
+      if (row.status === 'disputed') {
+        disputedCountByStudentId.set(
+          row.student_id,
+          (disputedCountByStudentId.get(row.student_id) || 0) + 1
+        )
+      } else {
+        openCountByStudentId.set(
+          row.student_id,
+          (openCountByStudentId.get(row.student_id) || 0) + 1
+        )
+      }
     }
 
     const latestByStudent = await fetchLatestGradedSubmissionsByStudent(
@@ -1872,6 +1895,7 @@ async function handleCorrectionDashboard(req, res) {
             DEFAULT_CORRECTION_ATTEMPT_LIMIT
           ),
           openQuestionCount: openCountByStudentId.get(student.id) || 0,
+          disputedQuestionCount: disputedCountByStudentId.get(student.id) || 0,
           latestMistakeCount: latestMistakes.length,
           lastStatusReason: state?.last_status_reason || '',
           lastGradedSubmissionId: state?.last_graded_submission_id || latestSubmission?.id || null
@@ -1904,6 +1928,167 @@ async function handleCorrectionDashboard(req, res) {
     res.status(500).json({
       error: err instanceof Error ? err.message : '讀取訂正儀表板失敗'
     })
+  }
+}
+
+// Teacher fetches disputed items for a specific student (for the dispute review panel)
+async function handleCorrectionDisputes(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const assignmentId = typeof req.query?.assignmentId === 'string' ? req.query.assignmentId.trim() : ''
+  const studentId = typeof req.query?.studentId === 'string' ? req.query.studentId.trim() : ''
+  if (!assignmentId || !studentId) {
+    res.status(400).json({ error: 'Missing assignmentId or studentId' })
+    return
+  }
+
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const { data, error } = await supabaseDb
+      .from('correction_question_items')
+      .select('question_id, question_text, hint_text, dispute_note, accessor_result, status')
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .eq('status', 'disputed')
+      .order('attempt_no', { ascending: false })
+
+    if (error) throw new Error(error.message)
+
+    const corrections = (data || []).map((row) => {
+      const accessor = row.accessor_result && typeof row.accessor_result === 'object' ? row.accessor_result : null
+      return {
+        questionId: row.question_id,
+        questionText: row.question_text ?? undefined,
+        hintText: sanitizeHintText(row.hint_text ?? ''),
+        disputeNote: row.dispute_note ?? undefined,
+        cropImageUrl: typeof accessor?.crop_image_url === 'string' ? accessor.crop_image_url : undefined,
+        status: row.status
+      }
+    })
+
+    res.status(200).json({ corrections })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '載入申訴題目失敗' })
+  }
+}
+
+// Teacher resolves disputed questions: accept (student was right) or reject (student must redo)
+async function handleDisputeResolve(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const body = parseJsonBody(req)
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Invalid JSON body' })
+    return
+  }
+
+  const assignmentId = typeof body.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const studentId = typeof body.studentId === 'string' ? body.studentId.trim() : ''
+  // resolutions: [{questionId, action: 'accept'|'reject', rejectionNote?}]
+  const resolutions = Array.isArray(body.resolutions) ? body.resolutions : []
+
+  if (!assignmentId || !studentId || !resolutions.length) {
+    res.status(400).json({ error: 'Missing required fields' })
+    return
+  }
+
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const now = new Date().toISOString()
+
+    for (const resolution of resolutions) {
+      const questionId = typeof resolution.questionId === 'string' ? resolution.questionId.trim() : ''
+      const action = typeof resolution.action === 'string' ? resolution.action.trim() : ''
+      if (!questionId || !['accept', 'reject'].includes(action)) continue
+
+      if (action === 'accept') {
+        // Teacher agrees — mark as resolved (student was correct, no more action needed)
+        await supabaseDb
+          .from('correction_question_items')
+          .update({ status: 'resolved', updated_at: now })
+          .eq('owner_id', user.id)
+          .eq('assignment_id', assignmentId)
+          .eq('student_id', studentId)
+          .eq('question_id', questionId)
+          .eq('status', 'disputed')
+      } else {
+        // Teacher rejects — put back to open so student must redo (no re-dispute allowed)
+        const rejectionNote = typeof resolution.rejectionNote === 'string' && resolution.rejectionNote.trim()
+          ? resolution.rejectionNote.trim()
+          : null
+        await supabaseDb
+          .from('correction_question_items')
+          .update({
+            status: 'open',
+            dispute_rejected_at: now,
+            dispute_rejection_note: rejectionNote,
+            updated_at: now
+          })
+          .eq('owner_id', user.id)
+          .eq('assignment_id', assignmentId)
+          .eq('student_id', studentId)
+          .eq('question_id', questionId)
+          .eq('status', 'disputed')
+      }
+    }
+
+    // After resolving all, check remaining open/disputed counts to update state
+    const { data: remaining } = await supabaseDb
+      .from('correction_question_items')
+      .select('status')
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .in('status', ['open', 'disputed'])
+
+    const remainingOpen = (remaining || []).filter((r) => r.status === 'open').length
+    const remainingDisputed = (remaining || []).filter((r) => r.status === 'disputed').length
+
+    let newStatus
+    if (remainingOpen > 0) {
+      newStatus = 'correction_required'
+    } else if (remainingDisputed > 0) {
+      newStatus = 'correction_pending_review'
+    } else {
+      newStatus = 'correction_passed'
+    }
+
+    await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, compactObject({
+      status: newStatus,
+      last_status_reason: newStatus === 'correction_required'
+        ? '老師駁回申訴，請重新訂正'
+        : newStatus === 'correction_pending_review'
+          ? '仍有申訴題目待審閱'
+          : undefined
+    }))
+
+    res.status(200).json({
+      success: true,
+      remainingOpen,
+      remainingDisputed,
+      newStatus
+    })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '申訴裁決失敗' })
   }
 }
 
@@ -3697,11 +3882,11 @@ async function handleStudentOverview(req, res) {
             ? supabaseDb
                 .from('correction_question_items')
                 .select(
-                  'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, accessor_result, status'
+                  'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, accessor_result, status, dispute_note, dispute_rejected_at, dispute_rejection_note'
                 )
                 .eq('owner_id', cOwnerId)
                 .eq('student_id', studentId)
-                .eq('status', 'open')
+                .in('status', ['open', 'disputed'])
                 .in('assignment_id', aIds)
             : Promise.resolve({ data: [], error: null }),
           // Global queue for this teacher (all students' pending correction submissions)
@@ -3753,7 +3938,10 @@ async function handleStudentOverview(req, res) {
               cropImageUrl: accessorCropImageUrl,
               questionBbox: normalizeBbox(accessor?.question_bbox),
               answerBbox: normalizeBbox(accessor?.answer_bbox),
-              status: row.status
+              status: row.status,
+              disputeNote: row.dispute_note ?? undefined,
+              disputeRejectedAt: row.dispute_rejected_at ?? undefined,
+              disputeRejectionNote: row.dispute_rejection_note ?? undefined
             })
           )
           openCorrectionsByAssignment.set(row.assignment_id, existing)
@@ -3778,7 +3966,7 @@ async function handleStudentOverview(req, res) {
               ? assignment.student_show_score
               : preferences.show_score_to_students
           const rawStatus = state?.status ?? 'not_uploaded'
-          const isCorrectionStatus = ['correction_required', 'correction_in_progress'].includes(rawStatus)
+          const isCorrectionStatus = ['correction_required', 'correction_in_progress', 'correction_pending_review'].includes(rawStatus)
           const effectiveUploadLocked =
             Boolean(state?.upload_locked) || String(state?.status || '') === 'uploaded'
           const canUpload = preferences.student_portal_enabled && !effectiveUploadLocked
@@ -3810,7 +3998,7 @@ async function handleStudentOverview(req, res) {
             openCorrections.length > 0 ? openCorrections : fallbackCorrections
           const status =
             mergedCorrections.length > 0 &&
-            !['correction_required', 'correction_in_progress', 'correction_failed', 'correction_passed'].includes(rawStatus)
+            !['correction_required', 'correction_in_progress', 'correction_pending_review', 'correction_failed', 'correction_passed'].includes(rawStatus)
               ? 'correction_required'
               : rawStatus
           const visibility = preferences.student_feedback_visibility || 'score_reason'
@@ -3931,6 +4119,8 @@ async function handleStudentSubmission(req, res) {
   const pageCount = clampInteger(body.pageCount, 1, 20, 1)
   // Per-question correction images: [{questionId, imageBase64, contentType}]
   const correctionImages = Array.isArray(body.correctionImages) ? body.correctionImages : []
+  // Disputed questions: [{questionId, note}] — student believes AI was wrong
+  const disputedQuestions = Array.isArray(body.disputedQuestions) ? body.disputedQuestions : []
 
   if (!assignmentId || !normalizedImagePayload) {
     res.status(400).json({ error: 'Missing required fields' })
@@ -4046,7 +4236,7 @@ async function handleStudentSubmission(req, res) {
 
     if (mode === 'correction') {
       const status = String(currentState?.status || '')
-      if (!['correction_required', 'correction_in_progress'].includes(status)) {
+      if (!['correction_required', 'correction_in_progress', 'correction_pending_review'].includes(status)) {
         res.status(409).json({
           error: '目前作業未進入可訂正狀態',
           code: 'INVALID_CORRECTION_STATE'
@@ -4151,6 +4341,27 @@ async function handleStudentSubmission(req, res) {
             })
         })
       )
+    }
+
+    // Write disputed questions as status='disputed' (student believes AI was wrong)
+    if (mode === 'correction' && disputedQuestions.length > 0) {
+      const disputeRows = disputedQuestions
+        .filter((d) => d && typeof d.questionId === 'string' && d.questionId.trim())
+        .map((d) => ({
+          owner_id: ownerId,
+          assignment_id: assignmentId,
+          student_id: studentContext.id,
+          attempt_no: correctionCount + 1,
+          question_id: String(d.questionId).trim(),
+          dispute_note: typeof d.note === 'string' && d.note.trim() ? d.note.trim() : null,
+          status: 'disputed',
+          updated_at: new Date().toISOString()
+        }))
+      if (disputeRows.length > 0) {
+        await supabaseDb
+          .from('correction_question_items')
+          .upsert(disputeRows, { onConflict: 'owner_id,assignment_id,student_id,attempt_no,question_id' })
+      }
     }
 
     await upsertAssignmentStudentState(
@@ -5186,6 +5397,14 @@ export default async function handler(req, res) {
   }
   if (action === 'correction-unlock') {
     await handleCorrectionUnlock(req, res)
+    return
+  }
+  if (action === 'correction-disputes') {
+    await handleCorrectionDisputes(req, res)
+    return
+  }
+  if (action === 'dispute-resolve') {
+    await handleDisputeResolve(req, res)
     return
   }
   if (action === 'report') {
