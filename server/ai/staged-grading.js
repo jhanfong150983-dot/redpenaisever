@@ -1001,51 +1001,59 @@ function buildReadAnswerPrompt(classifyResult) {
     ? `\nFILL-BLANK questions (填空題, output comma-separated blank contents): ${JSON.stringify(fillBlankIds)}`
     : ''
   return `
-You are a dumb OCR scanner with NO mathematical knowledge. You cannot add, subtract, multiply, or divide. You only see shapes of characters on paper and copy them exactly.
+You are an answer reader. Your only job is to report what the student physically wrote in each question's designated answer space. You have NO mathematical knowledge and must NOT solve, infer, or guess.
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
 ${singleChoiceNote}${multiCheckNote}${fillBlankNote}${mapDrawNote}
 
-RULES:
-1. DO NOT solve, calculate, verify, or correct anything.
-2. DO NOT normalize symbols (× vs x, ÷ vs /, − vs -). Copy exactly.
-3. Copy wrong calculations exactly as written. "6+3=8" → output "6+3=8".
-4. BLANK: If the student wrote nothing → status="blank", studentAnswerRaw="未作答". This includes: empty area, only pre-printed label ("A:", "答:", underlines, boxes, grids), or only pre-printed background art. ONLY handwritten/drawn student marks count as non-blank.
-5. UNREADABLE: If text exists but is too unclear to read → status="unreadable", studentAnswerRaw="無法辨識".
-6. TEXT ANSWER: Copy the student's written text character-by-character. Include the final answer line (A:, 答:, Ans:) exactly as written.
-7. SINGLE-CHOICE: For questions listed in SINGLE-CHOICE above, studentAnswerRaw must be exactly ONE letter (A/B/C/D or 甲/乙/丙/丁). If the student circled/ticked/filled option B → output "B". Do NOT include the full option text.
-   CRITICAL — CROP BOUNDARY: A single-choice answer is only valid if the student made a visible mark (circle, fill, tick, cross) DIRECTLY ON or beside one of THIS question's own printed options (e.g., ○A ○B ○C ○D or 甲乙丙丁). If the crop image shows a letter that is physically below this question's option row — meaning it is likely the answer written for a different (neighboring) question — do NOT include it. If no option of THIS question has any student mark, status="blank".
-   SELF-CHECK: Before outputting a non-blank answer, confirm "Is this mark physically next to one of this question's own options?" If no → blank.
-8. MULTI-CHECK: For questions listed in MULTI-CHECK above, studentAnswerRaw must be comma-separated selected options with NO spaces.
-   - If options have printed labels (numbers/letters/symbols like ①②③, A/B/C, 1/2/3): use those labels. Example: "①,③" or "A,C,D" or "1,3".
-   - If options have NO labels (blank boxes): use position descriptions. Example: "左側,中間" or "第1個,第3個".
-   - Order: left-to-right, top-to-bottom as they appear on paper.
-   - FORBIDDEN: action descriptions like "在...打勾" or "在...畫斜線". Output ONLY labels or positions.
-   - FORBIDDEN: full option text content. Output ONLY the identifier or position.
-9. FILL-BLANK: For questions listed in FILL-BLANK above, output ONLY the handwritten content inside each blank, comma-separated in left-to-right top-to-bottom order.
-   - Empty blank → "_" (underscore).
-   - Unreadable blank → "?" (question mark).
-   - All blanks empty → status="blank", studentAnswerRaw="未作答".
-   - Single blank: just the content (no comma). Multiple blanks: comma-separated.
-   - FORBIDDEN: including printed surrounding text ("答", "答案", underline markers, blank labels).
-   - FORBIDDEN: description sentences. Output ONLY the written content.
-   - Copy content exactly as written (Rule 1–3 apply: do NOT solve, calculate, or correct).
-10. DRAWING ANSWER (map/diagram marks): If the student drew or marked something on a map/diagram (a new pen mark not part of the pre-printed image), describe in Traditional Chinese what was drawn and where → status="read". Example: "在23.5°N與121°E交點處畫出颱風符號". If only pre-printed content is visible with no student mark → status="blank".
-11. LANGUAGE: Always output in Traditional Chinese (繁體中文). NEVER output English descriptions.
-12. Return strict JSON only. No markdown, no commentary.
+== BLANK FIRST RULE (most important) ==
+Before reading each question, ask yourself: "Is there fresh handwriting in this question's answer space?"
+- Answer space = the designated writing area: ( ), ___, □, or the answer line after "答:" "A:" "Ans:"
+- If no fresh handwriting is present → status="blank", studentAnswerRaw="未作答". STOP. Do not read further.
+- Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count.
+- Only FRESH student pen/pencil marks count.
+
+== COPY RULES (only when non-blank) ==
+1. Copy character-by-character. Do NOT solve, correct, or normalize.
+2. Copy wrong calculations exactly: "6+3=8" → output "6+3=8".
+3. Do NOT normalize symbols: × stays ×, ÷ stays ÷, − stays −.
+4. UNREADABLE: Fresh writing exists but is too unclear to read → status="unreadable", studentAnswerRaw="無法辨識".
+5. LANGUAGE: Always output in Traditional Chinese (繁體中文).
+
+== QUESTION TYPE RULES ==
+SINGLE-CHOICE (questions in SINGLE-CHOICE list):
+- Output exactly ONE letter (A/B/C/D or 甲/乙/丙/丁).
+- Valid only if the student wrote a letter OR made a mark (circle/tick/fill) in the designated answer space (  ) or ___ for this question.
+- A letter written beside option rows or next to a neighboring question does NOT count for this question.
+- SELF-CHECK: "Did the student write in THIS question's answer blank?" If no → blank.
+
+MULTI-CHECK (questions in MULTI-CHECK list):
+- Output comma-separated selected options with NO spaces.
+- Labeled options (①②③, A/B/C, 1/2/3): use those labels. Example: "①,③"
+- Unlabeled boxes: use positions. Example: "左側,中間"
+- FORBIDDEN: action descriptions ("在...打勾"). FORBIDDEN: full option text.
+
+FILL-BLANK (questions in FILL-BLANK list):
+- Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
+- Empty blank → "_". Unreadable blank → "?". All blanks empty → status="blank".
+- FORBIDDEN: surrounding printed text ("答", underline markers).
+
+DRAWING (map/diagram marks):
+- Only report a fresh student-drawn mark (new ink not part of pre-printed image).
+- If only pre-printed content visible → status="blank".
+- Description in Traditional Chinese: what was drawn and where.
 
 FORBIDDEN:
-- "A: 6.12 cm²" → output "A: 6.24 cm²"  ← FORBIDDEN (corrected)
-- Empty answer area → output any text  ← FORBIDDEN (should be blank)
-- Drawing answer → output English description  ← FORBIDDEN
-- Single-choice question → output "(B) 太平洋" instead of just "B"  ← FORBIDDEN
+- Guessing or inferring what the student meant to write
+- Outputting any answer for a question with an empty answer space
+- Correcting student errors
+- English descriptions
 
 REQUIRED:
-- "A: 6.12 cm²" → output "A: 6.12 cm²", status="read"  ← CORRECT
-- Empty answer area → status="blank", studentAnswerRaw="未作答"  ← CORRECT
-- Student drew typhoon at 23.5°N 121°E → "在23.5°N與121°E交點處畫出颱風符號", status="read"  ← CORRECT
-- Single-choice: student circled B → output "B", status="read"  ← CORRECT
+- Empty answer space → status="blank", studentAnswerRaw="未作答"
+- Student wrote "A: 6.12 cm²" → output "A: 6.12 cm²", status="read"
+- Single-choice: student wrote "B" in answer blank → output "B", status="read"
 ${mapFillNote ? `
 MAP-FILL RULE (地圖填圖題):
 - For question IDs in MAP-FILL list, scan the ENTIRE image.
@@ -1087,107 +1095,11 @@ Return:
 `.trim()
 }
 
-// Read2 uses a "skeptic" persona: default-blank unless there is unambiguous evidence.
-// This creates structural asymmetry with Read1 so that AI hallucinations surface as "diff".
+// Read2 uses the same prompt as Read1 — two independent calls, natural variance catches random errors.
+// Asymmetric skeptic/optimist design removed: it caused Read1 to over-read and Read2 to under-read,
+// resulting in too many diffs and defeating the purpose of the consistency check.
 function buildReReadAnswerPrompt(classifyResult) {
-  const visibleQuestions = Array.isArray(classifyResult?.alignedQuestions)
-    ? classifyResult.alignedQuestions.filter((q) => q.visible)
-    : []
-  const visibleIds = visibleQuestions.map((q) => q.questionId)
-  const singleChoiceIds = visibleQuestions
-    .filter((q) => q.questionType === 'single_choice')
-    .map((q) => q.questionId)
-  const multiCheckIds = visibleQuestions
-    .filter((q) => q.questionType === 'multi_check')
-    .map((q) => q.questionId)
-  const fillBlankIds = visibleQuestions
-    .filter((q) => q.questionType === 'fill_blank')
-    .map((q) => q.questionId)
-  const mapFillIds = visibleQuestions
-    .filter((q) => q.questionType === 'map_fill')
-    .map((q) => q.questionId)
-  const mapDrawIds = visibleQuestions
-    .filter((q) => q.questionType === 'map_draw')
-    .map((q) => q.questionId)
-  const singleChoiceNote = singleChoiceIds.length > 0
-    ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
-    : ''
-  const multiCheckNote = multiCheckIds.length > 0
-    ? `\nMULTI-CHECK questions: ${JSON.stringify(multiCheckIds)}`
-    : ''
-  const fillBlankNote = fillBlankIds.length > 0
-    ? `\nFILL-BLANK questions: ${JSON.stringify(fillBlankIds)}`
-    : ''
-  const mapFillNote = mapFillIds.length > 0
-    ? `\nMAP-FILL questions: ${JSON.stringify(mapFillIds)}`
-    : ''
-  const mapDrawNote = mapDrawIds.length > 0
-    ? `\nMAP-DRAW questions (繪圖/標記題): ${JSON.stringify(mapDrawIds)}`
-    : ''
-
-  return `
-You are a strict blank-detector and second-opinion verifier.
-Your job is to INDEPENDENTLY verify each question's answer with maximum skepticism.
-
-Visible question IDs on this image:
-${JSON.stringify(visibleIds)}
-${singleChoiceNote}${multiCheckNote}${fillBlankNote}${mapDrawNote}
-
-== CORE MINDSET ==
-DEFAULT ASSUMPTION: Every question is BLANK until proven otherwise.
-You must find clear, unambiguous, deliberate student handwriting INSIDE the designated answer space for this specific question before outputting a non-blank answer.
-
-== BLANK DECISION RULES (apply strictly) ==
-- If the designated answer space (blank line, box, circle options area) is empty → BLANK.
-- If you see handwriting but are not sure it belongs to THIS question (could be for a neighboring question) → BLANK.
-- If there is any doubt about whether a mark is intentional → BLANK.
-- Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count as a student answer.
-- ONLY deliberate, fresh student marks (pen/pencil strokes added by the student) count.
-
-== SINGLE-CHOICE RULE ==
-A selection is valid ONLY when ALL of these are true:
-1. There is a visible mark (circle, fill, cross, tick, underline) made by the student.
-2. The mark is physically attached to or surrounding one of THIS question's own printed options.
-3. The mark is clearly in this question's option row — not in the row above or below (which may belong to another question).
-If any condition fails → BLANK.
-SELF-CHECK before outputting: "Can I see a student mark ON one of this question's own options?" If no → blank.
-
-== FILL-BLANK RULE ==
-Only copy text that is physically written on the answer line(s) belonging to THIS question.
-Text that appears on a line belonging to a different question → ignore.
-Empty answer line → "_". All lines empty → BLANK.
-
-== DRAWING/MAP RULE ==
-Only report marks that are clearly drawn by the student on the map/diagram for THIS question's scope.
-If uncertain whether a mark is pre-printed or student-drawn → BLANK.
-
-== MAP-DRAW RULE (繪圖/標記題) ==
-For questions in MAP-DRAW list, apply maximum skepticism:
-- BLANK if you cannot clearly see a fresh student-drawn mark (new ink/pencil not part of the pre-printed diagram).
-- If a student mark IS present, output THREE parts: [符號名稱]，位置：[精確位置描述含參考線]
-  - Name the symbol/shape exactly.
-  - List ALL printed reference lines/labels (latitudes, longitudes, axes, grid labels).
-  - State which side of EACH reference line the mark is on.
-  - Example: "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"
-
-== COPY RULES (when non-blank) ==
-- Copy exactly, character by character. Do NOT correct or normalize.
-- Output in Traditional Chinese (繁體中文) for descriptions.
-- NEVER solve or calculate.
-
-Return strict JSON only. No markdown.
-
-Output:
-{
-  "answers": [
-    {
-      "questionId": "string",
-      "studentAnswerRaw": "exact text OR 未作答 OR 無法辨識",
-      "status": "read|blank|unreadable"
-    }
-  ]
-}
-`.trim()
+  return buildReadAnswerPrompt(classifyResult)
 }
 
 function buildAccessorPrompt(answerKey, readAnswerResult) {
