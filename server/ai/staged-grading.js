@@ -249,9 +249,11 @@ function extractInlineImages(contents) {
 }
 
 // A2: 用 Sharp 裁切 base64 inline image，回傳裁切後的 inlineData
-// bbox 為 normalized [0,1] 座標；失敗時回傳 null（fallback 全圖）
-// BBOX_PAD: 向外擴張比例（相對於圖寬/高），補償 Classify bbox 偏小的情況
-const BBOX_PAD = 0.03
+// bbox 為 normalized [0,1] 座標；失敗時回傳 null
+// 固定裁切尺寸：以 bbox 中心點為錨，擴展至 FIXED_CROP_W × FIXED_CROP_H
+// 確保作答區永遠在截圖中央，且大小一致、無雜訊過多或過小問題
+const FIXED_CROP_W = 0.55  // 佔圖寬的 55%
+const FIXED_CROP_H = 0.20  // 佔圖高的 20%
 async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
   if (!bbox || !imageBase64) return null
   try {
@@ -261,11 +263,13 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
     const { width, height } = metadata
     if (!width || !height) return null
 
-    // 向外擴張 BBOX_PAD，並 clamp 在 [0,1]
-    const px = Math.max(0, bbox.x - BBOX_PAD)
-    const py = Math.max(0, bbox.y - BBOX_PAD)
-    const px2 = Math.min(1, bbox.x + bbox.w + BBOX_PAD)
-    const py2 = Math.min(1, bbox.y + bbox.h + BBOX_PAD)
+    // 以 bbox 中心點為錨，向外擴展至固定尺寸
+    const cx = bbox.x + bbox.w / 2
+    const cy = bbox.y + bbox.h / 2
+    const px = Math.max(0, cx - FIXED_CROP_W / 2)
+    const py = Math.max(0, cy - FIXED_CROP_H / 2)
+    const px2 = Math.min(1, cx + FIXED_CROP_W / 2)
+    const py2 = Math.min(1, cy + FIXED_CROP_H / 2)
 
     const x = Math.round(px * width)
     const y = Math.round(py * height)
@@ -908,7 +912,8 @@ Rules:
 - questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem if blank markers are present.
 - questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers.
 - Otherwise questionType="other".
-- For visible=true questions (except map_fill), output answerBbox: the normalized [0,1] bounding box of the student's ANSWER AREA ONLY (exclude the question stem).
+- For visible=true questions (except map_fill), output answerBbox: the normalized [0,1] bounding box of the DESIGNATED ANSWER SPACE — the pre-printed area where students are supposed to write (blank line, answer box □, or the row of choice options ○A ○B ○C ○D). This is the PRINTED SPACE, not where the student actually wrote. If the student left it blank, still output the bbox of the empty answer space.
+  Only output the CENTER POINT of the answer space accurately — width and height will be normalized to a fixed size for display. Output your best estimate of center (x + w/2, y + h/2) encoded as a bbox.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
   If the answer area cannot be determined, omit answerBbox.
 - Return strict JSON only.
