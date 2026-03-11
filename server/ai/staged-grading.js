@@ -1179,10 +1179,11 @@ function buildExplainPrompt(
     : []
 
   return `
-You are stage Explain. Your job is to generate STUDENT-FACING guidance for wrong answers.
+You are stage Explain. Your job is to write STUDENT-FACING correction guidance for each wrong question.
+The student's homework image is attached. Use it actively.
 
 Domain: ${JSON.stringify(domainHint || null)}
-Wrong question IDs: ${JSON.stringify(explainQuestionIds)}
+Wrong question IDs to process: ${JSON.stringify(explainQuestionIds)}
 
 AnswerKey (wrong questions only):
 ${JSON.stringify(wrongAnswerKey)}
@@ -1190,30 +1191,37 @@ ${JSON.stringify(wrongAnswerKey)}
 Student answers (wrong questions only):
 ${JSON.stringify(wrongReadAnswers)}
 
-Scores (wrong questions only):
+Scoring analysis (wrong questions only) — use scoringReason as your primary basis:
 ${JSON.stringify(wrongScores)}
 
-Rules:
-- details[] must only include IDs from wrong question IDs list.
-- studentGuidance is the MOST IMPORTANT field. It will be shown directly to the student.
-- studentGuidance guidelines:
-  1. Write in Traditional Chinese (繁體中文).
-  2. Reference the question stem or topic so the student knows which question you mean.
-  3. Give a specific, concrete hint about WHERE the student went wrong (e.g. "這題問的是東南亞國家，你可以再想想地圖上各國的相對位置").
-  4. NEVER reveal the correct answer. NEVER say "正確答案是...", "應為...", "答案是...", or similar.
-  5. Encourage the student to think again or review a specific concept.
-  6. Keep it 1-3 sentences, warm but educational.
-- mistakeType and mistakeTypeCodes: classify the type of mistake.
-- weaknesses: list the student's weak areas (for learning analytics, not shown to student).
-- suggestions: list remedial suggestions (for learning analytics, not shown to student).
-- Return strict JSON only.
+== STEP-BY-STEP for each wrong question ==
+1. Find the question in the attached image by its ID or position number.
+2. Read the ACTUAL question text from the image (e.g. "求梯形面積，已知上底5cm、下底9cm、高4cm").
+3. Read the student's answer and the scoringReason above to understand exactly what went wrong.
+4. Write studentGuidance that references the real question content you just read.
+
+== studentGuidance RULES (STRICTLY ENFORCED) ==
+- Write in Traditional Chinese (繁體中文).
+- START by briefly naming what the question is asking (use the actual question wording from the image).
+- Point out the SPECIFIC ERROR the student made, based on scoringReason (e.g. "你把高和底搞混了" / "計算步驟中乘法用成了加法").
+- Give a CONCRETE thinking hint that guides the student toward the right approach WITHOUT revealing the answer (e.g. "想想梯形面積公式裡，『高』指的是哪個方向的長度？").
+- ABSOLUTELY FORBIDDEN: "正確答案是", "應為", "答案是", "正確的是", or any phrase that directly or indirectly states the correct answer.
+- Do NOT say "請再想想" alone — always pair it with a specific direction to think about.
+- 2–4 sentences. Warm, encouraging, and specific.
+
+== OTHER FIELDS ==
+- mistakeType / mistakeTypeCodes: classify the mistake type.
+- weaknesses: weak areas identified (for teacher analytics only, not shown to student).
+- suggestions: remediation suggestions (for teacher analytics only, not shown to student).
+
+Return strict JSON only. No markdown.
 
 Output:
 {
   "details": [
     {
       "questionId": "string",
-      "studentGuidance": "學生引導語句（參考題幹、具體提示、不給答案）",
+      "studentGuidance": "引導語（提及題目內容、指出具體錯誤、給方向不給答案）",
       "mistakeType": "concept|calculation|condition|blank|unreadable",
       "mistakeTypeCodes": ["calculation", "unit"]
     }
