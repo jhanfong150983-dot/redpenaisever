@@ -3751,6 +3751,12 @@ async function handleStudentOverview(req, res) {
       })
     })
 
+    // Debug log: 顯示每個作業的 status 與 openCorrections 筆數
+    console.log('[STUDENT-OVERVIEW] student:', studentContext.id, 'ownerId:', ownerId)
+    for (const item of assignmentItems) {
+      console.log('[STUDENT-OVERVIEW] assignment:', item.id, 'status:', item.status, 'openCorrections:', (item.openCorrections || []).length)
+    }
+
     res.status(200).json({
       classrooms: classroomOptions,
       activeClassroomKey: activeClassroom.key,
