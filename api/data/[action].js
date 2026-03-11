@@ -3564,6 +3564,7 @@ async function handleStudentOverview(req, res) {
     }
 
     const ownerId = studentContext.ownerId
+    console.log('[STUDENT-OVERVIEW] classroomId:', studentContext.classroomId)
     const preferences = await getTeacherPreferences(supabaseDb, ownerId)
 
     const assignmentsResult = await supabaseDb
@@ -3578,6 +3579,7 @@ async function handleStudentOverview(req, res) {
     }
 
     const assignmentIds = (assignmentsResult.data || []).map((a) => a.id)
+    console.log('[STUDENT-OVERVIEW] assignmentIds:', assignmentIds)
 
     const [statesResult, submissionsResult, correctionItemsResult] = await Promise.all([
       assignmentIds.length
