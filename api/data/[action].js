@@ -1456,6 +1456,12 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     let lastStatusReason = undefined
 
     if (source === 'student_correction') {
+      // Guard: skip if this correction submission was already processed
+      // (e.g. sync re-sends the same graded submission — would double-count)
+      if (isGraded && existingState?.current_submission_id === row.id) {
+        continue
+      }
+
       correctionAttemptCount += 1
 
       await writeCorrectionQuestionItems(
