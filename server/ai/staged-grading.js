@@ -907,12 +907,13 @@ Rules:
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - questionType="map_fill" if the question ID is listed in MAP-FILL QUESTIONS above.
+- questionType="map_draw" if the question shows a BLANK GRID, COORDINATE SYSTEM, or BLANK OUTLINE DIAGRAM and the question stem asks the student to DRAW, MARK, or PLACE a symbol/shape on it (e.g., 畫出颱風位置、以符號標示、在圖中標出位置、畫出符號). Do NOT output answerBbox for map_draw questions.
 - questionType="single_choice" if the question has labeled options (A/B/C/D or 甲/乙/丙/丁) and the student selects exactly one option (circle, tick, or fill-in).
 - questionType="multi_check" if the question has multiple checkboxes/boxes where the student can tick/check/cross ONE OR MORE options. Options may be unlabeled blank boxes, or labeled with numbers/letters/symbols. Key difference from single_choice: multiple selections are allowed.
 - questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem if blank markers are present.
 - questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers.
 - Otherwise questionType="other".
-- For visible=true questions (except map_fill), output answerBbox: the normalized [0,1] bounding box of the DESIGNATED ANSWER SPACE — the pre-printed space where students write their answer: parentheses (　), underline blanks ___, or empty boxes □. Do NOT frame the option list (A/B/C/D rows) — frame the blank where students write their selected letter. If the student left it blank, still output the bbox of the empty answer space.
+- For visible=true questions (except map_fill and map_draw), output answerBbox: the normalized [0,1] bounding box of the DESIGNATED ANSWER SPACE — the pre-printed space where students write their answer: parentheses (　), underline blanks ___, or empty boxes □. Do NOT frame the option list (A/B/C/D rows) — frame the blank where students write their selected letter. If the student left it blank, still output the bbox of the empty answer space.
   Only the CENTER POINT needs to be accurate — width and height will be overridden to a fixed display size. Output your best estimate of the center encoded as a bbox.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
   If the answer area cannot be determined, omit answerBbox.
@@ -981,11 +982,17 @@ function buildReadAnswerPrompt(classifyResult) {
   const fillBlankIds = visibleQuestions
     .filter((q) => q.questionType === 'fill_blank')
     .map((q) => q.questionId)
+  const mapDrawIds = visibleQuestions
+    .filter((q) => q.questionType === 'map_draw')
+    .map((q) => q.questionId)
   const singleChoiceNote = singleChoiceIds.length > 0
     ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
     : ''
   const mapFillNote = mapFillIds.length > 0
     ? `\nMAP-FILL questions (地圖填圖題): ${JSON.stringify(mapFillIds)}`
+    : ''
+  const mapDrawNote = mapDrawIds.length > 0
+    ? `\nMAP-DRAW questions (繪圖/標記題): ${JSON.stringify(mapDrawIds)}`
     : ''
   const multiCheckNote = multiCheckIds.length > 0
     ? `\nMULTI-CHECK questions (勾選題, output comma-separated selected options): ${JSON.stringify(multiCheckIds)}`
@@ -998,7 +1005,7 @@ You are a dumb OCR scanner with NO mathematical knowledge. You cannot add, subtr
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${multiCheckNote}${fillBlankNote}
+${singleChoiceNote}${multiCheckNote}${fillBlankNote}${mapDrawNote}
 
 RULES:
 1. DO NOT solve, calculate, verify, or correct anything.
@@ -1050,6 +1057,22 @@ MAP-FILL RULE (地圖填圖題):
 - Include ALL student-written text, even if misspelled.
 - status="read" if any handwritten text found, status="blank" if none.
 ` : ''}
+${mapDrawNote ? `
+MAP-DRAW RULE (繪圖/標記題):
+For question IDs in MAP-DRAW list, describe the student's drawing with THREE parts:
+  1. SYMBOL/SHAPE: What did the student draw? Name the symbol or shape exactly (e.g., 颱風符號、箭頭向右、圓點、叉號).
+  2. REFERENCE LINES: Read ALL printed reference lines and labels visible in the diagram (e.g., 23.5°N、121°E、赤道、X軸). List them.
+  3. POSITION: Describe where the drawing is relative to the printed reference lines using precise language:
+     - If coordinate grid: "在[A]緯線以[南/北]、[B]經線以[東/西]" + grid cell (e.g., 右下格、左上格)
+     - If numbered/labeled grid cells: "在第[N]格" or "在[標籤]格"
+     - If near a specific intersection: "在[A]與[B]交點附近"
+     - Always specify which side of EACH reference line the drawing is on.
+
+Output format (single string): "[符號名稱]，位置：[精確位置描述含參考線]"
+Example: "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"
+Example: "向右箭頭，位置：X軸以上、Y軸以右（第一象限）"
+If no student drawing found → status="blank"
+` : ''}
 
 Return:
 {
@@ -1083,6 +1106,9 @@ function buildReReadAnswerPrompt(classifyResult) {
   const mapFillIds = visibleQuestions
     .filter((q) => q.questionType === 'map_fill')
     .map((q) => q.questionId)
+  const mapDrawIds = visibleQuestions
+    .filter((q) => q.questionType === 'map_draw')
+    .map((q) => q.questionId)
   const singleChoiceNote = singleChoiceIds.length > 0
     ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
     : ''
@@ -1095,6 +1121,9 @@ function buildReReadAnswerPrompt(classifyResult) {
   const mapFillNote = mapFillIds.length > 0
     ? `\nMAP-FILL questions: ${JSON.stringify(mapFillIds)}`
     : ''
+  const mapDrawNote = mapDrawIds.length > 0
+    ? `\nMAP-DRAW questions (繪圖/標記題): ${JSON.stringify(mapDrawIds)}`
+    : ''
 
   return `
 You are a strict blank-detector and second-opinion verifier.
@@ -1102,7 +1131,7 @@ Your job is to INDEPENDENTLY verify each question's answer with maximum skeptici
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${multiCheckNote}${fillBlankNote}
+${singleChoiceNote}${multiCheckNote}${fillBlankNote}${mapDrawNote}
 
 == CORE MINDSET ==
 DEFAULT ASSUMPTION: Every question is BLANK until proven otherwise.
@@ -1131,6 +1160,15 @@ Empty answer line → "_". All lines empty → BLANK.
 == DRAWING/MAP RULE ==
 Only report marks that are clearly drawn by the student on the map/diagram for THIS question's scope.
 If uncertain whether a mark is pre-printed or student-drawn → BLANK.
+
+== MAP-DRAW RULE (繪圖/標記題) ==
+For questions in MAP-DRAW list, apply maximum skepticism:
+- BLANK if you cannot clearly see a fresh student-drawn mark (new ink/pencil not part of the pre-printed diagram).
+- If a student mark IS present, output THREE parts: [符號名稱]，位置：[精確位置描述含參考線]
+  - Name the symbol/shape exactly.
+  - List ALL printed reference lines/labels (latitudes, longitudes, axes, grid labels).
+  - State which side of EACH reference line the mark is on.
+  - Example: "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"
 
 == COPY RULES (when non-blank) ==
 - Copy exactly, character by character. Do NOT correct or normalize.
@@ -1188,6 +1226,11 @@ Rules:
   - score = Math.round(correctCount / totalPositions * maxScore).
   - isCorrect = (score === maxScore).
   - scoringReason MUST explain which positions the student answered incorrectly by describing the error pattern (e.g. "學生將位置C和位置D填反，其他位置正確"). Do NOT just say "X/Y correct". Describe WHAT went wrong so the teacher understands.
+- MAP-DRAW SCORING (繪圖/標記題): The student's answer is a description of what was drawn and where (e.g. "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"). The referenceAnswer in the AnswerKey describes where the symbol SHOULD be placed.
+  - Judge whether the drawn symbol is correct (right type of symbol).
+  - Judge whether the position is correct by comparing the described location against the referenceAnswer's required coordinates/grid position.
+  - A position is correct if the student placed it in the correct grid cell or within reasonable proximity of the required coordinate intersection.
+  - scoringReason should clearly explain: what symbol was drawn, where it was placed, and whether the position matches the requirement.
 - scoringReason must clearly explain WHY the answer is correct or incorrect. Write in Traditional Chinese.
   - For correct answers: briefly confirm (e.g. "答案完全正確").
   - For incorrect answers: describe the specific error pattern (e.g. "學生將九州寫成九洲，同音異字", "學生填寫的國名與實際位置不符").
