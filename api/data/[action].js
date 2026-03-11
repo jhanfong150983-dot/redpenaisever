@@ -3600,7 +3600,7 @@ async function handleStudentOverview(req, res) {
           supabaseDb
             .from('submissions')
             .select('id, created_at')
-            .in('status', ['pending_grading', 'grading_in_progress'])
+            .in('status', ['pending_grading', 'pending_grading_retry', 'grading_in_progress'])
             .eq('owner_id', cOwnerId)
             .eq('source', 'student_correction')
             .order('created_at', { ascending: true })
@@ -3712,7 +3712,7 @@ async function handleStudentOverview(req, res) {
 
           // Queue position for pending correction grading
           const pendingGradingSubmission = submissions.find((s) =>
-            ['pending_grading', 'grading_in_progress'].includes(String(s.status || '')) &&
+            ['pending_grading', 'pending_grading_retry', 'grading_in_progress'].includes(String(s.status || '')) &&
             s.source === 'student_correction'
           )
           let gradingPending = false
@@ -3723,6 +3723,10 @@ async function handleStudentOverview(req, res) {
             gradingQueuePosition = myIndex >= 0 ? myIndex + 1 : globalQueue.length
           }
 
+          const gradingFailed = submissions.some((s) =>
+            s.status === 'grading_failed' && s.source === 'student_correction'
+          ) || undefined
+
           return compactObject({
             id: assignment.id,
             classroomName,
@@ -3732,6 +3736,7 @@ async function handleStudentOverview(req, res) {
             status,
             gradingPending: gradingPending || undefined,
             gradingQueuePosition: gradingPending ? gradingQueuePosition : undefined,
+            gradingFailed,
             canUpload,
             uploadLocked: effectiveUploadLocked,
             uploadLockedReason:
@@ -4089,8 +4094,8 @@ async function handleProcessPendingGrading(req, res) {
 
   const { data: pendingRows, error: pendingError } = await supabaseDb
     .from('submissions')
-    .select('id, owner_id, assignment_id, student_id, image_url, source, round')
-    .eq('status', 'pending_grading')
+    .select('id, owner_id, assignment_id, student_id, image_url, source, round, status')
+    .in('status', ['pending_grading', 'pending_grading_retry'])
     .eq('source', 'student_correction')
     .order('created_at', { ascending: true })
     .limit(4)
@@ -4106,13 +4111,15 @@ async function handleProcessPendingGrading(req, res) {
   }
 
   const ids = pendingRows.map((r) => r.id)
+  // Remember original status to decide retry vs fail on error
+  const originalStatuses = new Map(pendingRows.map((r) => [r.id, r.status]))
 
   // Atomically mark as grading_in_progress to prevent duplicate processing
   await supabaseDb
     .from('submissions')
     .update({ status: 'grading_in_progress', updated_at: new Date().toISOString() })
     .in('id', ids)
-    .eq('status', 'pending_grading')
+    .in('status', ['pending_grading', 'pending_grading_retry'])
 
   const uniqueAssignmentIds = [...new Set(pendingRows.map((r) => r.assignment_id))]
   const { data: assignments } = await supabaseDb
@@ -4138,9 +4145,12 @@ async function handleProcessPendingGrading(req, res) {
   await runConcurrent(pendingRows, 2, async (submission) => {
     const assignment = assignmentMap.get(submission.assignment_id)
     if (!assignment) {
+      const revertStatus = originalStatuses.get(submission.id) === 'pending_grading_retry'
+        ? 'grading_failed'
+        : 'pending_grading_retry'
       await supabaseDb
         .from('submissions')
-        .update({ status: 'pending_grading', updated_at: new Date().toISOString() })
+        .update({ status: revertStatus, updated_at: new Date().toISOString() })
         .eq('id', submission.id)
       return
     }
@@ -4204,11 +4214,24 @@ async function handleProcessPendingGrading(req, res) {
       processed++
     } catch (err) {
       console.error('[PROCESS-GRADING] Error grading', submission.id, err?.message)
-      // Revert to pending_grading so cron can retry
-      await supabaseDb
-        .from('submissions')
-        .update({ status: 'pending_grading', updated_at: new Date().toISOString() })
-        .eq('id', submission.id)
+      const isRetry = originalStatuses.get(submission.id) === 'pending_grading_retry'
+      if (isRetry) {
+        // Second failure → permanently failed, reset student state so they can retry
+        await supabaseDb
+          .from('submissions')
+          .update({ status: 'grading_failed', updated_at: new Date().toISOString() })
+          .eq('id', submission.id)
+        await upsertAssignmentStudentState(supabaseDb, submission.owner_id, submission.assignment_id, submission.student_id, {
+          status: 'correction_required',
+          last_status_reason: 'AI 批改失敗，請重新送出訂正'
+        })
+      } else {
+        // First failure → retry once more next minute
+        await supabaseDb
+          .from('submissions')
+          .update({ status: 'pending_grading_retry', updated_at: new Date().toISOString() })
+          .eq('id', submission.id)
+      }
     }
   })
 
