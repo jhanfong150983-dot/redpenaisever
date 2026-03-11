@@ -1598,73 +1598,13 @@ export async function runStagedGradingPhaseA({
     .filter((q) => q.visible && q.questionType === 'word_problem')
     .map((q) => q.questionId)
 
-  // ── A2: CROP (server-side, per question, optional) ────────────────────────
-  const cropByQuestionId = new Map()
-  const visibleWithBbox = classifyAligned.filter((q) => q.visible && q.answerBbox && q.questionType !== 'map_fill')
-  if (visibleWithBbox.length > 0) {
-    const mainInlineData = inlineImages[0].inlineData
-    const cropResults = await Promise.all(
-      visibleWithBbox.map(async (q) => {
-        const cropData = await cropInlineImageByBbox(
-          mainInlineData.data,
-          mainInlineData.mimeType,
-          q.answerBbox
-        )
-        return { questionId: q.questionId, cropData }
-      })
-    )
-    for (const { questionId, cropData } of cropResults) {
-      if (cropData) cropByQuestionId.set(questionId, cropData)
-    }
-    logStaged(pipelineRunId, stagedLogLevel, 'crop summary', {
-      attempted: visibleWithBbox.length,
-      succeeded: cropByQuestionId.size
-    })
-  }
-
-  // ── A3 + A4: ReadAnswer + reReadAnswer IN PARALLEL ────────────────────────
-  // Build crop-aware image parts: send per-question crop images when available,
-  // so the AI sees only each question's answer area instead of the full page.
-  const visibleWithCrop = classifyAligned.filter((q) => q.visible && cropByQuestionId.has(q.questionId))
-  const visibleWithoutCrop = classifyAligned.filter((q) => q.visible && !cropByQuestionId.has(q.questionId))
-
-  function buildReadAnswerStageContents(prompt) {
-    if (visibleWithCrop.length === 0) {
-      // No crops available — fall back to full image
-      return [{ role: 'user', parts: [{ text: prompt }, ...submissionImageParts] }]
-    }
-    // Explain the image layout to the model
-    const structureNote = [
-      '',
-      'IMAGE STRUCTURE: Each question is followed by a CROP IMAGE showing only that question\'s answer area.',
-      '- "[QuestionId]" tag → the immediately following image is that question\'s cropped answer region.',
-      '- Read ONLY the answer for THAT question from its crop. The crop may include edges of neighboring questions — ignore those.',
-      '- CRITICAL: If the crop\'s PRIMARY answer space (blank line, box, circle options) for this question is EMPTY, output blank — even if you see handwriting from an adjacent question elsewhere in the crop.',
-      '- NEVER carry over an answer from a neighboring question into this question\'s slot.',
-      visibleWithoutCrop.length > 0
-        ? `- Questions without a crop (read from [FULL PAGE] image at the end): ${visibleWithoutCrop.map((q) => q.questionId).join(', ')}`
-        : '- All visible questions have a crop image.'
-    ].join('\n')
-
-    const parts = [{ text: prompt + structureNote }]
-    for (const q of visibleWithCrop) {
-      const cropData = cropByQuestionId.get(q.questionId)
-      parts.push({ text: `[${q.questionId}]` })
-      parts.push({ inlineData: { mimeType: cropData.mimeType, data: cropData.data } })
-    }
-    if (visibleWithoutCrop.length > 0) {
-      parts.push({ text: '[FULL PAGE]' })
-      parts.push(submissionImageParts[0])
-    }
-    return [{ role: 'user', parts }]
-  }
-
+  // ── A3 + A4: ReadAnswer + reReadAnswer IN PARALLEL (full image) ────────────
+  // Both reads use the full submission image so AI has complete layout context
+  // and cannot misattribute answers across question boundaries due to bad crops.
+  // Crops are done AFTER consistency check, only for non-stable questions (A2).
   const readAnswerPrompt = buildReadAnswerPrompt(classifyResult)
   const reReadAnswerPrompt = buildReReadAnswerPrompt(classifyResult)
-  logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', {
-    croppedQuestions: visibleWithCrop.length,
-    fullImageQuestions: visibleWithoutCrop.length
-  })
+  logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', { mode: 'full_image' })
   const parallelCalls = [
     executeStage({
       apiKey,
@@ -1673,7 +1613,7 @@ export async function runStagedGradingPhaseA({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-      stageContents: buildReadAnswerStageContents(readAnswerPrompt)
+      stageContents: [{ role: 'user', parts: [{ text: readAnswerPrompt }, ...submissionImageParts] }]
     }),
     executeStage({
       apiKey,
@@ -1682,7 +1622,7 @@ export async function runStagedGradingPhaseA({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-      stageContents: buildReadAnswerStageContents(reReadAnswerPrompt)
+      stageContents: [{ role: 'user', parts: [{ text: reReadAnswerPrompt }, ...submissionImageParts] }]
     })
   ]
   if (wordProblemIds.length > 0) {
@@ -1808,26 +1748,16 @@ export async function runStagedGradingPhaseA({
     ? normalizeReadAnswerResult(reReadAnswerParsed, questionIds, new Set())
     : { answers: [] }
 
-  // ── A5: CONSISTENCY CHECK (pure logic) ───────────────────────────────────
+  // ── A5: CONSISTENCY CHECK (pure logic, no crops yet) ─────────────────────
   const read1ById = mapByQuestionId(readAnswerResult.answers, (item) => item?.questionId)
   const read2ById = mapByQuestionId(reReadAnswerResult.answers, (item) => item?.questionId)
 
-  const questionResults = questionIds.map((questionId) => {
+  const questionResultsRaw = questionIds.map((questionId) => {
     const read1 = read1ById.get(questionId)
     const read2 = read2ById.get(questionId)
     const classifyRow = classifyAligned.find((q) => q.questionId === questionId)
     const consistencyStatus =
       read1 && read2 ? computeConsistencyStatus(read1, read2) : 'unstable'
-    // 非 stable 題目附上 crop 圖供老師審查；map_fill 無 crop，改附全圖
-    const isMapFill = classifyRow?.questionType === 'map_fill'
-    const cropData = consistencyStatus !== 'stable' ? cropByQuestionId.get(questionId) : undefined
-    let answerCropImageUrl
-    if (cropData) {
-      answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
-    } else if (consistencyStatus !== 'stable' && isMapFill && inlineImages.length > 0) {
-      const fullImg = inlineImages[0].inlineData
-      answerCropImageUrl = `data:${fullImg.mimeType};base64,${fullImg.data}`
-    }
     return {
       questionId,
       consistencyStatus,
@@ -1841,11 +1771,53 @@ export async function runStagedGradingPhaseA({
         status: read2?.status ?? 'unreadable',
         studentAnswer: read2?.studentAnswerRaw ?? '無法辨識'
       },
-      answerCropImageUrl,
       answerBbox: classifyRow?.answerBbox ?? null,
-      hasCropImage: cropByQuestionId.has(questionId),
       calculationAnswerMismatch: read1?.calculationAnswerMismatch === true
     }
+  })
+
+  // ── A2: CROP — only non-stable questions, for teacher review ──────────────
+  const cropByQuestionId = new Map()
+  const nonStableIds = new Set(
+    questionResultsRaw.filter((q) => q.consistencyStatus !== 'stable').map((q) => q.questionId)
+  )
+  const questionsToCrop = classifyAligned.filter(
+    (q) => nonStableIds.has(q.questionId) && q.answerBbox && q.questionType !== 'map_fill'
+  )
+  if (questionsToCrop.length > 0 && inlineImages.length > 0) {
+    const mainInlineData = inlineImages[0].inlineData
+    const cropResults = await Promise.all(
+      questionsToCrop.map(async (q) => {
+        const cropData = await cropInlineImageByBbox(
+          mainInlineData.data,
+          mainInlineData.mimeType,
+          q.answerBbox
+        )
+        return { questionId: q.questionId, cropData }
+      })
+    )
+    for (const { questionId, cropData } of cropResults) {
+      if (cropData) cropByQuestionId.set(questionId, cropData)
+    }
+    logStaged(pipelineRunId, stagedLogLevel, 'crop summary (non-stable only)', {
+      nonStable: nonStableIds.size,
+      attempted: questionsToCrop.length,
+      succeeded: cropByQuestionId.size
+    })
+  }
+
+  // Attach crop image URLs to non-stable question results
+  const questionResults = questionResultsRaw.map((qr) => {
+    const isMapFill = qr.questionType === 'map_fill'
+    const cropData = cropByQuestionId.get(qr.questionId)
+    let answerCropImageUrl
+    if (cropData) {
+      answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+    } else if (qr.consistencyStatus !== 'stable' && isMapFill && inlineImages.length > 0) {
+      const fullImg = inlineImages[0].inlineData
+      answerCropImageUrl = `data:${fullImg.mimeType};base64,${fullImg.data}`
+    }
+    return { ...qr, answerCropImageUrl, hasCropImage: cropByQuestionId.has(qr.questionId) }
   })
 
   // ── A5.5: AI CONSISTENCY JUDGE (non-single-choice diff 題目讓 AI 判斷是否真的不一致) ──
