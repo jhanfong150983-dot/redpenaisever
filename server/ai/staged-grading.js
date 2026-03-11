@@ -624,7 +624,7 @@ function normalizeClassifyResult(parsed, questionIds) {
     const row = byQuestionId.get(questionId)
     const visible = row?.visible === true
     const qt = row?.questionType
-    const questionType = qt === 'word_problem' ? 'word_problem' : qt === 'single_choice' ? 'single_choice' : qt === 'map_fill' ? 'map_fill' : 'other'
+    const questionType = qt === 'word_problem' ? 'word_problem' : qt === 'single_choice' ? 'single_choice' : qt === 'map_fill' ? 'map_fill' : qt === 'multi_check' ? 'multi_check' : qt === 'fill_blank' ? 'fill_blank' : 'other'
     alignedQuestions.push({
       questionId,
       visible,
@@ -904,7 +904,9 @@ Rules:
 - visible=false if the question is absent, cut off, or not on this image.
 - questionType="map_fill" if the question ID is listed in MAP-FILL QUESTIONS above.
 - questionType="single_choice" if the question has labeled options (A/B/C/D or 甲/乙/丙/丁) and the student selects exactly one option (circle, tick, or fill-in).
-- questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...").
+- questionType="multi_check" if the question has multiple checkboxes/boxes where the student can tick/check/cross ONE OR MORE options. Options may be unlabeled blank boxes, or labeled with numbers/letters/symbols. Key difference from single_choice: multiple selections are allowed.
+- questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem if blank markers are present.
+- questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers.
 - Otherwise questionType="other".
 - For visible=true questions (except map_fill), output answerBbox: the normalized [0,1] bounding box of the student's ANSWER AREA ONLY (exclude the question stem).
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
@@ -968,18 +970,30 @@ function buildReadAnswerPrompt(classifyResult) {
   const mapFillIds = visibleQuestions
     .filter((q) => q.questionType === 'map_fill')
     .map((q) => q.questionId)
+  const multiCheckIds = visibleQuestions
+    .filter((q) => q.questionType === 'multi_check')
+    .map((q) => q.questionId)
+  const fillBlankIds = visibleQuestions
+    .filter((q) => q.questionType === 'fill_blank')
+    .map((q) => q.questionId)
   const singleChoiceNote = singleChoiceIds.length > 0
     ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
     : ''
   const mapFillNote = mapFillIds.length > 0
     ? `\nMAP-FILL questions (地圖填圖題): ${JSON.stringify(mapFillIds)}`
     : ''
+  const multiCheckNote = multiCheckIds.length > 0
+    ? `\nMULTI-CHECK questions (勾選題, output comma-separated selected options): ${JSON.stringify(multiCheckIds)}`
+    : ''
+  const fillBlankNote = fillBlankIds.length > 0
+    ? `\nFILL-BLANK questions (填空題, output comma-separated blank contents): ${JSON.stringify(fillBlankIds)}`
+    : ''
   return `
 You are a dumb OCR scanner with NO mathematical knowledge. You cannot add, subtract, multiply, or divide. You only see shapes of characters on paper and copy them exactly.
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}
+${singleChoiceNote}${multiCheckNote}${fillBlankNote}
 
 RULES:
 1. DO NOT solve, calculate, verify, or correct anything.
@@ -989,9 +1003,23 @@ RULES:
 5. UNREADABLE: If text exists but is too unclear to read → status="unreadable", studentAnswerRaw="無法辨識".
 6. TEXT ANSWER: Copy the student's written text character-by-character. Include the final answer line (A:, 答:, Ans:) exactly as written.
 7. SINGLE-CHOICE: For questions listed in SINGLE-CHOICE above, studentAnswerRaw must be exactly ONE letter (A/B/C/D or 甲/乙/丙/丁). If the student circled/ticked/filled option B → output "B". Do NOT include the full option text.
-8. DRAWING ANSWER (map/diagram marks): If the student drew or marked something on a map/diagram (a new pen mark not part of the pre-printed image), describe in Traditional Chinese what was drawn and where → status="read". Example: "在23.5°N與121°E交點處畫出颱風符號". If only pre-printed content is visible with no student mark → status="blank".
-9. LANGUAGE: Always output in Traditional Chinese (繁體中文). NEVER output English descriptions.
-10. Return strict JSON only. No markdown, no commentary.
+8. MULTI-CHECK: For questions listed in MULTI-CHECK above, studentAnswerRaw must be comma-separated selected options with NO spaces.
+   - If options have printed labels (numbers/letters/symbols like ①②③, A/B/C, 1/2/3): use those labels. Example: "①,③" or "A,C,D" or "1,3".
+   - If options have NO labels (blank boxes): use position descriptions. Example: "左側,中間" or "第1個,第3個".
+   - Order: left-to-right, top-to-bottom as they appear on paper.
+   - FORBIDDEN: action descriptions like "在...打勾" or "在...畫斜線". Output ONLY labels or positions.
+   - FORBIDDEN: full option text content. Output ONLY the identifier or position.
+9. FILL-BLANK: For questions listed in FILL-BLANK above, output ONLY the handwritten content inside each blank, comma-separated in left-to-right top-to-bottom order.
+   - Empty blank → "_" (underscore).
+   - Unreadable blank → "?" (question mark).
+   - All blanks empty → status="blank", studentAnswerRaw="未作答".
+   - Single blank: just the content (no comma). Multiple blanks: comma-separated.
+   - FORBIDDEN: including printed surrounding text ("答", "答案", underline markers, blank labels).
+   - FORBIDDEN: description sentences. Output ONLY the written content.
+   - Copy content exactly as written (Rule 1–3 apply: do NOT solve, calculate, or correct).
+10. DRAWING ANSWER (map/diagram marks): If the student drew or marked something on a map/diagram (a new pen mark not part of the pre-printed image), describe in Traditional Chinese what was drawn and where → status="read". Example: "在23.5°N與121°E交點處畫出颱風符號". If only pre-printed content is visible with no student mark → status="blank".
+11. LANGUAGE: Always output in Traditional Chinese (繁體中文). NEVER output English descriptions.
+12. Return strict JSON only. No markdown, no commentary.
 
 FORBIDDEN:
 - "A: 6.12 cm²" → output "A: 6.24 cm²"  ← FORBIDDEN (corrected)
