@@ -1417,6 +1417,17 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
       ? true
       : String(row.status || '').toLowerCase() === 'graded'
 
+    // Layer 2: If teacher re-grades a student who is already in correction workflow,
+    // skip the state transition to avoid overwriting correction progress.
+    // Only skip for non-correction sources — student recheck must always proceed.
+    const CORRECTION_ACTIVE_STATUSES = [
+      'correction_required', 'correction_in_progress',
+      'correction_pending_review', 'correction_passed', 'correction_failed'
+    ]
+    if (source !== 'student_correction' && CORRECTION_ACTIVE_STATUSES.includes(String(existingState?.status || ''))) {
+      continue
+    }
+
     if (!isGraded) {
       const nextState = await upsertAssignmentStudentState(
         supabaseDb,
@@ -2143,32 +2154,73 @@ async function handleCorrectionDispatchToggle(req, res) {
 
     if (!enable) {
       const nowIso = new Date().toISOString()
-      const { error: updateError } = await supabaseDb
-        .from('assignment_student_state')
-        .update({
-          status: 'graded',
-          last_status_reason: '教師已停止訂正',
-          updated_at: nowIso
-        })
-        .eq('owner_id', user.id)
-        .eq('assignment_id', assignmentId)
-        .in('status', ['correction_required', 'correction_in_progress'])
-      if (updateError) throw new Error(updateError.message)
 
-      const { error: closeError } = await supabaseDb
-        .from('correction_question_items')
-        .update({
-          status: 'skipped',
-          updated_at: nowIso
-        })
+      // Layer 1: Find students whose correction submission is currently being AI-rechecked
+      // (pending_grading or grading_in_progress) — must not recall them
+      const { data: recheckingSubmissions } = await supabaseDb
+        .from('submissions')
+        .select('student_id')
         .eq('owner_id', user.id)
         .eq('assignment_id', assignmentId)
-        .eq('status', 'open')
-      if (closeError) throw new Error(closeError.message)
+        .eq('source', 'student_correction')
+        .in('status', ['pending_grading', 'pending_grading_retry', 'grading_in_progress'])
+
+      const recheckingStudentIds = new Set(
+        (recheckingSubmissions || []).map((r) => r.student_id).filter(Boolean)
+      )
+
+      // Fetch student names for blocked students to return in warning message
+      let blockedStudents = []
+      if (recheckingStudentIds.size > 0) {
+        const { data: studentRows } = await supabaseDb
+          .from('students')
+          .select('id, name, seat_number')
+          .eq('owner_id', user.id)
+          .in('id', [...recheckingStudentIds])
+        blockedStudents = (studentRows || []).map((s) => ({
+          studentId: s.id,
+          name: s.name,
+          seatNumber: s.seat_number
+        }))
+      }
+
+      // Only recall students who are NOT currently in recheck
+      const recallableStates = (states || [])
+        .filter((row) =>
+          ['correction_required', 'correction_in_progress'].includes(String(row.status || '')) &&
+          !recheckingStudentIds.has(row.student_id)
+        )
+        .map((row) => row.student_id)
+
+      if (recallableStates.length > 0) {
+        const { error: updateError } = await supabaseDb
+          .from('assignment_student_state')
+          .update({
+            status: 'graded',
+            last_status_reason: '教師已停止訂正',
+            updated_at: nowIso
+          })
+          .eq('owner_id', user.id)
+          .eq('assignment_id', assignmentId)
+          .in('student_id', recallableStates)
+          .in('status', ['correction_required', 'correction_in_progress'])
+        if (updateError) throw new Error(updateError.message)
+
+        const { error: closeError } = await supabaseDb
+          .from('correction_question_items')
+          .update({ status: 'skipped', updated_at: nowIso })
+          .eq('owner_id', user.id)
+          .eq('assignment_id', assignmentId)
+          .eq('status', 'open')
+          .in('student_id', recallableStates)
+        if (closeError) throw new Error(closeError.message)
+      }
 
       res.status(200).json({
         success: true,
-        dispatchActive: false
+        dispatchActive: recheckingStudentIds.size > 0,
+        recalledCount: recallableStates.length,
+        blockedStudents  // [{studentId, name, seatNumber}] — still in recheck, cannot recall
       })
       return
     }
