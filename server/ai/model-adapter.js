@@ -24,8 +24,17 @@ function getRetryConfig() {
   return { retryCount, baseBackoffMs }
 }
 
+function get429RetryConfig() {
+  const retryRaw = Number(process.env.GEMINI_429_RETRY_COUNT)
+  const backoffRaw = Number(process.env.GEMINI_429_RETRY_BACKOFF_MS)
+  const retryCount = Number.isFinite(retryRaw) ? Math.max(0, Math.round(retryRaw)) : 2
+  const backoffMs = Number.isFinite(backoffRaw) ? Math.max(1000, Math.round(backoffRaw)) : 15000
+  return { retryCount, backoffMs }
+}
+
 // Calls a single model. Returns { ok, status, data, modelPath, url, is503 }.
 // 504 is retried on the same model with exponential backoff.
+// 429 is retried with a fixed backoff (rate limit).
 // 503 is NOT retried here — caller should switch to a fallback model.
 async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) {
   const modelPath = String(model).startsWith('models/')
@@ -33,8 +42,11 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
     : `models/${model}`
   const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${apiKey}`
   const { retryCount, baseBackoffMs } = getRetryConfig()
+  const { retryCount: retry429Count, backoffMs: backoff429Ms } = get429RetryConfig()
   const hasTimeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
   const effectiveTimeoutMs = hasTimeout ? Math.max(1000, Number(timeoutMs)) : null
+
+  let attempts429 = 0
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
     const controller = hasTimeout ? new AbortController() : null
@@ -73,6 +85,17 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
     // 503 = model overloaded — signal caller to switch to fallback model, don't retry same model.
     if (Number(response.status) === 503) {
       return { ok: false, status: 503, data, modelPath, url, is503: true }
+    }
+
+    // 429 = rate limit — retry with fixed backoff, independent of 504 retry counter.
+    if (Number(response.status) === 429 && attempts429 < retry429Count) {
+      attempts429 += 1
+      console.warn(
+        `[ai-model-adapter] response status=429 model=${model} retry429=${attempts429}/${retry429Count} waitMs=${backoff429Ms}`
+      )
+      await sleep(backoff429Ms)
+      attempt -= 1  // don't consume 504 retry budget
+      continue
     }
 
     // 504 = timeout — retry the same model with exponential backoff.
