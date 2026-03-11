@@ -3566,7 +3566,7 @@ async function handleStudentOverview(req, res) {
 
         const aIds = (assignmentsResult.data || []).map((a) => a.id)
 
-        const [statesResult, submissionsResult, correctionItemsResult] = await Promise.all([
+        const [statesResult, submissionsResult, correctionItemsResult, globalQueueResult] = await Promise.all([
           aIds.length
             ? supabaseDb
                 .from('assignment_student_state')
@@ -3580,7 +3580,7 @@ async function handleStudentOverview(req, res) {
           aIds.length
             ? supabaseDb
                 .from('submissions')
-                .select('id, assignment_id, score, graded_at, created_at, updated_at, source, grading_result, image_url')
+                .select('id, assignment_id, score, graded_at, created_at, updated_at, source, grading_result, image_url, status')
                 .eq('owner_id', cOwnerId)
                 .eq('student_id', studentId)
                 .in('assignment_id', aIds)
@@ -3595,11 +3595,20 @@ async function handleStudentOverview(req, res) {
                 .eq('student_id', studentId)
                 .eq('status', 'open')
                 .in('assignment_id', aIds)
-            : Promise.resolve({ data: [], error: null })
+            : Promise.resolve({ data: [], error: null }),
+          // Global queue for this teacher (all students' pending correction submissions)
+          supabaseDb
+            .from('submissions')
+            .select('id, created_at')
+            .in('status', ['pending_grading', 'grading_in_progress'])
+            .eq('owner_id', cOwnerId)
+            .eq('source', 'student_correction')
+            .order('created_at', { ascending: true })
         ])
         if (statesResult.error) throw new Error(statesResult.error.message)
         if (submissionsResult.error) throw new Error(submissionsResult.error.message)
         if (correctionItemsResult.error) throw new Error(correctionItemsResult.error.message)
+        const globalQueue = globalQueueResult?.data || []
 
         const stateMap = new Map(
           (statesResult.data || []).map((row) => [row.assignment_id, row])
@@ -3701,6 +3710,19 @@ async function handleStudentOverview(req, res) {
           const visibleCorrections =
             visibility === 'status_only' || visibility === 'score_only' ? [] : mergedCorrections
 
+          // Queue position for pending correction grading
+          const pendingGradingSubmission = submissions.find((s) =>
+            ['pending_grading', 'grading_in_progress'].includes(String(s.status || '')) &&
+            s.source === 'student_correction'
+          )
+          let gradingPending = false
+          let gradingQueuePosition
+          if (pendingGradingSubmission) {
+            gradingPending = true
+            const myIndex = globalQueue.findIndex((q) => q.id === pendingGradingSubmission.id)
+            gradingQueuePosition = myIndex >= 0 ? myIndex + 1 : globalQueue.length
+          }
+
           return compactObject({
             id: assignment.id,
             classroomName,
@@ -3708,6 +3730,8 @@ async function handleStudentOverview(req, res) {
             title: assignment.title,
             totalPages: assignment.total_pages,
             status,
+            gradingPending: gradingPending || undefined,
+            gradingQueuePosition: gradingPending ? gradingQueuePosition : undefined,
             canUpload,
             uploadLocked: effectiveUploadLocked,
             uploadLockedReason:
@@ -3984,7 +4008,7 @@ async function handleStudentSubmission(req, res) {
           student_id: studentContext.id,
           image_url: filePath,
           thumb_url: thumbFilePath ?? undefined,
-          status: 'synced',
+          status: mode === 'correction' ? 'pending_grading' : 'synced',
           source,
           round,
           parent_submission_id: currentState?.current_submission_id ?? undefined,
@@ -4026,99 +4050,16 @@ async function handleStudentSubmission(req, res) {
 
     let correctionResult = null
     if (mode === 'correction') {
-      try {
-        const gradingResult = await runSubmissionGrading({
-          assignment,
-          normalizedImage: normalizedImagePayload,
-          contentType,
-          requestId: submissionId
-        })
-        const gradedAt = Date.now()
-        const totalScore = toNumber(gradingResult?.totalScore) ?? 0
-        const feedback =
-          Array.isArray(gradingResult?.suggestions) && gradingResult.suggestions.length > 0
-            ? String(gradingResult.suggestions[0] || '')
-            : undefined
-
-        const { error: updateSubmissionError } = await supabaseDb
-          .from('submissions')
-          .update(
-            compactObject({
-              status: 'graded',
-              score: totalScore,
-              feedback,
-              grading_result: gradingResult,
-              graded_at: gradedAt,
-              updated_at: new Date().toISOString()
-            })
-          )
-          .eq('id', submissionId)
-          .eq('owner_id', ownerId)
-
-        if (updateSubmissionError) {
-          throw new Error(updateSubmissionError.message)
-        }
-
-        await applySubmissionStateTransitions(supabaseDb, ownerId, [
-          {
-            id: submissionId,
-            assignment_id: assignmentId,
-            student_id: studentContext.id,
-            status: 'graded',
-            source,
-            graded_at: gradedAt,
-            grading_result: gradingResult,
-            image_url: filePath,
-            updated_at: new Date().toISOString()
-          }
-        ])
-
-        const { data: latestState, error: latestStateError } = await supabaseDb
-          .from('assignment_student_state')
-          .select(
-            'status, correction_attempt_count, correction_attempt_limit, last_status_reason'
-          )
-          .eq('owner_id', ownerId)
-          .eq('assignment_id', assignmentId)
-          .eq('student_id', studentContext.id)
-          .maybeSingle()
-        if (latestStateError) {
-          throw new Error(latestStateError.message)
-        }
-
-        correctionResult = {
-          status: latestState?.status || 'correction_in_progress',
-          totalScore,
-          wrongQuestionCount: parseMistakesFromGradingResult(gradingResult).length,
-          correctionAttemptCount: clampInteger(
-            latestState?.correction_attempt_count,
-            0,
-            99,
-            correctionCount + 1
-          ),
-          correctionAttemptLimit: clampInteger(
-            latestState?.correction_attempt_limit,
-            1,
-            MAX_CORRECTION_ATTEMPT_LIMIT,
-            correctionLimit
-          ),
-          lastStatusReason: latestState?.last_status_reason || undefined
-        }
-      } catch (gradingError) {
-        await upsertAssignmentStudentState(
-          supabaseDb,
-          ownerId,
-          assignmentId,
-          studentContext.id,
-          compactObject({
-            status: 'correction_required',
-            current_submission_id: submissionId,
-            correction_attempt_limit: correctionLimit,
-            upload_locked: true,
-            last_status_reason: 'AI 再次批改失敗，請稍後再試'
-          })
-        )
-        throw gradingError
+      // Calculate queue position (count all pending/in_progress for this teacher, including myself)
+      const { count: queueTotal } = await supabaseDb
+        .from('submissions')
+        .select('id', { count: 'exact', head: true })
+        .in('status', ['pending_grading', 'grading_in_progress'])
+        .eq('owner_id', ownerId)
+        .eq('source', 'student_correction')
+      correctionResult = {
+        gradingPending: true,
+        queuePosition: queueTotal || 1
       }
     }
 
@@ -4135,6 +4076,143 @@ async function handleStudentSubmission(req, res) {
       error: err instanceof Error ? err.message : '學生上傳作業失敗'
     })
   }
+}
+
+async function handleProcessPendingGrading(req, res) {
+  const secret = req.headers['x-cron-secret'] || req.query?.secret
+  if (!secret || secret !== process.env.CRON_SECRET) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const supabaseDb = getSupabaseAdmin()
+
+  const { data: pendingRows, error: pendingError } = await supabaseDb
+    .from('submissions')
+    .select('id, owner_id, assignment_id, student_id, image_url, source, round')
+    .eq('status', 'pending_grading')
+    .eq('source', 'student_correction')
+    .order('created_at', { ascending: true })
+    .limit(4)
+
+  if (pendingError) {
+    res.status(500).json({ error: pendingError.message })
+    return
+  }
+
+  if (!pendingRows?.length) {
+    res.status(200).json({ processed: 0, queued: 0 })
+    return
+  }
+
+  const ids = pendingRows.map((r) => r.id)
+
+  // Atomically mark as grading_in_progress to prevent duplicate processing
+  await supabaseDb
+    .from('submissions')
+    .update({ status: 'grading_in_progress', updated_at: new Date().toISOString() })
+    .in('id', ids)
+    .eq('status', 'pending_grading')
+
+  const uniqueAssignmentIds = [...new Set(pendingRows.map((r) => r.assignment_id))]
+  const { data: assignments } = await supabaseDb
+    .from('assignments')
+    .select('id, owner_id, classroom_id, total_pages, answer_key, title')
+    .in('id', uniqueAssignmentIds)
+  const assignmentMap = new Map((assignments || []).map((a) => [a.id, a]))
+
+  let processed = 0
+
+  // Simple N=2 concurrency runner
+  async function runConcurrent(items, n, fn) {
+    let i = 0
+    async function worker() {
+      while (i < items.length) {
+        const item = items[i++]
+        await fn(item)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker))
+  }
+
+  await runConcurrent(pendingRows, 2, async (submission) => {
+    const assignment = assignmentMap.get(submission.assignment_id)
+    if (!assignment) {
+      await supabaseDb
+        .from('submissions')
+        .update({ status: 'pending_grading', updated_at: new Date().toISOString() })
+        .eq('id', submission.id)
+      return
+    }
+
+    try {
+      const { data: imageBlob, error: downloadError } = await supabaseDb.storage
+        .from('homework-images')
+        .download(submission.image_url)
+
+      if (downloadError || !imageBlob) {
+        throw new Error(`Image download failed: ${downloadError?.message || 'empty blob'}`)
+      }
+
+      const arrayBuffer = await imageBlob.arrayBuffer()
+      const base64 = Buffer.from(arrayBuffer).toString('base64')
+
+      const gradingResult = await runSubmissionGrading({
+        assignment,
+        normalizedImage: base64,
+        contentType: 'image/webp',
+        requestId: submission.id
+      })
+
+      const gradedAt = Date.now()
+      const totalScore = toNumber(gradingResult?.totalScore) ?? 0
+      const feedback =
+        Array.isArray(gradingResult?.suggestions) && gradingResult.suggestions.length > 0
+          ? String(gradingResult.suggestions[0] || '')
+          : undefined
+
+      await supabaseDb
+        .from('submissions')
+        .update(
+          compactObject({
+            status: 'graded',
+            score: totalScore,
+            feedback,
+            grading_result: gradingResult,
+            graded_at: gradedAt,
+            updated_at: new Date().toISOString()
+          })
+        )
+        .eq('id', submission.id)
+        .eq('owner_id', submission.owner_id)
+
+      await applySubmissionStateTransitions(supabaseDb, submission.owner_id, [
+        {
+          id: submission.id,
+          assignment_id: submission.assignment_id,
+          student_id: submission.student_id,
+          status: 'graded',
+          source: submission.source,
+          graded_at: gradedAt,
+          grading_result: gradingResult,
+          image_url: submission.image_url,
+          updated_at: new Date().toISOString()
+        }
+      ])
+
+      console.log('[PROCESS-GRADING] graded submission', submission.id, 'score:', totalScore)
+      processed++
+    } catch (err) {
+      console.error('[PROCESS-GRADING] Error grading', submission.id, err?.message)
+      // Revert to pending_grading so cron can retry
+      await supabaseDb
+        .from('submissions')
+        .update({ status: 'pending_grading', updated_at: new Date().toISOString() })
+        .eq('id', submission.id)
+    }
+  })
+
+  res.status(200).json({ processed, queued: pendingRows.length })
 }
 
 async function handleStudentCorrections(req, res) {
@@ -4927,6 +5005,10 @@ export default async function handler(req, res) {
   }
   if (action === 'student-corrections') {
     await handleStudentCorrections(req, res)
+    return
+  }
+  if (action === 'process-grading') {
+    await handleProcessPendingGrading(req, res)
     return
   }
   if (action === 'correction-dashboard') {
