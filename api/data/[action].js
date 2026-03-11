@@ -1721,39 +1721,8 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
   const answerKey = normalizeJsonLike(assignment.answer_key)
   const keyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
 
-  // Fetch original per-question scores from last graded submission
-  const originalScoreMap = {}
-  try {
-    const { data: stateRow } = await supabaseDb
-      .from('assignment_student_state')
-      .select('last_graded_submission_id')
-      .eq('assignment_id', submission.assignment_id)
-      .eq('student_id', submission.student_id)
-      .single()
-    if (stateRow?.last_graded_submission_id) {
-      const { data: lastSub } = await supabaseDb
-        .from('submissions')
-        .select('grading_result')
-        .eq('id', stateRow.last_graded_submission_id)
-        .single()
-      const lastResult = normalizeJsonLike(lastSub?.grading_result)
-      const lastDetails = Array.isArray(lastResult?.details) ? lastResult.details : []
-      for (const d of lastDetails) {
-        if (d?.questionId) {
-          originalScoreMap[String(d.questionId)] = {
-            score: Number(d.score ?? 0),
-            maxScore: Number(d.maxScore ?? 1)
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('[RECHECK] Could not fetch original scores:', e?.message)
-  }
-
   const itemsWithAnswers = correctionItems.map((item) => {
     const keyQ = keyQuestions.find((q) => String(q.id || '').trim() === item.question_id)
-    const orig = originalScoreMap[item.question_id] || { score: 0, maxScore: 1 }
     return {
       questionId: item.question_id,
       questionText: item.question_text || '',
@@ -1763,8 +1732,7 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
       type: keyQ?.type ?? 1,
       acceptableAnswers: Array.isArray(keyQ?.acceptableAnswers) ? keyQ.acceptableAnswers : [],
       referenceAnswer: keyQ?.referenceAnswer || '',
-      maxScore: Number(keyQ?.maxScore ?? 1),
-      originalScore: orig.score
+      maxScore: Number(keyQ?.maxScore ?? 1)
     }
   })
 
@@ -2021,41 +1989,47 @@ async function handleDisputeResolve(req, res) {
   try {
     const now = new Date().toISOString()
 
-    for (const resolution of resolutions) {
-      const questionId = typeof resolution.questionId === 'string' ? resolution.questionId.trim() : ''
-      const action = typeof resolution.action === 'string' ? resolution.action.trim() : ''
-      if (!questionId || !['accept', 'reject'].includes(action)) continue
+    // Process all resolutions in parallel — avoids partial-update inconsistency if one fails mid-loop
+    await Promise.all(
+      resolutions.map(async (resolution) => {
+        const questionId = typeof resolution.questionId === 'string' ? resolution.questionId.trim() : ''
+        const action = typeof resolution.action === 'string' ? resolution.action.trim() : ''
+        if (!questionId || !['accept', 'reject'].includes(action)) return
 
-      if (action === 'accept') {
-        // Teacher agrees — mark as resolved (student was correct, no more action needed)
-        await supabaseDb
-          .from('correction_question_items')
-          .update({ status: 'resolved', updated_at: now })
-          .eq('owner_id', user.id)
-          .eq('assignment_id', assignmentId)
-          .eq('student_id', studentId)
-          .eq('question_id', questionId)
-          .eq('status', 'disputed')
-      } else {
-        // Teacher rejects — put back to open so student must redo (no re-dispute allowed)
-        const rejectionNote = typeof resolution.rejectionNote === 'string' && resolution.rejectionNote.trim()
-          ? resolution.rejectionNote.trim()
-          : null
-        await supabaseDb
-          .from('correction_question_items')
-          .update({
-            status: 'open',
-            dispute_rejected_at: now,
-            dispute_rejection_note: rejectionNote,
-            updated_at: now
-          })
-          .eq('owner_id', user.id)
-          .eq('assignment_id', assignmentId)
-          .eq('student_id', studentId)
-          .eq('question_id', questionId)
-          .eq('status', 'disputed')
-      }
-    }
+        if (action === 'accept') {
+          // Teacher agrees — mark as resolved (student was correct, no more action needed)
+          const { error } = await supabaseDb
+            .from('correction_question_items')
+            .update({ status: 'resolved', updated_at: now })
+            .eq('owner_id', user.id)
+            .eq('assignment_id', assignmentId)
+            .eq('student_id', studentId)
+            .eq('question_id', questionId)
+            .eq('status', 'disputed')
+          if (error) throw new Error(error.message)
+        } else {
+          // Teacher rejects — put back to open, clear dispute_note so student starts fresh
+          const rejectionNote = typeof resolution.rejectionNote === 'string' && resolution.rejectionNote.trim()
+            ? resolution.rejectionNote.trim()
+            : null
+          const { error } = await supabaseDb
+            .from('correction_question_items')
+            .update({
+              status: 'open',
+              dispute_note: null,
+              dispute_rejected_at: now,
+              dispute_rejection_note: rejectionNote,
+              updated_at: now
+            })
+            .eq('owner_id', user.id)
+            .eq('assignment_id', assignmentId)
+            .eq('student_id', studentId)
+            .eq('question_id', questionId)
+            .eq('status', 'disputed')
+          if (error) throw new Error(error.message)
+        }
+      })
+    )
 
     // After resolving all, check remaining open/disputed counts to update state
     const { data: remaining } = await supabaseDb
@@ -4249,6 +4223,23 @@ async function handleStudentSubmission(req, res) {
         })
         return
       }
+      // Block re-submission if all remaining items are disputed (waiting for teacher review)
+      if (status === 'correction_pending_review') {
+        const { count: openCount } = await supabaseDb
+          .from('correction_question_items')
+          .select('id', { count: 'exact', head: true })
+          .eq('owner_id', ownerId)
+          .eq('assignment_id', assignmentId)
+          .eq('student_id', studentId)
+          .eq('status', 'open')
+        if ((openCount ?? 0) === 0) {
+          res.status(409).json({
+            error: '所有題目皆在申訴審閱中，請等待老師裁決',
+            code: 'ALL_DISPUTED'
+          })
+          return
+        }
+      }
       if (correctionCount >= correctionLimit) {
         res.status(409).json({
           error: '已超過可自主訂正次數，請找老師協助',
@@ -4442,7 +4433,7 @@ async function handleProcessPendingGrading(req, res) {
     .in('status', ['pending_grading', 'pending_grading_retry'])
     .eq('source', 'student_correction')
     .order('created_at', { ascending: true })
-    .limit(4)
+    .limit(10)
 
   if (pendingError) {
     res.status(500).json({ error: pendingError.message })
@@ -4486,7 +4477,7 @@ async function handleProcessPendingGrading(req, res) {
     await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker))
   }
 
-  await runConcurrent(pendingRows, 2, async (submission) => {
+  await runConcurrent(pendingRows, 5, async (submission) => {
     const assignment = assignmentMap.get(submission.assignment_id)
     if (!assignment) {
       const revertStatus = originalStatuses.get(submission.id) === 'pending_grading_retry'
@@ -4649,11 +4640,11 @@ async function handleStudentCorrections(req, res) {
       let query = supabaseDb
         .from('correction_question_items')
         .select(
-          'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, accessor_result, status, updated_at'
+          'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, accessor_result, status, dispute_note, dispute_rejected_at, dispute_rejection_note, updated_at'
         )
         .eq('owner_id', ctx.ownerId)
         .eq('student_id', ctx.id)
-        .eq('status', 'open')
+        .in('status', ['open', 'disputed'])
         .order('attempt_no', { ascending: false })
 
       if (assignmentId) {
@@ -4703,6 +4694,9 @@ async function handleStudentCorrections(req, res) {
             questionBbox: normalizeBbox(accessor?.question_bbox),
             answerBbox: normalizeBbox(accessor?.answer_bbox),
             status: item.status,
+            disputeNote: item.dispute_note ?? undefined,
+            disputeRejectedAt: item.dispute_rejected_at ? toMillis(item.dispute_rejected_at) : undefined,
+            disputeRejectionNote: item.dispute_rejection_note ?? undefined,
             updatedAt: toMillis(item.updated_at) ?? undefined,
             classroomKey: item._classroomKey || undefined
           })

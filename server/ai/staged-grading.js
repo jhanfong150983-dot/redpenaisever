@@ -2069,9 +2069,10 @@ ${JSON.stringify(itemsWithAnswers, null, 2)}
 GRADING RULES per question type:
 - type=1 (unique answer): student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
 - type=2 (multiple acceptable answers): student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
-- type=3 (performance/partial scoring, maxScore>1):
-    * If originalScore=0: student must show clear understanding. Judge based on referenceAnswer.
-    * If originalScore>0: if the new answer shows ANY improvement over the previous attempt, mark passed=true. Be generous.
+- type=3 (performance/partial scoring): This is a correction submission — the student previously got this question wrong.
+    * Judge based on referenceAnswer and whether the student demonstrates genuine understanding of the concept.
+    * The answer does not need to be perfect, but must show the student understood their mistake and addressed it meaningfully.
+    * Do NOT pass if the answer is essentially unchanged from the mistake described in mistakeReason.
 
 Instructions for each question:
 1. Find the corresponding image using the mapping above.
