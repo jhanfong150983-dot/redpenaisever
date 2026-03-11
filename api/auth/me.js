@@ -126,7 +126,12 @@ export default async function handler(req, res) {
         } else {
           console.warn('[AUTH-ME] profile not found', user.id)
           profileError = 'Profile not found'
-          break // 沒有資料，不需重試
+          // null 可能是 Supabase 瞬斷而非真的沒有 profile，允許重試
+          if (attempt < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, 200))
+            continue
+          }
+          break
         }
       } catch (error) {
         console.error('[AUTH-ME] profile query exception', {
@@ -278,12 +283,10 @@ export default async function handler(req, res) {
       console.warn('[AUTH-ME] campus1 binding query failed:', err?.message)
     }
 
-    // 如果 profile 載入失敗，設定 Cache-Control 避免快取錯誤回應
-    if (!profileLoaded) {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
-      res.setHeader('Pragma', 'no-cache')
-      res.setHeader('Expires', '0')
-    }
+    // 永遠不快取 /auth/me 回應，避免瞬斷的失敗結果被快取住
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
+    res.setHeader('Pragma', 'no-cache')
+    res.setHeader('Expires', '0')
 
     res.status(200).json({
       user: {
