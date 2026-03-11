@@ -1776,16 +1776,20 @@ export async function runStagedGradingPhaseA({
     })
   }
 
-  // Attach crop image URLs to non-stable question results
+  // Attach crop image URLs to non-stable question results.
+  // Priority: per-question crop → full image fallback (for any non-stable question without a crop)
+  const fullImageDataUrl = inlineImages.length > 0
+    ? `data:${inlineImages[0].inlineData.mimeType};base64,${inlineImages[0].inlineData.data}`
+    : undefined
   const questionResults = questionResultsRaw.map((qr) => {
-    const isMapFill = qr.questionType === 'map_fill'
+    const isNonStable = qr.consistencyStatus !== 'stable'
     const cropData = cropByQuestionId.get(qr.questionId)
     let answerCropImageUrl
     if (cropData) {
       answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
-    } else if (qr.consistencyStatus !== 'stable' && isMapFill && inlineImages.length > 0) {
-      const fullImg = inlineImages[0].inlineData
-      answerCropImageUrl = `data:${fullImg.mimeType};base64,${fullImg.data}`
+    } else if (isNonStable && fullImageDataUrl) {
+      // No per-question crop available (no answerBbox, map_draw, or crop failed) → full image
+      answerCropImageUrl = fullImageDataUrl
     }
     return { ...qr, answerCropImageUrl, hasCropImage: cropByQuestionId.has(qr.questionId) }
   })
