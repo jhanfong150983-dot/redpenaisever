@@ -912,8 +912,8 @@ Rules:
 - questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem if blank markers are present.
 - questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers.
 - Otherwise questionType="other".
-- For visible=true questions (except map_fill), output answerBbox: the normalized [0,1] bounding box of the DESIGNATED ANSWER SPACE — the pre-printed area where students are supposed to write (blank line, answer box □, or the row of choice options ○A ○B ○C ○D). This is the PRINTED SPACE, not where the student actually wrote. If the student left it blank, still output the bbox of the empty answer space.
-  Only output the CENTER POINT of the answer space accurately — width and height will be normalized to a fixed size for display. Output your best estimate of center (x + w/2, y + h/2) encoded as a bbox.
+- For visible=true questions (except map_fill), output answerBbox: the normalized [0,1] bounding box of the DESIGNATED ANSWER SPACE — the pre-printed space where students write their answer: parentheses (　), underline blanks ___, or empty boxes □. Do NOT frame the option list (A/B/C/D rows) — frame the blank where students write their selected letter. If the student left it blank, still output the bbox of the empty answer space.
+  Only the CENTER POINT needs to be accurate — width and height will be overridden to a fixed display size. Output your best estimate of the center encoded as a bbox.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
   If the answer area cannot be determined, omit answerBbox.
 - Return strict JSON only.
