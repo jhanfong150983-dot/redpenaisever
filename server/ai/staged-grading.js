@@ -804,7 +804,7 @@ function normalizeAccessorResult(parsed, answerKey, answers) {
 
   return {
     scores,
-    totalScore
+    totalScore: parseFloat(totalScore.toFixed(1))
   }
 }
 
@@ -1352,6 +1352,7 @@ function buildFinalGradingResult({
     details.push(row)
     totalScore += row.score
   }
+  totalScore = parseFloat(totalScore.toFixed(1))
 
   const mistakes =
     explainResult.mistakes.length > 0
