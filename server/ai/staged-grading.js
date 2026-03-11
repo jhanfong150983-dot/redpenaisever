@@ -2052,4 +2052,111 @@ export async function runStagedGradingEvaluate({
   })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Recheck Agent: 逐題訂正檢查（一題一張照片，單次 AI call）
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildRecheckPrompt(itemsWithAnswers, imageMapping) {
+  return `You are the Recheck Agent. The student submitted one correction photo per wrong question.
+Check each answer and decide if it is now correct.
+
+Image mapping (in order, match by index):
+${imageMapping}
+
+Wrong questions context:
+${JSON.stringify(itemsWithAnswers)}
+
+Instructions for each question:
+1. Find the corresponding image using the mapping above.
+2. Carefully read the student's new answer from that image.
+3. Compare to correctAnswer. Be lenient: accept minor spacing, punctuation, or formatting differences.
+4. If passed=false, write newGuidance — a NEW hint different from hintGiven. Approach from a different angle.
+
+STRICT RULES for newGuidance:
+- Traditional Chinese (繁體中文) only.
+- ABSOLUTELY FORBIDDEN to reveal the correct answer in any form (no "正確答案是", "應為", "答案是", "正確的是" or similar).
+- Must be a DIFFERENT hint from hintGiven — try a new explanation angle or ask a guiding question.
+- 1–3 sentences. Specific, warm, and encouraging.
+
+Return strict JSON only. No markdown.
+
+Output:
+{
+  "results": [
+    {
+      "questionId": "string",
+      "passed": true,
+      "studentAnswer": "what student wrote"
+    },
+    {
+      "questionId": "string",
+      "passed": false,
+      "studentAnswer": "what student wrote",
+      "newGuidance": "新引導（不給答案）"
+    }
+  ]
+}`.trim()
+}
+
+function parseRecheckResponse(data, correctionItems) {
+  const raw = Array.isArray(data?.results) ? data.results : null
+  if (!raw) {
+    return correctionItems.map((item) => ({
+      questionId: item.questionId,
+      passed: false,
+      studentAnswer: '',
+      newGuidance: '請再試一次'
+    }))
+  }
+  const knownIds = new Set(correctionItems.map((i) => i.questionId))
+  return raw
+    .filter((r) => r && typeof r === 'object' && knownIds.has(String(r.questionId || '')))
+    .map((r) => ({
+      questionId: String(r.questionId),
+      passed: Boolean(r.passed),
+      studentAnswer: String(r.studentAnswer || ''),
+      newGuidance: r.passed ? undefined : String(r.newGuidance || '此題需要繼續訂正')
+    }))
+}
+
+export async function runRecheckPipeline({
+  apiKey,
+  model,
+  correctionImages,
+  correctionItems,
+  requestId
+}) {
+  if (!correctionImages?.length || !correctionItems?.length) {
+    return { results: [] }
+  }
+
+  const imageMapping = correctionImages
+    .map((img, i) => `- 圖片 ${i + 1}：題目 ${img.questionId} 的訂正照片`)
+    .join('\n')
+
+  const prompt = buildRecheckPrompt(correctionItems, imageMapping)
+
+  const imageParts = correctionImages.map((img) => ({
+    inlineData: { data: img.base64, mimeType: img.contentType || 'image/webp' }
+  }))
+
+  const pipelineRunId = requestId || `recheck_${Date.now()}`
+  logStageStart(pipelineRunId, 'recheck')
+
+  const response = await executeStage({
+    apiKey,
+    model,
+    routeKey: 'grading.explain',
+    stageContents: [{ role: 'user', parts: [{ text: prompt }, ...imageParts] }]
+  })
+
+  logStageEnd(pipelineRunId, 'recheck', response)
+
+  if (!response.ok || !response.data) {
+    throw new Error(`Recheck stage failed with status ${response.status}`)
+  }
+
+  return { results: parseRecheckResponse(response.data, correctionItems) }
+}
+
 

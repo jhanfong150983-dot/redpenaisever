@@ -4,6 +4,7 @@ import { getSupabaseAdmin } from '../../server/_supabase.js'
 import { getEnvValue } from '../../server/_env.js'
 import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
+import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
 import {
   isValidDsns,
   getJasmineAccessToken,
@@ -1666,6 +1667,77 @@ async function runSubmissionGrading({
   }
 
   return parsed
+}
+
+// Recheck Agent: 逐題訂正批改，取代全頁重批
+async function runRecheckGrading({ supabaseDb, submission, assignment, correctionItems }) {
+  const apiKey = getSystemApiKey()
+  if (!apiKey) throw new Error('Server API Key missing')
+
+  // Download per-question correction images: corrections/${submissionId}/${questionId}.webp
+  const correctionImages = []
+  for (const item of correctionItems) {
+    const imagePath = `corrections/${submission.id}/${item.question_id}.webp`
+    const { data: imageBlob, error } = await supabaseDb.storage
+      .from(HOMEWORK_IMAGES_BUCKET)
+      .download(imagePath)
+    if (error || !imageBlob) {
+      console.warn('[RECHECK] Could not download image for', item.question_id, error?.message)
+      continue
+    }
+    const arrayBuffer = await imageBlob.arrayBuffer()
+    correctionImages.push({
+      questionId: item.question_id,
+      base64: Buffer.from(arrayBuffer).toString('base64'),
+      contentType: 'image/webp'
+    })
+  }
+
+  if (!correctionImages.length) {
+    throw new Error('No correction images found — cannot run recheck')
+  }
+
+  const answerKey = normalizeJsonLike(assignment.answer_key)
+  const keyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+
+  const itemsWithAnswers = correctionItems.map((item) => {
+    const keyQ = keyQuestions.find((q) => String(q.id || '').trim() === item.question_id)
+    return {
+      questionId: item.question_id,
+      questionText: item.question_text || '',
+      mistakeReason: item.mistake_reason || '',
+      hintGiven: item.hint_text || '',
+      correctAnswer: keyQ?.answer || ''
+    }
+  })
+
+  const recheckResult = await runRecheckPipeline({
+    apiKey,
+    model: STUDENT_CORRECTION_MODEL,
+    correctionImages,
+    correctionItems: itemsWithAnswers,
+    requestId: submission.id
+  })
+
+  // Convert recheck results to gradingResult format (compatible with parseMistakesFromGradingResult)
+  const stillWrong = recheckResult.results.filter((r) => !r.passed)
+  const passedCount = recheckResult.results.filter((r) => r.passed).length
+  const totalChecked = recheckResult.results.length
+
+  return {
+    totalScore: totalChecked > 0 ? Math.round((passedCount / totalChecked) * 100) : 0,
+    mistakes: stillWrong.map((r) => ({
+      id: r.questionId,
+      questionId: r.questionId,
+      reason: r.newGuidance || '此題需要繼續訂正'
+    })),
+    details: recheckResult.results.map((r) => ({
+      questionId: r.questionId,
+      isCorrect: r.passed,
+      studentAnswer: r.studentAnswer,
+      studentGuidance: r.newGuidance
+    }))
+  }
 }
 
 async function handleCorrectionDashboard(req, res) {
@@ -3821,6 +3893,8 @@ async function handleStudentSubmission(req, res) {
   const thumbBase64 = body.thumbBase64
   const thumbContentType = body.thumbContentType
   const pageCount = clampInteger(body.pageCount, 1, 20, 1)
+  // Per-question correction images: [{questionId, imageBase64, contentType}]
+  const correctionImages = Array.isArray(body.correctionImages) ? body.correctionImages : []
 
   if (!assignmentId || !normalizedImagePayload) {
     res.status(400).json({ error: 'Missing required fields' })
@@ -4026,6 +4100,23 @@ async function handleStudentSubmission(req, res) {
       throw new Error(insertError.message)
     }
 
+    // Store per-question correction images for Recheck Agent
+    if (mode === 'correction' && correctionImages.length > 0) {
+      await Promise.all(
+        correctionImages.map(async (img) => {
+          const normalized = normalizeBase64Input(img.imageBase64)
+          if (!normalized || !img.questionId) return
+          const path = `corrections/${submissionId}/${img.questionId}.webp`
+          await supabaseDb.storage
+            .from(HOMEWORK_IMAGES_BUCKET)
+            .upload(path, Buffer.from(normalized, 'base64'), {
+              contentType: img.contentType || 'image/webp',
+              upsert: true
+            })
+        })
+      )
+    }
+
     await upsertAssignmentStudentState(
       supabaseDb,
       ownerId,
@@ -4167,12 +4258,27 @@ async function handleProcessPendingGrading(req, res) {
       const arrayBuffer = await imageBlob.arrayBuffer()
       const base64 = Buffer.from(arrayBuffer).toString('base64')
 
-      const gradingResult = await runSubmissionGrading({
-        assignment,
-        normalizedImage: base64,
-        contentType: 'image/webp',
-        requestId: submission.id
-      })
+      // Use Recheck Agent if per-question correction images exist, else full pipeline
+      const { data: openItems } = await supabaseDb
+        .from('correction_question_items')
+        .select('question_id, question_text, mistake_reason, hint_text')
+        .eq('owner_id', submission.owner_id)
+        .eq('assignment_id', submission.assignment_id)
+        .eq('student_id', submission.student_id)
+        .eq('status', 'open')
+
+      const hasRecheckImages = openItems?.length > 0 &&
+        (await supabaseDb.storage.from(HOMEWORK_IMAGES_BUCKET)
+          .list(`corrections/${submission.id}`)).data?.length > 0
+
+      const gradingResult = hasRecheckImages
+        ? await runRecheckGrading({ supabaseDb, submission, assignment, correctionItems: openItems })
+        : await runSubmissionGrading({
+            assignment,
+            normalizedImage: base64,
+            contentType: 'image/webp',
+            requestId: submission.id
+          })
 
       const gradedAt = Date.now()
       const totalScore = toNumber(gradingResult?.totalScore) ?? 0
