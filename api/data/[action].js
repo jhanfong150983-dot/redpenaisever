@@ -1533,7 +1533,8 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
       compactObject({
         status,
         current_submission_id: row.id,
-        last_graded_submission_id: row.id,
+        // 訂正提交不覆蓋 last_graded_submission_id，保留原始老師批改的 submission
+        ...(source !== 'student_correction' ? { last_graded_submission_id: row.id } : {}),
         graded_once: true,
         // 系統硬規則：一旦批改過即鎖定一般重交
         upload_locked: true,
