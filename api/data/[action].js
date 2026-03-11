@@ -3541,27 +3541,27 @@ async function handleStudentOverview(req, res) {
         )
       )
 
-    // 取得每個老師的 preferences（按 ownerId 快取，避免重複查詢）
-    const preferencesMap = new Map()
-    await Promise.all(
-      ownerIds.map(async (oId) => {
-        const prefs = await getTeacherPreferences(supabaseDb, oId)
-        preferencesMap.set(oId, prefs)
-      })
-    )
+    const primaryClassroom = classroomOptions[0]
+    const primaryStudentContext = studentContexts.find(
+      (c) => c.ownerId === primaryClassroom.ownerId && c.classroomId === primaryClassroom.classroomId
+    ) || studentContexts[0]
 
-    // 對每個 classroomOption 平行查詢作業資料，合併成一個清單
-    const allAssignmentItemsNested = await Promise.all(
-      classroomOptions.map(async (classroom) => {
+    // 對每個 classroomOption 平行查詢（preferences 和 assignments 同步並行）
+    // primaryPreferences 和整個 classroom loop 也並行執行
+    const [allAssignmentItemsNested, primaryPreferences] = await Promise.all([
+      Promise.all(
+        classroomOptions.map(async (classroom) => {
         const { ownerId: cOwnerId, classroomId, studentId, key: classroomKey, classroomName } = classroom
-        const preferences = preferencesMap.get(cOwnerId)
 
-        const assignmentsResult = await supabaseDb
-          .from('assignments')
-          .select('id, title, total_pages, student_show_score, updated_at')
-          .eq('owner_id', cOwnerId)
-          .eq('classroom_id', classroomId)
-          .order('created_at', { ascending: false })
+        const [preferences, assignmentsResult] = await Promise.all([
+          getTeacherPreferences(supabaseDb, cOwnerId),
+          supabaseDb
+            .from('assignments')
+            .select('id, title, total_pages, student_show_score, updated_at')
+            .eq('owner_id', cOwnerId)
+            .eq('classroom_id', classroomId)
+            .order('created_at', { ascending: false })
+        ])
         if (assignmentsResult.error) throw new Error(assignmentsResult.error.message)
 
         const aIds = (assignmentsResult.data || []).map((a) => a.id)
@@ -3729,17 +3729,13 @@ async function handleStudentOverview(req, res) {
           })
         })
       })
-    )
+    ),
+      getTeacherPreferences(supabaseDb, primaryClassroom.ownerId)
+    ])
 
     const assignmentItems = allAssignmentItemsNested
       .flat()
       .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-
-    const primaryClassroom = classroomOptions[0]
-    const primaryPreferences = preferencesMap.get(primaryClassroom.ownerId)
-    const primaryStudentContext = studentContexts.find(
-      (c) => c.ownerId === primaryClassroom.ownerId && c.classroomId === primaryClassroom.classroomId
-    ) || studentContexts[0]
 
     res.status(200).json({
       classrooms: classroomOptions,
