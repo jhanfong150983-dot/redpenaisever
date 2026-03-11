@@ -3496,10 +3496,7 @@ async function handleStudentOverview(req, res) {
       return
     }
 
-    const requestedClassroomKey =
-      typeof req.query?.classroomKey === 'string'
-        ? req.query.classroomKey.trim()
-        : ''
+
     const ownerIds = [...new Set(studentContexts.map((context) => context.ownerId))]
     const classroomIds = [...new Set(studentContexts.map((context) => context.classroomId))]
     const [classroomsResult, teacherProfilesResult] = await Promise.all([
@@ -3544,237 +3541,222 @@ async function handleStudentOverview(req, res) {
         )
       )
 
-    const activeClassroom =
-      classroomOptions.find((item) => item.key === requestedClassroomKey) ||
-      classroomOptions[0]
-    if (!activeClassroom) {
-      res.status(403).json({ error: 'Student account is not linked' })
-      return
-    }
-    const studentContext =
-      studentContexts.find(
-        (context) =>
-          context.id === activeClassroom.studentId &&
-          context.ownerId === activeClassroom.ownerId &&
-          context.classroomId === activeClassroom.classroomId
-      ) || studentContexts[0]
-    if (!studentContext) {
-      res.status(403).json({ error: 'Student account is not linked' })
-      return
-    }
-
-    const ownerId = studentContext.ownerId
-    console.log('[STUDENT-OVERVIEW] classroomId:', studentContext.classroomId)
-    const preferences = await getTeacherPreferences(supabaseDb, ownerId)
-
-    const assignmentsResult = await supabaseDb
-      .from('assignments')
-      .select('id, title, total_pages, student_show_score, updated_at')
-      .eq('owner_id', ownerId)
-      .eq('classroom_id', studentContext.classroomId)
-      .order('created_at', { ascending: false })
-
-    if (assignmentsResult.error) {
-      throw new Error(assignmentsResult.error.message)
-    }
-
-    const assignmentIds = (assignmentsResult.data || []).map((a) => a.id)
-    console.log('[STUDENT-OVERVIEW] assignmentIds:', assignmentIds)
-
-    const [statesResult, submissionsResult, correctionItemsResult] = await Promise.all([
-      assignmentIds.length
-        ? supabaseDb
-            .from('assignment_student_state')
-            .select(
-              'assignment_id, status, upload_locked, graded_once, correction_attempt_count, correction_attempt_limit, last_status_reason, current_submission_id, last_graded_submission_id, updated_at'
-            )
-            .eq('owner_id', ownerId)
-            .eq('student_id', studentContext.id)
-            .in('assignment_id', assignmentIds)
-        : Promise.resolve({ data: [], error: null }),
-      assignmentIds.length
-        ? supabaseDb
-            .from('submissions')
-            .select('id, assignment_id, score, graded_at, created_at, updated_at, source, grading_result, image_url')
-            .eq('owner_id', ownerId)
-            .eq('student_id', studentContext.id)
-            .in('assignment_id', assignmentIds)
-        : Promise.resolve({ data: [], error: null }),
-      assignmentIds.length
-        ? supabaseDb
-            .from('correction_question_items')
-            .select(
-              'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, accessor_result, status'
-            )
-            .eq('owner_id', ownerId)
-            .eq('student_id', studentContext.id)
-            .eq('status', 'open')
-            .in('assignment_id', assignmentIds)
-        : Promise.resolve({ data: [], error: null })
-    ])
-
-    if (statesResult.error) throw new Error(statesResult.error.message)
-    if (submissionsResult.error) throw new Error(submissionsResult.error.message)
-    if (correctionItemsResult.error) throw new Error(correctionItemsResult.error.message)
-
-    const stateMap = new Map(
-      (statesResult.data || []).map((row) => [row.assignment_id, row])
-    )
-    const submissionsByAssignment = new Map()
-    for (const row of submissionsResult.data || []) {
-      const existing = submissionsByAssignment.get(row.assignment_id) || []
-      existing.push(row)
-      submissionsByAssignment.set(row.assignment_id, existing)
-    }
-
-    const openCorrectionsByAssignment = new Map()
-    for (const row of correctionItemsResult.data || []) {
-      const existing = openCorrectionsByAssignment.get(row.assignment_id) || []
-      const accessor = row.accessor_result && typeof row.accessor_result === 'object'
-        ? row.accessor_result
-        : null
-      const accessorSourceImageUrl =
-        typeof accessor?.source_image_url === 'string'
-          ? accessor.source_image_url
-          : undefined
-      const accessorCropImageUrl =
-        typeof accessor?.crop_image_url === 'string'
-          ? accessor.crop_image_url
-          : undefined
-      const accessorSourceSubmissionId =
-        typeof accessor?.source_submission_id === 'string'
-          ? accessor.source_submission_id
-          : undefined
-      const resolvedSourceSubmissionId =
-        accessorSourceSubmissionId || extractSubmissionIdFromImagePath(accessorSourceImageUrl)
-      existing.push(
-        compactObject({
-          attemptNo: row.attempt_no,
-          questionId: row.question_id,
-          questionText: row.question_text ?? undefined,
-          mistakeReason: sanitizeHintText(row.mistake_reason ?? ''),
-          hintText: sanitizeHintText(row.hint_text ?? row.mistake_reason ?? ''),
-          sourceSubmissionId: resolvedSourceSubmissionId || undefined,
-          sourceImageUrl: accessorSourceImageUrl,
-          cropImageUrl: accessorCropImageUrl,
-          questionBbox: normalizeBbox(accessor?.question_bbox),
-          answerBbox: normalizeBbox(accessor?.answer_bbox),
-          status: row.status
-        })
-      )
-      openCorrectionsByAssignment.set(row.assignment_id, existing)
-    }
-
-    const assignmentItems = (assignmentsResult.data || []).map((assignment) => {
-      const state = stateMap.get(assignment.id)
-      const submissions = submissionsByAssignment.get(assignment.id) || []
-      const latestSubmission = submissions
-        .slice()
-        .sort((a, b) => {
-          const timeA = toMillis(a.updated_at) ?? toMillis(a.created_at) ?? 0
-          const timeB = toMillis(b.updated_at) ?? toMillis(b.created_at) ?? 0
-          return timeB - timeA
-        })[0]
-      const latestGradedSubmission = submissions
-        .filter((row) => row.graded_at !== null && row.graded_at !== undefined)
-        .sort((a, b) => (toNumber(b.graded_at) ?? 0) - (toNumber(a.graded_at) ?? 0))[0]
-
-      const showScore =
-        typeof assignment.student_show_score === 'boolean'
-          ? assignment.student_show_score
-          : preferences.show_score_to_students
-      const rawStatus = state?.status ?? 'not_uploaded'
-      const isCorrectionStatus = ['correction_required', 'correction_in_progress'].includes(rawStatus)
-      const effectiveUploadLocked =
-        Boolean(state?.upload_locked) || String(state?.status || '') === 'uploaded'
-      const canUpload =
-        preferences.student_portal_enabled && !effectiveUploadLocked
-      const correctionAttemptCount = state?.correction_attempt_count ?? 0
-      const openCorrections = openCorrectionsByAssignment.get(assignment.id) ?? []
-      const fallbackCorrections =
-        openCorrections.length === 0 && isCorrectionStatus && latestGradedSubmission?.grading_result
-          ? parseMistakesFromGradingResult(latestGradedSubmission.grading_result).map((mistake) =>
-              compactObject({
-                attemptNo: correctionAttemptCount,
-                questionId: mistake.questionId,
-                questionText: mistake.questionText,
-                mistakeReason: sanitizeHintText(mistake.reason),
-                hintText: sanitizeHintText(mistake.hintText || mistake.reason),
-                sourceSubmissionId:
-                  latestGradedSubmission.id ||
-                  extractSubmissionIdFromImagePath(latestGradedSubmission.image_url),
-                sourceImageUrl:
-                  typeof latestGradedSubmission.image_url === 'string'
-                    ? latestGradedSubmission.image_url
-                    : undefined,
-                questionBbox: normalizeBbox(mistake.questionBbox),
-                answerBbox: normalizeBbox(mistake.answerBbox),
-                status: 'open'
-              })
-            )
-          : []
-      const mergedCorrections =
-        openCorrections.length > 0 ? openCorrections : fallbackCorrections
-      const status =
-        mergedCorrections.length > 0 &&
-        !['correction_required', 'correction_in_progress', 'correction_failed', 'correction_passed'].includes(rawStatus)
-          ? 'correction_required'
-          : rawStatus
-
-      // Apply student_feedback_visibility preference
-      const visibility = preferences.student_feedback_visibility || 'score_reason'
-      const visibleScore = visibility === 'status_only' ? false : showScore
-      const visibleCorrections =
-        visibility === 'status_only' || visibility === 'score_only' ? [] : mergedCorrections
-
-      return compactObject({
-        id: assignment.id,
-        title: assignment.title,
-        totalPages: assignment.total_pages,
-        status,
-        canUpload,
-        uploadLocked: effectiveUploadLocked,
-        uploadLockedReason:
-          effectiveUploadLocked ? state?.last_status_reason ?? undefined : undefined,
-        gradedOnce: Boolean(state?.graded_once),
-        correctionAttemptCount,
-        correctionAttemptLimit:
-          state?.correction_attempt_limit ?? preferences.max_correction_attempts,
-        hasSubmission: Boolean(latestSubmission?.id),
-        latestSubmissionId: latestSubmission?.id ?? undefined,
-        latestSubmissionSource: latestSubmission?.source ?? undefined,
-        openCorrections: visibleCorrections,
-        showScore: visibleScore,
-        score:
-          visibleScore && latestGradedSubmission
-            ? toNumber(latestGradedSubmission.score)
-            : undefined,
-        updatedAt: toMillis(assignment.updated_at) ?? undefined
+    // 取得每個老師的 preferences（按 ownerId 快取，避免重複查詢）
+    const preferencesMap = new Map()
+    await Promise.all(
+      ownerIds.map(async (oId) => {
+        const prefs = await getTeacherPreferences(supabaseDb, oId)
+        preferencesMap.set(oId, prefs)
       })
-    })
+    )
 
-    // Debug log: 顯示每個作業的 status 與 openCorrections 筆數
-    console.log('[STUDENT-OVERVIEW] student:', studentContext.id, 'ownerId:', ownerId)
-    for (const item of assignmentItems) {
-      console.log('[STUDENT-OVERVIEW] assignment:', item.id, 'status:', item.status, 'openCorrections:', (item.openCorrections || []).length)
-    }
+    // 對每個 classroomOption 平行查詢作業資料，合併成一個清單
+    const allAssignmentItemsNested = await Promise.all(
+      classroomOptions.map(async (classroom) => {
+        const { ownerId: cOwnerId, classroomId, studentId, key: classroomKey, classroomName } = classroom
+        const preferences = preferencesMap.get(cOwnerId)
+
+        const assignmentsResult = await supabaseDb
+          .from('assignments')
+          .select('id, title, total_pages, student_show_score, updated_at')
+          .eq('owner_id', cOwnerId)
+          .eq('classroom_id', classroomId)
+          .order('created_at', { ascending: false })
+        if (assignmentsResult.error) throw new Error(assignmentsResult.error.message)
+
+        const aIds = (assignmentsResult.data || []).map((a) => a.id)
+
+        const [statesResult, submissionsResult, correctionItemsResult] = await Promise.all([
+          aIds.length
+            ? supabaseDb
+                .from('assignment_student_state')
+                .select(
+                  'assignment_id, status, upload_locked, graded_once, correction_attempt_count, correction_attempt_limit, last_status_reason, current_submission_id, last_graded_submission_id, updated_at'
+                )
+                .eq('owner_id', cOwnerId)
+                .eq('student_id', studentId)
+                .in('assignment_id', aIds)
+            : Promise.resolve({ data: [], error: null }),
+          aIds.length
+            ? supabaseDb
+                .from('submissions')
+                .select('id, assignment_id, score, graded_at, created_at, updated_at, source, grading_result, image_url')
+                .eq('owner_id', cOwnerId)
+                .eq('student_id', studentId)
+                .in('assignment_id', aIds)
+            : Promise.resolve({ data: [], error: null }),
+          aIds.length
+            ? supabaseDb
+                .from('correction_question_items')
+                .select(
+                  'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, accessor_result, status'
+                )
+                .eq('owner_id', cOwnerId)
+                .eq('student_id', studentId)
+                .eq('status', 'open')
+                .in('assignment_id', aIds)
+            : Promise.resolve({ data: [], error: null })
+        ])
+        if (statesResult.error) throw new Error(statesResult.error.message)
+        if (submissionsResult.error) throw new Error(submissionsResult.error.message)
+        if (correctionItemsResult.error) throw new Error(correctionItemsResult.error.message)
+
+        const stateMap = new Map(
+          (statesResult.data || []).map((row) => [row.assignment_id, row])
+        )
+        const submissionsByAssignment = new Map()
+        for (const row of submissionsResult.data || []) {
+          const existing = submissionsByAssignment.get(row.assignment_id) || []
+          existing.push(row)
+          submissionsByAssignment.set(row.assignment_id, existing)
+        }
+        const openCorrectionsByAssignment = new Map()
+        for (const row of correctionItemsResult.data || []) {
+          const existing = openCorrectionsByAssignment.get(row.assignment_id) || []
+          const accessor = row.accessor_result && typeof row.accessor_result === 'object'
+            ? row.accessor_result
+            : null
+          const accessorSourceImageUrl =
+            typeof accessor?.source_image_url === 'string' ? accessor.source_image_url : undefined
+          const accessorCropImageUrl =
+            typeof accessor?.crop_image_url === 'string' ? accessor.crop_image_url : undefined
+          const accessorSourceSubmissionId =
+            typeof accessor?.source_submission_id === 'string' ? accessor.source_submission_id : undefined
+          const resolvedSourceSubmissionId =
+            accessorSourceSubmissionId || extractSubmissionIdFromImagePath(accessorSourceImageUrl)
+          existing.push(
+            compactObject({
+              attemptNo: row.attempt_no,
+              questionId: row.question_id,
+              questionText: row.question_text ?? undefined,
+              mistakeReason: sanitizeHintText(row.mistake_reason ?? ''),
+              hintText: sanitizeHintText(row.hint_text ?? row.mistake_reason ?? ''),
+              sourceSubmissionId: resolvedSourceSubmissionId || undefined,
+              sourceImageUrl: accessorSourceImageUrl,
+              cropImageUrl: accessorCropImageUrl,
+              questionBbox: normalizeBbox(accessor?.question_bbox),
+              answerBbox: normalizeBbox(accessor?.answer_bbox),
+              status: row.status
+            })
+          )
+          openCorrectionsByAssignment.set(row.assignment_id, existing)
+        }
+
+        return (assignmentsResult.data || []).map((assignment) => {
+          const state = stateMap.get(assignment.id)
+          const submissions = submissionsByAssignment.get(assignment.id) || []
+          const latestSubmission = submissions
+            .slice()
+            .sort((a, b) => {
+              const timeA = toMillis(a.updated_at) ?? toMillis(a.created_at) ?? 0
+              const timeB = toMillis(b.updated_at) ?? toMillis(b.created_at) ?? 0
+              return timeB - timeA
+            })[0]
+          const latestGradedSubmission = submissions
+            .filter((row) => row.graded_at !== null && row.graded_at !== undefined)
+            .sort((a, b) => (toNumber(b.graded_at) ?? 0) - (toNumber(a.graded_at) ?? 0))[0]
+
+          const showScore =
+            typeof assignment.student_show_score === 'boolean'
+              ? assignment.student_show_score
+              : preferences.show_score_to_students
+          const rawStatus = state?.status ?? 'not_uploaded'
+          const isCorrectionStatus = ['correction_required', 'correction_in_progress'].includes(rawStatus)
+          const effectiveUploadLocked =
+            Boolean(state?.upload_locked) || String(state?.status || '') === 'uploaded'
+          const canUpload = preferences.student_portal_enabled && !effectiveUploadLocked
+          const correctionAttemptCount = state?.correction_attempt_count ?? 0
+          const openCorrections = openCorrectionsByAssignment.get(assignment.id) ?? []
+          const fallbackCorrections =
+            openCorrections.length === 0 && isCorrectionStatus && latestGradedSubmission?.grading_result
+              ? parseMistakesFromGradingResult(latestGradedSubmission.grading_result).map((mistake) =>
+                  compactObject({
+                    attemptNo: correctionAttemptCount,
+                    questionId: mistake.questionId,
+                    questionText: mistake.questionText,
+                    mistakeReason: sanitizeHintText(mistake.reason),
+                    hintText: sanitizeHintText(mistake.hintText || mistake.reason),
+                    sourceSubmissionId:
+                      latestGradedSubmission.id ||
+                      extractSubmissionIdFromImagePath(latestGradedSubmission.image_url),
+                    sourceImageUrl:
+                      typeof latestGradedSubmission.image_url === 'string'
+                        ? latestGradedSubmission.image_url
+                        : undefined,
+                    questionBbox: normalizeBbox(mistake.questionBbox),
+                    answerBbox: normalizeBbox(mistake.answerBbox),
+                    status: 'open'
+                  })
+                )
+              : []
+          const mergedCorrections =
+            openCorrections.length > 0 ? openCorrections : fallbackCorrections
+          const status =
+            mergedCorrections.length > 0 &&
+            !['correction_required', 'correction_in_progress', 'correction_failed', 'correction_passed'].includes(rawStatus)
+              ? 'correction_required'
+              : rawStatus
+          const visibility = preferences.student_feedback_visibility || 'score_reason'
+          const visibleScore = visibility === 'status_only' ? false : showScore
+          const visibleCorrections =
+            visibility === 'status_only' || visibility === 'score_only' ? [] : mergedCorrections
+
+          return compactObject({
+            id: assignment.id,
+            classroomName,
+            classroomKey,
+            title: assignment.title,
+            totalPages: assignment.total_pages,
+            status,
+            canUpload,
+            uploadLocked: effectiveUploadLocked,
+            uploadLockedReason:
+              effectiveUploadLocked ? state?.last_status_reason ?? undefined : undefined,
+            gradedOnce: Boolean(state?.graded_once),
+            correctionAttemptCount,
+            correctionAttemptLimit:
+              state?.correction_attempt_limit ?? preferences.max_correction_attempts,
+            hasSubmission: Boolean(latestSubmission?.id),
+            latestSubmissionId: latestSubmission?.id ?? undefined,
+            latestSubmissionSource: latestSubmission?.source ?? undefined,
+            openCorrections: visibleCorrections,
+            showScore: visibleScore,
+            score:
+              visibleScore && latestGradedSubmission
+                ? toNumber(latestGradedSubmission.score)
+                : undefined,
+            updatedAt: toMillis(assignment.updated_at) ?? undefined
+          })
+        })
+      })
+    )
+
+    const assignmentItems = allAssignmentItemsNested
+      .flat()
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+
+    const primaryClassroom = classroomOptions[0]
+    const primaryPreferences = preferencesMap.get(primaryClassroom.ownerId)
+    const primaryStudentContext = studentContexts.find(
+      (c) => c.ownerId === primaryClassroom.ownerId && c.classroomId === primaryClassroom.classroomId
+    ) || studentContexts[0]
 
     res.status(200).json({
       classrooms: classroomOptions,
-      activeClassroomKey: activeClassroom.key,
+      activeClassroomKey: primaryClassroom.key,
       student: {
-        id: studentContext.id,
-        name: studentContext.name,
-        seatNumber: studentContext.seatNumber,
-        classroomId: studentContext.classroomId,
-        ownerId
+        id: primaryStudentContext.id,
+        name: primaryStudentContext.name,
+        seatNumber: primaryStudentContext.seatNumber,
+        classroomId: primaryStudentContext.classroomId,
+        ownerId: primaryClassroom.ownerId
       },
       preferences: {
-        studentPortalEnabled: preferences.student_portal_enabled,
-        showScoreToStudents: preferences.show_score_to_students,
-        maxCorrectionAttempts: preferences.max_correction_attempts,
-        lockUploadAfterGraded: preferences.lock_upload_after_graded,
-        requireFullPageCount: preferences.require_full_page_count
+        studentPortalEnabled: primaryPreferences.student_portal_enabled,
+        showScoreToStudents: primaryPreferences.show_score_to_students,
+        maxCorrectionAttempts: primaryPreferences.max_correction_attempts,
+        lockUploadAfterGraded: primaryPreferences.lock_upload_after_graded,
+        requireFullPageCount: primaryPreferences.require_full_page_count
       },
       assignments: assignmentItems
     })
