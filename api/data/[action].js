@@ -4028,11 +4028,9 @@ async function handleStudentOverview(req, res) {
               : []
           const mergedCorrections =
             openCorrections.length > 0 ? openCorrections : fallbackCorrections
-          const status =
-            mergedCorrections.length > 0 &&
-            !['correction_required', 'correction_in_progress', 'correction_pending_review', 'correction_failed', 'correction_passed'].includes(rawStatus)
-              ? 'correction_required'
-              : rawStatus
+          // Status always follows assignment_student_state — teacher dispatch is the sole
+          // trigger for correction visibility. Never force correction_required from mistakes alone.
+          const status = rawStatus
           const visibility = preferences.student_feedback_visibility || 'score_reason'
           const visibleScore = visibility === 'status_only' ? false : showScore
           const visibleCorrections =
