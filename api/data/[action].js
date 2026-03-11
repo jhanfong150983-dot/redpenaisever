@@ -4572,9 +4572,10 @@ async function handleCampus1ClassroomSync(req, res) {
 
     const baseClassName = String(classInfo.className || '').trim()
     const courseName = String(course.courseName || '').trim()
+    // getCourseStudent API 不一定回傳 courseName；若無則跳過，避免以純班級名稱建立重複班級
+    if (!courseName) continue
     // 科目名稱通常已包含班級名稱（如「五年6班_智慧探究家：科技創新任務課程」）
-    // 直接用 courseName；若無則退回 baseClassName
-    const displayName = courseName || baseClassName || `課程 ${key}`
+    const displayName = courseName
 
     classByCourseID[key] = {
       courseID: key,
