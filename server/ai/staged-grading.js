@@ -1007,7 +1007,17 @@ Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
 ${singleChoiceNote}${multiCheckNote}${fillBlankNote}${mapDrawNote}
 
-== BLANK FIRST RULE (most important) ==
+== ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
+You do NOT know what the correct answer is. You do NOT know what the student intended to write.
+NEVER output an answer based on:
+- what you think the correct answer should be
+- the question stem or context clues
+- answers you see in neighboring questions
+- printed option labels (A B C D 甲乙丙丁) that the student did NOT mark
+You may ONLY output what is physically, visibly written by the student's own hand.
+If the answer space is empty → blank. There are NO exceptions.
+
+== BLANK FIRST RULE ==
 Before reading each question, ask yourself: "Is there fresh handwriting in this question's answer space?"
 - Answer space = the designated writing area: ( ), ___, □, or the answer line after "答:" "A:" "Ans:"
 - If no fresh handwriting is present → status="blank", studentAnswerRaw="未作答". STOP. Do not read further.
