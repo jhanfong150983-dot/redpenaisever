@@ -1,3 +1,10 @@
+// Increase bodyParser limit to 4mb (Vercel hard cap is 4.5mb; per-question
+// correction images are compressed to 200KB each to stay well under the cap)
+export const config = {
+  runtime: 'nodejs',
+  api: { bodyParser: { sizeLimit: '4mb' } }
+}
+
 import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
