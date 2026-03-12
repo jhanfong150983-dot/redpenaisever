@@ -1041,11 +1041,16 @@ SINGLE-CHOICE (questions in SINGLE-CHOICE list):
 MULTI-CHECK (questions in MULTI-CHECK list):
 - Output comma-separated selected options with NO spaces.
 - STRICT FORMAT PRIORITY — apply the FIRST matching rule, never mix rules across options:
-  1. Printed labels exist (①②③ / A B C / 1 2 3 / 甲乙丙): always use those labels. Example: "①,③"
-  2. Grid/spatial layout (options arranged in 2+ columns, or clearly top/bottom/left/right zones): use spatial descriptors ONLY — 左上/右上/左下/右下 for 2×2; 上方/下方 for vertical pair; 左側/右側 for horizontal pair. Example: "左上,右下"
-  3. Vertical list without labels: use ordinals ONLY — 第一個/第二個/第三個... top-to-bottom. Example: "第三個"
-- Both Read1 and Read2 must use THE SAME format rule for the same question.
-- ABSOLUTELY FORBIDDEN: outputting the text/formula content of the option box. FORBIDDEN: mixing rule 2 and rule 3 (e.g., "第三個" mixed with "下方").
+  1. Printed labels exist (①②③ / A B C / 1 2 3 / 甲乙丙): use ONLY the label character(s). Template: "<label>". Example: "①,③" or "A,C"
+  2. Grid/spatial layout (options in 2+ columns or clear top/bottom/left/right zones): use ONLY these fixed spatial tokens:
+     - 2×2 grid → tokens must be one of: 左上格/右上格/左下格/右下格
+     - Vertical pair (top+bottom) → tokens must be one of: 上方格/下方格
+     - Horizontal pair (left+right) → tokens must be one of: 左格/右格
+     Template: "<spatial token>". Example: "左上格,右下格"
+  3. Vertical list without labels (top-to-bottom): use ONLY "第X個" where X is 一/二/三/四/五/六/七/八/九/十.
+     Template: "第X個". Example: "第三個" or "第一個,第四個"
+- LOCK THE RULE: identify the rule (1, 2, or 3) from the FIRST option you see. Apply that SAME rule to ALL selected options in this question. Never switch rules mid-answer.
+- ABSOLUTELY FORBIDDEN: outputting the text/formula/sentence content of the option box. FORBIDDEN: 第X個 mixed with spatial tokens. FORBIDDEN: any token not matching the template above.
 
 FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
@@ -1201,7 +1206,7 @@ IMPORTANT:
 - "Truly different" means the MEANING or CONTENT differs (different words, numbers, names, or answers).
 - "NOT truly different" means the differences are only in formatting, spacing, punctuation, character width (full/half), or trivial OCR noise.
 - For map/diagram answers with multiple labels: compare the SET of position-to-name mappings. Minor formatting differences in positions or separators are NOT truly different.
-- For checkbox/multi-choice answers: if one read uses an ordinal position (第三個, 第二個) and the other reads the actual text of that option (a formula, a phrase), they may be describing the SAME selected box. Mark as NOT truly different if both appear to indicate exactly ONE selected option and there is no reason to think they point to different options.
+- For checkbox/multi-choice answers: both reads now use fixed template tokens (第X個 / 左上格 / ① / A etc.). If one read uses a fixed token and the other uses option text content (a formula, phrase) that appears to describe the same box, mark as NOT truly different. If both use fixed tokens but they are different tokens (e.g. 第一個 vs 第三個), that IS truly different.
 - Examples of NOT truly different:
   - "\u6cf0\u570b" vs "\u6cf0\u570b " (trailing space)
   - "A:\u6cf0\u570b" vs "A: \u6cf0\u570b" (space after colon)
