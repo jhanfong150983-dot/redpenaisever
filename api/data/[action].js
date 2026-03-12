@@ -5200,6 +5200,18 @@ async function handleCampus1ClassroomSync(req, res) {
         })
         .filter((s) => s.seat_number > 0 && s.name)
 
+      const hasEmailCount = normalizedStudents.filter((s) => !!s.email).length
+      const hasProviderStudentIdCount = normalizedStudents.filter((s) => !!s.provider_student_id).length
+      console.log(
+        '[1campus sync] normalized students snapshot:',
+        {
+          className,
+          total: normalizedStudents.length,
+          hasEmailCount,
+          hasProviderStudentIdCount
+        }
+      )
+
       // 批次匯入學生
       let studentCount = 0
       if (normalizedStudents.length > 0) {

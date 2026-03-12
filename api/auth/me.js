@@ -310,7 +310,7 @@ export default async function handler(req, res) {
               .select('owner_id, classroom_id')
               .eq('provider', 'campus1')
               .eq('provider_dsns', providerDsns)
-              .eq('provider_class_name', metaClassName)
+              .ilike('provider_class_name', `${metaClassName}%`)
 
             if (syncByClassNameError) {
               console.warn('[AUTH-ME] campus1 fallback className lookup failed:', syncByClassNameError.message)

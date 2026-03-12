@@ -383,7 +383,7 @@ async function handlePhase1(req, res) {
         const byProviderStudentId = await fetchStudents('provider_student_id', () =>
           supabaseAdmin
             .from('students')
-            .select('id, owner_id, auth_user_id')
+            .select('id, owner_id, auth_user_id, email, provider_student_id')
             .eq('provider_student_id', studentID)
         )
         pushMatches(byProviderStudentId)
@@ -394,7 +394,7 @@ async function handlePhase1(req, res) {
         const byAccountEmail = await fetchStudents('email', () =>
           supabaseAdmin
             .from('students')
-            .select('id, owner_id, auth_user_id')
+            .select('id, owner_id, auth_user_id, email, provider_student_id')
             .eq('email', normalizedAccountEmail)
         )
         pushMatches(byAccountEmail)
@@ -404,7 +404,7 @@ async function handlePhase1(req, res) {
         const byStudentNumber = await fetchStudents('student_number', () =>
           supabaseAdmin
             .from('students')
-            .select('id, owner_id, auth_user_id')
+            .select('id, owner_id, auth_user_id, email, provider_student_id')
             .eq('student_number', studentNumber)
         )
         pushMatches(byStudentNumber)
@@ -426,7 +426,7 @@ async function handlePhase1(req, res) {
               fetchStudents(`class_seat:${sync.owner_id}:${sync.classroom_id}`, () =>
                 supabaseAdmin
                   .from('students')
-                  .select('id, owner_id, auth_user_id')
+                  .select('id, owner_id, auth_user_id, email, provider_student_id')
                   .eq('owner_id', sync.owner_id)
                   .eq('classroom_id', sync.classroom_id)
                   .eq('seat_number', studentSeatNo)
@@ -444,7 +444,7 @@ async function handlePhase1(req, res) {
           .select('owner_id, classroom_id')
           .eq('provider', 'campus1')
           .eq('provider_dsns', dsns)
-          .eq('provider_class_name', studentClassName)
+          .ilike('provider_class_name', `${studentClassName}%`)
 
         if (syncNameError) {
           console.warn('[1campus SSO] class name sync lookup failed:', syncNameError.message)
@@ -454,7 +454,7 @@ async function handlePhase1(req, res) {
               fetchStudents(`class_name_seat:${sync.owner_id}:${sync.classroom_id}`, () =>
                 supabaseAdmin
                   .from('students')
-                  .select('id, owner_id, auth_user_id')
+                  .select('id, owner_id, auth_user_id, email, provider_student_id')
                   .eq('owner_id', sync.owner_id)
                   .eq('classroom_id', sync.classroom_id)
                   .eq('seat_number', studentSeatNo)
@@ -468,19 +468,27 @@ async function handlePhase1(req, res) {
       const matchedStudents = Array.from(matchedMap.values())
 
       if (matchedStudents.length > 0) {
-        const needsBind = matchedStudents.filter((s) => s.auth_user_id !== userId)
-        if (needsBind.length > 0) {
+        const needsUpdate = matchedStudents.filter((s) => {
+          if (s.auth_user_id !== userId) return true
+          if (normalizedAccountEmail.includes('@') && !s.email) return true
+          if (studentID && !s.provider_student_id) return true
+          return false
+        })
+        if (needsUpdate.length > 0) {
           await Promise.all(
-            needsBind.map((s) =>
-              supabaseAdmin
+            needsUpdate.map((s) => {
+              const payload = { auth_user_id: userId, updated_at: nowIso }
+              if (normalizedAccountEmail.includes('@') && !s.email) payload.email = normalizedAccountEmail
+              if (studentID && !s.provider_student_id) payload.provider_student_id = studentID
+              return supabaseAdmin
                 .from('students')
-                .update({ auth_user_id: userId, updated_at: nowIso })
+                .update(payload)
                 .eq('id', s.id)
                 .eq('owner_id', s.owner_id)
-            )
+            })
           )
           console.log(
-            `[1campus SSO] Bound student auth_user_id for ${needsBind.length} records`,
+            `[1campus SSO] Bound/updated student records: ${needsUpdate.length}`,
             { studentID, studentNumber, classID: studentClassID, seatNo: studentSeatNo }
           )
         }
