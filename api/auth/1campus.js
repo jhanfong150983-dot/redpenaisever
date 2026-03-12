@@ -362,7 +362,8 @@ async function handlePhase1(req, res) {
           if (error) {
             if (
               label === 'student_number' &&
-              String(error.message || '').includes('column students.student_number does not exist')
+              String(error.message || '').includes('student_number') &&
+              String(error.message || '').includes('does not exist')
             ) {
               studentNumberLookupAvailable = false
               console.log('[1campus SSO] student_number lookup skipped: column not exists')

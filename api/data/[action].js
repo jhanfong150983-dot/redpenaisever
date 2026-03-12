@@ -5038,6 +5038,40 @@ async function handleCampus1ClassroomSync(req, res) {
   console.log('[1campus sync] effectiveTeacherID:', effectiveTeacherID, '(storedTeacherID:', storedTeacherID, ', account:', providerAccount, ')')
   console.log('[1campus sync] hasOAuthToken:', hasOAuthToken)
 
+  const dsnsLower = dsns.toLowerCase()
+  const providerAccountDomain = providerAccount.includes('@')
+    ? providerAccount.split('@')[1].trim().toLowerCase()
+    : ''
+  const fallbackEmailDomains = []
+  if (providerAccountDomain) {
+    fallbackEmailDomains.push(providerAccountDomain)
+    if (!providerAccountDomain.startsWith('smail.')) {
+      fallbackEmailDomains.push(`smail.${providerAccountDomain}`)
+    }
+  }
+  fallbackEmailDomains.push(`smail.${dsnsLower}`)
+  const dsnsParts = dsnsLower.split('.')
+  if (dsnsParts.length > 2) {
+    fallbackEmailDomains.push(`smail.${dsnsParts.slice(1).join('.')}`)
+  }
+  const uniqueFallbackDomains = Array.from(new Set(fallbackEmailDomains.filter(Boolean)))
+  const defaultStudentMailDomain =
+    uniqueFallbackDomains.find((d) => d.startsWith('smail.')) ||
+    uniqueFallbackDomains[0] ||
+    ''
+
+  const normalizeCampus1StudentEmail = (rawEmail, rawStudentAcc) => {
+    const directEmail = String(rawEmail || '').trim().toLowerCase()
+    if (directEmail && directEmail.includes('@')) return directEmail
+
+    const accountValue = String(rawStudentAcc || '').trim().toLowerCase()
+    if (!accountValue) return null
+    if (accountValue.includes('@')) return accountValue
+    if (!defaultStudentMailDomain) return null
+    if (!/^[a-z0-9._-]+$/i.test(accountValue)) return null
+    return `${accountValue}@${defaultStudentMailDomain}`
+  }
+
   if (!effectiveTeacherID) {
     res.status(403).json({ error: '無法取得 teacherID，請重新從 1Campus 登入' })
     return
@@ -5155,13 +5189,11 @@ async function handleCampus1ClassroomSync(req, res) {
       // email 可能在 email 或 studentAcc 欄位
       const normalizedStudents = cls.students
         .map((s) => {
-          const rawEmail = (typeof s.email === 'string' && s.email.trim()) ? s.email.trim()
-            : (typeof s.studentAcc === 'string' && s.studentAcc.trim()) ? s.studentAcc.trim()
-            : null
+          const normalizedEmail = normalizeCampus1StudentEmail(s.email, s.studentAcc)
           return {
             seat_number: Number(s.seatNo) || 0,
             name: String(s.studentName || '').trim(),
-            email: rawEmail,
+            email: normalizedEmail,
             provider_student_id: s.studentID != null && String(s.studentID).trim() ? String(s.studentID).trim() : null,
             student_number: s.studentNumber != null ? String(s.studentNumber).trim() : null
           }
@@ -5187,19 +5219,56 @@ async function handleCampus1ClassroomSync(req, res) {
           (s) => s.email || s.provider_student_id || s.student_number
         )
         if (studentsNeedUpdate.length > 0) {
+          let studentNumberColumnMissing = false
+          let updateFailedCount = 0
           for (const s of studentsNeedUpdate) {
             const updatePayload = { updated_at: nowIso }
             if (s.email) updatePayload.email = s.email
             if (s.provider_student_id) updatePayload.provider_student_id = s.provider_student_id
-            if (s.student_number) updatePayload.student_number = s.student_number
-            await supabaseAdmin
-              .from('students')
-              .update(updatePayload)
-              .eq('owner_id', user.id)
-              .eq('classroom_id', classroomId)
-              .eq('seat_number', s.seat_number)
+            if (!studentNumberColumnMissing && s.student_number) {
+              updatePayload.student_number = s.student_number
+            }
+
+            const runUpdate = async (payload) =>
+              await supabaseAdmin
+                .from('students')
+                .update(payload)
+                .eq('owner_id', user.id)
+                .eq('classroom_id', classroomId)
+                .eq('seat_number', s.seat_number)
+
+            let { error: updateError } = await runUpdate(updatePayload)
+
+            if (
+              updateError &&
+              String(updateError.message || '').includes('student_number') &&
+              String(updateError.message || '').includes('does not exist')
+            ) {
+              studentNumberColumnMissing = true
+              const retryPayload = { ...updatePayload }
+              delete retryPayload.student_number
+              if (Object.keys(retryPayload).length > 1) {
+                const retryResult = await runUpdate(retryPayload)
+                updateError = retryResult.error
+              } else {
+                updateError = null
+              }
+            }
+
+            if (updateError) {
+              updateFailedCount += 1
+              console.warn(
+                '[1campus sync] update student extra fields failed:',
+                updateError.message,
+                { className, seatNo: s.seat_number, name: s.name }
+              )
+            }
           }
-          console.log('[1campus sync] updated extra fields for', studentsNeedUpdate.length, 'students')
+          const updatedCount = studentsNeedUpdate.length - updateFailedCount
+          console.log(
+            '[1campus sync] updated extra fields:',
+            { className, total: studentsNeedUpdate.length, updated: updatedCount, failed: updateFailedCount, studentNumberColumnMissing }
+          )
         }
       }
 
