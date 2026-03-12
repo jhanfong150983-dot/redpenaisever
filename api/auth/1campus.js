@@ -219,7 +219,36 @@ async function handlePhase1(req, res) {
   const teacherID = rawTeacherID != null && rawTeacherID !== '' ? String(rawTeacherID).trim() : ''
   const rawStudentID = identity.studentID ?? identity.student?.studentID ?? null
   const studentID = rawStudentID != null && rawStudentID !== '' ? String(rawStudentID).trim() : ''
-  console.log('[1campus Phase1] identity fields:', { account, teacherID, studentID, roleType: identity.roleType })
+  const rawStudentNumber = identity.studentNumber ?? identity.student?.studentNumber ?? null
+  const studentNumber = rawStudentNumber != null && rawStudentNumber !== '' ? String(rawStudentNumber).trim() : ''
+  const rawStudentClassID = identity.classID ?? identity.student?.classID ?? null
+  const studentClassID = rawStudentClassID != null && rawStudentClassID !== '' ? String(rawStudentClassID).trim() : ''
+  const rawStudentSeatNo = identity.seatNo ?? identity.student?.seatNo ?? null
+  const parsedStudentSeatNo = Number(rawStudentSeatNo)
+  const studentSeatNo = Number.isFinite(parsedStudentSeatNo) && parsedStudentSeatNo > 0 ? parsedStudentSeatNo : 0
+  const rawStudentClassName = identity.className ?? identity.student?.className ?? null
+  const studentClassName = rawStudentClassName != null && rawStudentClassName !== '' ? String(rawStudentClassName).trim() : ''
+  const rawStudentClassNo = identity.classNo ?? identity.student?.classNo ?? null
+  const studentClassNo = rawStudentClassNo != null && rawStudentClassNo !== '' ? String(rawStudentClassNo).trim() : ''
+  console.log('[1campus Phase1] identity fields:', {
+    account,
+    teacherID,
+    studentID,
+    studentNumber,
+    studentClassID,
+    studentSeatNo,
+    roleType: identity.roleType
+  })
+  const studentMeta = isStudent
+    ? {
+        ...(studentID ? { studentID } : {}),
+        ...(studentNumber ? { studentNumber } : {}),
+        ...(studentClassID ? { classID: studentClassID } : {}),
+        ...(studentClassName ? { className: studentClassName } : {}),
+        ...(studentClassNo ? { classNo: studentClassNo } : {}),
+        ...(studentSeatNo > 0 ? { seatNo: studentSeatNo } : {})
+      }
+    : null
   const displayName = buildCampus1DisplayName(identity)
   const virtualEmail = buildCampus1VirtualEmail(account, dsns)
   const supabaseAdmin = getSupabaseAdmin()
@@ -241,7 +270,7 @@ async function handlePhase1(req, res) {
       userId = existingIdentity.user_id
       const updatedMeta = {
         ...(existingIdentity.provider_meta || {}),
-        ...(isStudent ? { studentID } : { teacherID }),
+        ...(isStudent ? studentMeta : { teacherID }),
         displayName,
         dsns,
         roleType: identity.roleType,
@@ -290,7 +319,7 @@ async function handlePhase1(req, res) {
       }
 
       const meta = {
-        ...(isStudent ? { studentID } : { teacherID }),
+        ...(isStudent ? studentMeta : { teacherID }),
         displayName,
         dsns,
         roleType: identity.roleType,
@@ -314,15 +343,81 @@ async function handlePhase1(req, res) {
     return
   }
 
-  // 學生：用 provider_student_id 綁定 auth_user_id
-  if (isStudent && studentID) {
+  // 學生：綁定 auth_user_id（優先 provider_student_id，備援 student_number / classID+seatNo）
+  if (isStudent) {
     try {
-      const { data: matchedStudents } = await supabaseAdmin
-        .from('students')
-        .select('id, owner_id, auth_user_id')
-        .eq('provider_student_id', studentID)
+      const matchedMap = new Map()
+      const pushMatches = (rows) => {
+        for (const row of rows || []) {
+          if (!row?.id || !row?.owner_id) continue
+          matchedMap.set(`${row.owner_id}::${row.id}`, row)
+        }
+      }
 
-      if (matchedStudents && matchedStudents.length > 0) {
+      const fetchStudents = async (label, builder) => {
+        try {
+          const { data, error } = await builder()
+          if (error) {
+            console.warn(`[1campus SSO] Student lookup failed(${label}):`, error.message)
+            return []
+          }
+          return data || []
+        } catch (err) {
+          console.warn(`[1campus SSO] Student lookup exception(${label}):`, err?.message)
+          return []
+        }
+      }
+
+      if (studentID) {
+        const byProviderStudentId = await fetchStudents('provider_student_id', () =>
+          supabaseAdmin
+            .from('students')
+            .select('id, owner_id, auth_user_id')
+            .eq('provider_student_id', studentID)
+        )
+        pushMatches(byProviderStudentId)
+      }
+
+      if (matchedMap.size === 0 && studentNumber) {
+        const byStudentNumber = await fetchStudents('student_number', () =>
+          supabaseAdmin
+            .from('students')
+            .select('id, owner_id, auth_user_id')
+            .eq('student_number', studentNumber)
+        )
+        pushMatches(byStudentNumber)
+      }
+
+      if (matchedMap.size === 0 && studentClassID && studentSeatNo > 0) {
+        const { data: syncRows, error: syncError } = await supabaseAdmin
+          .from('campus_classroom_sync')
+          .select('owner_id, classroom_id')
+          .eq('provider', 'campus1')
+          .eq('provider_dsns', dsns)
+          .eq('provider_class_id', studentClassID)
+
+        if (syncError) {
+          console.warn('[1campus SSO] class sync lookup failed:', syncError.message)
+        } else if (syncRows?.length) {
+          const byClassSeatResults = await Promise.all(
+            syncRows.map((sync) =>
+              fetchStudents(`class_seat:${sync.owner_id}:${sync.classroom_id}`, () =>
+                supabaseAdmin
+                  .from('students')
+                  .select('id, owner_id, auth_user_id')
+                  .eq('owner_id', sync.owner_id)
+                  .eq('classroom_id', sync.classroom_id)
+                  .eq('seat_number', studentSeatNo)
+              )
+            )
+          )
+          byClassSeatResults.forEach(pushMatches)
+        }
+      }
+
+      const matchedStudents = Array.from(matchedMap.values())
+
+      if (matchedStudents.length > 0) {
         const needsBind = matchedStudents.filter((s) => s.auth_user_id !== userId)
         if (needsBind.length > 0) {
           await Promise.all(
@@ -334,10 +429,16 @@ async function handlePhase1(req, res) {
                 .eq('owner_id', s.owner_id)
             )
           )
-          console.log(`[1campus SSO] Bound student auth_user_id for ${needsBind.length} records (studentID=${studentID})`)
+          console.log(
+            `[1campus SSO] Bound student auth_user_id for ${needsBind.length} records`,
+            { studentID, studentNumber, classID: studentClassID, seatNo: studentSeatNo }
+          )
         }
       } else {
-        console.log(`[1campus SSO] No student records found for provider_student_id=${studentID}`)
+        console.log(
+          '[1campus SSO] No student records matched for binding',
+          { studentID, studentNumber, classID: studentClassID, seatNo: studentSeatNo, dsns }
+        )
       }
     } catch (err) {
       console.warn('[1campus SSO] Student binding failed (non-blocking):', err?.message)

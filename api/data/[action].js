@@ -5182,13 +5182,16 @@ async function handleCampus1ClassroomSync(req, res) {
         if (rpcError) throw new Error(`匯入學生失敗: ${rpcError.message}`)
         studentCount = normalizedStudents.length
 
-        // 更新 email 和 provider_student_id（upsert_students_batch 不處理這兩個欄位）
-        const studentsNeedUpdate = normalizedStudents.filter((s) => s.email || s.provider_student_id)
+        // 更新 email / provider_student_id / student_number（upsert_students_batch 不處理這些欄位）
+        const studentsNeedUpdate = normalizedStudents.filter(
+          (s) => s.email || s.provider_student_id || s.student_number
+        )
         if (studentsNeedUpdate.length > 0) {
           for (const s of studentsNeedUpdate) {
             const updatePayload = { updated_at: nowIso }
             if (s.email) updatePayload.email = s.email
             if (s.provider_student_id) updatePayload.provider_student_id = s.provider_student_id
+            if (s.student_number) updatePayload.student_number = s.student_number
             await supabaseAdmin
               .from('students')
               .update(updatePayload)
