@@ -359,11 +359,16 @@ async function handlePhase1(req, res) {
       const fetchStudents = async (label, builder) => {
         try {
           const { data, error } = await builder()
+          const errMsg = String(error?.message || '').toLowerCase()
           if (error) {
             if (
               label === 'student_number' &&
-              String(error.message || '').includes('student_number') &&
-              String(error.message || '').includes('does not exist')
+              errMsg.includes('student_number') &&
+              (
+                errMsg.includes('does not exist') ||
+                errMsg.includes('schema cache') ||
+                errMsg.includes("could not find")
+              )
             ) {
               studentNumberLookupAvailable = false
               console.log('[1campus SSO] student_number lookup skipped: column not exists')

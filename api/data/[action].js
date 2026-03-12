@@ -5250,11 +5250,16 @@ async function handleCampus1ClassroomSync(req, res) {
                 .eq('seat_number', s.seat_number)
 
             let { error: updateError } = await runUpdate(updatePayload)
+            const updateErrMsg = String(updateError?.message || '').toLowerCase()
 
             if (
               updateError &&
-              String(updateError.message || '').includes('student_number') &&
-              String(updateError.message || '').includes('does not exist')
+              updateErrMsg.includes('student_number') &&
+              (
+                updateErrMsg.includes('does not exist') ||
+                updateErrMsg.includes('schema cache') ||
+                updateErrMsg.includes("could not find")
+              )
             ) {
               studentNumberColumnMissing = true
               const retryPayload = { ...updatePayload }
