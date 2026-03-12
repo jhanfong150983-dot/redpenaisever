@@ -1004,7 +1004,7 @@ function buildReadAnswerPrompt(classifyResult) {
     ? `\nMAP-FILL questions (地圖填圖題): ${JSON.stringify(mapFillIds)}`
     : ''
   const mapDrawNote = mapDrawIds.length > 0
-    ? `\nMAP-DRAW questions (繪圖/標記題): ${JSON.stringify(mapDrawIds)}`
+    ? `\nMAP-DRAW questions (繪圖/標記題, use fixed template): ${JSON.stringify(mapDrawIds)}`
     : ''
   const multiCheckNote = multiCheckIds.length > 0
     ? `\nMULTI-CHECK questions (勾選題, output comma-separated selected options): ${JSON.stringify(multiCheckIds)}`
@@ -1069,10 +1069,21 @@ FILL-BLANK (questions in FILL-BLANK list):
 - Empty blank → "_". Unreadable blank → "?". All blanks empty → status="blank".
 - FORBIDDEN: surrounding printed text ("答", underline markers).
 
-DRAWING (map/diagram marks):
+MAP-DRAW (questions in MAP-DRAW list):
 - Only report a fresh student-drawn mark (new ink not part of pre-printed image).
-- If only pre-printed content visible → status="blank".
-- Description in Traditional Chinese: what was drawn and where.
+- If only pre-printed content visible → status="blank", studentAnswerRaw="未作答".
+- FIXED TEMPLATE (mandatory): "符號：[符號類型]，位置：[位置描述]"
+  - 符號類型: name of the drawn symbol in Traditional Chinese (e.g. 閃電符號, 颱風符號, 高壓符號, X記號, 點, 箭頭)
+  - 位置描述: use the FIRST matching rule:
+    1. If the diagram has a printed grid with clear spatial zones → use fixed spatial tokens:
+       - 2×2 grid → one of: 左上格/右上格/左下格/右下格
+       - Vertical pair → one of: 上方格/下方格
+       - Horizontal pair → one of: 左格/右格
+    2. If the diagram has printed coordinate axes or degree markers → use coordinate format: "[value]N/S緯線與[value]E/W經線交叉點附近" or similar
+    3. Otherwise → describe position with fixed spatial words: 左上角/右上角/左下角/右下角/中央/左側/右側/上方/下方
+  - Multiple marks: separate with "；" e.g. "符號：颱風符號，位置：左上格；符號：高壓符號，位置：右下格"
+- LOCK THE RULE: identify position rule (1, 2, or 3) from the diagram structure. Apply the SAME rule consistently.
+- FORBIDDEN: free-form prose descriptions. FORBIDDEN: mentioning pre-printed content as student marks.
 
 FORBIDDEN:
 - Guessing or inferring what the student meant to write
@@ -1229,6 +1240,7 @@ IMPORTANT:
 - "NOT truly different" means the differences are only in formatting, spacing, punctuation, character width (full/half), or trivial OCR noise.
 - For map/diagram answers with multiple labels: compare the SET of position-to-name mappings. Minor formatting differences in positions or separators are NOT truly different.
 - For checkbox/multi-choice answers: both reads now use fixed template tokens (第X個 / 左上格 / ① / A etc.). If one read uses a fixed token and the other uses option text content (a formula, phrase) that appears to describe the same box, mark as NOT truly different. If both use fixed tokens but they are different tokens (e.g. 第一個 vs 第三個), that IS truly different.
+- For map-draw answers: both reads now use the fixed template "符號：[type]，位置：[token]". Compare symbol type AND position token. Minor wording differences in symbol name (e.g. 閃電 vs 閃電符號) are NOT truly different. Different position tokens (e.g. 左上格 vs 右下格) ARE truly different. One read blank and one read non-blank IS truly different.
 - Examples of NOT truly different:
   - "\u6cf0\u570b" vs "\u6cf0\u570b " (trailing space)
   - "A:\u6cf0\u570b" vs "A: \u6cf0\u570b" (space after colon)
