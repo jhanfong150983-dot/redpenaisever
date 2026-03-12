@@ -343,10 +343,12 @@ async function handlePhase1(req, res) {
     return
   }
 
-  // 學生：綁定 auth_user_id（優先 provider_student_id，備援 student_number / classID+seatNo）
+  // 學生：綁定 auth_user_id（多層備援，避免單一鍵值不一致）
   if (isStudent) {
     try {
       const matchedMap = new Map()
+      const normalizedAccountEmail = account.toLowerCase()
+      let studentNumberLookupAvailable = true
       const pushMatches = (rows) => {
         for (const row of rows || []) {
           if (!row?.id || !row?.owner_id) continue
@@ -358,6 +360,14 @@ async function handlePhase1(req, res) {
         try {
           const { data, error } = await builder()
           if (error) {
+            if (
+              label === 'student_number' &&
+              String(error.message || '').includes('column students.student_number does not exist')
+            ) {
+              studentNumberLookupAvailable = false
+              console.log('[1campus SSO] student_number lookup skipped: column not exists')
+              return []
+            }
             console.warn(`[1campus SSO] Student lookup failed(${label}):`, error.message)
             return []
           }
@@ -378,7 +388,18 @@ async function handlePhase1(req, res) {
         pushMatches(byProviderStudentId)
       }
 
-      if (matchedMap.size === 0 && studentNumber) {
+      // 備援 1：用 1Campus account(email) 直接匹配 students.email
+      if (matchedMap.size === 0 && normalizedAccountEmail.includes('@')) {
+        const byAccountEmail = await fetchStudents('email', () =>
+          supabaseAdmin
+            .from('students')
+            .select('id, owner_id, auth_user_id')
+            .eq('email', normalizedAccountEmail)
+        )
+        pushMatches(byAccountEmail)
+      }
+
+      if (matchedMap.size === 0 && studentNumber && studentNumberLookupAvailable) {
         const byStudentNumber = await fetchStudents('student_number', () =>
           supabaseAdmin
             .from('students')
@@ -412,6 +433,34 @@ async function handlePhase1(req, res) {
             )
           )
           byClassSeatResults.forEach(pushMatches)
+        }
+      }
+
+      // 備援 3：className + seatNo（當 classID 與同步資料不一致時）
+      if (matchedMap.size === 0 && studentClassName && studentSeatNo > 0) {
+        const { data: syncRowsByClassName, error: syncNameError } = await supabaseAdmin
+          .from('campus_classroom_sync')
+          .select('owner_id, classroom_id')
+          .eq('provider', 'campus1')
+          .eq('provider_dsns', dsns)
+          .eq('provider_class_name', studentClassName)
+
+        if (syncNameError) {
+          console.warn('[1campus SSO] class name sync lookup failed:', syncNameError.message)
+        } else if (syncRowsByClassName?.length) {
+          const byClassNameSeatResults = await Promise.all(
+            syncRowsByClassName.map((sync) =>
+              fetchStudents(`class_name_seat:${sync.owner_id}:${sync.classroom_id}`, () =>
+                supabaseAdmin
+                  .from('students')
+                  .select('id, owner_id, auth_user_id')
+                  .eq('owner_id', sync.owner_id)
+                  .eq('classroom_id', sync.classroom_id)
+                  .eq('seat_number', studentSeatNo)
+              )
+            )
+          )
+          byClassNameSeatResults.forEach(pushMatches)
         }
       }
 

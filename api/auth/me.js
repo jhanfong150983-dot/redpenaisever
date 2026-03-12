@@ -241,6 +241,100 @@ export default async function handler(req, res) {
         }
       }
 
+      // 1Campus 備援：從 external_identities 取 provider_account / classID+seatNo 再匹配 students
+      if (mergedRows.size === 0) {
+        const { data: campus1Identity, error: campus1IdentityError } = await supabaseDb
+          .from('external_identities')
+          .select('provider_account, provider_dsns, provider_meta')
+          .eq('user_id', user.id)
+          .eq('provider', 'campus1')
+          .maybeSingle()
+
+        if (campus1IdentityError) {
+          console.warn('[AUTH-ME] campus1 fallback identity query failed:', campus1IdentityError.message)
+        } else if (campus1Identity) {
+          const providerAccount = String(campus1Identity.provider_account || '').trim().toLowerCase()
+          const meta = campus1Identity.provider_meta || {}
+          const metaClassID = meta.classID != null ? String(meta.classID).trim() : ''
+          const rawMetaSeatNo = Number(meta.seatNo)
+          const metaSeatNo = Number.isFinite(rawMetaSeatNo) && rawMetaSeatNo > 0 ? rawMetaSeatNo : 0
+          const metaClassName = meta.className != null ? String(meta.className).trim() : ''
+          const providerDsns = String(campus1Identity.provider_dsns || '').trim()
+
+          if (providerAccount && providerAccount.includes('@')) {
+            const { data: providerAccountRows } = await supabaseDb
+              .from('students')
+              .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
+              .eq('email', providerAccount)
+              .order('updated_at', { ascending: false })
+            for (const row of providerAccountRows || []) {
+              mergedRows.set(`${row.owner_id}::${row.id}`, row)
+            }
+            if ((providerAccountRows || []).length > 0) {
+              console.log(`[AUTH-ME] 1campus provider_account fallback matched ${providerAccountRows.length} student(s) for ${providerAccount}`)
+            }
+          }
+
+          if (mergedRows.size === 0 && providerDsns && metaClassID && metaSeatNo > 0) {
+            const { data: syncRowsByClassID, error: syncByClassIdError } = await supabaseDb
+              .from('campus_classroom_sync')
+              .select('owner_id, classroom_id')
+              .eq('provider', 'campus1')
+              .eq('provider_dsns', providerDsns)
+              .eq('provider_class_id', metaClassID)
+
+            if (syncByClassIdError) {
+              console.warn('[AUTH-ME] campus1 fallback classID lookup failed:', syncByClassIdError.message)
+            } else if (syncRowsByClassID?.length) {
+              const classSeatResults = await Promise.all(
+                syncRowsByClassID.map((sync) =>
+                  supabaseDb
+                    .from('students')
+                    .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
+                    .eq('owner_id', sync.owner_id)
+                    .eq('classroom_id', sync.classroom_id)
+                    .eq('seat_number', metaSeatNo)
+                )
+              )
+              for (const result of classSeatResults) {
+                for (const row of result.data || []) {
+                  mergedRows.set(`${row.owner_id}::${row.id}`, row)
+                }
+              }
+            }
+          }
+
+          if (mergedRows.size === 0 && providerDsns && metaClassName && metaSeatNo > 0) {
+            const { data: syncRowsByClassName, error: syncByClassNameError } = await supabaseDb
+              .from('campus_classroom_sync')
+              .select('owner_id, classroom_id')
+              .eq('provider', 'campus1')
+              .eq('provider_dsns', providerDsns)
+              .eq('provider_class_name', metaClassName)
+
+            if (syncByClassNameError) {
+              console.warn('[AUTH-ME] campus1 fallback className lookup failed:', syncByClassNameError.message)
+            } else if (syncRowsByClassName?.length) {
+              const classNameSeatResults = await Promise.all(
+                syncRowsByClassName.map((sync) =>
+                  supabaseDb
+                    .from('students')
+                    .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
+                    .eq('owner_id', sync.owner_id)
+                    .eq('classroom_id', sync.classroom_id)
+                    .eq('seat_number', metaSeatNo)
+                )
+              )
+              for (const result of classNameSeatResults) {
+                for (const row of result.data || []) {
+                  mergedRows.set(`${row.owner_id}::${row.id}`, row)
+                }
+              }
+            }
+          }
+        }
+      }
+
       const linkedStudents = Array.from(mergedRows.values())
         .sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime())
 
