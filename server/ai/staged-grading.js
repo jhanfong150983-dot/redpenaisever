@@ -1041,8 +1041,8 @@ SINGLE-CHOICE (questions in SINGLE-CHOICE list):
 MULTI-CHECK (questions in MULTI-CHECK list):
 - Output comma-separated selected options with NO spaces.
 - Labeled options (①②③, A/B/C, 1/2/3): use those labels. Example: "①,③"
-- Unlabeled boxes: use positions. Example: "左側,中間"
-- FORBIDDEN: action descriptions ("在...打勾"). FORBIDDEN: full option text.
+- Unlabeled boxes: use ordinal positions ONLY — 第一個,第二個,第三個,... (top-to-bottom, left-to-right). Example: "第三個" NOT "5000×3.14×240/360".
+- FORBIDDEN: action descriptions ("在...打勾"). FORBIDDEN: full option text content. FORBIDDEN: vague spatial words (上方/下方/左側/右側) when ordinal counting is possible.
 
 FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
@@ -1198,6 +1198,7 @@ IMPORTANT:
 - "Truly different" means the MEANING or CONTENT differs (different words, numbers, names, or answers).
 - "NOT truly different" means the differences are only in formatting, spacing, punctuation, character width (full/half), or trivial OCR noise.
 - For map/diagram answers with multiple labels: compare the SET of position-to-name mappings. Minor formatting differences in positions or separators are NOT truly different.
+- For checkbox/multi-choice answers: if one read uses an ordinal position (第三個, 第二個) and the other reads the actual text of that option (a formula, a phrase), they may be describing the SAME selected box. Mark as NOT truly different if both appear to indicate exactly ONE selected option and there is no reason to think they point to different options.
 - Examples of NOT truly different:
   - "\u6cf0\u570b" vs "\u6cf0\u570b " (trailing space)
   - "A:\u6cf0\u570b" vs "A: \u6cf0\u570b" (space after colon)
