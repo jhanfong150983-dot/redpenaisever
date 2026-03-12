@@ -4389,19 +4389,39 @@ async function handleStudentSubmission(req, res) {
 
     // Store per-question correction images for Recheck Agent
     if (mode === 'correction' && correctionImages.length > 0) {
-      await Promise.all(
-        correctionImages.map(async (img) => {
-          const normalized = normalizeBase64Input(img.imageBase64)
-          if (!normalized || !img.questionId) return
-          const path = `corrections/${submissionId}/${img.questionId}.webp`
-          await supabaseDb.storage
-            .from(HOMEWORK_IMAGES_BUCKET)
-            .upload(path, Buffer.from(normalized, 'base64'), {
-              contentType: img.contentType || 'image/webp',
-              upsert: true
-            })
-        })
-      )
+      // 高併發時限制每次請求的上傳並行度，避免 1 班同時送出時大量平行連線導致逾時
+      const uploadConcurrency = 2
+      for (let i = 0; i < correctionImages.length; i += uploadConcurrency) {
+        const batch = correctionImages.slice(i, i + uploadConcurrency)
+        const results = await Promise.all(
+          batch.map(async (img) => {
+            const normalized = normalizeBase64Input(img.imageBase64)
+            if (!normalized || !img.questionId) return { ok: true }
+            const path = `corrections/${submissionId}/${img.questionId}.webp`
+            const { error: uploadError } = await supabaseDb.storage
+              .from(HOMEWORK_IMAGES_BUCKET)
+              .upload(path, Buffer.from(normalized, 'base64'), {
+                contentType: img.contentType || 'image/webp',
+                upsert: true
+              })
+            if (uploadError) {
+              console.warn('[student-submission] correction image upload failed:', uploadError.message, {
+                submissionId,
+                questionId: img.questionId
+              })
+            }
+            return { ok: !uploadError, questionId: img.questionId }
+          })
+        )
+        const failCount = results.filter((r) => r && r.ok === false).length
+        if (failCount > 0) {
+          console.warn('[student-submission] correction image batch had failures:', {
+            submissionId,
+            batchSize: batch.length,
+            failCount
+          })
+        }
+      }
     }
 
     // Write disputed questions as status='disputed' (student believes AI was wrong)
