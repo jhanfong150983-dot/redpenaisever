@@ -1121,6 +1121,14 @@ function buildReReadAnswerPrompt(classifyResult) {
 }
 
 function buildAccessorPrompt(answerKey, readAnswerResult) {
+  const strictness = answerKey?.strictness || 'standard'
+  const strictnessRule =
+    strictness === 'strict'
+      ? 'GRADING STRICTNESS: STRICT — The student answer must match the answer key exactly. Word order, factor order in multiplication, punctuation, units, and formatting must all be correct. Any deviation = wrong.'
+      : strictness === 'lenient'
+        ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, factor order, units, or minor formatting differ.'
+        : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, equivalent units, small formatting differences) but reject wrong meaning, wrong numbers, or wrong key terms.'
+
   const compactAnswerKey = {
     questions: Array.isArray(answerKey?.questions) ? answerKey.questions : [],
     totalScore: toFiniteNumber(answerKey?.totalScore) ?? null
@@ -1135,6 +1143,8 @@ function buildAccessorPrompt(answerKey, readAnswerResult) {
 
   return `
 You are stage Assessor. Score each question by comparing student answers to the answer key.
+
+${strictnessRule}
 
 AnswerKey:
 ${JSON.stringify(compactAnswerKey)}
