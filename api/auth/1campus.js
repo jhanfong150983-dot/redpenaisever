@@ -210,6 +210,10 @@ async function handlePhase1(req, res) {
     return
   }
 
+  // Log raw identity for diagnosing missing teacherID
+  console.log('[1campus Phase1] raw identity keys:', Object.keys(identity || {}))
+  console.log('[1campus Phase1] raw identity (truncated):', JSON.stringify(identity).slice(0, 600))
+
   // teacherID / studentID 可能在頂層或嵌套物件中（依 1campus API 版本而異）
   const rawTeacherID = identity.teacherID ?? identity.teacher?.teacherID ?? null
   const teacherID = rawTeacherID != null && rawTeacherID !== '' ? String(rawTeacherID).trim() : ''
