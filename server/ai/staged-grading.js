@@ -250,11 +250,11 @@ function extractInlineImages(contents) {
 
 // A2: 用 Sharp 裁切 base64 inline image，回傳裁切後的 inlineData
 // bbox 為 normalized [0,1] 座標；失敗時回傳 null
-// 固定裁切尺寸：以 bbox 中心點為錨，擴展至 FIXED_CROP_W × FIXED_CROP_H
-// 確保作答區永遠在截圖中央，且大小一致、無雜訊過多或過小問題
+// useActualBbox=false（預設）：以 bbox 中心點為錨，擴展至固定尺寸（確保一致性）
+// useActualBbox=true：直接使用 bbox 的實際範圍（map_draw 等大面積區域用）
 const FIXED_CROP_W = 0.55  // 佔圖寬的 55%
 const FIXED_CROP_H = 0.20  // 佔圖高的 20%
-async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
+async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false) {
   if (!bbox || !imageBase64) return null
   try {
     const { default: sharp } = await import('sharp')
@@ -263,13 +263,23 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox) {
     const { width, height } = metadata
     if (!width || !height) return null
 
-    // 以 bbox 中心點為錨，向外擴展至固定尺寸
-    const cx = bbox.x + bbox.w / 2
-    const cy = bbox.y + bbox.h / 2
-    const px = Math.max(0, cx - FIXED_CROP_W / 2)
-    const py = Math.max(0, cy - FIXED_CROP_H / 2)
-    const px2 = Math.min(1, cx + FIXED_CROP_W / 2)
-    const py2 = Math.min(1, cy + FIXED_CROP_H / 2)
+    let px, py, px2, py2
+    if (useActualBbox) {
+      // 直接使用 bbox 實際範圍，加 5% 邊距
+      const pad = 0.03
+      px = Math.max(0, bbox.x - pad)
+      py = Math.max(0, bbox.y - pad)
+      px2 = Math.min(1, bbox.x + bbox.w + pad)
+      py2 = Math.min(1, bbox.y + bbox.h + pad)
+    } else {
+      // 以 bbox 中心點為錨，向外擴展至固定尺寸
+      const cx = bbox.x + bbox.w / 2
+      const cy = bbox.y + bbox.h / 2
+      px = Math.max(0, cx - FIXED_CROP_W / 2)
+      py = Math.max(0, cy - FIXED_CROP_H / 2)
+      px2 = Math.min(1, cx + FIXED_CROP_W / 2)
+      py2 = Math.min(1, cy + FIXED_CROP_H / 2)
+    }
 
     const x = Math.round(px * width)
     const y = Math.round(py * height)
@@ -907,14 +917,16 @@ Rules:
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - questionType="map_fill" if the question ID is listed in MAP-FILL QUESTIONS above.
-- questionType="map_draw" if the question shows a BLANK GRID, COORDINATE SYSTEM, or BLANK OUTLINE DIAGRAM and the question stem asks the student to DRAW, MARK, or PLACE a symbol/shape on it (e.g., 畫出颱風位置、以符號標示、在圖中標出位置、畫出符號). Do NOT output answerBbox for map_draw questions.
+- questionType="map_draw" if the question shows a BLANK GRID, COORDINATE SYSTEM, or BLANK OUTLINE DIAGRAM and the question stem asks the student to DRAW, MARK, or PLACE a symbol/shape on it (e.g., 畫出颱風位置、以符號標示、在圖中標出位置、畫出符號). For map_draw questions, output answerBbox that frames the ENTIRE diagram/map/grid area (the whole drawing region, not a small blank). This allows cropping to zoom in on just the map and remove surrounding question text.
 - questionType="single_choice" if the question has labeled options (A/B/C/D or 甲/乙/丙/丁) and the student selects exactly one option (circle, tick, or fill-in).
 - questionType="multi_check" if the question has multiple checkboxes/boxes where the student can tick/check/cross ONE OR MORE options. Options may be unlabeled blank boxes, or labeled with numbers/letters/symbols. Key difference from single_choice: multiple selections are allowed.
 - questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem if blank markers are present.
 - questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers.
 - Otherwise questionType="other".
-- For visible=true questions (except map_fill and map_draw), output answerBbox: the normalized [0,1] bounding box of the DESIGNATED ANSWER SPACE — the pre-printed space where students write their answer: parentheses (　), underline blanks ___, or empty boxes □. Do NOT frame the option list (A/B/C/D rows) — frame the blank where students write their selected letter. If the student left it blank, still output the bbox of the empty answer space.
-  Only the CENTER POINT needs to be accurate — width and height will be overridden to a fixed display size. Output your best estimate of the center encoded as a bbox.
+- For visible=true questions (except map_fill), output answerBbox:
+  - For map_draw: frame the ENTIRE diagram/map/grid area (large bbox covering the whole drawing region).
+  - For all others: frame the DESIGNATED ANSWER SPACE — the pre-printed space where students write their answer: parentheses (　), underline blanks ___, or empty boxes □. Do NOT frame the option list (A/B/C/D rows) — frame the blank where students write their selected letter. If the student left it blank, still output the bbox of the empty answer space.
+  Only the CENTER POINT needs to be accurate for non-map_draw questions — width and height will be overridden to a fixed display size. For map_draw, output the actual full extent of the diagram.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
   If the answer area cannot be determined, omit answerBbox.
 - Return strict JSON only.
@@ -1780,7 +1792,8 @@ export async function runStagedGradingPhaseA({
         const cropData = await cropInlineImageByBbox(
           mainInlineData.data,
           mainInlineData.mimeType,
-          q.answerBbox
+          q.answerBbox,
+          q.questionType === 'map_draw'
         )
         return { questionId: q.questionId, cropData }
       })
