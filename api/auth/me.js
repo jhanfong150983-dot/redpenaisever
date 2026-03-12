@@ -213,6 +213,28 @@ export default async function handler(req, res) {
         mergedRows.set(`${row.owner_id}::${row.id}`, row)
       }
 
+      // 1Campus 學生帳號備用匹配：虛擬 email 格式為 campus1.{account}@{dsns}
+      // 學生在 students 表的 email 格式通常為 {account}@smail.{dsns}
+      // 例如 campus1.webber0610@hc.edu.tw → webber0610@smail.hc.edu.tw
+      if (mergedRows.size === 0 && normalizedEmail.startsWith('campus1.') && normalizedEmail.includes('@')) {
+        const atIdx = normalizedEmail.indexOf('@')
+        const localPart = normalizedEmail.slice(0, atIdx)       // 'campus1.webber0610'
+        const domain = normalizedEmail.slice(atIdx + 1)         // 'hc.edu.tw'
+        const account = localPart.slice('campus1.'.length)      // 'webber0610'
+        const smailEmail = `${account}@smail.${domain}`         // 'webber0610@smail.hc.edu.tw'
+        const { data: smailRows } = await supabaseDb
+          .from('students')
+          .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
+          .eq('email', smailEmail)
+          .order('updated_at', { ascending: false })
+        for (const row of smailRows || []) {
+          mergedRows.set(`${row.owner_id}::${row.id}`, row)
+        }
+        if ((smailRows || []).length > 0) {
+          console.log(`[AUTH-ME] 1campus smail fallback matched ${smailRows.length} student(s) for ${smailEmail}`)
+        }
+      }
+
       const linkedStudents = Array.from(mergedRows.values())
         .sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime())
 
