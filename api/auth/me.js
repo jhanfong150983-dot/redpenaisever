@@ -276,7 +276,8 @@ export default async function handler(req, res) {
         campus1Binding = {
           account: campus1Data.provider_account,
           dsns: campus1Data.provider_dsns,
-          displayName: campus1Data.provider_meta?.displayName || ''
+          displayName: campus1Data.provider_meta?.displayName || '',
+          roleType: campus1Data.provider_meta?.roleType || ''
         }
       }
     } catch (err) {

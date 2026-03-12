@@ -5013,6 +5013,14 @@ async function handleCampus1ClassroomSync(req, res) {
     return
   }
 
+  // 確認是老師帳號（學生帳號不應呼叫 teacher sync）
+  const roleType = String(identity.provider_meta?.roleType || '').trim()
+  if (roleType && roleType !== 'teacher') {
+    console.warn('[1campus sync] blocked: roleType is', roleType, 'for user', user.id)
+    res.status(403).json({ error: '此功能僅限老師帳號使用' })
+    return
+  }
+
   // 從 DB 取 teacherID（不從 request 驗證，以防 teacherID 為空或格式不同）
   const storedTeacherID = String(identity.provider_meta?.teacherID || '').trim()
   const providerAccount = String(identity.provider_account || '').trim()
