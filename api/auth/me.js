@@ -124,13 +124,19 @@ export default async function handler(req, res) {
           profileLoaded = true
           break // 成功，跳出重試迴圈
         } else {
-          console.warn('[AUTH-ME] profile not found', user.id)
           profileError = 'Profile not found'
           // null 可能是 Supabase 瞬斷而非真的沒有 profile，允許重試
           if (attempt < maxRetries - 1) {
+            logAuthMe(
+              authMeLogLevel,
+              'profile not found; retrying',
+              { userId: user.id, attempt: attempt + 1 },
+              'detail'
+            )
             await new Promise(resolve => setTimeout(resolve, 200))
             continue
           }
+          console.warn('[AUTH-ME] profile not found (after retries)', user.id)
           break
         }
       } catch (error) {
