@@ -1040,9 +1040,12 @@ SINGLE-CHOICE (questions in SINGLE-CHOICE list):
 
 MULTI-CHECK (questions in MULTI-CHECK list):
 - Output comma-separated selected options with NO spaces.
-- Labeled options (①②③, A/B/C, 1/2/3): use those labels. Example: "①,③"
-- Unlabeled boxes: use ordinal positions ONLY — 第一個,第二個,第三個,... (top-to-bottom, left-to-right). Example: "第三個" NOT "5000×3.14×240/360".
-- FORBIDDEN: action descriptions ("在...打勾"). FORBIDDEN: full option text content. FORBIDDEN: vague spatial words (上方/下方/左側/右側) when ordinal counting is possible.
+- STRICT FORMAT PRIORITY — apply the FIRST matching rule, never mix rules across options:
+  1. Printed labels exist (①②③ / A B C / 1 2 3 / 甲乙丙): always use those labels. Example: "①,③"
+  2. Grid/spatial layout (options arranged in 2+ columns, or clearly top/bottom/left/right zones): use spatial descriptors ONLY — 左上/右上/左下/右下 for 2×2; 上方/下方 for vertical pair; 左側/右側 for horizontal pair. Example: "左上,右下"
+  3. Vertical list without labels: use ordinals ONLY — 第一個/第二個/第三個... top-to-bottom. Example: "第三個"
+- Both Read1 and Read2 must use THE SAME format rule for the same question.
+- ABSOLUTELY FORBIDDEN: outputting the text/formula content of the option box. FORBIDDEN: mixing rule 2 and rule 3 (e.g., "第三個" mixed with "下方").
 
 FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
