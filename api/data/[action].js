@@ -145,6 +145,13 @@ function parseBooleanParam(value) {
   return false
 }
 
+function applyNoStoreHeaders(res) {
+  if (!res || typeof res.setHeader !== 'function') return
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
+  res.setHeader('Pragma', 'no-cache')
+  res.setHeader('Expires', '0')
+}
+
 function extractCandidateText(data) {
   const candidates = Array.isArray(data?.candidates) ? data.candidates : []
   return candidates
@@ -3101,23 +3108,82 @@ async function handleSync(req, res) {
         console.log(`✅ [後端 Sync] 成功寫入 ${assignmentRows.length} 個作業`)
       }
 
-      const submissionRows = await buildUpsertRows(
-        'submissions',
-        submissions.filter((s) => s?.id && s?.assignmentId && s?.studentId),
-        (s) => {
-          const createdAt = toIsoTimestamp(s.createdAt)
-          const gradedAt = toNumber(s.gradedAt)
-          const normalizedRound = clampInteger(s.round, 0, 9999, 0)
-          const imageUrl =
-            s.imageUrl || s.image_url || `submissions/${s.id}.webp`
-          const thumbUrl =
-            s.thumbUrl ||
-            s.thumb_url ||
-            s.thumbnailUrl ||
-            s.thumbnail_url ||
-            `submissions/thumbs/${s.id}.webp`
+      const incomingSubmissions = submissions.filter(
+        (s) => s?.id && s?.assignmentId && s?.studentId
+      )
+      const incomingSubmissionIds = incomingSubmissions.map((s) => s.id)
+      const [deletedSubmissionSet, existingSubmissionResult] = await Promise.all([
+        fetchDeletedSet(supabaseDb, 'submissions', incomingSubmissionIds, user.id),
+        incomingSubmissionIds.length > 0
+          ? supabaseDb
+              .from('submissions')
+              .select('id, status, graded_at, updated_at')
+              .eq('owner_id', user.id)
+              .in('id', incomingSubmissionIds)
+          : Promise.resolve({ data: [], error: null })
+      ])
 
-          return compactObject({
+      if (existingSubmissionResult.error) {
+        throw new Error(existingSubmissionResult.error.message)
+      }
+
+      const existingSubmissionMap = new Map(
+        (existingSubmissionResult.data || []).map((row) => [row.id, row])
+      )
+
+      const submissionRows = []
+      let skippedSubmissionDeletedCount = 0
+      let skippedSubmissionStaleCount = 0
+      for (const s of incomingSubmissions) {
+        if (deletedSubmissionSet.has(s.id)) {
+          skippedSubmissionDeletedCount += 1
+          continue
+        }
+
+        const existing = existingSubmissionMap.get(s.id) || null
+        const incomingUpdatedAt = toMillis(s.updatedAt ?? s.updated_at)
+        const existingUpdatedAt = toMillis(existing?.updated_at)
+        const incomingStatus = String(s.status || '').toLowerCase()
+        const existingStatus = String(existing?.status || '').toLowerCase()
+        const incomingGradedAt = toNumber(s.gradedAt ?? s.graded_at)
+        const existingGradedAt = toNumber(existing?.graded_at)
+        const incomingLooksGraded =
+          incomingStatus === 'graded' || Number.isFinite(incomingGradedAt)
+        const existingLooksGraded =
+          existingStatus === 'graded' || Number.isFinite(existingGradedAt)
+
+        if (existing) {
+          const bothGraded = incomingLooksGraded && existingLooksGraded
+          if (bothGraded) {
+            if (
+              !Number.isFinite(incomingGradedAt) ||
+              (Number.isFinite(existingGradedAt) && incomingGradedAt <= existingGradedAt)
+            ) {
+              skippedSubmissionStaleCount += 1
+              continue
+            }
+          } else if (
+            !incomingUpdatedAt ||
+            (existingUpdatedAt && incomingUpdatedAt <= existingUpdatedAt)
+          ) {
+            skippedSubmissionStaleCount += 1
+            continue
+          }
+        }
+
+        const createdAt = toIsoTimestamp(s.createdAt)
+        const normalizedRound = clampInteger(s.round, 0, 9999, 0)
+        const imageUrl =
+          s.imageUrl || s.image_url || `submissions/${s.id}.webp`
+        const thumbUrl =
+          s.thumbUrl ||
+          s.thumb_url ||
+          s.thumbnailUrl ||
+          s.thumbnail_url ||
+          `submissions/thumbs/${s.id}.webp`
+
+        submissionRows.push(
+          compactObject({
             id: s.id,
             assignment_id: s.assignmentId,
             student_id: s.studentId,
@@ -3133,16 +3199,20 @@ async function handleSync(req, res) {
             score: toNumber(s.score) ?? undefined,
             feedback: s.feedback ?? undefined,
             grading_result: s.gradingResult ?? undefined,
-            graded_at: gradedAt ?? undefined,
+            graded_at: Number.isFinite(incomingGradedAt) ? incomingGradedAt : undefined,
             correction_count: toNumber(s.correctionCount) ?? undefined,
             owner_id: user.id,
-            updated_at:
-              toIsoTimestamp(s.updatedAt ?? s.updated_at) ??
-              createdAt ??
-              nowIso
+            // authoritative timestamp: always generated on server side
+            updated_at: nowIso
           })
-        }
-      )
+        )
+      }
+
+      if (incomingSubmissions.length > 0) {
+        console.log(
+          `📝 [sync] upsert submissions count=${submissionRows.length} (incoming=${incomingSubmissions.length} stale=${skippedSubmissionStaleCount} deleted=${skippedSubmissionDeletedCount})`
+        )
+      }
 
       if (submissionRows.length > 0) {
         // Batch upsert to avoid hitting Supabase request body size limits (large grading_result JSONs)
@@ -5531,6 +5601,7 @@ export default async function handler(req, res) {
   if (handleCors(req, res)) {
     return
   }
+  applyNoStoreHeaders(res)
   const action = resolveAction(req)
   if (action === 'sync') {
     await handleSync(req, res)
