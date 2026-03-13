@@ -1572,6 +1572,12 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
       }
     }
 
+    // Explicitly clear old explanation text for terminal/no-action states.
+    // `undefined` would be dropped by compactObject and keep stale DB value.
+    if (status === 'graded' || status === 'correction_passed') {
+      lastStatusReason = null
+    }
+
     const nextState = await upsertAssignmentStudentState(
       supabaseDb,
       ownerId,
@@ -2083,7 +2089,7 @@ async function handleDisputeResolve(req, res) {
         ? '老師駁回申訴，請重新訂正'
         : newStatus === 'correction_pending_review'
           ? '仍有申訴題目待審閱'
-          : undefined
+          : null
     }))
 
     res.status(200).json({
