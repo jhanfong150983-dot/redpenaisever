@@ -23,6 +23,13 @@ function logAuthMe(configuredLevel, message, payload, requiredLevel = 'basic') {
   console.log(`[AUTH-ME][${requiredLevel}] ${message}`, payload)
 }
 
+function isDuplicateKeyError(error) {
+  const code = String(error?.code || '').trim()
+  if (code === '23505') return true
+  const message = String(error?.message || '').toLowerCase()
+  return message.includes('duplicate key')
+}
+
 export default async function handler(req, res) {
   if (handleCors(req, res)) {
     return
@@ -178,6 +185,57 @@ export default async function handler(req, res) {
       const supabaseDb = getSupabaseAdmin()
       const normalizedEmail =
         typeof user.email === 'string' ? user.email.trim().toLowerCase() : ''
+
+      // Self-heal: 某些歷史帳號會出現 auth.users 存在但 profiles 遺失。
+      // 先補建 profile，避免後續流程與前端角色判斷不一致。
+      if (!profileLoaded) {
+        const fallbackName =
+          String(
+            user.user_metadata?.full_name ||
+            user.user_metadata?.name ||
+            ''
+          ).trim() || null
+        const fallbackEmail = normalizedEmail || null
+        const repairPayload = {
+          id: user.id,
+          email: fallbackEmail,
+          name: fallbackName,
+          role: 'user',
+          permission_tier: 'basic',
+          ink_balance: 0,
+          updated_at: new Date().toISOString()
+        }
+        const { error: repairInsertError } = await supabaseDb
+          .from('profiles')
+          .insert(repairPayload)
+
+        if (repairInsertError && !isDuplicateKeyError(repairInsertError)) {
+          console.warn('[AUTH-ME] profile repair insert failed:', repairInsertError.message)
+        } else {
+          const { data: repairedProfile, error: repairedQueryError } = await supabaseDb
+            .from('profiles')
+            .select('name, avatar_url, role, permission_tier, ink_balance')
+            .eq('id', user.id)
+            .maybeSingle()
+
+          if (!repairedQueryError && repairedProfile) {
+            profile = {
+              name: repairedProfile.name?.trim(),
+              avatar_url: repairedProfile.avatar_url?.trim(),
+              role: repairedProfile.role?.trim()?.toLowerCase(),
+              permission_tier: repairedProfile.permission_tier?.trim()?.toLowerCase(),
+              ink_balance: repairedProfile.ink_balance
+            }
+            profileLoaded = true
+            profileError = null
+            logAuthMe(authMeLogLevel, 'profile repaired from auth metadata', {
+              userId: user.id,
+              email: fallbackEmail
+            })
+          }
+        }
+      }
+
       const hasValidStudentEmail = (row) => {
         const studentEmail =
           typeof row?.email === 'string' ? row.email.trim().toLowerCase() : ''
@@ -243,18 +301,51 @@ export default async function handler(req, res) {
 
       // 1Campus 備援：從 external_identities 取 provider_account / classID+seatNo 再匹配 students
       if (mergedRows.size === 0) {
-        const { data: campus1Identity, error: campus1IdentityError } = await supabaseDb
+        let campus1Identity = null
+        let campus1IdentityError = null
+
+        const identityByUserIdResult = await supabaseDb
           .from('external_identities')
-          .select('provider_account, provider_dsns, provider_meta')
+          .select('user_id, provider_account, provider_dsns, provider_meta')
           .eq('user_id', user.id)
           .eq('provider', 'campus1')
           .maybeSingle()
+
+        campus1Identity = identityByUserIdResult.data
+        campus1IdentityError = identityByUserIdResult.error
+
+        // 若 user_id 綁定錯位（舊帳號殘留），改用 email(provider_account) 找回 identity。
+        if (!campus1Identity && normalizedEmail) {
+          const identityByAccountResult = await supabaseDb
+            .from('external_identities')
+            .select('user_id, provider_account, provider_dsns, provider_meta')
+            .eq('provider', 'campus1')
+            .eq('provider_account', normalizedEmail)
+            .maybeSingle()
+
+          if (!identityByAccountResult.error && identityByAccountResult.data) {
+            campus1Identity = identityByAccountResult.data
+            if (campus1Identity.user_id && campus1Identity.user_id !== user.id) {
+              await supabaseDb
+                .from('external_identities')
+                .update({ user_id: user.id, updated_at: new Date().toISOString() })
+                .eq('provider', 'campus1')
+                .eq('provider_account', normalizedEmail)
+              logAuthMe(authMeLogLevel, 'campus1 identity rebound by provider_account', {
+                oldUserId: campus1Identity.user_id,
+                newUserId: user.id,
+                providerAccount: normalizedEmail
+              })
+            }
+          }
+        }
 
         if (campus1IdentityError) {
           console.warn('[AUTH-ME] campus1 fallback identity query failed:', campus1IdentityError.message)
         } else if (campus1Identity) {
           const providerAccount = String(campus1Identity.provider_account || '').trim().toLowerCase()
           const meta = campus1Identity.provider_meta || {}
+          const metaStudentID = meta.studentID != null ? String(meta.studentID).trim() : ''
           const metaClassID = meta.classID != null ? String(meta.classID).trim() : ''
           const rawMetaSeatNo = Number(meta.seatNo)
           const metaSeatNo = Number.isFinite(rawMetaSeatNo) && rawMetaSeatNo > 0 ? rawMetaSeatNo : 0
@@ -272,6 +363,20 @@ export default async function handler(req, res) {
             }
             if ((providerAccountRows || []).length > 0) {
               console.log(`[AUTH-ME] 1campus provider_account fallback matched ${providerAccountRows.length} student(s) for ${providerAccount}`)
+            }
+          }
+
+          if (mergedRows.size === 0 && metaStudentID) {
+            const { data: studentIdRows } = await supabaseDb
+              .from('students')
+              .select('id, classroom_id, seat_number, name, owner_id, email, auth_user_id, updated_at')
+              .eq('provider_student_id', metaStudentID)
+              .order('updated_at', { ascending: false })
+            for (const row of studentIdRows || []) {
+              mergedRows.set(`${row.owner_id}::${row.id}`, row)
+            }
+            if ((studentIdRows || []).length > 0) {
+              console.log(`[AUTH-ME] 1campus provider_student_id fallback matched ${studentIdRows.length} student(s) for ${metaStudentID}`)
             }
           }
 
