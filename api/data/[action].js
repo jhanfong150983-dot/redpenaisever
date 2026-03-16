@@ -1133,6 +1133,51 @@ async function writeCorrectionQuestionItems(
 ) {
   if (!Number.isFinite(attemptNo) || attemptNo < 0) return
 
+  const uniqueMistakes = []
+  const seenQuestionIds = new Set()
+  for (let index = 0; index < (Array.isArray(mistakes) ? mistakes.length : 0); index += 1) {
+    const mistake = mistakes[index]
+    const questionIdRaw =
+      typeof mistake?.questionId === 'string' ? mistake.questionId.trim() : ''
+    const questionId = questionIdRaw || `Q${index + 1}`
+    if (seenQuestionIds.has(questionId)) continue
+    seenQuestionIds.add(questionId)
+    uniqueMistakes.push({
+      mistake,
+      questionId
+    })
+  }
+
+  const preferPreviousAccessor = options.preferPreviousAccessor === true
+  const previousAccessorByQuestionId = new Map()
+  if (preferPreviousAccessor && uniqueMistakes.length > 0) {
+    const targetQuestionIds = uniqueMistakes.map(({ questionId }) => questionId)
+    const { data: previousRows, error: previousRowsError } = await supabaseDb
+      .from('correction_question_items')
+      .select('question_id, accessor_result, attempt_no, updated_at')
+      .eq('owner_id', ownerId)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .in('question_id', targetQuestionIds)
+      .order('attempt_no', { ascending: true })
+      .order('updated_at', { ascending: true })
+
+    if (previousRowsError) {
+      console.warn('[correction_question_items] load previous accessor failed:', previousRowsError.message)
+    } else {
+      for (const row of previousRows || []) {
+        const questionId = typeof row?.question_id === 'string' ? row.question_id.trim() : ''
+        if (!questionId || previousAccessorByQuestionId.has(questionId)) continue
+        const accessor =
+          row?.accessor_result && typeof row.accessor_result === 'object'
+            ? row.accessor_result
+            : null
+        if (!accessor) continue
+        previousAccessorByQuestionId.set(questionId, accessor)
+      }
+    }
+  }
+
   // Only resolve 'open' items — leave 'disputed' items in place for teacher review
   await supabaseDb
     .from('correction_question_items')
@@ -1146,21 +1191,6 @@ async function writeCorrectionQuestionItems(
     .eq('status', 'open')
 
   if (!mistakes.length) return
-
-  const uniqueMistakes = []
-  const seenQuestionIds = new Set()
-  for (let index = 0; index < mistakes.length; index += 1) {
-    const mistake = mistakes[index]
-    const questionIdRaw =
-      typeof mistake?.questionId === 'string' ? mistake.questionId.trim() : ''
-    const questionId = questionIdRaw || `Q${index + 1}`
-    if (seenQuestionIds.has(questionId)) continue
-    seenQuestionIds.add(questionId)
-    uniqueMistakes.push({
-      mistake,
-      questionId
-    })
-  }
 
   if (!uniqueMistakes.length) return
 
@@ -1184,18 +1214,43 @@ async function writeCorrectionQuestionItems(
 
   const preparedMistakes = await Promise.all(
     uniqueMistakes.map(async ({ mistake, questionId }) => {
-      const questionBbox = normalizeBbox(mistake.questionBbox)
-      const answerBbox = normalizeBbox(mistake.answerBbox)
-      const cropImageUrl = cropImageForQuestion
-        ? await cropImageForQuestion({
-            questionId,
-            questionBbox,
-            answerBbox
-          })
-        : null
+      const previousAccessor =
+        preferPreviousAccessor && previousAccessorByQuestionId.has(questionId)
+          ? previousAccessorByQuestionId.get(questionId)
+          : null
+      const previousSourceSubmissionId =
+        typeof previousAccessor?.source_submission_id === 'string' &&
+        previousAccessor.source_submission_id.trim()
+          ? previousAccessor.source_submission_id.trim()
+          : undefined
+      const previousSourceImageUrl =
+        typeof previousAccessor?.source_image_url === 'string' &&
+        previousAccessor.source_image_url.trim()
+          ? previousAccessor.source_image_url.trim()
+          : undefined
+      const previousCropImageUrl =
+        typeof previousAccessor?.crop_image_url === 'string' &&
+        previousAccessor.crop_image_url.trim()
+          ? previousAccessor.crop_image_url.trim()
+          : undefined
+      const fallbackQuestionBbox = normalizeBbox(previousAccessor?.question_bbox)
+      const fallbackAnswerBbox = normalizeBbox(previousAccessor?.answer_bbox)
+      const questionBbox = normalizeBbox(mistake.questionBbox) || fallbackQuestionBbox
+      const answerBbox = normalizeBbox(mistake.answerBbox) || fallbackAnswerBbox
+      const carryPreviousImage = Boolean(previousAccessor)
+      let cropImageUrl = carryPreviousImage ? previousCropImageUrl : null
+      if (!cropImageUrl && !carryPreviousImage && cropImageForQuestion) {
+        cropImageUrl = await cropImageForQuestion({
+          questionId,
+          questionBbox,
+          answerBbox
+        })
+      }
       return {
         mistake,
         questionId,
+        sourceSubmissionId: carryPreviousImage ? previousSourceSubmissionId : sourceSubmissionId,
+        sourceImageUrl: carryPreviousImage ? previousSourceImageUrl : sourceImageUrl,
         questionBbox,
         answerBbox,
         cropImageUrl: cropImageUrl || undefined
@@ -1204,7 +1259,18 @@ async function writeCorrectionQuestionItems(
   )
 
   const rows = preparedMistakes.map(
-    ({ mistake, questionId, questionBbox, answerBbox, cropImageUrl }, index) =>
+    (
+      {
+        mistake,
+        questionId,
+        sourceSubmissionId: resolvedSourceSubmissionId,
+        sourceImageUrl: resolvedSourceImageUrl,
+        questionBbox,
+        answerBbox,
+        cropImageUrl
+      },
+      index
+    ) =>
       compactObject({
         owner_id: ownerId,
         assignment_id: assignmentId,
@@ -1215,8 +1281,8 @@ async function writeCorrectionQuestionItems(
         mistake_reason: mistake.reason || undefined,
         hint_text: mistake.hintText || undefined,
         accessor_result: compactObject({
-          source_submission_id: sourceSubmissionId,
-          source_image_url: sourceImageUrl,
+          source_submission_id: resolvedSourceSubmissionId,
+          source_image_url: resolvedSourceImageUrl,
           crop_image_url: cropImageUrl,
           question_bbox: questionBbox,
           answer_bbox: answerBbox
@@ -1503,7 +1569,8 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
         mistakes,
         {
           sourceSubmissionId: row.id,
-          sourceImageUrl: row.image_url
+          sourceImageUrl: row.image_url,
+          preferPreviousAccessor: true
         }
       )
 
