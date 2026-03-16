@@ -1,8 +1,8 @@
-// Increase bodyParser limit to 4mb (Vercel hard cap is 4.5mb; per-question
-// correction images are compressed to 200KB each to stay well under the cap)
+// Increase bodyParser limit close to Vercel hard cap (4.5mb) to leave room for
+// correction payload metadata while frontend keeps images aggressively compressed.
 export const config = {
   runtime: 'nodejs',
-  api: { bodyParser: { sizeLimit: '4mb' } }
+  api: { bodyParser: { sizeLimit: '4.5mb' } }
 }
 
 import { handleCors } from '../../server/_cors.js'
