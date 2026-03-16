@@ -1483,7 +1483,12 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     if (source === 'student_correction') {
       // Guard: skip if this correction submission was already processed
       // (e.g. sync re-sends the same graded submission — would double-count)
-      if (isGraded && existingState?.current_submission_id === row.id) {
+      const existingStatus = String(existingState?.status || '')
+      const alreadyProcessedCurrentCorrection =
+        isGraded &&
+        existingState?.current_submission_id === row.id &&
+        existingStatus !== 'correction_in_progress'
+      if (alreadyProcessedCurrentCorrection) {
         continue
       }
 
