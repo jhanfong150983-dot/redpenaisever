@@ -4298,6 +4298,7 @@ async function handleStudentSubmission(req, res) {
     }
 
     if (
+      mode === 'upload' &&
       Number.isFinite(assignment.total_pages) &&
       assignment.total_pages > 0 &&
       pageCount !== assignment.total_pages
