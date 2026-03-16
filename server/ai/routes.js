@@ -8,6 +8,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_ACCESSOR: 'grading.accessor',
   GRADING_LOCATE: 'grading.locate',
   GRADING_EXPLAIN: 'grading.explain',
+  GRADING_RECHECK: 'grading.recheck',
   GRADING_CONSISTENCY_JUDGE: 'grading.consistency_judge',
   ANSWER_KEY_EXTRACT: 'answer_key.extract',
   ANSWER_KEY_REANALYZE: 'answer_key.reanalyze',

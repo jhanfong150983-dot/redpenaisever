@@ -242,6 +242,41 @@ function validateGradingExplainResponse(data) {
   return { warnings, metrics }
 }
 
+function validateGradingRecheckResponse(data) {
+  const warnings = []
+  const metrics = {}
+  const parsed = tryParseCandidateJson(data)
+  if (!parsed || typeof parsed !== 'object') {
+    warnings.push('GRADING_RECHECK_JSON_PARSE_FAILED')
+    return { warnings, metrics }
+  }
+
+  const results = Array.isArray(parsed.results) ? parsed.results : []
+  const passedCount = results.filter((item) => item?.passed === true).length
+  const failedCount = results.filter((item) => item?.passed === false).length
+  const missingQuestionIdCount = results.filter(
+    (item) => !String(item?.questionId || '').trim()
+  ).length
+  const missingReasonCount = results.filter((item) => {
+    if (item?.passed !== false) return false
+    const hasReason = typeof item?.reason === 'string' && item.reason.trim()
+    const hasGuidance = typeof item?.newGuidance === 'string' && item.newGuidance.trim()
+    return !hasReason && !hasGuidance
+  }).length
+
+  metrics.resultCount = results.length
+  metrics.passedCount = passedCount
+  metrics.failedCount = failedCount
+  metrics.missingQuestionIdCount = missingQuestionIdCount
+  metrics.missingReasonCount = missingReasonCount
+
+  if (results.length === 0) warnings.push('GRADING_RECHECK_RESULTS_EMPTY')
+  if (missingQuestionIdCount > 0) warnings.push('GRADING_RECHECK_QUESTION_ID_MISSING')
+  if (missingReasonCount > 0) warnings.push('GRADING_RECHECK_REASON_MISSING')
+
+  return { warnings, metrics }
+}
+
 function validateAnswerKeyResponse(data) {
   const warnings = []
   const metrics = {}
@@ -356,6 +391,8 @@ export function validateResponseByRoute(routeKey, data) {
       return validateGradingLocateResponse(data)
     case AI_ROUTE_KEYS.GRADING_EXPLAIN:
       return validateGradingExplainResponse(data)
+    case AI_ROUTE_KEYS.GRADING_RECHECK:
+      return validateGradingRecheckResponse(data)
     case AI_ROUTE_KEYS.GRADING_EVALUATE:
     case AI_ROUTE_KEYS.GRADING_PHASE_A:
     case AI_ROUTE_KEYS.GRADING_PHASE_B:

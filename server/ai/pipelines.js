@@ -44,6 +44,10 @@ const PIPELINE_REGISTRY = new Map([
     createPipeline(AI_ROUTE_KEYS.GRADING_EXPLAIN, 'grading-explain-pipeline')
   ],
   [
+    AI_ROUTE_KEYS.GRADING_RECHECK,
+    createPipeline(AI_ROUTE_KEYS.GRADING_RECHECK, 'grading-recheck-pipeline')
+  ],
+  [
     AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT,
     createPipeline(AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT, 'answer-key-extract-pipeline')
   ],

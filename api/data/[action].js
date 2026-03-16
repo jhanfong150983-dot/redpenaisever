@@ -1780,23 +1780,47 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
     requestId: submission.id
   })
 
+  const expectedQuestionIds = correctionItems
+    .map((item) => String(item?.question_id || '').trim())
+    .filter(Boolean)
+  const rawResults = Array.isArray(recheckResult?.results) ? recheckResult.results : []
+  const resultByQuestionId = new Map(
+    rawResults
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => [String(item.questionId || '').trim(), item])
+      .filter(([questionId]) => questionId)
+  )
+  const normalizedResults = expectedQuestionIds.map((questionId) => {
+    const matched = resultByQuestionId.get(questionId)
+    if (matched && typeof matched === 'object') return matched
+    const fallbackReason = 'AI 未能成功判定此題，請重新拍攝（含題號與作答）後再試。'
+    return {
+      questionId,
+      passed: false,
+      studentAnswer: '',
+      reason: fallbackReason,
+      newGuidance: fallbackReason
+    }
+  })
+
   // Convert recheck results to gradingResult format (compatible with parseMistakesFromGradingResult)
-  const stillWrong = recheckResult.results.filter((r) => !r.passed)
-  const passedCount = recheckResult.results.filter((r) => r.passed).length
-  const totalChecked = recheckResult.results.length
+  const stillWrong = normalizedResults.filter((r) => r?.passed !== true)
+  const passedCount = normalizedResults.filter((r) => r?.passed === true).length
+  const totalChecked = normalizedResults.length
 
   return {
     totalScore: totalChecked > 0 ? Math.round((passedCount / totalChecked) * 100) : 0,
     mistakes: stillWrong.map((r) => ({
       id: r.questionId,
       questionId: r.questionId,
-      reason: r.newGuidance || '此題需要繼續訂正'
+      reason: r.reason || r.newGuidance || '此題需要繼續訂正'
     })),
-    details: recheckResult.results.map((r) => ({
+    details: normalizedResults.map((r) => ({
       questionId: r.questionId,
       isCorrect: r.passed,
       studentAnswer: r.studentAnswer,
-      studentGuidance: r.newGuidance
+      reason: r.reason,
+      studentGuidance: r.newGuidance || r.reason
     }))
   }
 }

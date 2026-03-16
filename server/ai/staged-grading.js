@@ -2162,13 +2162,20 @@ Instructions for each question:
 1. Find the corresponding image using the mapping above.
 2. Carefully read the student's new answer from that image.
 3. Apply the grading rule for that question's type.
-4. If passed=false, write newGuidance — a NEW hint different from hintGiven. Approach from a different angle.
+4. If passed=false, write both reason and newGuidance:
+   - reason: short why the correction is still not acceptable.
+   - newGuidance: a NEW hint different from hintGiven. Approach from a different angle.
 
 STRICT RULES for newGuidance:
 - Traditional Chinese (繁體中文) only.
 - ABSOLUTELY FORBIDDEN to reveal the correct answer in any form (no "正確答案是", "應為", "答案是", "正確的是" or similar).
 - Must be a DIFFERENT hint from hintGiven — try a new explanation angle or ask a guiding question.
 - 1–3 sentences. Specific, warm, and encouraging.
+
+STRICT RULES for reason:
+- Traditional Chinese (繁體中文) only.
+- 1 sentence, concrete, and cannot reveal the exact correct answer.
+- Focus on what is still missing/wrong (e.g., 單位、步驟、條件、關鍵詞、題意誤解).
 
 Return strict JSON only. No markdown.
 
@@ -2184,31 +2191,125 @@ Output:
       "questionId": "string",
       "passed": false,
       "studentAnswer": "what student wrote",
+      "reason": "為何仍錯（不給正解）",
       "newGuidance": "新引導（不給答案）"
     }
   ]
 }`.trim()
 }
 
-function parseRecheckResponse(data, correctionItems) {
-  const raw = Array.isArray(data?.results) ? data.results : null
-  if (!raw) {
-    return correctionItems.map((item) => ({
-      questionId: item.questionId,
-      passed: false,
-      studentAnswer: '',
-      newGuidance: '請再試一次'
-    }))
+function normalizeRecheckQuestionId(value) {
+  const raw = ensureString(value, '').trim().toLowerCase()
+  if (!raw) return ''
+  const compact = raw.replace(/\s+/g, '')
+  const directNumeric = compact.match(/^第?(\d+)題$/)
+  if (directNumeric?.[1]) return directNumeric[1]
+  const prefixedNumeric = compact.match(/^(?:q|question|題目|題號)[#:_-]?(\d+)$/)
+  if (prefixedNumeric?.[1]) return prefixedNumeric[1]
+  return compact
+}
+
+function buildRecheckFallbackResult(questionId, reason) {
+  const fallbackReason = ensureString(reason, '').trim() || 'AI 未能正確判讀此題，請重新拍攝並保留題號。'
+  return {
+    questionId,
+    passed: false,
+    studentAnswer: '',
+    reason: fallbackReason,
+    newGuidance: fallbackReason
   }
-  const knownIds = new Set(correctionItems.map((i) => i.questionId))
-  return raw
-    .filter((r) => r && typeof r === 'object' && knownIds.has(String(r.questionId || '')))
-    .map((r) => ({
-      questionId: String(r.questionId),
-      passed: Boolean(r.passed),
-      studentAnswer: String(r.studentAnswer || ''),
-      newGuidance: r.passed ? undefined : String(r.newGuidance || '此題需要繼續訂正')
-    }))
+}
+
+function parseRecheckResponse(data, correctionItems, options = {}) {
+  const requestTag = ensureString(options.requestId, '').trim() || 'recheck'
+  const parsed =
+    data && typeof data === 'object' && Array.isArray(data.results)
+      ? data
+      : parseCandidateJson(data)
+  const rawResults = Array.isArray(parsed?.results) ? parsed.results : []
+
+  const questionOrder = correctionItems
+    .map((item) => ensureString(item?.questionId, '').trim())
+    .filter(Boolean)
+  if (!questionOrder.length) return []
+
+  if (rawResults.length === 0) {
+    console.warn(
+      `[AI-5STAGE][${requestTag}] recheck response has no usable results; fallback to all-fail`
+    )
+    return questionOrder.map((questionId) =>
+      buildRecheckFallbackResult(questionId, 'AI 本次未回傳可判定結果，請重新拍攝後再試。')
+    )
+  }
+
+  const knownIdSet = new Set(questionOrder)
+  const normalizedToKnown = new Map()
+  for (const knownId of questionOrder) {
+    const normalized = normalizeRecheckQuestionId(knownId)
+    if (normalized && !normalizedToKnown.has(normalized)) {
+      normalizedToKnown.set(normalized, knownId)
+    }
+  }
+
+  const assigned = new Map()
+  const consumed = new Set()
+
+  const takeNextUnassigned = () => questionOrder.find((id) => !consumed.has(id)) || ''
+
+  for (const row of rawResults) {
+    if (!row || typeof row !== 'object') continue
+
+    const rawQuestionId = ensureString(row.questionId, '').trim()
+    const normalizedRawId = normalizeRecheckQuestionId(rawQuestionId)
+    let resolvedQuestionId = ''
+
+    if (rawQuestionId && knownIdSet.has(rawQuestionId)) {
+      resolvedQuestionId = rawQuestionId
+    } else if (normalizedRawId && normalizedToKnown.has(normalizedRawId)) {
+      resolvedQuestionId = normalizedToKnown.get(normalizedRawId) || ''
+    } else if (normalizedRawId && /^\d+$/.test(normalizedRawId)) {
+      const oneBased = Number.parseInt(normalizedRawId, 10)
+      if (Number.isFinite(oneBased) && oneBased >= 1 && oneBased <= questionOrder.length) {
+        resolvedQuestionId = questionOrder[oneBased - 1] || ''
+      }
+    }
+
+    if (!resolvedQuestionId) {
+      resolvedQuestionId = takeNextUnassigned()
+    }
+    if (!resolvedQuestionId || consumed.has(resolvedQuestionId)) continue
+
+    consumed.add(resolvedQuestionId)
+    const passed = row.passed === true
+    const studentAnswer = ensureString(row.studentAnswer, '').trim()
+    const reasonText =
+      ensureString(row.reason, '').trim() ||
+      ensureString(row.newGuidance, '').trim() ||
+      '此題仍需訂正，請檢查題號與答案是否清楚入鏡。'
+
+    assigned.set(resolvedQuestionId, {
+      questionId: resolvedQuestionId,
+      passed,
+      studentAnswer,
+      reason: passed ? undefined : reasonText,
+      newGuidance: passed ? undefined : reasonText
+    })
+  }
+
+  const missingQuestionIds = questionOrder.filter((id) => !assigned.has(id))
+  if (missingQuestionIds.length > 0) {
+    console.warn(
+      `[AI-5STAGE][${requestTag}] recheck missing question results: ${missingQuestionIds.join(', ')}`
+    )
+    for (const missingId of missingQuestionIds) {
+      assigned.set(
+        missingId,
+        buildRecheckFallbackResult(missingId, '此題尚未成功判定，請重新拍攝答案區域後再試。')
+      )
+    }
+  }
+
+  return questionOrder.map((questionId) => assigned.get(questionId))
 }
 
 export async function runRecheckPipeline({
@@ -2238,7 +2339,7 @@ export async function runRecheckPipeline({
   const response = await executeStage({
     apiKey,
     model,
-    routeKey: 'grading.explain',
+    routeKey: AI_ROUTE_KEYS.GRADING_RECHECK,
     stageContents: [{ role: 'user', parts: [{ text: prompt }, ...imageParts] }]
   })
 
@@ -2248,7 +2349,6 @@ export async function runRecheckPipeline({
     throw new Error(`Recheck stage failed with status ${response.status}`)
   }
 
-  return { results: parseRecheckResponse(response.data, correctionItems) }
+  return { results: parseRecheckResponse(response.data, correctionItems, { requestId: pipelineRunId }) }
 }
-
 
