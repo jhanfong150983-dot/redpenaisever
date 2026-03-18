@@ -490,6 +490,7 @@ export default async function handler(req, res) {
           : profileRole
 
     let campus1Binding = null
+    let campus1BindingError = null
     try {
       const supabaseDb = getSupabaseAdmin()
       const { data: campus1Data } = await supabaseDb
@@ -508,7 +509,8 @@ export default async function handler(req, res) {
         }
       }
     } catch (err) {
-      console.warn('[AUTH-ME] campus1 binding query failed:', err?.message)
+      campus1BindingError = err?.message || 'unknown error'
+      console.warn('[AUTH-ME] campus1 binding query failed:', campus1BindingError)
     }
 
     // 永遠不快取 /auth/me 回應，避免瞬斷的失敗結果被快取住
@@ -538,6 +540,8 @@ export default async function handler(req, res) {
         profileError,
         hasStudentContext: !!studentContext,
         dataSource: profileLoaded ? 'database' : 'oauth_metadata',
+        campus1BindingFound: campus1Binding !== null,
+        campus1BindingError,
         timestamp: Date.now() // 加入時間戳，幫助除錯
       }
     })
