@@ -303,7 +303,7 @@ async function handlePhase1(req, res) {
 
         const { error: profileError } = await supabaseAdmin
           .from('profiles')
-          .insert({
+          .upsert({
             id: userId,
             email: virtualEmail,
             name: displayName,
@@ -311,10 +311,10 @@ async function handlePhase1(req, res) {
             permission_tier: 'basic',
             ink_balance: isStudent ? 0 : 10,
             updated_at: nowIso
-          })
+          }, { onConflict: 'id', ignoreDuplicates: true })
 
         if (profileError) {
-          console.warn('[1campus SSO] Profile insert failed:', profileError.message)
+          console.warn('[1campus SSO] Profile upsert failed:', profileError.message)
         }
       }
 

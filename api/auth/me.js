@@ -23,12 +23,6 @@ function logAuthMe(configuredLevel, message, payload, requiredLevel = 'basic') {
   console.log(`[AUTH-ME][${requiredLevel}] ${message}`, payload)
 }
 
-function isDuplicateKeyError(error) {
-  const code = String(error?.code || '').trim()
-  if (code === '23505') return true
-  const message = String(error?.message || '').toLowerCase()
-  return message.includes('duplicate key')
-}
 
 export default async function handler(req, res) {
   if (handleCors(req, res)) {
@@ -205,13 +199,21 @@ export default async function handler(req, res) {
           ink_balance: 0,
           updated_at: new Date().toISOString()
         }
+        // Use upsert with ignoreDuplicates so the operation is idempotent:
+        // if the profile was already created by SSO handler (Phase 1) the conflict
+        // is silently skipped rather than raising an RLS / duplicate-key error.
         const { error: repairInsertError } = await supabaseDb
           .from('profiles')
-          .insert(repairPayload)
+          .upsert(repairPayload, { onConflict: 'id', ignoreDuplicates: true })
 
-        if (repairInsertError && !isDuplicateKeyError(repairInsertError)) {
-          console.warn('[AUTH-ME] profile repair insert failed:', repairInsertError.message)
-        } else {
+        if (repairInsertError) {
+          console.warn('[AUTH-ME] profile repair upsert failed:', repairInsertError.message)
+        }
+
+        // Always re-query after upsert (whether or not the upsert succeeded):
+        // the profile may have existed already (created by Phase 1 SSO handler)
+        // and the initial select may have missed it due to replication lag.
+        {
           const { data: repairedProfile, error: repairedQueryError } = await supabaseDb
             .from('profiles')
             .select('name, avatar_url, role, permission_tier, ink_balance')
