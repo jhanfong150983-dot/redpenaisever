@@ -173,6 +173,8 @@ export default async function handler(req, res) {
       return
     }
 
+    console.log('[callback] Google OAuth user:', { userId: user.id, email: user.email })
+
     const supabaseAdmin = getSupabaseAdmin()
     const fullName =
       user.user_metadata?.full_name ||
@@ -192,6 +194,8 @@ export default async function handler(req, res) {
       res.status(500).json({ error: '讀取使用者資料失敗' })
       return
     }
+
+    console.log('[callback] profile lookup:', existingProfile ? 'found' : 'not found', { userId: user.id })
 
     let query
     if (existingProfile) {
@@ -213,6 +217,7 @@ export default async function handler(req, res) {
 
       if (orphanedProfile) {
         // 找到孤立的 1Campus 帳號，將所有資料搬移到新 Google 帳號
+        console.log('[callback] orphaned 1Campus profile found, merging:', { oldUserId: orphanedProfile.id, newUserId: user.id })
         const oldUserId = orphanedProfile.id
         const ownerTables = [
           'folders', 'assignments', 'submissions', 'classrooms', 'students',
@@ -250,9 +255,12 @@ export default async function handler(req, res) {
     const { error: profileError } = await query
 
     if (profileError) {
+      console.error('[callback] profile upsert failed:', { userId: user.id, error: profileError.message })
       res.status(500).json({ error: '建立使用者資料失敗' })
       return
     }
+
+    console.log('[callback] profile upsert OK, redirecting userId:', user.id)
 
       setAuthCookies(res, session, isSecureRequest(req), req)
 

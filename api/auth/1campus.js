@@ -268,6 +268,7 @@ async function handlePhase1(req, res) {
 
     if (existingIdentity) {
       userId = existingIdentity.user_id
+      console.log('[1campus Phase1] path=existing_identity userId:', userId)
       const updatedMeta = {
         ...(existingIdentity.provider_meta || {}),
         ...(isStudent ? studentMeta : { teacherID }),
@@ -339,8 +340,10 @@ async function handlePhase1(req, res) {
 
       if (existingProfile) {
         userId = existingProfile.id
+        console.log('[1campus Phase1] path=existing_profile userId:', userId)
       } else if (existingStudentUserId) {
         userId = existingStudentUserId
+        console.log('[1campus Phase1] path=existing_student_user userId:', userId)
       } else {
         const { data: newUserData, error: createError } =
           await supabaseAdmin.auth.admin.createUser({
@@ -351,6 +354,7 @@ async function handlePhase1(req, res) {
 
         if (createError) throw new Error(`建立帳號失敗: ${createError.message}`)
         userId = newUserData.user.id
+        console.log('[1campus Phase1] path=new_user userId:', userId, 'virtualEmail:', virtualEmail)
 
         const { error: profileError } = await supabaseAdmin
           .from('profiles')
@@ -594,6 +598,7 @@ async function handlePhase1(req, res) {
 
     session = await createSessionForEmail(sessionEmail)
     if (!session?.access_token) throw new Error('Session 缺少 access_token')
+    console.log('[1campus Phase1] session created OK userId:', userId, 'email:', sessionEmail)
   } catch (err) {
     console.error('[1campus SSO] Session creation failed:', err?.message)
     const isRateLimit = /429|rate.?limit|too.?many/i.test(err?.message || '')
