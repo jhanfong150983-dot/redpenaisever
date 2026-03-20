@@ -579,16 +579,17 @@ async function handlePhase1(req, res) {
   try {
     // 如果 userId（來自 external_identities）與 virtualEmail 的 Supabase 用戶不同
     // （merge 後 identity.user_id → Google user），需要用真實 email 建立 session
+    // 以 auth user 的實際 email 為準（避免 profile.email 與 auth user email 不一致）
     let sessionEmail = virtualEmail
-    const { data: userProfile } = await supabaseAdmin
-      .from('profiles')
-      .select('email')
-      .eq('id', userId)
-      .maybeSingle()
-
-    if (userProfile?.email && userProfile.email !== virtualEmail) {
-      sessionEmail = userProfile.email
-      console.log('[1campus SSO] Using merged profile email for session:', sessionEmail)
+    try {
+      const { data: authUserData } = await supabaseAdmin.auth.admin.getUserById(userId)
+      const authUserEmail = authUserData?.user?.email
+      if (authUserEmail && authUserEmail !== virtualEmail) {
+        sessionEmail = authUserEmail
+        console.log('[1campus SSO] Using auth user email for session:', sessionEmail)
+      }
+    } catch {
+      // fall through to virtualEmail
     }
 
     session = await createSessionForEmail(sessionEmail)
