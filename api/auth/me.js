@@ -52,6 +52,7 @@ export default async function handler(req, res) {
     let profileError = null
     let studentContext = null
     let studentContexts = []
+    let studentLookupError = false
 
     // 重試機制：最多重試 2 次
     const maxRetries = 2
@@ -481,6 +482,7 @@ export default async function handler(req, res) {
       studentContext = studentContexts[0] || null
     } catch (studentResolveError) {
       console.warn('⚠️ 讀取學生關聯例外:', studentResolveError)
+      studentLookupError = true
     }
 
     const profileRole = profile?.role || 'user'
@@ -534,7 +536,12 @@ export default async function handler(req, res) {
             : null,
         student: studentContext ?? undefined,
         students: studentContexts.length ? studentContexts : undefined,
-        campus1Binding: campus1Binding ?? undefined
+        campus1Binding: campus1Binding ?? undefined,
+        studentLookupStatus: studentContexts.length > 0
+          ? 'ok'
+          : studentLookupError
+            ? 'system_error'
+            : 'user_not_found'
       },
       // 除錯資訊：讓前端知道是否從資料庫載入成功
       _debug: {

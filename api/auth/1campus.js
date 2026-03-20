@@ -390,7 +390,8 @@ async function handlePhase1(req, res) {
     }
   } catch (err) {
     console.error('[1campus SSO] findOrCreateUser failed:', err?.message)
-    ssoErrorRedirect(res, frontendUrl, 'create_user_failed')
+    const isRateLimit = /429|rate.?limit|too.?many/i.test(err?.message || '')
+    ssoErrorRedirect(res, frontendUrl, isRateLimit ? 'system_busy' : 'create_user_failed')
     return
   }
 
@@ -594,7 +595,8 @@ async function handlePhase1(req, res) {
     if (!session?.access_token) throw new Error('Session 缺少 access_token')
   } catch (err) {
     console.error('[1campus SSO] Session creation failed:', err?.message)
-    ssoErrorRedirect(res, frontendUrl, 'session_failed')
+    const isRateLimit = /429|rate.?limit|too.?many/i.test(err?.message || '')
+    ssoErrorRedirect(res, frontendUrl, isRateLimit ? 'system_busy' : 'session_failed')
     return
   }
 
