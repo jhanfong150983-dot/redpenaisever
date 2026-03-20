@@ -281,6 +281,33 @@ async function handlePhase1(req, res) {
         .update({ provider_meta: updatedMeta, updated_at: nowIso })
         .eq('provider', 'campus1')
         .eq('provider_account', account)
+
+      // 補建遺失的 profile（profile 可能被手動刪除或當初建立失敗）
+      const { data: existingProfileCheck } = await supabaseAdmin
+        .from('profiles')
+        .select('id')
+        .eq('id', userId)
+        .maybeSingle()
+
+      if (!existingProfileCheck) {
+        console.log('[1campus Phase1] profile missing for existing identity, repairing:', userId)
+        const { data: authUserData } = await supabaseAdmin.auth.admin.getUserById(userId)
+        const repairEmail = authUserData?.user?.email || virtualEmail
+        const { error: repairProfileError } = await supabaseAdmin
+          .from('profiles')
+          .upsert({
+            id: userId,
+            email: repairEmail,
+            name: displayName,
+            role: 'user',
+            permission_tier: 'basic',
+            ink_balance: isStudent ? 0 : 10,
+            updated_at: nowIso
+          }, { onConflict: 'id', ignoreDuplicates: true })
+        if (repairProfileError) {
+          console.warn('[1campus Phase1] profile repair failed:', repairProfileError.message)
+        }
+      }
     } else {
       const { data: existingProfile } = await supabaseAdmin
         .from('profiles')
@@ -288,8 +315,32 @@ async function handlePhase1(req, res) {
         .eq('email', virtualEmail)
         .maybeSingle()
 
+      // 備援：同一學生可能從不同 dsns 登入，virtualEmail 不同但 smail email 相同。
+      // 透過 students 表找出已存在的 auth_user_id，避免替同一學生建立多個帳號。
+      let existingStudentUserId = null
+      if (!existingProfile && isStudent && account) {
+        const smailCandidate = (() => {
+          // 若 account 已是完整 email（含 @），直接使用
+          if (account.includes('@')) return account.toLowerCase()
+          // 否則嘗試從 smail 格式推導（account@smail.{dsns}）
+          return `${account.toLowerCase()}@smail.${dsns}`
+        })()
+        const { data: matchedStudent } = await supabaseAdmin
+          .from('students')
+          .select('auth_user_id')
+          .eq('email', smailCandidate)
+          .not('auth_user_id', 'is', null)
+          .maybeSingle()
+        if (matchedStudent?.auth_user_id) {
+          existingStudentUserId = matchedStudent.auth_user_id
+          console.log('[1campus Phase1] found existing student user via smail email:', smailCandidate, '→', existingStudentUserId)
+        }
+      }
+
       if (existingProfile) {
         userId = existingProfile.id
+      } else if (existingStudentUserId) {
+        userId = existingStudentUserId
       } else {
         const { data: newUserData, error: createError } =
           await supabaseAdmin.auth.admin.createUser({
@@ -480,22 +531,37 @@ async function handlePhase1(req, res) {
           return false
         })
         if (needsUpdate.length > 0) {
-          await Promise.all(
-            needsUpdate.map((s) => {
+          const bindResults = await Promise.all(
+            needsUpdate.map(async (s) => {
               const payload = { auth_user_id: userId, updated_at: nowIso }
               if (normalizedAccountEmail.includes('@') && !s.email) payload.email = normalizedAccountEmail
               if (studentID && !s.provider_student_id) payload.provider_student_id = studentID
-              return supabaseAdmin
+              const result = await supabaseAdmin
                 .from('students')
                 .update(payload)
                 .eq('id', s.id)
                 .eq('owner_id', s.owner_id)
+              return { studentId: s.id, ownerId: s.owner_id, result }
             })
           )
-          console.log(
-            `[1campus SSO] Bound/updated student records: ${needsUpdate.length}`,
-            { studentID, studentNumber, classID: studentClassID, seatNo: studentSeatNo }
-          )
+          const bindFailures = bindResults.filter(({ result }) => result.error)
+          const bindSuccesses = bindResults.filter(({ result }) => !result.error)
+          if (bindSuccesses.length > 0) {
+            console.log(
+              `[1campus SSO] Bound/updated student records: ${bindSuccesses.length}`,
+              { studentID, studentNumber, classID: studentClassID, seatNo: studentSeatNo }
+            )
+          }
+          if (bindFailures.length > 0) {
+            console.warn(
+              `[1campus SSO] Student binding update FAILED for ${bindFailures.length} record(s):`,
+              bindFailures.map(({ studentId, result }) => ({
+                studentId,
+                error: result.error?.message,
+                code: result.error?.code
+              }))
+            )
+          }
         }
       } else {
         console.log(
