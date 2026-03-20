@@ -480,6 +480,19 @@ export default async function handler(req, res) {
 
       // studentContext = 第一筆（向後相容）
       studentContext = studentContexts[0] || null
+
+      if (studentContexts.length > 0) {
+        logAuthMe(authMeLogLevel, 'student context found', {
+          userId: user.id,
+          count: studentContexts.length,
+          classroomIds: studentContexts.map((s) => s.classroomId)
+        })
+      } else {
+        logAuthMe(authMeLogLevel, 'student context NOT found (account not linked)', {
+          userId: user.id,
+          email: normalizedEmail
+        })
+      }
     } catch (studentResolveError) {
       console.warn('⚠️ 讀取學生關聯例外:', studentResolveError)
       studentLookupError = true
