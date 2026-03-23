@@ -3585,7 +3585,21 @@ async function handleSubmission(req, res) {
       }
     }
 
-    // 插入新的 submission（使用 insert 而非 upsert）
+    // 冪等性保護：若相同 submissionId 已存在（例如 client 重試但上次回應遺失），直接回傳成功
+    const { data: existingById } = await supabaseDb
+      .from('submissions')
+      .select('id, status')
+      .eq('id', submissionId)
+      .eq('owner_id', user.id)
+      .limit(1)
+
+    if (existingById && existingById.length > 0) {
+      console.log('ℹ️ [資料庫] submission 已存在，跳過重複寫入:', submissionId)
+      res.status(200).json({ success: true, imageUrl: filePath })
+      return
+    }
+
+    // 插入新的 submission（使用 insert 而非 upsert，避免蓋掉已批改的記錄）
     console.log('💾 [資料庫] 開始插入新 submission:', {
       id: submissionId,
       assignmentId,
@@ -4538,29 +4552,8 @@ async function handleStudentSubmission(req, res) {
     const round = mode === 'correction' ? correctionCount + 1 : 0
     const source = mode === 'correction' ? 'student_correction' : 'student_upload'
 
-    const { error: insertError } = await supabaseDb
-      .from('submissions')
-      .insert(
-        compactObject({
-          id: submissionId,
-          assignment_id: assignmentId,
-          student_id: studentContext.id,
-          image_url: filePath,
-          thumb_url: thumbFilePath ?? undefined,
-          status: mode === 'correction' ? 'pending_grading' : 'synced',
-          source,
-          round,
-          parent_submission_id: currentState?.current_submission_id ?? undefined,
-          actor_user_id: user.id,
-          owner_id: ownerId
-        })
-      )
-
-    if (insertError) {
-      throw new Error(insertError.message)
-    }
-
-    // Store per-question correction images for Recheck Agent
+    // Store per-question correction images BEFORE inserting submission,
+    // so grading job never sees pending_grading without images already in Storage.
     if (mode === 'correction' && correctionImages.length > 0) {
       // 高併發時限制每次請求的上傳並行度，避免 1 班同時送出時大量平行連線導致逾時
       const uploadConcurrency = 2
@@ -4595,6 +4588,28 @@ async function handleStudentSubmission(req, res) {
           })
         }
       }
+    }
+
+    const { error: insertError } = await supabaseDb
+      .from('submissions')
+      .insert(
+        compactObject({
+          id: submissionId,
+          assignment_id: assignmentId,
+          student_id: studentContext.id,
+          image_url: filePath,
+          thumb_url: thumbFilePath ?? undefined,
+          status: mode === 'correction' ? 'pending_grading' : 'synced',
+          source,
+          round,
+          parent_submission_id: currentState?.current_submission_id ?? undefined,
+          actor_user_id: user.id,
+          owner_id: ownerId
+        })
+      )
+
+    if (insertError) {
+      throw new Error(insertError.message)
     }
 
     // Write disputed questions as status='disputed' (student believes AI was wrong)
