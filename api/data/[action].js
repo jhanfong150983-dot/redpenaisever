@@ -225,27 +225,6 @@ function normalizeBbox(value) {
   return { x, y, w, h }
 }
 
-function sanitizeHintText(rawReason = '') {
-  const text = String(rawReason || '').trim()
-  if (!text) return '作答內容與題目要求不一致。'
-
-  // 只移除真正直接洩漏答案的句子片段，保留其餘所有引導語
-  const leakPatterns = [
-    /正確答案[是為]?[^。！？\n]*/g,
-    /標準答案[是為]?[^。！？\n]*/g,
-    /答案[是為][^。！？\n]*/g,
-    /應[填選為][^。！？\n]*/g,
-    /「[^」]{1,40}」\s*才是[^。！？\n]*/g,
-    /『[^』]{1,40}』\s*才是[^。！？\n]*/g,
-  ]
-  let sanitized = text
-  for (const pattern of leakPatterns) {
-    sanitized = sanitized.replace(pattern, '').trim()
-  }
-  sanitized = sanitized.replace(/\s{2,}/g, ' ').replace(/^[，。；、\s]+/, '').trim()
-
-  return sanitized || '作答內容與題目要求不一致。'
-}
 
 function extractSubmissionIdFromImagePath(value) {
   const text = String(value || '').trim()
@@ -961,7 +940,7 @@ function parseMistakesFromGradingResult(gradingResult) {
       questionId: questionId || questionText || `Q${mistakes.length + 1}`,
       questionText: questionText || questionId || '',
       reason: reason || '需要再次確認作答內容',
-      hintText: sanitizeHintText(reason),
+      hintText: String(reason || ''),
       questionBbox: normalizeBbox(linkedDetail?.questionBbox),
       answerBbox: normalizeBbox(linkedDetail?.answerBbox)
     })
@@ -987,7 +966,7 @@ function parseMistakesFromGradingResult(gradingResult) {
       questionId,
       questionText: questionId,
       reason,
-      hintText: sanitizeHintText(reason),
+      hintText: String(reason || ''),
       questionBbox: normalizeBbox(detail.questionBbox),
       answerBbox: normalizeBbox(detail.answerBbox)
     })
@@ -2007,7 +1986,7 @@ async function handleCorrectionDisputes(req, res) {
       return {
         questionId: row.question_id,
         questionText: row.question_text ?? undefined,
-        hintText: sanitizeHintText(row.hint_text ?? ''),
+        hintText: String(row.hint_text ?? ''),
         disputeNote: row.dispute_note ?? undefined,
         cropImageUrl: typeof accessor?.crop_image_url === 'string' ? accessor.crop_image_url : undefined,
         status: row.status
@@ -4093,8 +4072,8 @@ async function handleStudentOverview(req, res) {
               attemptNo: row.attempt_no,
               questionId: row.question_id,
               questionText: row.question_text ?? undefined,
-              mistakeReason: sanitizeHintText(row.mistake_reason ?? ''),
-              hintText: sanitizeHintText(row.hint_text ?? row.mistake_reason ?? ''),
+              mistakeReason: String(row.mistake_reason ?? ''),
+              hintText: String(row.hint_text ?? row.mistake_reason ?? ''),
               sourceSubmissionId: resolvedSourceSubmissionId || undefined,
               sourceImageUrl: accessorSourceImageUrl,
               cropImageUrl: accessorCropImageUrl,
@@ -4141,8 +4120,8 @@ async function handleStudentOverview(req, res) {
                     attemptNo: correctionAttemptCount,
                     questionId: mistake.questionId,
                     questionText: mistake.questionText,
-                    mistakeReason: sanitizeHintText(mistake.reason),
-                    hintText: sanitizeHintText(mistake.hintText || mistake.reason),
+                    mistakeReason: String(mistake.reason || ''),
+                    hintText: String(mistake.hintText || mistake.reason || ''),
                     sourceSubmissionId:
                       latestGradedSubmission.id ||
                       extractSubmissionIdFromImagePath(latestGradedSubmission.image_url),
@@ -4893,8 +4872,8 @@ async function handleStudentCorrections(req, res) {
             attemptNo: item.attempt_no,
             questionId: item.question_id,
             questionText: item.question_text ?? undefined,
-            mistakeReason: sanitizeHintText(item.mistake_reason ?? ''),
-            hintText: sanitizeHintText(item.hint_text ?? item.mistake_reason ?? ''),
+            mistakeReason: String(item.mistake_reason ?? ''),
+            hintText: String(item.hint_text ?? item.mistake_reason ?? ''),
             sourceSubmissionId: resolvedSourceSubmissionId || undefined,
             sourceImageUrl: accessorSourceImageUrl,
             cropImageUrl: accessorCropImageUrl,
