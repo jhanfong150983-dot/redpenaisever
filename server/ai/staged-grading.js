@@ -1508,7 +1508,7 @@ function buildFinalGradingResult({
 
   const reviewReasons = []
   if (stageMeta.classify.coverage < 1) {
-    const missing = questionIds.length - Math.round(stageMeta.classify.coverage * questionIds.length)
+    const missing = keyQuestions.length - Math.round(stageMeta.classify.coverage * keyQuestions.length)
     reviewReasons.push(`有 ${missing} 題未被辨識到，可能漏批`)
   }
   if (unreadableCount > 0) {
