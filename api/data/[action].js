@@ -227,87 +227,24 @@ function normalizeBbox(value) {
 
 function sanitizeHintText(rawReason = '') {
   const text = String(rawReason || '').trim()
-  if (!text) {
-    return '作答內容與題目要求不一致。'
-  }
+  if (!text) return '作答內容與題目要求不一致。'
 
-  const buildGenericReasonFromReason = (sourceText) => {
-    const base = String(sourceText || '')
-    if (/重複|漏填|漏選|漏答|遺漏/.test(base)) {
-      return '答案選取不完整或有重複，與題目要求不一致。'
-    }
-    if (/單位|公分|公斤|平方|cm|mm|m²|kg|g/i.test(base)) {
-      return '數值與單位對應不一致。'
-    }
-    if (/計算|運算|加|減|乘|除|小數|四捨五入|等於/.test(base)) {
-      return '計算結果與題目條件不一致。'
-    }
-    if (/題意|概念|條件|分類|判斷|理解/.test(base)) {
-      return '作答與題意或分類條件不一致。'
-    }
-    if (/未作答|空白/.test(base)) {
-      return '此題未完成作答。'
-    }
-    return '作答內容與題目要求不一致。'
-  }
-
-  const hasAnswerLeakRisk = (sourceText) => {
-    const base = String(sourceText || '')
-    if (!base) return false
-    const patterns = [
-      /正確答案|標準答案|答案是|答案為|正解|應該是|應為|應填|應選|才是/,
-      /「[^」]{1,40}」\s*(?:才是|為|是)/,
-      /『[^』]{1,40}』\s*(?:才是|為|是)/,
-      /“[^”]{1,40}”\s*(?:才是|為|是)/,
-      /漏(?:掉|選|填|答).{0,20}(?:「[^」]{1,40}」|『[^』]{1,40}』|“[^”]{1,40}”)/,
-      /改(?:成|為).{0,20}(?:「[^」]{1,40}」|『[^』]{1,40}』|“[^”]{1,40}”)/,
-      /符合該題定義/
-    ]
-    return patterns.some((pattern) => pattern.test(base))
-  }
-
-  // 避免直接洩漏答案
-  const blockedPatterns = [
-    /正確答案[^\n，。]*/g,
-    /標準答案[^\n，。]*/g,
-    /答案是[^\n，。]*/g,
-    /答案為[^\n，。]*/g,
-    /「[^」]{1,40}」\s*才是[^\n，。]*/g,
-    /『[^』]{1,40}』\s*才是[^\n，。]*/g,
-    /“[^”]{1,40}”\s*才是[^\n，。]*/g
+  // 只移除真正直接洩漏答案的句子片段，保留其餘所有引導語
+  const leakPatterns = [
+    /正確答案[是為]?[^。！？\n]*/g,
+    /標準答案[是為]?[^。！？\n]*/g,
+    /答案[是為][^。！？\n]*/g,
+    /應[填選為][^。！？\n]*/g,
+    /「[^」]{1,40}」\s*才是[^。！？\n]*/g,
+    /『[^』]{1,40}』\s*才是[^。！？\n]*/g,
   ]
   let sanitized = text
-  for (const pattern of blockedPatterns) {
+  for (const pattern of leakPatterns) {
     sanitized = sanitized.replace(pattern, '').trim()
   }
-  sanitized = sanitized
-    .replace(/^(?:學生|同學|你|您|作答者)\s*/g, '')
-    .replace(/^(?:誤將|誤把)\s*/g, '')
-    .replace(/\s*(?:建議|請)\s*[^。；!！?？\n]*/g, '')
-    .replace(/\s*(?:可再|可改|可參考|記得)\s*[^。；!！?？\n]*/g, '')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/^[，。；、\s]+/, '')
-    .replace(/[，、\s]+$/, '')
-    .trim()
+  sanitized = sanitized.replace(/\s{2,}/g, ' ').replace(/^[，。；、\s]+/, '').trim()
 
-  if (!sanitized || hasAnswerLeakRisk(text) || hasAnswerLeakRisk(sanitized)) {
-    return buildGenericReasonFromReason(text)
-  }
-
-  const firstSentence = sanitized
-    .split(/[。；;!?！？\n]/)
-    .map((part) => part.trim())
-    .filter(Boolean)[0]
-
-  let core = String(firstSentence || '').trim()
-  core = core.replace(/^(?:需注意|請注意|注意)\s*/, '').trim()
-  core = core.replace(/[，、\s]+$/, '').trim()
-
-  if (!core || hasAnswerLeakRisk(core)) {
-    return buildGenericReasonFromReason(text)
-  }
-
-  return /[。！？]$/.test(core) ? core : `${core}。`
+  return sanitized || '作答內容與題目要求不一致。'
 }
 
 function extractSubmissionIdFromImagePath(value) {

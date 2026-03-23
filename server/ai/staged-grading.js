@@ -1319,6 +1319,8 @@ function buildExplainPrompt(
 You are stage Explain. Your job is to write STUDENT-FACING correction guidance for each wrong question.
 The student's homework image is attached. Use it actively.
 
+AUDIENCE: Taiwan elementary school students (小學生). Use simple, everyday spoken Chinese — the kind a caring teacher would say face-to-face. Middle schoolers can read this too, so clarity matters more than difficulty level.
+
 Domain: ${JSON.stringify(domainHint || null)}
 Wrong question IDs to process: ${JSON.stringify(explainQuestionIds)}
 
@@ -1333,19 +1335,34 @@ ${JSON.stringify(wrongScores)}
 
 == STEP-BY-STEP for each wrong question ==
 1. Find the question in the attached image by its ID or position number.
-2. Read the ACTUAL question text from the image (e.g. "求梯形面積，已知上底5cm、下底9cm、高4cm").
-3. Read the student's answer and the scoringReason above to understand exactly what went wrong.
-4. Write studentGuidance that references the real question content you just read.
+2. Read the ACTUAL question text from the image carefully.
+3. Read the student's answer and the scoringReason to understand exactly what went wrong.
+4. Write studentGuidance following the THREE-PART structure below.
 
-== studentGuidance RULES (STRICTLY ENFORCED) ==
-- Write in Traditional Chinese (繁體中文).
-- START by briefly naming what the question is asking (use the actual question wording from the image).
-- Point out the SPECIFIC ERROR the student made, based on scoringReason (e.g. "你把高和底搞混了" / "計算步驟中乘法用成了加法").
-- Give a CONCRETE thinking hint that guides the student toward the right approach WITHOUT revealing the answer (e.g. "想想梯形面積公式裡，『高』指的是哪個方向的長度？").
-- ABSOLUTELY FORBIDDEN: "正確答案是", "應為", "答案是", "正確的是", or any phrase that directly or indirectly states the correct answer.
-- Do NOT say "請再想想" alone — always pair it with a specific direction to think about.
-- 2–4 sentences. Warm, encouraging, and specific.
-- SPECIAL RULE — unreadable answer: If the student answer has status "unreadable" (老師標記為「無法辨識」), the studentGuidance MUST start with "老師無法辨識你的字跡，" and then kindly tell the student to write more clearly next time. Do NOT mention what the correct answer is. Set mistakeType to "unreadable".
+== studentGuidance: THREE-PART STRUCTURE (follow this order every time) ==
+
+Part 1 — 你錯在哪裡（What went wrong）
+  - Name the question topic briefly using words from the actual question.
+  - State the specific mistake in plain language a child can understand.
+  - BAD: "三角形公式使用錯誤" ✗
+  - GOOD: "這題要算三角形的面積，你用了底×高，但忘了最後要除以2。" ✓
+
+Part 2 — 提醒一下（Key concept reminder）
+  - Give a short, concrete reminder of the concept, rule, or formula the student needs — without revealing the answer.
+  - BAD: "請複習梯形面積公式。" ✗
+  - GOOD: "記得梯形面積的公式是：(上底＋下底)×高÷2，三個數字都要用到喔。" ✓
+
+Part 3 — 再試試看（Thinking direction）
+  - Give ONE specific question or action that points the student toward the correct approach.
+  - Must be concrete, not vague.
+  - BAD: "請再想想。" ✗
+  - GOOD: "再看一次題目，『高』是哪條線段？把它找出來再算算看。" ✓
+
+== STRICTLY ENFORCED RULES ==
+- Write entirely in Traditional Chinese (繁體中文).
+- ABSOLUTELY FORBIDDEN: "正確答案是", "應為", "答案是", "正確的是", or any phrase that directly states the correct answer.
+- Total length: 3–5 sentences. Warm and encouraging in tone.
+- SPECIAL RULE — unreadable answer: If studentAnswer has status "unreadable", studentGuidance MUST start with "老師無法辨識你的字跡，" and kindly ask the student to write more clearly. Do NOT mention the correct answer. Set mistakeType to "unreadable".
 
 == OTHER FIELDS ==
 - mistakeType / mistakeTypeCodes: classify the mistake type.
@@ -1359,7 +1376,7 @@ Output:
   "details": [
     {
       "questionId": "string",
-      "studentGuidance": "引導語（提及題目內容、指出具體錯誤、給方向不給答案）",
+      "studentGuidance": "引導語（三段式：指出具體錯誤→概念提醒→思考方向）",
       "mistakeType": "concept|calculation|condition|blank|unreadable",
       "mistakeTypeCodes": ["calculation", "unit"]
     }
