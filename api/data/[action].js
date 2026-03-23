@@ -4774,7 +4774,7 @@ async function handleProcessPendingGrading(req, res) {
       const arrayBuffer = await imageBlob.arrayBuffer()
       const base64 = Buffer.from(arrayBuffer).toString('base64')
 
-      // Use Recheck Agent if per-question correction images exist, else full pipeline
+      // Use Recheck Agent — correction submissions must provide per-question images
       const { data: openItems } = await supabaseDb
         .from('correction_question_items')
         .select('question_id, question_text, mistake_reason, hint_text')
@@ -4783,18 +4783,15 @@ async function handleProcessPendingGrading(req, res) {
         .eq('student_id', submission.student_id)
         .eq('status', 'open')
 
-      const hasRecheckImages = openItems?.length > 0 &&
-        (await supabaseDb.storage.from(HOMEWORK_IMAGES_BUCKET)
-          .list(`corrections/${submission.id}`)).data?.length > 0
+      const recheckFolder = await supabaseDb.storage.from(HOMEWORK_IMAGES_BUCKET)
+        .list(`corrections/${submission.id}`)
+      const hasRecheckImages = openItems?.length > 0 && recheckFolder.data?.length > 0
 
-      const gradingResult = hasRecheckImages
-        ? await runRecheckGrading({ supabaseDb, submission, assignment, correctionItems: openItems })
-        : await runSubmissionGrading({
-            assignment,
-            normalizedImage: base64,
-            contentType: 'image/webp',
-            requestId: submission.id
-          })
+      if (!hasRecheckImages) {
+        throw Object.assign(new Error('訂正照片未正確上傳，請重新拍攝每題作答後再送出。'), { code: 'NO_RECHECK_IMAGES' })
+      }
+
+      const gradingResult = await runRecheckGrading({ supabaseDb, submission, assignment, correctionItems: openItems })
 
       const gradedAt = Date.now()
       const totalScore = toNumber(gradingResult?.totalScore) ?? 0
@@ -4837,15 +4834,16 @@ async function handleProcessPendingGrading(req, res) {
     } catch (err) {
       console.error('[PROCESS-GRADING] Error grading', submission.id, err?.message)
       const isRetry = originalStatuses.get(submission.id) === 'pending_grading_retry'
-      if (isRetry) {
-        // Second failure → permanently failed, reset student state so they can retry
+      const isInvalidUpload = err?.code === 'NO_RECHECK_IMAGES'
+      if (isRetry || isInvalidUpload) {
+        // Permanent failure: second failure or invalid upload (no recheck images)
         await supabaseDb
           .from('submissions')
           .update({ status: 'grading_failed', updated_at: new Date().toISOString() })
           .eq('id', submission.id)
         await upsertAssignmentStudentState(supabaseDb, submission.owner_id, submission.assignment_id, submission.student_id, {
           status: 'correction_required',
-          last_status_reason: 'AI 批改失敗，請重新送出訂正'
+          last_status_reason: isInvalidUpload ? err.message : 'AI 批改失敗，請重新送出訂正'
         })
       } else {
         // First failure → retry once more next minute

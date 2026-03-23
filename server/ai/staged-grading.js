@@ -48,6 +48,27 @@ function logStageEnd(pipelineRunId, stageName, stageResponse) {
   }
 }
 
+// questionCategory → internal type 1/2/3 (backward compat)
+const CATEGORY_TO_TYPE = {
+  single_choice: 1,
+  true_false: 1,
+  fill_blank: 1,
+  fill_variants: 2,
+  word_problem: 3,
+  short_answer: 3,
+  map_fill: 2,
+  map_draw: 3,
+}
+
+// Resolve effective type from question (prefer questionCategory, fallback to numeric type)
+function resolveQuestionType(question) {
+  if (question?.questionCategory && CATEGORY_TO_TYPE[question.questionCategory] !== undefined) {
+    return CATEGORY_TO_TYPE[question.questionCategory]
+  }
+  const t = Number(question?.type)
+  return t === 1 || t === 2 || t === 3 ? t : 1
+}
+
 function toFiniteNumber(value) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
@@ -456,9 +477,10 @@ function buildQuestionExpectedVariants(question) {
     variants.push(normalized)
   }
 
-  if (toFiniteNumber(question?.type) === 1) {
+  const resolvedType = resolveQuestionType(question)
+  if (resolvedType === 1) {
     pushVariant(question?.answer)
-  } else if (toFiniteNumber(question?.type) === 2) {
+  } else if (resolvedType === 2) {
     pushVariant(question?.referenceAnswer)
     if (Array.isArray(question?.acceptableAnswers)) {
       for (const value of question.acceptableAnswers) pushVariant(value)
@@ -887,13 +909,14 @@ function normalizeLocateResult(parsed, questionIds) {
 function buildClassifyPrompt(questionIds, answerKeyQuestions) {
   const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
 
-  // Detect map_fill questions from answerKey heuristics:
-  // Type 2 + acceptableAnswers >= 3 + referenceAnswer length > 30
+  // Detect map_fill questions: prefer explicit questionCategory, fall back to heuristic
+  // Heuristic: type=2 + acceptableAnswers >= 3 + referenceAnswer length > 30
   const mapFillIds = questions
     .filter((q) => {
       const qId = ensureString(q?.id).trim()
       if (!questionIds.includes(qId)) return false
-      const isType2 = q?.type === 2
+      if (q?.questionCategory === 'map_fill') return true
+      const isType2 = resolveQuestionType(q) === 2
       const hasMultipleAcceptable = Array.isArray(q?.acceptableAnswers) && q.acceptableAnswers.length >= 3
       const hasLongReference = typeof q?.referenceAnswer === 'string' && q.referenceAnswer.length > 30
       return isType2 && hasMultipleAcceptable && hasLongReference
@@ -1149,8 +1172,8 @@ function buildAccessorPrompt(answerKey, readAnswerResult) {
     strictness === 'strict'
       ? 'GRADING STRICTNESS: STRICT — The student answer must match the answer key exactly. Word order, factor order in multiplication, punctuation, units, and formatting must all be correct. Any deviation = wrong.'
       : strictness === 'lenient'
-        ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, factor order, units, or minor formatting differ.'
-        : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, equivalent units, small formatting differences) but reject wrong meaning, wrong numbers, or wrong key terms.'
+        ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, or minor formatting differ. However, unit substitution (e.g. 公尺 for 公分) is still wrong even in lenient mode for fill_blank and word_problem questions.'
+        : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, same unit written differently e.g. ml/mL) but reject wrong meaning, wrong numbers, wrong key terms, or different units.'
 
   const compactAnswerKey = {
     questions: Array.isArray(answerKey?.questions) ? answerKey.questions : [],
@@ -1182,6 +1205,17 @@ Rules:
 - errorType: calculation|copying|unit|concept|blank|unreadable|none.
 - If question has orderMode="unordered" and shares unorderedGroupId with sibling questions:
   - evaluate as a bag (order-insensitive matching) within that group.
+
+QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
+- single_choice / true_false: Compare student's selected option letter/symbol only. Ignore surrounding text. Case-insensitive.
+- fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical. 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm — these are WRONG (errorType='unit'), not equivalent. Do NOT accept unit substitution regardless of strictness setting.
+- fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
+- word_problem: Grade using rubricsDimensions (列式計算 + 答句). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical. Wrong unit = that dimension loses points (errorType='unit').
+- short_answer: Grade by key concept presence using rubricsDimensions or rubric. No unit checking required.
+- map_fill: See MAP-FILL SCORING below.
+- map_draw: See MAP-DRAW SCORING below.
+- (If questionCategory is absent, fall back to type-based rules: type=1 → exact match, type=2 → acceptableAnswers match, type=3 → rubric.)
+
 - MAP-FILL SCORING (地圖填圖題): If the AnswerKey question has acceptableAnswers (list of correct names) AND a long referenceAnswer describing positions:
   - The student's answer contains position:name pairs (e.g. "位置A: 泰國, 位置B: 越南").
   - Compare each student-labeled position+name against the referenceAnswer's position→name mapping.
@@ -1494,7 +1528,7 @@ function buildFinalGradingResult({
   }
   totalScore = parseFloat(totalScore.toFixed(1))
 
-  const mistakes =
+  const gradedMistakes =
     explainResult.mistakes.length > 0
       ? explainResult.mistakes
       : details
@@ -1505,6 +1539,17 @@ function buildFinalGradingResult({
             reason: item.reason,
             errorType: item.errorType || 'unknown'
           }))
+
+  const unansweredMistakes = details
+    .filter((item) => item.studentAnswer === '未作答')
+    .map((item) => ({
+      id: item.questionId,
+      question: `題目 ${item.questionId}`,
+      reason: '此題未作答，請補寫作答',
+      errorType: 'unanswered'
+    }))
+
+  const mistakes = [...gradedMistakes, ...unansweredMistakes]
 
   const reviewReasons = []
   if (stageMeta.classify.coverage < 1) {
@@ -2150,10 +2195,15 @@ ${imageMapping}
 Wrong questions context (JSON):
 ${JSON.stringify(itemsWithAnswers, null, 2)}
 
-GRADING RULES per question type:
-- type=1 (unique answer): student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
-- type=2 (multiple acceptable answers): student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
-- type=3 (performance/partial scoring): This is a correction submission — the student previously got this question wrong.
+GRADING RULES per questionCategory (use "questionCategory" field if present; otherwise fall back to "type"):
+- single_choice / true_false / fill_blank (or type=1): student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
+  - fill_blank UNIT RULE: if correctAnswer contains a unit (e.g. "15 公分"), the student's unit must match exactly. 公尺 ≠ 公分 → not passed.
+- fill_variants / map_fill (or type=2): student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
+- word_problem (or type=3 with rubricsDimensions): This is a correction submission.
+    * Check BOTH: (1) a calculation formula/process is present, AND (2) an answer sentence starts with "答：" or "A："and contains a number+unit (or full text answer).
+    * UNIT RULE: if the expected answer has a unit, the student's unit must match. Wrong unit = not passed.
+    * Must show the student understood the mistake and corrected it meaningfully.
+- short_answer / map_draw (or type=3): This is a correction submission.
     * Judge based on referenceAnswer and whether the student demonstrates genuine understanding of the concept.
     * The answer does not need to be perfect, but must show the student understood their mistake and addressed it meaningfully.
     * Do NOT pass if the answer is essentially unchanged from the mistake described in mistakeReason.
