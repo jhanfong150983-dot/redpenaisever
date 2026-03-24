@@ -167,6 +167,15 @@ export async function runAiPipeline({
       console.warn(`${logPrefix} staged-unavailable fallback=single-shot`)
     }
     console.log(`${logPrefix} single-shot route=${resolvedRouteKey}`)
+
+    // Debug log for answer_key.extract — print prompt text and raw response
+    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
+      const promptText = contents?.[0]?.parts?.[0]?.text ?? contents?.[0]?.parts?.find?.(p => typeof p?.text === 'string')?.text ?? null
+      if (promptText) {
+        console.log(`${logPrefix} [DEBUG] answer_key.extract prompt:\n${promptText}`)
+      }
+    }
+
     pipelineResult = await executeSinglePipelineCall({
       apiKey,
       model,
@@ -176,6 +185,11 @@ export async function runAiPipeline({
       timeoutMs,
       routeKey: resolvedRouteKey
     })
+
+    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
+      const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
+      console.log(`${logPrefix} [DEBUG] answer_key.extract response:\n${rawText}`)
+    }
   }
   const responseStatus = Number(pipelineResult.status) || 500
 
