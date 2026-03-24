@@ -54,10 +54,13 @@ const CATEGORY_TO_TYPE = {
   true_false: 1,
   fill_blank: 1,
   fill_variants: 2,
+  multi_check: 2,
+  calculation: 3,
   word_problem: 3,
   short_answer: 3,
   map_fill: 2,
   map_draw: 3,
+  diagram_draw: 3,
 }
 
 // Resolve effective type from question (prefer questionCategory, fallback to numeric type)
@@ -660,11 +663,20 @@ function normalizeClassifyResult(parsed, questionIds) {
     const row = byQuestionId.get(questionId)
     const visible = row?.visible === true
     const qt = row?.questionType
-    const questionType = qt === 'word_problem' ? 'word_problem' : qt === 'single_choice' ? 'single_choice' : qt === 'map_fill' ? 'map_fill' : qt === 'multi_check' ? 'multi_check' : qt === 'fill_blank' ? 'fill_blank' : 'other'
+    const VALID_QUESTION_TYPES = new Set([
+      'word_problem', 'calculation', 'single_choice', 'map_fill', 'map_draw',
+      'diagram_draw', 'multi_check', 'fill_blank', 'true_false'
+    ])
+    const questionType = VALID_QUESTION_TYPES.has(qt) ? qt : 'other'
+    const VALID_DRAW_TYPES = new Set(['map_symbol', 'grid_geometry', 'connect_dots'])
+    const drawType = (questionType === 'map_draw' && VALID_DRAW_TYPES.has(row?.drawType))
+      ? row.drawType
+      : (questionType === 'map_draw' ? 'map_symbol' : undefined)
     alignedQuestions.push({
       questionId,
       visible,
       questionType,
+      drawType,
       questionBbox: normalizeBboxRef(row?.questionBbox ?? row?.question_bbox),
       answerBbox: normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox)
     })
@@ -733,6 +745,37 @@ Return:
     {
       "questionId": "string",
       "studentAnswerRaw": "exact text of the A:/答:/Ans: line",
+      "status": "read|blank|unreadable"
+    }
+  ]
+}
+`.trim()
+}
+
+function buildCalculationFinalAnswerPrompt(calculationIds) {
+  return `
+You are a final answer reader. Your ONLY job is to find the last computed result for each listed calculation question.
+
+Question IDs:
+${JSON.stringify(calculationIds)}
+
+For each question, scan the student's work area and find the LAST standalone equation result.
+This is the rightmost/bottommost occurrence of "= [number]" in their work (e.g. "25×6=150" → "150").
+
+Rules:
+1. Do NOT read "答:" or "A:" lines — calculation questions may not have them.
+2. Find the final "= X" where X is a pure number. If multiple lines end with "= X", take the last one.
+3. Output ONLY the number after the last "=". Do not include units, formulas, or text.
+4. If no "= X" found → status="blank", studentAnswerRaw="未作答".
+5. If the work area is unreadable → status="unreadable", studentAnswerRaw="無法辨識".
+6. Return strict JSON only.
+
+Return:
+{
+  "answers": [
+    {
+      "questionId": "string",
+      "studentAnswerRaw": "the last = X number only (e.g. '150')",
       "status": "read|blank|unreadable"
     }
   ]
@@ -940,16 +983,26 @@ Rules:
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - questionType="map_fill" if the question ID is listed in MAP-FILL QUESTIONS above.
-- questionType="map_draw" if the question shows a BLANK GRID, COORDINATE SYSTEM, or BLANK OUTLINE DIAGRAM and the question stem asks the student to DRAW, MARK, or PLACE a symbol/shape on it (e.g., 畫出颱風位置、以符號標示、在圖中標出位置、畫出符號). For map_draw questions, output answerBbox that frames the ENTIRE diagram/map/grid area (the whole drawing region, not a small blank). This allows cropping to zoom in on just the map and remove surrounding question text.
-- questionType="single_choice" if the question has labeled options (A/B/C/D or 甲/乙/丙/丁) and the student selects exactly one option (circle, tick, or fill-in).
+- questionType="map_draw" if the question shows a BLANK GRID, COORDINATE SYSTEM, GRID PAPER, or BLANK OUTLINE DIAGRAM and the question stem asks the student to DRAW, MARK, CONNECT DOTS, or PLACE a symbol/shape on it. This includes:
+  - Geographic map symbol placement (畫出颱風位置、以符號標示)
+  - Grid paper geometry drawing (在方格紙上畫正方形、畫三角形)
+  - Connect-the-dots diagrams (依編號連接座標點)
+  For map_draw questions, output answerBbox that frames the ENTIRE diagram/map/grid area.
+  Also output drawType to distinguish the sub-type:
+  - drawType="map_symbol": geographic map — student places a symbol at a coordinate position
+  - drawType="grid_geometry": grid paper — student draws a geometric shape (square, triangle, etc.)
+  - drawType="connect_dots": numbered dots — student connects points in order to form a shape
+- questionType="diagram_draw" if the question shows pre-printed shapes/figures (circles, fraction bars, etc.) and asks the student to COLOR or SHADE a portion of them (e.g., 塗色表示分數、塗出1又2/3個圓). Output answerBbox that frames the entire figure area.
+- questionType="single_choice" if the question has labeled options (A/B/C/D or 甲/乙/丙/丁 or ①/②/③) and the student selects exactly one option (circle, tick, or fill-in).
 - questionType="multi_check" if the question has multiple checkboxes/boxes where the student can tick/check/cross ONE OR MORE options. Options may be unlabeled blank boxes, or labeled with numbers/letters/symbols. Key difference from single_choice: multiple selections are allowed.
-- questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem if blank markers are present.
-- questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers.
+- questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem and calculation if blank markers are present.
+- questionType="calculation" if the question is a math calculation with NO narrative/story context, NO blank markers (□/___), and the student must write formula steps and a final numeric answer (e.g., 算算看、直式算算看). The answer does NOT require a unit or answer sentence.
+- questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers, and the answer requires a unit or text answer sentence.
 - Otherwise questionType="other".
 - For visible=true questions (except map_fill), output answerBbox:
-  - For map_draw: frame the ENTIRE diagram/map/grid area (large bbox covering the whole drawing region).
+  - For map_draw and diagram_draw: frame the ENTIRE diagram/map/grid area (large bbox covering the whole drawing/coloring region).
   - For all others: frame the DESIGNATED ANSWER SPACE — the pre-printed space where students write their answer: parentheses (　), underline blanks ___, or empty boxes □. Do NOT frame the option list (A/B/C/D rows) — frame the blank where students write their selected letter. If the student left it blank, still output the bbox of the empty answer space.
-  Only the CENTER POINT needs to be accurate for non-map_draw questions — width and height will be overridden to a fixed display size. For map_draw, output the actual full extent of the diagram.
+  Only the CENTER POINT needs to be accurate for non-map_draw/non-diagram_draw questions — width and height will be overridden to a fixed display size.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
   If the answer area cannot be determined, omit answerBbox.
 - Return strict JSON only.
@@ -961,6 +1014,7 @@ Output:
       "questionId": "string",
       "visible": true,
       "questionType": "word_problem",
+      "drawType": "map_symbol",
       "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 }
     }
   ]
@@ -1008,6 +1062,9 @@ function buildReadAnswerPrompt(classifyResult) {
   const singleChoiceIds = visibleQuestions
     .filter((q) => q.questionType === 'single_choice')
     .map((q) => q.questionId)
+  const trueFalseIds = visibleQuestions
+    .filter((q) => q.questionType === 'true_false')
+    .map((q) => q.questionId)
   const mapFillIds = visibleQuestions
     .filter((q) => q.questionType === 'map_fill')
     .map((q) => q.questionId)
@@ -1017,17 +1074,43 @@ function buildReadAnswerPrompt(classifyResult) {
   const fillBlankIds = visibleQuestions
     .filter((q) => q.questionType === 'fill_blank')
     .map((q) => q.questionId)
+  const calculationIds = visibleQuestions
+    .filter((q) => q.questionType === 'calculation')
+    .map((q) => q.questionId)
+  const diagramDrawIds = visibleQuestions
+    .filter((q) => q.questionType === 'diagram_draw')
+    .map((q) => q.questionId)
+  // map_draw split by drawType
+  const mapDrawSymbolIds = visibleQuestions
+    .filter((q) => q.questionType === 'map_draw' && q.drawType !== 'grid_geometry' && q.drawType !== 'connect_dots')
+    .map((q) => q.questionId)
+  const mapDrawGridIds = visibleQuestions
+    .filter((q) => q.questionType === 'map_draw' && q.drawType === 'grid_geometry')
+    .map((q) => q.questionId)
+  const mapDrawConnectIds = visibleQuestions
+    .filter((q) => q.questionType === 'map_draw' && q.drawType === 'connect_dots')
+    .map((q) => q.questionId)
   const mapDrawIds = visibleQuestions
     .filter((q) => q.questionType === 'map_draw')
     .map((q) => q.questionId)
+
   const singleChoiceNote = singleChoiceIds.length > 0
-    ? `\nSINGLE-CHOICE questions (output ONE letter only): ${JSON.stringify(singleChoiceIds)}`
+    ? `\nSINGLE-CHOICE questions (output ONE option only): ${JSON.stringify(singleChoiceIds)}`
+    : ''
+  const trueFalseNote = trueFalseIds.length > 0
+    ? `\nTRUE-FALSE questions (output ○ or ✗ only): ${JSON.stringify(trueFalseIds)}`
     : ''
   const mapFillNote = mapFillIds.length > 0
     ? `\nMAP-FILL questions (地圖填圖題): ${JSON.stringify(mapFillIds)}`
     : ''
-  const mapDrawNote = mapDrawIds.length > 0
-    ? `\nMAP-DRAW questions (繪圖/標記題, use fixed template): ${JSON.stringify(mapDrawIds)}`
+  const mapDrawSymbolNote = mapDrawSymbolIds.length > 0
+    ? `\nMAP-DRAW (map_symbol) questions: ${JSON.stringify(mapDrawSymbolIds)}`
+    : ''
+  const mapDrawGridNote = mapDrawGridIds.length > 0
+    ? `\nMAP-DRAW (grid_geometry) questions: ${JSON.stringify(mapDrawGridIds)}`
+    : ''
+  const mapDrawConnectNote = mapDrawConnectIds.length > 0
+    ? `\nMAP-DRAW (connect_dots) questions: ${JSON.stringify(mapDrawConnectIds)}`
     : ''
   const multiCheckNote = multiCheckIds.length > 0
     ? `\nMULTI-CHECK questions (勾選題, output comma-separated selected options): ${JSON.stringify(multiCheckIds)}`
@@ -1035,12 +1118,18 @@ function buildReadAnswerPrompt(classifyResult) {
   const fillBlankNote = fillBlankIds.length > 0
     ? `\nFILL-BLANK questions (填空題, output comma-separated blank contents): ${JSON.stringify(fillBlankIds)}`
     : ''
+  const calculationNote = calculationIds.length > 0
+    ? `\nCALCULATION questions (計算題, read entire work area): ${JSON.stringify(calculationIds)}`
+    : ''
+  const diagramDrawNote = diagramDrawIds.length > 0
+    ? `\nDIAGRAM-DRAW questions (塗色題, describe coloring): ${JSON.stringify(diagramDrawIds)}`
+    : ''
   return `
-You are an answer reader. Your only job is to report what the student physically wrote in each question's designated answer space. You have NO mathematical knowledge and must NOT solve, infer, or guess.
+You are an answer reader. Your only job is to report what the student physically wrote or drew in each question's designated answer space. You have NO mathematical knowledge and must NOT solve, infer, or guess.
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${multiCheckNote}${fillBlankNote}${mapDrawNote}
+${singleChoiceNote}${trueFalseNote}${multiCheckNote}${fillBlankNote}${calculationNote}${diagramDrawNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
@@ -1054,7 +1143,7 @@ If the answer space is empty → blank. There are NO exceptions.
 
 == BLANK FIRST RULE ==
 Before reading each question, ask yourself: "Is there fresh handwriting in this question's answer space?"
-- Answer space = the designated writing area: ( ), ___, □, or the answer line after "答:" "A:" "Ans:"
+- Answer space = the designated writing area: ( ), ___, □, or the answer line after "答:" "A:" "Ans:", or the entire work area for calculation/drawing questions.
 - If no fresh handwriting is present → status="blank", studentAnswerRaw="未作答". STOP. Do not read further.
 - Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count.
 - Only FRESH student pen/pencil marks count.
@@ -1068,10 +1157,15 @@ Before reading each question, ask yourself: "Is there fresh handwriting in this 
 
 == QUESTION TYPE RULES ==
 SINGLE-CHOICE (questions in SINGLE-CHOICE list):
-- Output exactly ONE letter (A/B/C/D or 甲/乙/丙/丁).
-- Valid only if the student wrote a letter OR made a mark (circle/tick/fill) in the designated answer space (  ) or ___ for this question.
-- A letter written beside option rows or next to a neighboring question does NOT count for this question.
-- SELF-CHECK: "Did the student write in THIS question's answer blank?" If no → blank.
+- Output exactly ONE option identifier (A/B/C/D or 甲/乙/丙/丁 or ①/②/③/④).
+- Valid only if the student wrote a letter/number OR made a mark (circle/tick/fill) in the designated answer space ( ) or ___ for this question.
+- A mark beside option rows or next to a neighboring question does NOT count for this question.
+- SELF-CHECK: "Did the student mark in THIS question's answer blank?" If no → blank.
+
+TRUE-FALSE (questions in TRUE-FALSE list):
+- Output ONLY the symbol or word the student wrote in the answer space.
+- Valid outputs: "○", "✗", "對", "錯", "是", "否", or the exact character written.
+- Do NOT append any explanatory text (e.g. output "○" NOT "○ 正確").
 
 MULTI-CHECK (questions in MULTI-CHECK list):
 - Output comma-separated selected options with NO spaces.
@@ -1092,21 +1186,12 @@ FILL-BLANK (questions in FILL-BLANK list):
 - Empty blank → "_". Unreadable blank → "?". All blanks empty → status="blank".
 - FORBIDDEN: surrounding printed text ("答", underline markers).
 
-MAP-DRAW (questions in MAP-DRAW list):
-- Only report a fresh student-drawn mark (new ink not part of pre-printed image).
-- If only pre-printed content visible → status="blank", studentAnswerRaw="未作答".
-- FIXED TEMPLATE (mandatory): "符號：[符號類型]，位置：[位置描述]"
-  - 符號類型: name of the drawn symbol in Traditional Chinese (e.g. 閃電符號, 颱風符號, 高壓符號, X記號, 點, 箭頭)
-  - 位置描述: use the FIRST matching rule:
-    1. If the diagram has a printed grid with clear spatial zones → use fixed spatial tokens:
-       - 2×2 grid → one of: 左上格/右上格/左下格/右下格
-       - Vertical pair → one of: 上方格/下方格
-       - Horizontal pair → one of: 左格/右格
-    2. If the diagram has printed coordinate axes or degree markers → use coordinate format: "[value]N/S緯線與[value]E/W經線交叉點附近" or similar
-    3. Otherwise → describe position with fixed spatial words: 左上角/右上角/左下角/右下角/中央/左側/右側/上方/下方
-  - Multiple marks: separate with "；" e.g. "符號：颱風符號，位置：左上格；符號：高壓符號，位置：右下格"
-- LOCK THE RULE: identify position rule (1, 2, or 3) from the diagram structure. Apply the SAME rule consistently.
-- FORBIDDEN: free-form prose descriptions. FORBIDDEN: mentioning pre-printed content as student marks.
+CALCULATION (questions in CALCULATION list):
+- Read the ENTIRE answer work area: formula steps (橫式/直式) AND the final result.
+- Copy ALL calculation content written by the student, including intermediate steps.
+- Copy exactly as written: "25×6=150" → output "25×6=150"; wrong calc "6+3=8" → output "6+3=8".
+- Include the final answer line if present (e.g. "答: 150" or just "= 150").
+- If the work area is blank (no fresh marks) → status="blank".
 
 FORBIDDEN:
 - Guessing or inferring what the student meant to write
@@ -1117,7 +1202,7 @@ FORBIDDEN:
 REQUIRED:
 - Empty answer space → status="blank", studentAnswerRaw="未作答"
 - Student wrote "A: 6.12 cm²" → output "A: 6.12 cm²", status="read"
-- Single-choice: student wrote "B" in answer blank → output "B", status="read"
+- Single-choice: student marked "②" in answer blank → output "②", status="read"
 ${mapFillNote ? `
 MAP-FILL RULE (地圖填圖題):
 - For question IDs in MAP-FILL list, scan the ENTIRE image.
@@ -1129,21 +1214,52 @@ MAP-FILL RULE (地圖填圖題):
 - Include ALL student-written text, even if misspelled.
 - status="read" if any handwritten text found, status="blank" if none.
 ` : ''}
-${mapDrawNote ? `
-MAP-DRAW RULE (繪圖/標記題):
-For question IDs in MAP-DRAW list, describe the student's drawing with THREE parts:
-  1. SYMBOL/SHAPE: What did the student draw? Name the symbol or shape exactly (e.g., 颱風符號、箭頭向右、圓點、叉號).
-  2. REFERENCE LINES: Read ALL printed reference lines and labels visible in the diagram (e.g., 23.5°N、121°E、赤道、X軸). List them.
-  3. POSITION: Describe where the drawing is relative to the printed reference lines using precise language:
-     - If coordinate grid: "在[A]緯線以[南/北]、[B]經線以[東/西]" + grid cell (e.g., 右下格、左上格)
+${mapDrawIds.length > 0 ? `
+MAP-DRAW RULES (繪圖/標記題):
+Apply the rule that matches the question's sub-type listed above.
+
+${mapDrawSymbolIds.length > 0 ? `MAP-DRAW (map_symbol) — for IDs ${JSON.stringify(mapDrawSymbolIds)}:
+Describe the student's drawing with THREE parts:
+  1. SYMBOL/SHAPE: What did the student draw? Name the symbol exactly (e.g., 颱風符號、箭頭向右、圓點、叉號).
+  2. REFERENCE LINES: Read ALL printed reference lines and labels visible (e.g., 23.5°N、121°E、赤道). List them.
+  3. POSITION: Describe where the drawing is relative to the printed reference lines:
+     - If coordinate grid: "在[A]緯線以[南/北]、[B]經線以[東/西]" + grid cell (e.g., 右下格)
      - If numbered/labeled grid cells: "在第[N]格" or "在[標籤]格"
      - If near a specific intersection: "在[A]與[B]交點附近"
-     - Always specify which side of EACH reference line the drawing is on.
-
-Output format (single string): "[符號名稱]，位置：[精確位置描述含參考線]"
+Output format: "[符號名稱]，位置：[精確位置描述含參考線]"
 Example: "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"
-Example: "向右箭頭，位置：X軸以上、Y軸以右（第一象限）"
 If no student drawing found → status="blank"
+` : ''}
+${mapDrawGridIds.length > 0 ? `MAP-DRAW (grid_geometry) — for IDs ${JSON.stringify(mapDrawGridIds)}:
+Describe the geometric shape the student drew on the grid paper:
+  1. SHAPE: What shape did the student draw? (e.g., 正方形、三角形、長方形)
+  2. SIZE: How many grid squares wide/tall? (e.g., 邊長3格、底3格高2格)
+  3. POSITION: Where on the grid is the shape's top-left corner or reference point? (e.g., 從第2列第3格開始)
+Output format: "圖形：[形狀]，大小：[尺寸描述]，位置：[起始位置]"
+Example: "圖形：正方形，大小：邊長3格，位置：從第1列第2格開始"
+If no student drawing found → status="blank"
+` : ''}
+${mapDrawConnectIds.length > 0 ? `MAP-DRAW (connect_dots) — for IDs ${JSON.stringify(mapDrawConnectIds)}:
+Describe how the student connected the numbered dots:
+  1. CONNECTION ORDER: List the order in which dots are connected (e.g., 1→2→3→4→1).
+  2. RESULTING SHAPE: What shape is formed? (e.g., 三角形、Z字形、正方形)
+Output format: "連線：[點的連接順序]，形成圖形：[形狀名稱]"
+Example: "連線：1→2→3→4→5，形成圖形：Z字形"
+If no student connection marks found → status="blank"
+` : ''}
+` : ''}
+${diagramDrawNote ? `
+DIAGRAM-DRAW RULE (塗色題):
+For question IDs in DIAGRAM-DRAW list, describe ONLY fresh student coloring/shading marks on pre-printed figures.
+- Report only what the student colored — do NOT describe uncolored regions unless needed for context.
+- FIXED TEMPLATE: "塗色：[描述塗色範圍]"
+  - For circles/fraction diagrams: describe which circles are fully/partially colored and what fraction.
+    Example: "塗色：第1個圓完整，第2個圓左側2/3，第3個圓未塗"
+  - For fraction bars/grids: describe how many cells are colored.
+    Example: "塗色：10格中的7格（左側連續7格）"
+  - For other shapes: describe the colored region using spatial words.
+- If no fresh coloring marks → status="blank", studentAnswerRaw="未作答".
+- FORBIDDEN: describing pre-printed outlines, grid lines, or labels as student marks.
 ` : ''}
 
 Return:
@@ -1210,8 +1326,19 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - single_choice / true_false: Compare student's selected option letter/symbol only. Ignore surrounding text. Case-insensitive.
 - fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical. 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm — these are WRONG (errorType='unit'), not equivalent. Do NOT accept unit substitution regardless of strictness setting.
 - fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
-- word_problem: Grade using rubricsDimensions (列式計算 + 答句). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical. Wrong unit = that dimension loses points (errorType='unit').
+- multi_check: The answer field contains comma-separated correct tokens (e.g. "①,③"). Parse BOTH student answer and correct answer as comma-separated token sets (order-insensitive).
+  - correct = tokens in student ∩ answer_tokens
+  - wrong = tokens in student − answer_tokens
+  - score = max(0, round((|correct| − |wrong|) / |answer_tokens| × maxScore))
+  - isCorrect = (score === maxScore)
+  - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
+- word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical. Wrong unit = that dimension loses points (errorType='unit').
+- calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
 - short_answer: Grade by key concept presence using rubricsDimensions or rubric. No unit checking required.
+- diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
+  - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
+  - 塗色完整性: check if coloring is continuous and covers the correct regions without major gaps.
+  - errorType: 'concept' if wrong proportion; 'blank' if no fresh marks described.
 - map_fill: See MAP-FILL SCORING below.
 - map_draw: See MAP-DRAW SCORING below.
 - (If questionCategory is absent, fall back to type-based rules: type=1 → exact match, type=2 → acceptableAnswers match, type=3 → rubric.)
@@ -1673,6 +1800,10 @@ export async function runStagedGradingPhaseA({
     .filter((q) => q.visible && q.questionType === 'word_problem')
     .map((q) => q.questionId)
 
+  const calculationIds = classifyAligned
+    .filter((q) => q.visible && q.questionType === 'calculation')
+    .map((q) => q.questionId)
+
   // ── A3 + A4: ReadAnswer + reReadAnswer IN PARALLEL (full image) ────────────
   // Both reads use the full submission image so AI has complete layout context
   // and cannot misattribute answers across question boundaries due to bad crops.
@@ -1700,7 +1831,10 @@ export async function runStagedGradingPhaseA({
       stageContents: [{ role: 'user', parts: [{ text: reReadAnswerPrompt }, ...submissionImageParts] }]
     })
   ]
+  let finalAnswerOnlyIdx = -1
+  let calcFinalAnswerIdx = -1
   if (wordProblemIds.length > 0) {
+    finalAnswerOnlyIdx = parallelCalls.length
     parallelCalls.push(
       executeStage({
         apiKey,
@@ -1718,9 +1852,31 @@ export async function runStagedGradingPhaseA({
       })
     )
   }
+  if (calculationIds.length > 0) {
+    calcFinalAnswerIdx = parallelCalls.length
+    parallelCalls.push(
+      executeStage({
+        apiKey,
+        model,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+        stageContents: [
+          {
+            role: 'user',
+            parts: [{ text: buildCalculationFinalAnswerPrompt(calculationIds) }, ...submissionImageParts]
+          }
+        ]
+      })
+    )
+  }
   logStageStart(pipelineRunId, 'ReadAnswer+reReadAnswer')
-  const [readAnswerResponse, reReadAnswerResponse, finalAnswerOnlyResponse] =
-    await Promise.all(parallelCalls)
+  const parallelResults = await Promise.all(parallelCalls)
+  const readAnswerResponse = parallelResults[0]
+  const reReadAnswerResponse = parallelResults[1]
+  const finalAnswerOnlyResponse = finalAnswerOnlyIdx >= 0 ? parallelResults[finalAnswerOnlyIdx] : null
+  const calcFinalAnswerResponse = calcFinalAnswerIdx >= 0 ? parallelResults[calcFinalAnswerIdx] : null
   logStageEnd(pipelineRunId, 'ReadAnswer', readAnswerResponse)
   logStageEnd(pipelineRunId, 'reReadAnswer', reReadAnswerResponse)
   stageResponses.push(readAnswerResponse, reReadAnswerResponse)
@@ -1795,6 +1951,70 @@ export async function runStagedGradingPhaseA({
               : null
             const retryNum = retryRow
               ? extractAnswerNumber(ensureString(retryRow.studentAnswerRaw, ''))
+              : null
+            if (retryNum && calcResult !== retryNum) {
+              mismatchIds.add(questionId)
+              stageWarnings.push(
+                `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} calc=${calcResult} stated=${retryNum}`
+              )
+            }
+          } else {
+            mismatchIds.add(questionId)
+            stageWarnings.push(
+              `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} calc=${calcResult} stated=${finalNum}`
+            )
+          }
+        }
+      }
+    }
+  }
+
+  // Mismatch detection for calculation questions (A3 last-= result vs calcFinalAnswer)
+  if (calculationIds.length > 0 && calcFinalAnswerResponse?.ok) {
+    const calcFinalParsed = parseCandidateJson(calcFinalAnswerResponse.data)
+    if (calcFinalParsed && typeof calcFinalParsed === 'object') {
+      const calcFinalById = mapByQuestionId(
+        Array.isArray(calcFinalParsed.answers) ? calcFinalParsed.answers : [],
+        (item) => item?.questionId
+      )
+      const mainById = mapByQuestionId(
+        Array.isArray(readAnswerParsed?.answers) ? readAnswerParsed.answers : [],
+        (item) => item?.questionId
+      )
+      for (const questionId of calculationIds) {
+        const mainRow = mainById.get(questionId)
+        const calcFinalRow = calcFinalById.get(questionId)
+        if (!mainRow || !calcFinalRow) continue
+        if (calcFinalRow.status === 'blank' || calcFinalRow.status === 'unreadable') continue
+        const calcResult = extractLastEquationResult(ensureString(mainRow.studentAnswerRaw, ''))
+        const finalNum = ensureString(calcFinalRow.studentAnswerRaw, '').replace(/,/g, '').trim()
+        if (calcResult && finalNum && calcResult !== finalNum) {
+          // Retry once with a fresh calculation final-answer read to confirm mismatch
+          const retryResponse = await executeStage({
+            apiKey,
+            model,
+            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+            timeoutMs: getRemainingBudget(),
+            routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+            stageContents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: buildCalculationFinalAnswerPrompt([questionId]) },
+                  ...submissionImageParts
+                ]
+              }
+            ]
+          })
+          stageResponses.push(retryResponse)
+          if (retryResponse.ok) {
+            const retryParsed = parseCandidateJson(retryResponse.data)
+            const retryRow = Array.isArray(retryParsed?.answers)
+              ? retryParsed.answers.find((a) => ensureString(a?.questionId).trim() === questionId)
+              : null
+            const retryNum = retryRow
+              ? ensureString(retryRow.studentAnswerRaw, '').replace(/,/g, '').trim()
               : null
             if (retryNum && calcResult !== retryNum) {
               mismatchIds.add(questionId)
