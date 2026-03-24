@@ -1113,7 +1113,7 @@ function buildReadAnswerPrompt(classifyResult) {
     ? `\nMAP-DRAW (connect_dots) questions: ${JSON.stringify(mapDrawConnectIds)}`
     : ''
   const multiCheckNote = multiCheckIds.length > 0
-    ? `\nMULTI-CHECK questions (勾選題, output comma-separated selected options): ${JSON.stringify(multiCheckIds)}`
+    ? `\nMULTI-CHECK questions (勾選題, output comma-separated tokens; use printed labels if any, else 第X個 in reading order): ${JSON.stringify(multiCheckIds)}`
     : ''
   const fillBlankNote = fillBlankIds.length > 0
     ? `\nFILL-BLANK questions (填空題, output comma-separated blank contents): ${JSON.stringify(fillBlankIds)}`
@@ -1171,15 +1171,14 @@ MULTI-CHECK (questions in MULTI-CHECK list):
 - Output comma-separated selected options with NO spaces.
 - STRICT FORMAT PRIORITY — apply the FIRST matching rule, never mix rules across options:
   1. Printed labels exist (①②③ / A B C / 1 2 3 / 甲乙丙): use ONLY the label character(s). Template: "<label>". Example: "①,③" or "A,C"
-  2. Grid/spatial layout (options in 2+ columns or clear top/bottom/left/right zones): use ONLY these fixed spatial tokens:
-     - 2×2 grid → tokens must be one of: 左上格/右上格/左下格/右下格
-     - Vertical pair (top+bottom) → tokens must be one of: 上方格/下方格
-     - Horizontal pair (left+right) → tokens must be one of: 左格/右格
-     Template: "<spatial token>". Example: "左上格,右下格"
-  3. Vertical list without labels (top-to-bottom): use ONLY "第X個" where X is 一/二/三/四/五/六/七/八/九/十.
-     Template: "第X個". Example: "第三個" or "第一個,第四個"
-- LOCK THE RULE: identify the rule (1, 2, or 3) from the FIRST option you see. Apply that SAME rule to ALL selected options in this question. Never switch rules mid-answer.
-- ABSOLUTELY FORBIDDEN: outputting the text/formula/sentence content of the option box. FORBIDDEN: 第X個 mixed with spatial tokens. FORBIDDEN: any token not matching the template above.
+  2. Unlabeled boxes (no printed label next to any box): use ONLY "第X個" where X is 一/二/三/四/五/六/七/八/九/十.
+     Count in READING ORDER:
+     - Vertical Chinese text with boxes in a HORIZONTAL ROW (each box above a vertical-text column): count RIGHT-to-LEFT. Rightmost box = 第一個.
+     - Horizontal text with boxes in a HORIZONTAL ROW: count LEFT-to-RIGHT. Leftmost box = 第一個.
+     - Boxes in a VERTICAL COLUMN: count TOP-to-BOTTOM. Topmost box = 第一個.
+     Template: "第X個". Example: "第一個,第三個"
+- LOCK THE RULE: identify the rule (1 or 2) from the FIRST option you see. Apply that SAME rule to ALL selected options in this question. Never switch rules mid-answer.
+- ABSOLUTELY FORBIDDEN: outputting the text/sentence content of the option box. FORBIDDEN: mixing label tokens with 第X個 tokens. FORBIDDEN: plain digits (1,2,3) for unlabeled boxes — always use 第X個.
 
 FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
