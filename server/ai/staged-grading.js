@@ -1325,6 +1325,7 @@ Rules:
 QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - single_choice / true_false: Compare student's selected option letter/symbol only. Ignore surrounding text. Case-insensitive.
 - fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical. 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm — these are WRONG (errorType='unit'), not equivalent. Do NOT accept unit substitution regardless of strictness setting.
+  DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
 - fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
 - multi_check: The answer field contains comma-separated correct tokens (e.g. "①,③"). Parse BOTH student answer and correct answer as comma-separated token sets (order-insensitive).
   - correct = tokens in student ∩ answer_tokens
@@ -2435,6 +2436,7 @@ ${JSON.stringify(itemsWithAnswers, null, 2)}
 GRADING RULES per questionCategory (use "questionCategory" field if present; otherwise fall back to "type"):
 - single_choice / true_false / fill_blank (or type=1): student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
   - fill_blank UNIT RULE: if correctAnswer contains a unit (e.g. "15 公分"), the student's unit must match exactly. 公尺 ≠ 公分 → not passed.
+  - fill_blank DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
 - fill_variants / map_fill (or type=2): student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
 - word_problem (or type=3 with rubricsDimensions): This is a correction submission.
     * Check BOTH: (1) a calculation formula/process is present, AND (2) an answer sentence starts with "答：" or "A："and contains a number+unit (or full text answer).
