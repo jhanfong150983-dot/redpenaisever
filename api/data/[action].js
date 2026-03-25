@@ -416,9 +416,11 @@ async function buildCorrectionCropGenerator(
   const prefix = `corrections/crops/${sourceKey}`
 
   return async ({ questionId, questionBbox, answerBbox }) => {
+    // Prefer questionBbox (full question context: stem + answer) for student correction preview.
+    // Fall back to answerBbox if questionBbox is absent.
     const normalizedBbox =
-      normalizeBboxForImage(answerBbox, imageWidth, imageHeight) ||
-      normalizeBboxForImage(questionBbox, imageWidth, imageHeight)
+      normalizeBboxForImage(questionBbox, imageWidth, imageHeight) ||
+      normalizeBboxForImage(answerBbox, imageWidth, imageHeight)
     if (!normalizedBbox) return null
 
     const rect = normalizedBboxToPixelRect(normalizedBbox, imageWidth, imageHeight)

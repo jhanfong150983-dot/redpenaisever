@@ -1006,12 +1006,15 @@ Rules:
 - questionType="calculation" if the question is a math calculation with NO narrative/story context, NO blank markers (□/___), and the student must write formula steps and a final numeric answer (e.g., 算算看、直式算算看). The answer does NOT require a unit or answer sentence.
 - questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers, and the answer requires a unit or text answer sentence.
 - Otherwise questionType="other".
-- For visible=true questions (except map_fill), output answerBbox:
-  - For map_draw and diagram_draw: frame the ENTIRE diagram/map/grid area (large bbox covering the whole drawing/coloring region).
-  - For all others: frame the DESIGNATED ANSWER SPACE — the pre-printed space where students write their answer: parentheses (　), underline blanks ___, or empty boxes □. Do NOT frame the option list (A/B/C/D rows) — frame the blank where students write their selected letter. If the student left it blank, still output the bbox of the empty answer space.
-  Only the CENTER POINT needs to be accurate for non-map_draw/non-diagram_draw questions — width and height will be overridden to a fixed display size.
-  Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height.
-  If the answer area cannot be determined, omit answerBbox.
+- For visible=true questions (except map_fill), output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
+  - Include the question number, question stem text, AND the student's answer area all within the bbox.
+  - For map_draw and diagram_draw: frame the entire diagram/map/grid area plus any visible question stem above it.
+  - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer.
+  - For fill_blank with multiple blanks: frame all blanks and the surrounding question text together.
+  - For single_choice / multi_choice / single_check / multi_check: frame the question stem plus the option rows and answer spaces.
+  - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
+  Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
+  If the question region cannot be determined, omit answerBbox.
 - Return strict JSON only.
 
 Output:
@@ -1032,18 +1035,26 @@ Output:
 function buildLocatePrompt(questionIds) {
   return `
 You are stage Locate.
-Task: locate question/answer regions for the provided question IDs on this submission image.
+Task: for each wrong question ID listed below, locate the region on the student's submission image that a student needs to see when reviewing their mistake.
 
-Target question IDs:
+Target question IDs (these are wrong answers that need correction):
 ${JSON.stringify(questionIds)}
 
 Rules:
 - Only return question IDs in the target list.
-- If you can find a question stem region, return questionBbox.
-- If you can find the student answer region, return answerBbox.
-- Bboxes must be normalized to [0,1] using:
-  { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 }
-- If uncertain, still give the best approximate box and lower confidence.
+- For each question, output questionBbox that captures the FULL CORRECTION CONTEXT the student needs:
+  - Frame from the question number/stem down through the student's complete answer.
+  - Include enough surrounding text so the student can identify which question this is.
+  - For calculation / word_problem: include all formula lines, intermediate steps, and the final answer line.
+  - For fill_blank with multiple blanks: include all blanks and the question text together.
+  - For single_choice / multi_choice: include the option rows and the parentheses where the student wrote.
+  - For single_check / multi_check: include all checkbox options and the student's marks.
+  - For map_draw / diagram_draw: include the entire drawn/colored area plus the question stem.
+- Also output answerBbox for the precise region where the student actually wrote their answer (tighter than questionBbox). This helps highlight the specific wrong content.
+- All bboxes normalized to [0,1]: { "x": top-left x, "y": top-left y, "w": width, "h": height }.
+- Be ACCURATE and output actual dimensions — do not use placeholder sizes.
+- If uncertain about exact edges, expand slightly to ensure nothing is cut off (err on the side of including more).
+- confidence: 0–100, lower if image quality or handwriting makes it hard to locate precisely.
 - Return strict JSON only.
 
 Output:
@@ -1051,8 +1062,8 @@ Output:
   "locatedQuestions": [
     {
       "questionId": "string",
-      "questionBbox": { "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.08 },
-      "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.1 },
+      "questionBbox": { "x": 0.05, "y": 0.12, "w": 0.90, "h": 0.15 },
+      "answerBbox": { "x": 0.60, "y": 0.14, "w": 0.35, "h": 0.10 },
       "confidence": 85
     }
   ]
@@ -2143,7 +2154,7 @@ export async function runStagedGradingPhaseA({
           mainInlineData.data,
           mainInlineData.mimeType,
           q.answerBbox,
-          q.questionType === 'map_draw'
+          true  // always use actual bbox — Classify now outputs full-question-block bbox
         )
         return { questionId: q.questionId, cropData }
       })
@@ -2374,6 +2385,42 @@ export async function runStagedGradingPhaseB({
     logStaged(pipelineRunId, stagedLogLevel, 'skip stage=explain reason=no_wrong_questions')
   }
 
+  // ── B3: LOCATE (only wrong questions — for student correction preview) ──────
+  const wrongQuestionIds = accessorScores
+    .filter((s) => s?.isCorrect !== true)
+    .map((s) => ensureString(s?.questionId).trim())
+    .filter(Boolean)
+
+  let locateResult = { locatedQuestions: [] }
+  if (wrongQuestionIds.length > 0) {
+    const locatePrompt = buildLocatePrompt(wrongQuestionIds)
+    logStageStart(pipelineRunId, 'locate')
+    const locateResponse = await executeStage({
+      apiKey,
+      model,
+      payload,
+      timeoutMs: getRemainingBudget(),
+      routeHint,
+      routeKey: AI_ROUTE_KEYS.GRADING_LOCATE,
+      stageContents: [{ role: 'user', parts: [{ text: locatePrompt }, ...submissionImageParts] }]
+    })
+    logStageEnd(pipelineRunId, 'locate', locateResponse)
+    stageResponses.push(locateResponse)
+    if (locateResponse.ok) {
+      if (locateResponse.warnings.length > 0) {
+        stageWarnings.push(...locateResponse.warnings.map((w) => `[locate] ${w}`))
+      }
+      const locateParsed = parseCandidateJson(locateResponse.data)
+      if (locateParsed && typeof locateParsed === 'object') {
+        locateResult = normalizeLocateResult(locateParsed, wrongQuestionIds)
+      }
+    } else {
+      stageWarnings.push(`[locate] status=${locateResponse.status}`)
+    }
+  } else {
+    logStaged(pipelineRunId, stagedLogLevel, 'skip stage=locate reason=no_wrong_questions')
+  }
+
   // 建立 consistencyById（從 phaseAResult，並注入 finalAnswerSource）
   const consistencyById = mapByQuestionId(phaseAResult.questionResults, (item) => item?.questionId)
   if (Array.isArray(finalAnswers)) {
@@ -2396,7 +2443,7 @@ export async function runStagedGradingPhaseB({
     stageWarnings,
     stageMeta: {
       classify: classifyResult,
-      locate: { locatedQuestions: [] }
+      locate: locateResult
     },
     consistencyById
   })
