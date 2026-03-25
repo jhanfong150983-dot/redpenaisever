@@ -4158,9 +4158,14 @@ async function handleStudentOverview(req, res) {
             gradingQueuePosition = myIndex >= 0 ? myIndex + 1 : globalQueue.length
           }
 
-          const gradingFailed = submissions.some((s) =>
-            s.status === 'grading_failed' && s.source === 'student_correction'
-          ) || undefined
+          // Only report gradingFailed if the LATEST correction submission failed —
+          // older grading_failed records from previous rounds should not resurface.
+          const correctionSubmissions = submissions.filter((s) => s.source === 'student_correction')
+          const latestCorrectionSub = correctionSubmissions.reduce((latest, s) => {
+            if (!latest) return s
+            return (Date.parse(s.created_at) || 0) > (Date.parse(latest.created_at) || 0) ? s : latest
+          }, null)
+          const gradingFailed = (!gradingPending && latestCorrectionSub?.status === 'grading_failed') || undefined
 
           return compactObject({
             id: assignment.id,
@@ -4473,6 +4478,7 @@ async function handleStudentSubmission(req, res) {
     if (mode === 'correction' && correctionImages.length > 0) {
       // 高併發時限制每次請求的上傳並行度，避免 1 班同時送出時大量平行連線導致逾時
       const uploadConcurrency = 2
+      const failedQuestionIds = []
       for (let i = 0; i < correctionImages.length; i += uploadConcurrency) {
         const batch = correctionImages.slice(i, i + uploadConcurrency)
         const results = await Promise.all(
@@ -4495,14 +4501,15 @@ async function handleStudentSubmission(req, res) {
             return { ok: !uploadError, questionId: img.questionId }
           })
         )
-        const failCount = results.filter((r) => r && r.ok === false).length
-        if (failCount > 0) {
-          console.warn('[student-submission] correction image batch had failures:', {
-            submissionId,
-            batchSize: batch.length,
-            failCount
-          })
+        for (const r of results) {
+          if (r && r.ok === false && r.questionId) {
+            failedQuestionIds.push(r.questionId)
+          }
         }
+      }
+      if (failedQuestionIds.length > 0) {
+        const questionList = failedQuestionIds.join('、')
+        throw new Error(`第 ${questionList} 題照片上傳失敗，請重新拍攝後再送出`)
       }
     }
 
@@ -4757,10 +4764,15 @@ async function handleProcessPendingGrading(req, res) {
           .from('submissions')
           .update({ status: 'grading_failed', updated_at: new Date().toISOString() })
           .eq('id', submission.id)
-        await upsertAssignmentStudentState(supabaseDb, submission.owner_id, submission.assignment_id, submission.student_id, {
-          status: 'correction_required',
-          last_status_reason: isInvalidUpload ? err.message : 'AI 批改失敗，請重新送出訂正'
-        })
+        // Wrap separately so a state-update failure does not leave assignment stuck at correction_in_progress
+        try {
+          await upsertAssignmentStudentState(supabaseDb, submission.owner_id, submission.assignment_id, submission.student_id, {
+            status: 'correction_required',
+            last_status_reason: isInvalidUpload ? err.message : 'AI 批改失敗，請重新送出訂正'
+          })
+        } catch (stateErr) {
+          console.error('[PROCESS-GRADING] Failed to reset assignment state after grading failure', submission.id, stateErr?.message)
+        }
       } else {
         // First failure → retry once more next minute
         await supabaseDb
