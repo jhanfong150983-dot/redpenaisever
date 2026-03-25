@@ -1187,7 +1187,10 @@ FORMAT B — CIRCLE-IN-PARENS 圈圈看 (both options pre-printed inside parens)
 - The student circles, underlines, or otherwise marks ONE of the pre-printed words.
 - Output ONLY the word that has a fresh circle/underline/mark drawn around it.
 - ❌ FORBIDDEN: outputting the un-marked word. ❌ FORBIDDEN: outputting both words.
-- If you cannot tell which word is marked → status="unreadable", studentAnswerRaw="無法辨識".
+- ❌ FORBIDDEN: using the question stem, subject knowledge, or logic to guess which word is more likely correct — you have NO knowledge of correct answers.
+- ❌ FORBIDDEN: outputting an answer just because one option "sounds right" or "makes sense" given the question context.
+- The ONLY valid evidence is a visible fresh mark (circle, underline, cross-out) physically drawn on ONE word.
+- If the mark is ambiguous (cannot determine which word it covers) → status="unreadable", studentAnswerRaw="無法辨識".
 - If no mark at all → blank.
 
 BOTH formats:
