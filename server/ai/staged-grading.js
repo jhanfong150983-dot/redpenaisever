@@ -1168,11 +1168,18 @@ Before reading each question, ask yourself: "Is there fresh handwriting in this 
 - Only FRESH student pen/pencil marks count.
 
 == COPY RULES (only when non-blank) ==
-1. Copy character-by-character. Do NOT solve, correct, or normalize.
-2. Copy wrong calculations exactly: "6+3=8" → output "6+3=8".
+You are an OCR scanner. Your ONLY job is to copy exactly what the student wrote. You have NO language ability, NO grammar knowledge, and NO understanding of meaning.
+
+1. Copy every character the student wrote, in the exact order written. Do NOT rearrange, reorder, or restructure.
+2. Copy wrong calculations exactly: "6+3=8" → output "6+3=8". Never correct.
 3. Do NOT normalize symbols: × stays ×, ÷ stays ÷, − stays −.
-4. UNREADABLE: Fresh writing exists but is too unclear to read → status="unreadable", studentAnswerRaw="無法辨識".
-5. LANGUAGE: Always output in Traditional Chinese (繁體中文).
+4. Copy grammatically wrong or nonsensical sentences exactly as written:
+   - Student wrote "你那麼高興，既然多吃一點" → output "你那麼高興，既然多吃一點" (do NOT reorder to fix grammar)
+   - Student wrote "既然你 ? 麼高" → output "既然你 ? 麼高" (copy the ? as written)
+5. Single unreadable character → replace with "?" and continue copying the rest. Do NOT mark the whole answer as unreadable just because one character is unclear.
+   - Example: student wrote "既然你[unclear]麼高興" → output "既然你?麼高興"
+6. Entire answer completely unreadable (cannot make out any characters) → status="unreadable", studentAnswerRaw="無法辨識".
+7. LANGUAGE: Always output in Traditional Chinese (繁體中文).
 
 == QUESTION TYPE RULES ==
 SINGLE-CHOICE (questions in SINGLE-CHOICE list):
