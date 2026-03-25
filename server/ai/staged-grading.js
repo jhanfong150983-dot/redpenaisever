@@ -51,6 +51,8 @@ function logStageEnd(pipelineRunId, stageName, stageResponse) {
 // questionCategory → internal type 1/2/3 (backward compat)
 const CATEGORY_TO_TYPE = {
   single_choice: 1,
+  multi_choice: 2,
+  single_check: 1,
   true_false: 1,
   fill_blank: 1,
   fill_variants: 2,
@@ -993,8 +995,13 @@ Rules:
   - drawType="grid_geometry": grid paper — student draws a geometric shape (square, triangle, etc.)
   - drawType="connect_dots": numbered dots — student connects points in order to form a shape
 - questionType="diagram_draw" if the question shows pre-printed shapes/figures (circles, fraction bars, etc.) and asks the student to COLOR or SHADE a portion of them (e.g., 塗色表示分數、塗出1又2/3個圓). Output answerBbox that frames the entire figure area.
-- questionType="single_choice" if the question has labeled options (A/B/C/D or 甲/乙/丙/丁 or ①/②/③) and the student selects exactly one option (circle, tick, or fill-in).
-- questionType="multi_check" if the question has multiple checkboxes/boxes where the student can tick/check/cross ONE OR MORE options. Options may be unlabeled blank boxes, or labeled with numbers/letters/symbols. Key difference from single_choice: multiple selections are allowed.
+- questionType="single_choice" if the answer space is a PARENTHESES ( ) and the student writes ONE option symbol (A/B/C/D or 甲/乙/丙/丁 or ①/②/③) inside it. Binary right/wrong scoring.
+- questionType="multi_choice" if the answer space is PARENTHESES ( ) and the student writes MULTIPLE option symbols (comma-separated like "A,C"). Partial credit scoring. Key distinction from single_choice: multiple selections expected.
+- questionType="single_check" if the answer space is a CHECKBOX □ and the student marks ONLY ONE box with ✓/○/×. Binary right/wrong scoring. Key distinction from multi_check: only one box should be marked.
+- questionType="multi_check" if the answer space is CHECKBOXES □ and the student can mark MULTIPLE boxes. Options may be unlabeled blank boxes, or labeled with numbers/letters/symbols. Partial credit scoring.
+  KEY DISTINCTION — 選擇(choice) vs 勾選(check):
+  - 選擇題 (single_choice / multi_choice): the answer space is PARENTHESES ( ) — student writes a symbol inside
+  - 勾選題 (single_check / multi_check): the answer space is CHECKBOXES □ — student marks the box itself
 - questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem and calculation if blank markers are present.
 - questionType="calculation" if the question is a math calculation with NO narrative/story context, NO blank markers (□/___), and the student must write formula steps and a final numeric answer (e.g., 算算看、直式算算看). The answer does NOT require a unit or answer sentence.
 - questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers, and the answer requires a unit or text answer sentence.
@@ -1071,6 +1078,12 @@ function buildReadAnswerPrompt(classifyResult) {
   const multiCheckIds = visibleQuestions
     .filter((q) => q.questionType === 'multi_check')
     .map((q) => q.questionId)
+  const multiChoiceIds = visibleQuestions
+    .filter((q) => q.questionType === 'multi_choice')
+    .map((q) => q.questionId)
+  const singleCheckIds = visibleQuestions
+    .filter((q) => q.questionType === 'single_check')
+    .map((q) => q.questionId)
   const fillBlankIds = visibleQuestions
     .filter((q) => q.questionType === 'fill_blank')
     .map((q) => q.questionId)
@@ -1113,7 +1126,13 @@ function buildReadAnswerPrompt(classifyResult) {
     ? `\nMAP-DRAW (connect_dots) questions: ${JSON.stringify(mapDrawConnectIds)}`
     : ''
   const multiCheckNote = multiCheckIds.length > 0
-    ? `\nMULTI-CHECK questions (勾選題, output comma-separated tokens; use printed labels if any, else 第X個 in reading order): ${JSON.stringify(multiCheckIds)}`
+    ? `\nMULTI-CHECK questions (多選勾選, output comma-separated tokens; use printed labels if any, else 第X個 in reading order): ${JSON.stringify(multiCheckIds)}`
+    : ''
+  const multiChoiceNote = multiChoiceIds.length > 0
+    ? `\nMULTI-CHOICE questions (多選選擇, output comma-separated option symbols written inside parentheses; e.g. "A,C" or "①,③"): ${JSON.stringify(multiChoiceIds)}`
+    : ''
+  const singleCheckNote = singleCheckIds.length > 0
+    ? `\nSINGLE-CHECK questions (單選勾選, output ONE token for the single marked checkbox; use printed label if any, else 第X個 in reading order): ${JSON.stringify(singleCheckIds)}`
     : ''
   const fillBlankNote = fillBlankIds.length > 0
     ? `\nFILL-BLANK questions (填空題, output comma-separated blank contents): ${JSON.stringify(fillBlankIds)}`
@@ -1129,7 +1148,7 @@ You are an answer reader. Your only job is to report what the student physically
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${trueFalseNote}${multiCheckNote}${fillBlankNote}${calculationNote}${diagramDrawNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}
+${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${diagramDrawNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
@@ -1157,9 +1176,15 @@ Before reading each question, ask yourself: "Is there fresh handwriting in this 
 
 == QUESTION TYPE RULES ==
 SINGLE-CHOICE (questions in SINGLE-CHOICE list):
-- Output exactly ONE option identifier (A/B/C/D or 甲/乙/丙/丁 or ①/②/③/④).
-- Valid only if the student wrote a letter/number OR made a mark (circle/tick/fill) in the designated answer space ( ) or ___ for this question.
+- Answer space is PARENTHESES ( ) — output exactly ONE option identifier (A/B/C/D or 甲/乙/丙/丁 or ①/②/③/④).
+- Valid only if the student wrote a letter/number OR made a mark (circle/tick/fill) inside the parentheses ( ) for this question.
 - A mark beside option rows or next to a neighboring question does NOT count for this question.
+- SELF-CHECK: "Did the student mark in THIS question's answer blank?" If no → blank.
+
+MULTI-CHOICE (questions in MULTI-CHOICE list):
+- Answer space is PARENTHESES ( ) — output comma-separated option identifiers for ALL marked options (e.g. "A,C" or "①,③").
+- No spaces around commas. If only one option is marked, output just that one (e.g. "B").
+- Valid only if the student wrote symbols inside the parentheses ( ) for this question.
 - SELF-CHECK: "Did the student mark in THIS question's answer blank?" If no → blank.
 
 TRUE-FALSE (questions in TRUE-FALSE list):
@@ -1167,8 +1192,16 @@ TRUE-FALSE (questions in TRUE-FALSE list):
 - Valid outputs: "○", "✗", "對", "錯", "是", "否", or the exact character written.
 - Do NOT append any explanatory text (e.g. output "○" NOT "○ 正確").
 
+SINGLE-CHECK (questions in SINGLE-CHECK list):
+- Answer space is CHECKBOX □ — output ONE token for the single marked box.
+- STRICT FORMAT PRIORITY — apply the FIRST matching rule:
+  1. Printed labels exist (①②③ / A B C / 甲乙丙): use ONLY the label character. Template: "<label>". Example: "①" or "A"
+  2. Unlabeled boxes: use "第X個" where X is 一/二/三/四/五/六/七/八/九/十, counting in reading order.
+- ABSOLUTELY FORBIDDEN: outputting the text/sentence content of the option box.
+- If no box is marked → blank.
+
 MULTI-CHECK (questions in MULTI-CHECK list):
-- Output comma-separated selected options with NO spaces.
+- Answer space is CHECKBOXES □ — output comma-separated selected options with NO spaces.
 - STRICT FORMAT PRIORITY — apply the FIRST matching rule, never mix rules across options:
   1. Printed labels exist (①②③ / A B C / 1 2 3 / 甲乙丙): use ONLY the label character(s). Template: "<label>". Example: "①,③" or "A,C"
   2. Unlabeled boxes (no printed label next to any box): use ONLY "第X個" where X is 一/二/三/四/五/六/七/八/九/十.
@@ -1322,11 +1355,11 @@ Rules:
   - evaluate as a bag (order-insensitive matching) within that group.
 
 QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
-- single_choice / true_false: Compare student's selected option letter/symbol only. Ignore surrounding text. Case-insensitive.
+- single_choice / true_false / single_check: Compare student's selected option letter/symbol only. Ignore surrounding text. Case-insensitive. Binary right/wrong.
 - fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical. 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm — these are WRONG (errorType='unit'), not equivalent. Do NOT accept unit substitution regardless of strictness setting.
   DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
 - fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
-- multi_check: The answer field contains comma-separated correct tokens (e.g. "①,③"). Parse BOTH student answer and correct answer as comma-separated token sets (order-insensitive).
+- multi_check / multi_choice: The answer field contains comma-separated correct tokens (e.g. "①,③" or "A,C"). Parse BOTH student answer and correct answer as comma-separated token sets (order-insensitive).
   - correct = tokens in student ∩ answer_tokens
   - wrong = tokens in student − answer_tokens
   - score = max(0, round((|correct| − |wrong|) / |answer_tokens| × maxScore))
