@@ -1176,8 +1176,21 @@ Before reading each question, ask yourself: "Is there fresh handwriting in this 
 
 == QUESTION TYPE RULES ==
 SINGLE-CHOICE (questions in SINGLE-CHOICE list):
-- Answer space is PARENTHESES ( ) — output exactly ONE option identifier (A/B/C/D or 甲/乙/丙/丁 or ①/②/③/④).
-- Valid only if the student wrote a letter/number OR made a mark (circle/tick/fill) inside the parentheses ( ) for this question.
+TWO formats exist — identify which format this question uses, then apply ONLY that format's rule:
+
+FORMAT A — WRITE-IN (student writes a symbol in an empty blank):
+- The parentheses ( ) are empty; the student writes ONE option identifier inside: A/B/C/D or 甲/乙/丙/丁 or ①/②/③/④.
+- Output exactly that written identifier. Example: student wrote "B" → output "B".
+
+FORMAT B — CIRCLE-IN-PARENS 圈圈看 (both options pre-printed inside parens):
+- Both options are pre-printed inside the same parentheses, e.g. "（可以，不可以）" or "（會，不會）" or "（大於，小於，等於）".
+- The student circles, underlines, or otherwise marks ONE of the pre-printed words.
+- Output ONLY the word that has a fresh circle/underline/mark drawn around it.
+- ❌ FORBIDDEN: outputting the un-marked word. ❌ FORBIDDEN: outputting both words.
+- If you cannot tell which word is marked → status="unreadable", studentAnswerRaw="無法辨識".
+- If no mark at all → blank.
+
+BOTH formats:
 - A mark beside option rows or next to a neighboring question does NOT count for this question.
 - SELF-CHECK: "Did the student mark in THIS question's answer blank?" If no → blank.
 
