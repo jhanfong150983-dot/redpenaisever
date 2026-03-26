@@ -4708,9 +4708,24 @@ async function handleProcessPendingGrading(req, res) {
         .eq('student_id', submission.student_id)
         .eq('status', 'open')
 
+      // If all remaining questions were disputed (no open items), skip AI recheck and
+      // set state to correction_pending_review — no grading failure should occur here.
+      if (!openItems?.length) {
+        await supabaseDb
+          .from('submissions')
+          .update({ status: 'graded', score: 0, updated_at: new Date().toISOString() })
+          .eq('id', submission.id)
+        await upsertAssignmentStudentState(
+          supabaseDb, submission.owner_id, submission.assignment_id, submission.student_id,
+          { status: 'correction_pending_review', last_status_reason: '所有題目已申訴，等待老師審閱' }
+        )
+        processed++
+        return
+      }
+
       const recheckFolder = await supabaseDb.storage.from(HOMEWORK_IMAGES_BUCKET)
         .list(`corrections/${submission.id}`)
-      const hasRecheckImages = openItems?.length > 0 && recheckFolder.data?.length > 0
+      const hasRecheckImages = recheckFolder.data?.length > 0
 
       if (!hasRecheckImages) {
         throw Object.assign(new Error('訂正照片未正確上傳，請重新拍攝每題作答後再送出。'), { code: 'NO_RECHECK_IMAGES' })
