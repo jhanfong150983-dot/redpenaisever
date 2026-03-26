@@ -1191,6 +1191,15 @@ You are an OCR scanner. Your ONLY job is to copy exactly what the student wrote.
    - Example: student wrote "既然你[unclear]麼高興" → output "既然你?麼高興"
 6. Entire answer completely unreadable (cannot make out any characters) → status="unreadable", studentAnswerRaw="無法辨識".
 7. LANGUAGE: Always output in Traditional Chinese (繁體中文).
+8. INSERTION MARK (插入符號 ∧ or 入-shape):
+   If the student uses a handwritten ∧ or 入-shaped symbol to indicate a text insertion:
+   - The tip of the symbol points to the insertion position in the original text.
+   - The inserted text is written above the symbol (between the symbol and the line above).
+   - Merge the inserted text into the original sentence at exactly that position.
+   - Output the COMPLETE merged result as if the insertion was always there. Do NOT mention the symbol.
+   - Follow the student's intent faithfully even if the merged result sounds grammatically odd.
+   - Example: student wrote "小明走路∧上學" with "快速" written above the ∧ → output "小明走路快速上學"
+   - Example: student wrote "答：速率為60∧" with "公尺" above the ∧ → output "答：速率為60公尺"
 
 == QUESTION TYPE RULES ==
 SINGLE-CHOICE (questions in SINGLE-CHOICE list):
@@ -2549,9 +2558,18 @@ GRADING RULES per questionCategory (use "questionCategory" field if present; oth
     * The answer does not need to be perfect, but must show the student understood their mistake and addressed it meaningfully.
     * Do NOT pass if the answer is essentially unchanged from the mistake described in mistakeReason.
 
+INSERTION MARK (插入符號 ∧ or 入-shape):
+If the student uses a handwritten ∧ or 入-shaped symbol to indicate a text insertion:
+- The tip of the symbol points to the insertion position in the original text.
+- The inserted text is written above the symbol.
+- Merge the inserted text into the original sentence at exactly that position.
+- Output the COMPLETE merged result as if the insertion was always there. Do NOT mention the symbol.
+- Follow the student's intent faithfully even if the merged result sounds grammatically odd.
+- Example: student wrote "速率為60∧" with "公尺" above → read as "速率為60公尺"
+
 Instructions for each question:
 1. Find the corresponding image using the mapping above.
-2. Carefully read the student's new answer from that image.
+2. Carefully read the student's new answer from that image (apply INSERTION MARK rule if present).
 3. Apply the grading rule for that question's type.
 4. If passed=false, write both reason and newGuidance:
    - reason: short why the correction is still not acceptable.
