@@ -4545,7 +4545,7 @@ async function handleStudentSubmission(req, res) {
           owner_id: ownerId,
           assignment_id: assignmentId,
           student_id: studentContext.id,
-          attempt_no: correctionCount + 1,
+          attempt_no: correctionCount,
           question_id: String(d.questionId).trim(),
           dispute_note: typeof d.note === 'string' && d.note.trim() ? d.note.trim() : null,
           status: 'disputed',
