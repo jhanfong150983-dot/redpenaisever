@@ -2117,6 +2117,84 @@ async function handleDisputeResolve(req, res) {
   }
 }
 
+async function handleManualGrade(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Invalid JSON body' })
+    return
+  }
+  const assignmentId = typeof body.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const studentId = typeof body.studentId === 'string' ? body.studentId.trim() : ''
+  if (!assignmentId || !studentId) {
+    res.status(400).json({ error: 'Missing required fields' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
+      status: 'graded',
+      graded_once: true,
+      last_status_reason: 'teacher_manual_grade'
+    })
+    res.status(200).json({ success: true, newStatus: 'graded' })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '手動標記失敗' })
+  }
+}
+
+async function handleCorrectionManualPass(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Invalid JSON body' })
+    return
+  }
+  const assignmentId = typeof body.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const studentId = typeof body.studentId === 'string' ? body.studentId.trim() : ''
+  if (!assignmentId || !studentId) {
+    res.status(400).json({ error: 'Missing required fields' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const now = new Date().toISOString()
+    // Resolve all open/disputed correction items for this student
+    const { error: updateError } = await supabaseDb
+      .from('correction_question_items')
+      .update({ status: 'resolved', updated_at: now })
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .in('status', ['open', 'disputed'])
+    if (updateError) throw new Error(updateError.message)
+    // Mark correction as passed
+    await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
+      status: 'correction_passed',
+      last_status_reason: 'teacher_manual_pass'
+    })
+    res.status(200).json({ success: true, newStatus: 'correction_passed' })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '手動通過訂正失敗' })
+  }
+}
+
 async function handleCorrectionDispatchToggle(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -5718,6 +5796,14 @@ export default async function handler(req, res) {
   }
   if (action === 'dispute-resolve') {
     await handleDisputeResolve(req, res)
+    return
+  }
+  if (action === 'manual-grade') {
+    await handleManualGrade(req, res)
+    return
+  }
+  if (action === 'correction-manual-pass') {
+    await handleCorrectionManualPass(req, res)
     return
   }
   if (action === 'report') {
