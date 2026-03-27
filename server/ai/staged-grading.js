@@ -1361,10 +1361,10 @@ function buildAccessorPrompt(answerKey, readAnswerResult) {
   const strictness = answerKey?.strictness || 'standard'
   const strictnessRule =
     strictness === 'strict'
-      ? 'GRADING STRICTNESS: STRICT — The student answer must match the answer key exactly. Word order, factor order in multiplication, punctuation, units, and formatting must all be correct. Any deviation = wrong.'
+      ? 'GRADING STRICTNESS: STRICT — The student answer must match the answer key exactly. Word order, factor order in multiplication, punctuation, units, and formatting must all be correct. Any deviation = wrong. Exception: unit pairs listed in the UNIT EQUIVALENCE TABLE below are always treated as identical.'
       : strictness === 'lenient'
-        ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, or minor formatting differ. However, unit substitution (e.g. 公尺 for 公分) is still wrong even in lenient mode for fill_blank and word_problem questions.'
-        : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, same unit written differently e.g. ml/mL) but reject wrong meaning, wrong numbers, wrong key terms, or different units.'
+        ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, or minor formatting differ. However, unit substitution (e.g. 公尺 for 公分) is still wrong even in lenient mode for fill_blank and word_problem questions. Exception: unit pairs listed in the UNIT EQUIVALENCE TABLE below are always treated as identical.'
+        : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, equivalent units per the UNIT EQUIVALENCE TABLE below) but reject wrong meaning, wrong numbers, wrong key terms, or different units.'
 
   const compactAnswerKey = {
     questions: Array.isArray(answerKey?.questions) ? answerKey.questions : [],
@@ -1389,6 +1389,16 @@ ${JSON.stringify(compactAnswerKey)}
 Student answers:
 ${JSON.stringify(trimmedAnswers)}
 
+UNIT EQUIVALENCE TABLE — these pairs are ALWAYS treated as identical regardless of strictness:
+  【長度】 km = 公里   m = 公尺   cm = 公分   mm = 公釐
+  【面積】 km² = 平方公里   m² = 平方公尺 = ㎡   cm² = 平方公分   mm² = 平方公釐
+  【重量】 kg = 公斤   g = 公克   mg = 毫克
+  【容積】 L = 公升   mL = ml = 毫升
+  【時間】 h = hr = 小時   min = 分 = 分鐘   s = sec = 秒
+  【速度】 km/h = 公里/小時 = 時速X公里   m/s = 公尺/秒   m/min = 公尺/分鐘   km/min = 公里/分鐘
+  Note: "時速X公里" (e.g. 時速60公里) = "X km/h" = "X 公里/小時" — treat as identical.
+  Note: Different units (e.g. 公尺 vs 公分, kg vs g) are still WRONG even if both appear in this table.
+
 Rules:
 - score must be 0..maxScore.
 - If status is "blank" or "unreadable": score=0, isCorrect=false.
@@ -1399,7 +1409,7 @@ Rules:
 
 QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - single_choice / true_false / single_check: Compare student's selected option letter/symbol only. Ignore surrounding text. Case-insensitive. Binary right/wrong.
-- fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical. 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm — these are WRONG (errorType='unit'), not equivalent. Do NOT accept unit substitution regardless of strictness setting.
+- fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "15 km" = "15 公里" ✓). Units NOT in the same equivalence pair are WRONG (errorType='unit'): 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm. Do NOT accept other unit substitutions regardless of strictness setting.
   DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
 - fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
 - multi_check / multi_choice: The answer field contains comma-separated correct tokens (e.g. "①,③" or "A,C"). Parse BOTH student answer and correct answer as comma-separated token sets (order-insensitive).
@@ -1408,7 +1418,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - score = max(0, round((|correct| − |wrong|) / |answer_tokens| × maxScore))
   - isCorrect = (score === maxScore)
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
-- word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical. Wrong unit = that dimension loses points (errorType='unit').
+- word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
 - short_answer: Grade by key concept presence using rubricsDimensions or rubric. No unit checking required.
 - diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
@@ -2544,14 +2554,24 @@ ${imageMapping}
 Wrong questions context (JSON):
 ${JSON.stringify(itemsWithAnswers, null, 2)}
 
+UNIT EQUIVALENCE TABLE — these pairs are ALWAYS treated as identical:
+  【長度】 km = 公里   m = 公尺   cm = 公分   mm = 公釐
+  【面積】 km² = 平方公里   m² = 平方公尺 = ㎡   cm² = 平方公分   mm² = 平方公釐
+  【重量】 kg = 公斤   g = 公克   mg = 毫克
+  【容積】 L = 公升   mL = ml = 毫升
+  【時間】 h = hr = 小時   min = 分 = 分鐘   s = sec = 秒
+  【速度】 km/h = 公里/小時 = 時速X公里   m/s = 公尺/秒   m/min = 公尺/分鐘   km/min = 公里/分鐘
+  Note: "時速X公里" (e.g. 時速60公里) = "X km/h" = "X 公里/小時" — treat as identical.
+  Note: Different units (e.g. 公尺 vs 公分, kg vs g) are still WRONG even if both appear in this table.
+
 GRADING RULES per questionCategory (use "questionCategory" field if present; otherwise fall back to "type"):
 - single_choice / true_false / fill_blank (or type=1): student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
-  - fill_blank UNIT RULE: if correctAnswer contains a unit (e.g. "15 公分"), the student's unit must match exactly. 公尺 ≠ 公分 → not passed.
+  - fill_blank UNIT RULE: if correctAnswer contains a unit (e.g. "15 公分"), the student's unit must match exactly OR be an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "15 km" = "15 公里" ✓). Units not in the same equivalence pair (e.g. 公尺 ≠ 公分) → not passed.
   - fill_blank DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
 - fill_variants / map_fill (or type=2): student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
 - word_problem (or type=3 with rubricsDimensions): This is a correction submission.
     * Check BOTH: (1) a calculation formula/process is present, AND (2) an answer sentence starts with "答：" or "A："and contains a number+unit (or full text answer).
-    * UNIT RULE: if the expected answer has a unit, the student's unit must match. Wrong unit = not passed.
+    * UNIT RULE: if the expected answer has a unit, the student's unit must match OR be an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair → not passed.
     * Must show the student understood the mistake and corrected it meaningfully.
 - short_answer / map_draw (or type=3): This is a correction submission.
     * Judge based on referenceAnswer and whether the student demonstrates genuine understanding of the concept.
