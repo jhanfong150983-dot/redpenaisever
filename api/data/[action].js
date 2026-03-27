@@ -5736,5 +5736,48 @@ export default async function handler(req, res) {
     await handleCampus1Debug(req, res)
     return
   }
+  if (action === 'assignment-state-summary') {
+    await handleAssignmentStateSummary(req, res)
+    return
+  }
   res.status(404).json({ error: 'Not Found' })
+}
+
+async function handleAssignmentStateSummary(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const rawIds = typeof req.query?.assignmentIds === 'string' ? req.query.assignmentIds.trim() : ''
+  const assignmentIds = rawIds.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 200)
+  if (!assignmentIds.length) {
+    res.status(200).json({ byAssignment: {} })
+    return
+  }
+
+  const supabaseDb = getSupabaseAdmin()
+  const { data, error } = await supabaseDb
+    .from('assignment_student_state')
+    .select('assignment_id, student_id, status')
+    .eq('owner_id', user.id)
+    .in('assignment_id', assignmentIds)
+
+  if (error) {
+    res.status(500).json({ error: error.message })
+    return
+  }
+
+  const byAssignment = {}
+  for (const row of data || []) {
+    if (!byAssignment[row.assignment_id]) byAssignment[row.assignment_id] = []
+    byAssignment[row.assignment_id].push({ studentId: row.student_id, status: row.status })
+  }
+
+  res.status(200).json({ byAssignment })
 }
