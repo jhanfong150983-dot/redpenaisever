@@ -1101,6 +1101,9 @@ function buildReadAnswerPrompt(classifyResult) {
   const calculationIds = visibleQuestions
     .filter((q) => q.questionType === 'calculation')
     .map((q) => q.questionId)
+  const wordProblemIds = visibleQuestions
+    .filter((q) => q.questionType === 'word_problem')
+    .map((q) => q.questionId)
   const diagramDrawIds = visibleQuestions
     .filter((q) => q.questionType === 'diagram_draw')
     .map((q) => q.questionId)
@@ -1151,6 +1154,9 @@ function buildReadAnswerPrompt(classifyResult) {
   const calculationNote = calculationIds.length > 0
     ? `\nCALCULATION questions (計算題, read entire work area): ${JSON.stringify(calculationIds)}`
     : ''
+  const wordProblemNote = wordProblemIds.length > 0
+    ? `\nWORD-PROBLEM questions (應用題, read entire work area including proportion tables): ${JSON.stringify(wordProblemIds)}`
+    : ''
   const diagramDrawNote = diagramDrawIds.length > 0
     ? `\nDIAGRAM-DRAW questions (塗色題, describe coloring): ${JSON.stringify(diagramDrawIds)}`
     : ''
@@ -1159,7 +1165,7 @@ You are an answer reader. Your only job is to report what the student physically
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${diagramDrawNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}
+${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
@@ -1267,6 +1273,29 @@ CALCULATION (questions in CALCULATION list):
 - Copy exactly as written: "25×6=150" → output "25×6=150"; wrong calc "6+3=8" → output "6+3=8".
 - Include the final answer line if present (e.g. "答: 150" or just "= 150").
 - If the work area is blank (no fresh marks) → status="blank".
+
+WORD-PROBLEM (questions in WORD-PROBLEM list):
+- Read the ENTIRE answer work area: ALL formula lines, intermediate steps, AND the final answer sentence (答:/A:/Ans:).
+- Copy ALL student-written content in reading order (top to bottom, left to right).
+- Include the final answer sentence if present (e.g. "答: 小明走了120公尺").
+- If the work area is blank (no fresh marks) → status="blank".
+
+PROPORTION TABLE FORMAT (比例式格式) — applies to WORD-PROBLEM and CALCULATION questions:
+Students in Taiwan often write ratio-scaling steps as a two-row table with multipliers on the side:
+
+  Example on paper:
+       0.048 : 0.2
+  ×1000↙         ↘×1000
+       48    : ( )
+
+When you encounter this format:
+- Read BOTH rows completely, including the side multiplier annotation (×N or ÷N).
+- Output as: "[top-left]:[top-right] ×[N] → [bottom-left]:[bottom-right]"
+  Example: "0.048:0.2 ×1000 → 48:200"
+- The side annotation (×N or ÷N) written beside or between the rows IS part of the calculation — do NOT skip it.
+- This two-row structure counts as a valid 列式 (calculation listing). Treat it the same as writing "0.048÷0.2=48÷X".
+- The multiplier may appear as: "×1000", "÷10", "×5" etc., written to the left/right side or between the two rows.
+- Even if the multiplier is small or positioned at the edge, include it in your output.
 
 FORBIDDEN:
 - Guessing or inferring what the student meant to write
