@@ -686,7 +686,8 @@ function normalizeClassifyResult(parsed, questionIds) {
       questionType,
       drawType,
       questionBbox: normalizeBboxRef(row?.questionBbox ?? row?.question_bbox),
-      answerBbox: normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox)
+      answerBbox: normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox),
+      bracketBbox: (questionType === 'single_choice') ? normalizeBboxRef(row?.bracketBbox) : undefined
     })
     if (!visible) unmappedQuestionIds.push(questionId)
   }
@@ -1021,6 +1022,7 @@ Rules:
   - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
   If the question region cannot be determined, omit answerBbox.
+- For single_choice questions ONLY: also output bracketBbox that frames ONLY the printed bracket row "（option1，option2）" and the student's mark inside it — do NOT include the question stem text. This should be a very tight crop of just that one bracket line. Omit bracketBbox if this is FORMAT A (empty parentheses where student writes a symbol) or if the bracket row cannot be located precisely.
 - Return strict JSON only.
 
 Output:
@@ -1031,7 +1033,8 @@ Output:
       "visible": true,
       "questionType": "word_problem",
       "drawType": "map_symbol",
-      "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 }
+      "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 },
+      "bracketBbox": { "x": 0.1, "y": 0.26, "w": 0.25, "h": 0.025 }
     }
   ]
 }
@@ -1077,6 +1080,33 @@ Output:
 `.trim()
 }
 
+
+function buildFocusedBracketReadPrompt(questionId) {
+  return `You are looking at a CROPPED IMAGE that shows ONLY a single bracket row "(option1，option2)" with the student's handwritten mark inside it. There is NO question stem visible. You have NO knowledge of the correct answer and must NOT guess based on logic or context.
+
+Your task: identify which pre-printed option word the student circled/underlined/marked.
+
+Question ID: "${questionId}"
+
+Steps (write each step into formatBReasoning):
+1. Read the two pre-printed option words: OPTION_LEFT = the word before the comma, OPTION_RIGHT = the word after the comma.
+2. Locate the student's handwritten circle, underline, or mark.
+3. Determine whether the CENTER of that mark is to the LEFT or RIGHT of the comma character.
+4. Output the text of the option on that side.
+5. If no mark is visible → blank. If mark center position is truly ambiguous → unreadable.
+
+Return strict JSON:
+{
+  "answers": [
+    {
+      "questionId": "${questionId}",
+      "studentAnswerRaw": "exact option text the student marked",
+      "status": "read|blank|unreadable",
+      "formatBReasoning": "OPTION_LEFT=[word], OPTION_RIGHT=[word]. I see a [circle/underline]. Its center is to the [LEFT/RIGHT] of the comma. Therefore I output [word]."
+    }
+  ]
+}`.trim()
+}
 
 function buildReadAnswerPrompt(classifyResult) {
   const visibleQuestions = Array.isArray(classifyResult?.alignedQuestions)
@@ -2036,6 +2066,72 @@ export async function runStagedGradingPhaseA({
   if (readAnswerLogMode !== 'off') {
     logStaged(pipelineRunId, 'basic', 'ReadAnswer per-question', toReadAnswerSchemaPreview(readAnswerParsed))
     logStaged(pipelineRunId, 'basic', 'reReadAnswer per-question', toReadAnswerSchemaPreview(reReadAnswerParsed))
+  }
+
+  // ── A3b: Focused bracket read for single_choice questions (crop-based, context-free) ──
+  const bracketQuestions = classifyAligned.filter(
+    (q) => q.visible && q.questionType === 'single_choice' && q.bracketBbox
+  )
+  if (bracketQuestions.length > 0) {
+    const inlineImage = inlineImages[0]
+    logStaged(pipelineRunId, 'basic', 'bracket-read begin', { count: bracketQuestions.length })
+    const bracketReadResults = await Promise.all(
+      bracketQuestions.map(async (q) => {
+        const croppedData = await cropInlineImageByBbox(
+          inlineImage.inlineData.data,
+          inlineImage.inlineData.mimeType,
+          q.bracketBbox,
+          true // useActualBbox: tight crop
+        )
+        if (!croppedData) {
+          logStaged(pipelineRunId, 'basic', `bracket-read crop-failed qid=${q.questionId}`)
+          return null
+        }
+        const focusedPrompt = buildFocusedBracketReadPrompt(q.questionId)
+        const bracketResponse = await executeStage({
+          apiKey,
+          model,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(),
+          routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+          stageContents: [{ role: 'user', parts: [{ text: focusedPrompt }, { inlineData: croppedData }] }]
+        })
+        if (!bracketResponse.ok) {
+          logStaged(pipelineRunId, 'basic', `bracket-read failed qid=${q.questionId}`)
+          return null
+        }
+        const parsed = parseCandidateJson(bracketResponse.data)
+        const answer = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
+        if (answer) {
+          logStaged(pipelineRunId, 'basic', `bracket-read result qid=${q.questionId}`, {
+            studentAnswerRaw: answer.studentAnswerRaw,
+            status: answer.status,
+            formatBReasoning: answer.formatBReasoning
+          })
+        }
+        return answer ? { questionId: q.questionId, answer } : null
+      })
+    )
+
+    // Override full-image ReadAnswer results with bracket-crop results
+    const overrideMap = new Map()
+    for (const result of bracketReadResults) {
+      if (result) overrideMap.set(result.questionId, result.answer)
+    }
+    if (overrideMap.size > 0 && Array.isArray(readAnswerParsed?.answers)) {
+      readAnswerParsed.answers = readAnswerParsed.answers.map((item) => {
+        const override = overrideMap.get(item?.questionId)
+        return override ? { ...item, ...override } : item
+      })
+      if (reReadAnswerParsed && Array.isArray(reReadAnswerParsed?.answers)) {
+        reReadAnswerParsed.answers = reReadAnswerParsed.answers.map((item) => {
+          const override = overrideMap.get(item?.questionId)
+          return override ? { ...item, ...override } : item
+        })
+      }
+      logStaged(pipelineRunId, 'basic', 'bracket-read overrides applied', { count: overrideMap.size })
+    }
   }
 
   // Mismatch detection for word problems (A3 calc result vs FinalAnswerOnly)
