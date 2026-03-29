@@ -5953,7 +5953,7 @@ async function handleRefreshAssignmentSummary(req, res) {
     // 1. 讀取此作業所有已批改的 submissions
     const { data: submissions, error: subErr } = await supabaseDb
       .from('submissions')
-      .select('id, student_id, grading_result, status, students(name)')
+      .select('id, student_id, grading_result, status')
       .eq('assignment_id', assignmentId)
       .eq('owner_id', user.id)
       .in('status', ['graded', 'correction_passed', 'correction_pending_review'])
@@ -5970,7 +5970,20 @@ async function handleRefreshAssignmentSummary(req, res) {
       return
     }
 
-    // 2. 讀取答案鍵的 concept_code（從 assignments 表）
+    // 2. 取得學生姓名
+    const studentIds = [...new Set(submissions.map(s => s.student_id).filter(Boolean))]
+    const studentNameMap = {}
+    if (studentIds.length > 0) {
+      const { data: studentRows } = await supabaseDb
+        .from('students')
+        .select('id, name')
+        .in('id', studentIds)
+      if (studentRows) {
+        studentRows.forEach(s => { studentNameMap[s.id] = s.name })
+      }
+    }
+
+    // 3. 讀取答案鍵的 concept_code（從 assignments 表）
     const { data: assignment } = await supabaseDb
       .from('assignments')
       .select('answer_key')
@@ -6018,7 +6031,7 @@ async function handleRefreshAssignmentSummary(req, res) {
 
       if (errorItems.length > 0) {
         studentErrors.push({
-          studentName: sub.students?.name || `學生${sub.student_id}`,
+          studentName: studentNameMap[sub.student_id] || `學生${sub.student_id}`,
           studentId: sub.student_id,
           errors: errorItems
         })
