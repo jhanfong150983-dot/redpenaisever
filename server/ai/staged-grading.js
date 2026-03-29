@@ -1223,6 +1223,12 @@ FORMAT B — CIRCLE-IN-PARENS 圈圈看 (both options pre-printed inside parens)
 - ❌ FORBIDDEN: using the question stem, subject knowledge, or logic to guess which word is more likely correct — you have NO knowledge of correct answers.
 - ❌ FORBIDDEN: outputting an answer just because one option "sounds right" or "makes sense" given the question context.
 - The ONLY valid evidence is a visible fresh mark (circle, underline, cross-out) physically drawn on ONE word.
+- SUBSTRING TRAP — when one option is contained inside another (e.g. "可以" is a substring of "不可以"):
+  Step 1: Locate the LEFT EDGE of the drawn circle/mark.
+  Step 2: If the left edge starts at or after the character "不" → the student marked "不可以".
+  Step 3: If the left edge starts BEFORE "不" (i.e. the mark begins at "可") → the student marked "可以" only.
+  Step 4: If you cannot determine the left edge precisely → status="unreadable", studentAnswerRaw="無法辨識".
+  Do NOT default to the longer option just because it looks more prominent.
 - If the mark is ambiguous (cannot determine which word it covers) → status="unreadable", studentAnswerRaw="無法辨識".
 - If no mark at all → blank.
 
