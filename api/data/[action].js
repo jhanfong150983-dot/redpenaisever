@@ -5900,7 +5900,7 @@ async function handleGetAssignmentSummary(req, res) {
   const supabaseDb = getSupabaseAdmin()
   const { data, error } = await supabaseDb
     .from('assignment_summaries')
-    .select('status, class_summary, minority_summary, student_summaries, sample_count')
+    .select('status, class_summary, class_suggestion, minority_summary, minority_suggestion, student_summaries, sample_count')
     .eq('owner_id', user.id)
     .eq('assignment_id', assignmentId)
     .maybeSingle()
@@ -6059,10 +6059,12 @@ ${conceptContext}
 學生錯誤明細：
 ${studentLines || '（無錯誤）'}
 
-請根據以上資料，用繁體中文生成三段摘要，輸出純 JSON（不要 markdown）：
+請根據以上資料，用繁體中文生成摘要，輸出純 JSON（不要 markdown）：
 {
-  "class_summary": "大多數學生（N 人以上）的共同錯誤摘要，說明主要錯在哪個概念或步驟（2-4句話）",
-  "minority_summary": "少數學生（少於全班一半）的個別問題，若無則填 null（1-2句話）",
+  "class_summary": "大多數學生（超過半數）的共同錯誤描述，說明主要錯在哪個概念或步驟（2-4句話）。若無共同錯誤則說明全班表現。",
+  "class_suggestion": "針對 class_summary 的問題，給老師具體的教學建議（1-3點，例如：建議複習某概念、加強某題型練習等）。若無錯誤則填 null。",
+  "minority_summary": "少數學生（少於半數）特有的問題描述，若無則填 null（1-2句話）",
+  "minority_suggestion": "針對 minority_summary 的問題，給老師處理這些學生的建議（1-2點）。若無則填 null。",
   "student_summaries": [
     { "student_id": "xxx", "student_name": "小明", "summary": "簡短描述這位學生的主要錯誤（1句話）" }
   ]
@@ -6072,7 +6074,8 @@ ${studentLines || '（無錯誤）'}
 - class_summary 聚焦在超過半數學生都有的問題
 - minority_summary 說明少數人特有的問題模式
 - student_summaries 只列出有錯誤的學生
-- 若有課綱概念代碼（如 N-4-12），請在摘要中引用讓老師知道是哪個單元`
+- 若有課綱概念代碼（如 N-4-12），請在摘要中引用讓老師知道是哪個單元
+- class_suggestion 和 minority_suggestion 要具體可執行，不要太籠統`
 
     // 5. 呼叫 Gemini
     const apiKey = getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY')
@@ -6103,7 +6106,9 @@ ${studentLines || '（無錯誤）'}
           assignment_id: assignmentId,
           status: 'ready',
           class_summary: parsed.class_summary || null,
+          class_suggestion: parsed.class_suggestion || null,
           minority_summary: parsed.minority_summary || null,
+          minority_suggestion: parsed.minority_suggestion || null,
           student_summaries: Array.isArray(parsed.student_summaries) ? parsed.student_summaries : [],
           sample_count: sampleCount,
           error_message: null,
