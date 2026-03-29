@@ -1218,18 +1218,15 @@ FORMAT A — WRITE-IN (student writes a symbol in an empty blank):
 FORMAT B — CIRCLE-IN-PARENS 圈圈看 (both options pre-printed inside parens):
 - Both options are pre-printed inside the same parentheses, e.g. "（可以，不可以）" or "（會，不會）" or "（大於，小於，等於）".
 - The student circles, underlines, or otherwise marks ONE of the pre-printed words.
-- Output ONLY the word that has a fresh circle/underline/mark drawn around it.
-- ❌ FORBIDDEN: outputting the un-marked word. ❌ FORBIDDEN: outputting both words.
-- ❌ FORBIDDEN: using the question stem, subject knowledge, or logic to guess which word is more likely correct — you have NO knowledge of correct answers.
+- ❌ FORBIDDEN: using the question stem, subject knowledge, or logic to guess which word is correct — you have NO knowledge of correct answers.
 - ❌ FORBIDDEN: outputting an answer just because one option "sounds right" or "makes sense" given the question context.
-- The ONLY valid evidence is a visible fresh mark (circle, underline, cross-out) physically drawn on ONE word.
-- SUBSTRING TRAP — when one option is contained inside another (e.g. "可以" is a substring of "不可以"):
-  Step 1: Locate the LEFT EDGE of the drawn circle/mark.
-  Step 2: If the left edge starts at or after the character "不" → the student marked "不可以".
-  Step 3: If the left edge starts BEFORE "不" (i.e. the mark begins at "可") → the student marked "可以" only.
-  Step 4: If you cannot determine the left edge precisely → status="unreadable", studentAnswerRaw="無法辨識".
-  Do NOT default to the longer option just because it looks more prominent.
-- If the mark is ambiguous (cannot determine which word it covers) → status="unreadable", studentAnswerRaw="無法辨識".
+- SPATIAL METHOD — do NOT try to read the circled text directly. Use position instead:
+  Step 1: Identify OPTION_LEFT (first word printed, left of the comma) and OPTION_RIGHT (second word, right of the comma).
+  Step 2: Find the CENTER POINT of the student's circle/underline/mark.
+  Step 3: If the center is on the LEFT half of the bracket content → output OPTION_LEFT.
+  Step 4: If the center is on the RIGHT half of the bracket content → output OPTION_RIGHT.
+  Step 5: If you cannot determine which half the center falls in → status="unreadable", studentAnswerRaw="無法辨識".
+- This spatial method avoids substring confusion (e.g. "可以" inside "不可以") entirely.
 - If no mark at all → blank.
 
 BOTH formats:
