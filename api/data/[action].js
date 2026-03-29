@@ -5391,11 +5391,14 @@ async function handleCampus1ClassroomSync(req, res) {
 
       let classroomId
 
+      const gradeNum = cls.gradeYear != null ? parseInt(String(cls.gradeYear), 10) : null
+      const gradeValue = gradeNum != null && !isNaN(gradeNum) ? gradeNum : null
+
       if (syncRecord?.classroom_id) {
         classroomId = syncRecord.classroom_id
         await supabaseAdmin
           .from('classrooms')
-          .update({ name: className })
+          .update({ name: className, ...(gradeValue != null ? { grade: gradeValue } : {}) })
           .eq('id', classroomId)
           .eq('owner_id', user.id)
       } else {
@@ -5404,7 +5407,7 @@ async function handleCampus1ClassroomSync(req, res) {
         const { data: newClassroom, error: classroomError } =
           await supabaseAdmin
             .from('classrooms')
-            .insert({ id: generatedId, owner_id: user.id, name: className, folder: '1Campus' })
+            .insert({ id: generatedId, owner_id: user.id, name: className, folder: '1Campus', ...(gradeValue != null ? { grade: gradeValue } : {}) })
             .select('id')
             .single()
 
@@ -5826,7 +5829,254 @@ export default async function handler(req, res) {
     await handleAssignmentStateSummary(req, res)
     return
   }
+  if (action === 'refresh-assignment-summary') {
+    await handleRefreshAssignmentSummary(req, res)
+    return
+  }
+  if (action === 'assignment-summary') {
+    await handleGetAssignmentSummary(req, res)
+    return
+  }
   res.status(404).json({ error: 'Not Found' })
+}
+
+// ─────────────────────────────────────────────────────────
+// handleGetAssignmentSummary
+// GET /api/data/assignment-summary?assignmentId=xxx
+// ─────────────────────────────────────────────────────────
+async function handleGetAssignmentSummary(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const assignmentId = typeof req.query?.assignmentId === 'string' ? req.query.assignmentId.trim() : ''
+  if (!assignmentId) {
+    res.status(400).json({ error: 'assignmentId required' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  const { data, error } = await supabaseDb
+    .from('assignment_summaries')
+    .select('status, class_summary, minority_summary, student_summaries, sample_count')
+    .eq('owner_id', user.id)
+    .eq('assignment_id', assignmentId)
+    .maybeSingle()
+  if (error) {
+    res.status(500).json({ error: error.message })
+    return
+  }
+  res.status(200).json({ summary: data ?? null })
+}
+
+// ─────────────────────────────────────────────────────────
+// handleRefreshAssignmentSummary
+// POST /api/data/refresh-assignment-summary
+// Phase B 批改完後非同步觸發，為單份作業生成 AI 錯誤摘要
+// ─────────────────────────────────────────────────────────
+async function handleRefreshAssignmentSummary(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const { assignmentId } = req.body || {}
+  if (!assignmentId || typeof assignmentId !== 'string') {
+    res.status(400).json({ error: 'assignmentId required' })
+    return
+  }
+
+  const supabaseDb = getSupabaseAdmin()
+  const nowIso = new Date().toISOString()
+
+  // 標記為 running
+  await supabaseDb
+    .from('assignment_summaries')
+    .upsert(
+      { owner_id: user.id, assignment_id: assignmentId, status: 'running', updated_at: nowIso },
+      { onConflict: 'owner_id,assignment_id' }
+    )
+
+  // 回傳 202 讓前端不等待，後續在背景完成
+  res.status(202).json({ success: true, status: 'running' })
+
+  // ── 背景執行（Vercel Node runtime 允許在 res.json 後繼續執行直到 function timeout）──
+  try {
+    // 1. 讀取此作業所有已批改的 submissions
+    const { data: submissions, error: subErr } = await supabaseDb
+      .from('submissions')
+      .select('id, student_id, student_name, grading_result, status')
+      .eq('assignment_id', assignmentId)
+      .eq('owner_id', user.id)
+      .in('status', ['graded', 'correction_passed', 'correction_pending_review'])
+
+    if (subErr) throw new Error(subErr.message)
+    if (!submissions || submissions.length === 0) {
+      await supabaseDb
+        .from('assignment_summaries')
+        .upsert(
+          { owner_id: user.id, assignment_id: assignmentId, status: 'failed',
+            error_message: '尚無批改資料', updated_at: new Date().toISOString() },
+          { onConflict: 'owner_id,assignment_id' }
+        )
+      return
+    }
+
+    // 2. 讀取答案鍵的 concept_code（從 assignments 表）
+    const { data: assignment } = await supabaseDb
+      .from('assignments')
+      .select('answer_key')
+      .eq('id', assignmentId)
+      .eq('owner_id', user.id)
+      .maybeSingle()
+
+    const conceptByQuestion = {}
+    if (assignment?.answer_key) {
+      const answerKey = typeof assignment.answer_key === 'string'
+        ? JSON.parse(assignment.answer_key)
+        : assignment.answer_key
+      for (const q of (answerKey?.questions || [])) {
+        if (q.concept_code) {
+          conceptByQuestion[q.id] = { code: q.concept_code, label: q.concept_label || q.concept_code }
+        }
+      }
+    }
+
+    // 3. 整理每位學生的錯誤清單
+    const studentErrors = []
+    for (const sub of submissions) {
+      let grading = null
+      try {
+        grading = typeof sub.grading_result === 'string'
+          ? JSON.parse(sub.grading_result)
+          : sub.grading_result
+      } catch { continue }
+
+      const mistakes = Array.isArray(grading?.mistakes) ? grading.mistakes : []
+      const details = Array.isArray(grading?.details) ? grading.details : []
+
+      // 收集每題的錯誤（含課綱概念）
+      const errorItems = []
+      for (const detail of details) {
+        if (detail.score > 0 && detail.score >= (detail.maxScore || 1)) continue // 答對跳過
+        const concept = conceptByQuestion[detail.questionId]
+        const reason = mistakes.find(m => m.question?.includes(detail.questionId))?.reason || detail.explanation || ''
+        errorItems.push({
+          questionId: detail.questionId,
+          concept: concept ? `${concept.code}（${concept.label}）` : null,
+          reason: reason.slice(0, 100)
+        })
+      }
+
+      if (errorItems.length > 0) {
+        studentErrors.push({
+          studentName: sub.student_name || `學生${sub.student_id}`,
+          studentId: sub.student_id,
+          errors: errorItems
+        })
+      }
+    }
+
+    const sampleCount = submissions.length
+    const errorCount = studentErrors.length
+
+    // 4. 建立 AI prompt
+    const conceptContext = Object.keys(conceptByQuestion).length > 0
+      ? `\n作業涵蓋的課綱概念：\n${Object.entries(conceptByQuestion).map(([qId, c]) => `第${qId}題：${c.code} ${c.label}`).join('\n')}\n`
+      : ''
+
+    const studentLines = studentErrors.map(s => {
+      const errLines = s.errors.map(e => {
+        const conceptStr = e.concept ? `（${e.concept}）` : ''
+        return `  第${e.questionId}題${conceptStr}：${e.reason || '答錯'}`
+      }).join('\n')
+      return `${s.studentName}：\n${errLines}`
+    }).join('\n\n')
+
+    const prompt = `你是台灣國小/國中老師的教學助理。以下是一份作業的批改結果，共 ${sampleCount} 位學生，其中 ${errorCount} 位有錯誤。
+${conceptContext}
+學生錯誤明細：
+${studentLines || '（無錯誤）'}
+
+請根據以上資料，用繁體中文生成三段摘要，輸出純 JSON（不要 markdown）：
+{
+  "class_summary": "大多數學生（N 人以上）的共同錯誤摘要，說明主要錯在哪個概念或步驟（2-4句話）",
+  "minority_summary": "少數學生（少於全班一半）的個別問題，若無則填 null（1-2句話）",
+  "student_summaries": [
+    { "student_id": "xxx", "student_name": "小明", "summary": "簡短描述這位學生的主要錯誤（1句話）" }
+  ]
+}
+
+注意：
+- class_summary 聚焦在超過半數學生都有的問題
+- minority_summary 說明少數人特有的問題模式
+- student_summaries 只列出有錯誤的學生
+- 若有課綱概念代碼（如 N-4-12），請在摘要中引用讓老師知道是哪個單元`
+
+    // 5. 呼叫 Gemini
+    const apiKey = getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY')
+    if (!apiKey) throw new Error('Server API Key missing')
+
+    const summaryModel = getEnvValue('SYSTEM_GEMINI_MODEL') || 'gemini-3-flash-preview'
+    const pipelineResult = await runAiPipeline({
+      apiKey,
+      model: summaryModel,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      requestedRouteKey: 'report.teacher_summary',
+      routeHint: { source: 'data' }
+    })
+
+    const ok = Number(pipelineResult.status) >= 200 && Number(pipelineResult.status) < 300
+    if (!ok) throw new Error('Gemini 呼叫失敗')
+
+    const rawText = pipelineResult.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    const cleanText = rawText.replace(/```json|```/g, '').trim()
+    const parsed = JSON.parse(cleanText)
+
+    // 6. 寫入 assignment_summaries
+    await supabaseDb
+      .from('assignment_summaries')
+      .upsert(
+        {
+          owner_id: user.id,
+          assignment_id: assignmentId,
+          status: 'ready',
+          class_summary: parsed.class_summary || null,
+          minority_summary: parsed.minority_summary || null,
+          student_summaries: Array.isArray(parsed.student_summaries) ? parsed.student_summaries : [],
+          sample_count: sampleCount,
+          error_message: null,
+          generated_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: 'owner_id,assignment_id' }
+      )
+
+  } catch (err) {
+    console.error('[refresh-assignment-summary] error:', err)
+    await supabaseDb
+      .from('assignment_summaries')
+      .upsert(
+        {
+          owner_id: user.id,
+          assignment_id: assignmentId,
+          status: 'failed',
+          error_message: err instanceof Error ? err.message : String(err),
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: 'owner_id,assignment_id' }
+      )
+  }
 }
 
 async function handleAssignmentStateSummary(req, res) {
