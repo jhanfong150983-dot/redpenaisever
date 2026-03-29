@@ -1227,10 +1227,11 @@ FORMAT B — CIRCLE-IN-PARENS 圈圈看 (both options pre-printed inside parens)
 - ❌ FORBIDDEN: using the question stem, subject knowledge, or logic to guess which word is correct — you have NO knowledge of correct answers.
 - ❌ FORBIDDEN: outputting an answer just because one option "sounds right" or "makes sense" given the question context.
 - REQUIRED: For every FORMAT B question, you MUST fill in the "formatBReasoning" field before deciding the answer. Follow these steps IN ORDER and write each step into formatBReasoning:
-  Step 1 — Identify options: "OPTION_LEFT=[first word], OPTION_RIGHT=[second word]"
+  Step 1 — Identify options: "OPTION_LEFT=[first word before the comma], OPTION_RIGHT=[second word after the comma]"
   Step 2 — Describe the mark: "I see a [circle/underline/cross-out] drawn by the student."
-  Step 3 — Locate center: "The center of the mark is in the [LEFT/RIGHT] half of the bracket."
+  Step 3 — Locate relative to comma: "The center of the mark is to the [LEFT/RIGHT] of the comma separator."
   Step 4 — Conclude: "Therefore I output [OPTION_LEFT value / OPTION_RIGHT value]."
+- The comma (，or ,) printed between the two options is your ANCHOR POINT. Use it as the dividing line — not the bracket edges, not the midpoint of the text.
 - After completing formatBReasoning, set studentAnswerRaw to the concluded option text.
 - If Step 3 cannot be determined → status="unreadable", studentAnswerRaw="無法辨識", formatBReasoning must still explain why.
 - If no mark at all → blank.
