@@ -3139,6 +3139,7 @@ async function handleSync(req, res) {
             id: c.id,
             name: c.name,
             folder: c.folder,
+            grade: c.grade != null ? parseInt(String(c.grade), 10) : undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(c.updatedAt ?? c.updated_at) ?? nowIso
           })
