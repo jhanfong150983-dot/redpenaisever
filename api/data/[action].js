@@ -5837,7 +5837,44 @@ export default async function handler(req, res) {
     await handleGetAssignmentSummary(req, res)
     return
   }
+  if (action === 'concept-map') {
+    await handleGetConceptMap(req, res)
+    return
+  }
   res.status(404).json({ error: 'Not Found' })
+}
+
+// ─────────────────────────────────────────────────────────
+// handleGetConceptMap
+// GET /api/data/concept-map?grade=X
+// ─────────────────────────────────────────────────────────
+async function handleGetConceptMap(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const grade = parseInt(req.query?.grade, 10)
+  if (!grade || grade < 1 || grade > 12) {
+    res.status(400).json({ error: 'Invalid grade parameter (must be 1–12)' })
+    return
+  }
+  try {
+    const supabaseDb = getSupabaseAdmin()
+    const { data, error } = await supabaseDb
+      .from('concept_map')
+      .select('code, label')
+      .eq('grade', grade)
+      .order('code', { ascending: true })
+    if (error) {
+      console.error('[concept-map] supabase error:', error)
+      res.status(500).json({ error: 'DB error' })
+      return
+    }
+    res.status(200).json({ items: data || [] })
+  } catch (err) {
+    console.error('[concept-map] error:', err)
+    res.status(500).json({ error: 'Internal Server Error' })
+  }
 }
 
 // ─────────────────────────────────────────────────────────
