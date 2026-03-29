@@ -5953,7 +5953,7 @@ async function handleRefreshAssignmentSummary(req, res) {
     // 1. 讀取此作業所有已批改的 submissions
     const { data: submissions, error: subErr } = await supabaseDb
       .from('submissions')
-      .select('id, student_id, student_name, grading_result, status')
+      .select('id, student_id, grading_result, status, students(name)')
       .eq('assignment_id', assignmentId)
       .eq('owner_id', user.id)
       .in('status', ['graded', 'correction_passed', 'correction_pending_review'])
@@ -6018,7 +6018,7 @@ async function handleRefreshAssignmentSummary(req, res) {
 
       if (errorItems.length > 0) {
         studentErrors.push({
-          studentName: sub.student_name || `學生${sub.student_id}`,
+          studentName: sub.students?.name || `學生${sub.student_id}`,
           studentId: sub.student_id,
           errors: errorItems
         })
