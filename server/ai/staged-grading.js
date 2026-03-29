@@ -2023,6 +2023,13 @@ export async function runStagedGradingPhaseA({
     ? parseCandidateJson(reReadAnswerResponse.data)
     : null
 
+  // Log per-question read results for debugging
+  const readAnswerLogMode = getReadAnswerLogMode()
+  if (readAnswerLogMode !== 'off') {
+    logStaged(pipelineRunId, 'basic', 'ReadAnswer per-question', toReadAnswerSchemaPreview(readAnswerParsed))
+    logStaged(pipelineRunId, 'basic', 'reReadAnswer per-question', toReadAnswerSchemaPreview(reReadAnswerParsed))
+  }
+
   // Mismatch detection for word problems (A3 calc result vs FinalAnswerOnly)
   const mismatchIds = new Set()
   if (wordProblemIds.length > 0 && finalAnswerOnlyResponse?.ok) {
