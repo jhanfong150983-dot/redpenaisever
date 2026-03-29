@@ -242,11 +242,17 @@ function toReadAnswerSchemaPreview(parsed) {
   const answers = Array.isArray(parsed?.answers) ? parsed.answers : []
   return {
     answerCount: answers.length,
-    answers: answers.map((item) => ({
-      questionId: ensureString(item?.questionId, ''),
-      status: ensureString(item?.status, ''),
-      studentAnswerRaw: ensureString(item?.studentAnswerRaw, '')
-    }))
+    answers: answers.map((item) => {
+      const entry = {
+        questionId: ensureString(item?.questionId, ''),
+        status: ensureString(item?.status, ''),
+        studentAnswerRaw: ensureString(item?.studentAnswerRaw, '')
+      }
+      if (item?.formatBReasoning) {
+        entry.formatBReasoning = ensureString(item.formatBReasoning, '')
+      }
+      return entry
+    })
   }
 }
 
@@ -1220,13 +1226,13 @@ FORMAT B — CIRCLE-IN-PARENS 圈圈看 (both options pre-printed inside parens)
 - The student circles, underlines, or otherwise marks ONE of the pre-printed words.
 - ❌ FORBIDDEN: using the question stem, subject knowledge, or logic to guess which word is correct — you have NO knowledge of correct answers.
 - ❌ FORBIDDEN: outputting an answer just because one option "sounds right" or "makes sense" given the question context.
-- SPATIAL METHOD — do NOT try to read the circled text directly. Use position instead:
-  Step 1: Identify OPTION_LEFT (first word printed, left of the comma) and OPTION_RIGHT (second word, right of the comma).
-  Step 2: Find the CENTER POINT of the student's circle/underline/mark.
-  Step 3: If the center is on the LEFT half of the bracket content → output OPTION_LEFT.
-  Step 4: If the center is on the RIGHT half of the bracket content → output OPTION_RIGHT.
-  Step 5: If you cannot determine which half the center falls in → status="unreadable", studentAnswerRaw="無法辨識".
-- This spatial method avoids substring confusion (e.g. "可以" inside "不可以") entirely.
+- REQUIRED: For every FORMAT B question, you MUST fill in the "formatBReasoning" field before deciding the answer. Follow these steps IN ORDER and write each step into formatBReasoning:
+  Step 1 — Identify options: "OPTION_LEFT=[first word], OPTION_RIGHT=[second word]"
+  Step 2 — Describe the mark: "I see a [circle/underline/cross-out] drawn by the student."
+  Step 3 — Locate center: "The center of the mark is in the [LEFT/RIGHT] half of the bracket."
+  Step 4 — Conclude: "Therefore I output [OPTION_LEFT value / OPTION_RIGHT value]."
+- After completing formatBReasoning, set studentAnswerRaw to the concluded option text.
+- If Step 3 cannot be determined → status="unreadable", studentAnswerRaw="無法辨識", formatBReasoning must still explain why.
 - If no mark at all → blank.
 
 BOTH formats:
@@ -1375,7 +1381,8 @@ Return:
     {
       "questionId": "string",
       "studentAnswerRaw": "exact text as written",
-      "status": "read|blank|unreadable"
+      "status": "read|blank|unreadable",
+      "formatBReasoning": "only for FORMAT B questions: step-by-step spatial reasoning (omit for all other question types)"
     }
   ]
 }
