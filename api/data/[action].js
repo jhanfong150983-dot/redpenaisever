@@ -2171,7 +2171,7 @@ async function handleManualGrade(req, res) {
         student_id: studentId,
         owner_id: user.id,
         status: 'graded',
-        source: 'manual',
+        source: 'teacher_camera',
         round: 0,
         actor_user_id: user.id,
         image_url: '',
