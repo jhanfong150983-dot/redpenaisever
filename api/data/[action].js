@@ -5865,7 +5865,7 @@ async function handleGetConceptMap(req, res) {
     const supabaseDb = getSupabaseAdmin()
     const { data, error } = await supabaseDb
       .from('concept_map')
-      .select('code, label')
+      .select('code, label, description')
       .eq('grade', grade)
       .order('code', { ascending: true })
     if (error) {
