@@ -2174,6 +2174,7 @@ async function handleManualGrade(req, res) {
         source: 'manual',
         round: 0,
         actor_user_id: user.id,
+        image_url: 'manual',
         created_at: new Date().toISOString()
       })
       if (insertErr) throw new Error(insertErr.message)
