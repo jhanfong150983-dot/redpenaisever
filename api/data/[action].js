@@ -2153,6 +2153,32 @@ async function handleManualGrade(req, res) {
   }
   const supabaseDb = getSupabaseAdmin()
   try {
+    // 先確認是否已有 submission（避免重複建立）
+    const { data: existing } = await supabaseDb
+      .from('submissions')
+      .select('id')
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .eq('owner_id', user.id)
+      .maybeSingle()
+
+    if (!existing) {
+      // 建一筆 stub submission，讓 sync 能把 graded 狀態帶回前端
+      const { randomUUID } = await import('node:crypto')
+      const { error: insertErr } = await supabaseDb.from('submissions').insert({
+        id: randomUUID(),
+        assignment_id: assignmentId,
+        student_id: studentId,
+        owner_id: user.id,
+        status: 'graded',
+        source: 'manual',
+        round: 0,
+        actor_user_id: user.id,
+        created_at: new Date().toISOString()
+      })
+      if (insertErr) throw new Error(insertErr.message)
+    }
+
     await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
       status: 'graded',
       graded_once: true,
