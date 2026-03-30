@@ -1411,9 +1411,11 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     const key = `${assignmentId}::${studentId}`
     const existingState = stateMap.get(key) || null
     const source = String(row.source || 'teacher_camera')
+    const submissionStatus = String(row.status || '').toLowerCase()
+    const existingStatus = String(existingState?.status || '').toLowerCase()
     const isGraded = row.graded_at !== undefined && row.graded_at !== null
       ? true
-      : String(row.status || '').toLowerCase() === 'graded'
+      : submissionStatus === 'graded'
 
     // Layer 2: If teacher re-grades a student who is already in correction workflow,
     // skip the state transition to avoid overwriting correction progress.
@@ -1422,23 +1424,35 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
       'correction_required', 'correction_in_progress',
       'correction_pending_review', 'correction_passed', 'correction_failed'
     ]
-    if (source !== 'student_correction' && CORRECTION_ACTIVE_STATUSES.includes(String(existingState?.status || ''))) {
+    if (source !== 'student_correction' && CORRECTION_ACTIVE_STATUSES.includes(existingStatus)) {
+      continue
+    }
+    // Guard: once teacher/manual flow reaches correction_passed, treat it as terminal.
+    // Ignore stale correction submissions synced later (graded or non-graded).
+    if (source === 'student_correction' && existingStatus === 'correction_passed') {
       continue
     }
 
     if (!isGraded) {
+      let nextStatus = source === 'student_correction' ? 'correction_in_progress' : 'uploaded'
+      let nextReason = undefined
+      if (source === 'student_correction' && submissionStatus === 'grading_failed') {
+        nextStatus = 'correction_required'
+        nextReason = 'AI 批改失敗，請重新送出訂正'
+      }
       const nextState = await upsertAssignmentStudentState(
         supabaseDb,
         ownerId,
         assignmentId,
         studentId,
-        {
-          status: source === 'student_correction' ? 'correction_in_progress' : 'uploaded',
+        compactObject({
+          status: nextStatus,
           current_submission_id: row.id,
           correction_attempt_limit:
             existingState?.correction_attempt_limit ??
-            preferences.max_correction_attempts
-        }
+            preferences.max_correction_attempts,
+          last_status_reason: nextReason
+        })
       )
       stateMap.set(key, nextState)
       continue
@@ -1467,7 +1481,6 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     if (source === 'student_correction') {
       // Guard: skip if this correction submission was already processed
       // (e.g. sync re-sends the same graded submission — would double-count)
-      const existingStatus = String(existingState?.status || '')
       const alreadyProcessedCurrentCorrection =
         isGraded &&
         existingState?.current_submission_id === row.id &&
