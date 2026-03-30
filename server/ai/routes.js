@@ -12,6 +12,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_CONSISTENCY_JUDGE: 'grading.consistency_judge',
   ANSWER_KEY_EXTRACT: 'answer_key.extract',
   ANSWER_KEY_REANALYZE: 'answer_key.reanalyze',
+  ANSWER_KEY_TAG_CONCEPTS: 'answer_key.tag_concepts',
   REPORT_TEACHER_SUMMARY: 'report.teacher_summary',
   REPORT_DOMAIN_DIAGNOSIS: 'report.domain_diagnosis',
   ADMIN_TAG_AGGREGATION: 'admin.tag_aggregation',
@@ -69,6 +70,11 @@ const ROUTE_KEYWORDS = Object.freeze({
     'reanalyze',
     'needsreanalysis'
   ],
+  answerKeyTagConcepts: [
+    '108課綱概念標記任務',
+    'tag_concepts',
+    'concept_code_only'
+  ],
   answerKeyExtract: [
     '從標準答案圖片提取可機器批改的答案表',
     '題型分類',
@@ -101,6 +107,9 @@ export function resolveRouteKey({
 
   if (hasAnyKeyword(promptText, ROUTE_KEYWORDS.answerKeyReanalyze)) {
     return AI_ROUTE_KEYS.ANSWER_KEY_REANALYZE
+  }
+  if (hasAnyKeyword(promptText, ROUTE_KEYWORDS.answerKeyTagConcepts)) {
+    return AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS
   }
   if (hasAnyKeyword(promptText, ROUTE_KEYWORDS.reportDomainDiagnosis)) {
     return AI_ROUTE_KEYS.REPORT_DOMAIN_DIAGNOSIS

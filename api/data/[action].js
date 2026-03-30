@@ -2809,6 +2809,7 @@ async function handleSync(req, res) {
             folder: row.folder ?? undefined,
             priorWeightTypes: row.prior_weight_types ?? undefined,
             answerKey: row.answer_key ?? undefined,
+            conceptTags: row.concept_tags ?? undefined,
             updatedAt: toMillis(row.updated_at) ?? undefined
           })
         )
@@ -3190,6 +3191,7 @@ async function handleSync(req, res) {
             folder: a.folder,
             prior_weight_types: a.priorWeightTypes ?? undefined,
             answer_key: a.answerKey ?? undefined,
+            concept_tags: a.conceptTags ?? undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(a.updatedAt ?? a.updated_at) ?? nowIso
           })
@@ -4376,7 +4378,7 @@ async function handleStudentSubmission(req, res) {
     const ownerIds = [...new Set(studentContexts.map((context) => context.ownerId))]
     const { data: assignment, error: assignmentError } = await supabaseDb
       .from('assignments')
-      .select('id, owner_id, classroom_id, total_pages, answer_key, title')
+      .select('id, owner_id, classroom_id, total_pages, answer_key, concept_tags, title')
       .eq('id', assignmentId)
       .in('owner_id', ownerIds)
       .maybeSingle()

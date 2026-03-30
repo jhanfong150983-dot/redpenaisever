@@ -168,11 +168,11 @@ export async function runAiPipeline({
     }
     console.log(`${logPrefix} single-shot route=${resolvedRouteKey}`)
 
-    // Debug log for answer_key.extract — print prompt text and raw response
-    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
+    // Debug log for answer_key.extract / answer_key.tag_concepts
+    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT || resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS) {
       const promptText = contents?.[0]?.parts?.[0]?.text ?? contents?.[0]?.parts?.find?.(p => typeof p?.text === 'string')?.text ?? null
       if (promptText) {
-        console.log(`${logPrefix} [DEBUG] answer_key.extract prompt:\n${promptText}`)
+        console.log(`${logPrefix} [DEBUG] ${resolvedRouteKey} prompt:\n${promptText}`)
       }
     }
 
@@ -186,9 +186,9 @@ export async function runAiPipeline({
       routeKey: resolvedRouteKey
     })
 
-    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
+    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT || resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS) {
       const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
-      console.log(`${logPrefix} [DEBUG] answer_key.extract response:\n${rawText}`)
+      console.log(`${logPrefix} [DEBUG] ${resolvedRouteKey} response:\n${rawText}`)
     }
   }
   const responseStatus = Number(pipelineResult.status) || 500
