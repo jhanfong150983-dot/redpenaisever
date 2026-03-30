@@ -1321,21 +1321,33 @@ WORD-PROBLEM (questions in WORD-PROBLEM list):
 - If the work area is blank (no fresh marks) → status="blank".
 
 PROPORTION TABLE FORMAT (比例式格式) — applies to WORD-PROBLEM and CALCULATION questions:
-Students in Taiwan often write ratio-scaling steps as a two-row table with multipliers on the side:
+Students in Taiwan write ratio-scaling in several visual layouts. ALL of the following count as valid 列式:
 
-  Example on paper:
+FORMAT A — Arrow style (×N↙↘×N):
+  Example:
        0.048 : 0.2
   ×1000↙         ↘×1000
        48    : ( )
+  Output as: "0.048:0.2 ×1000 → 48:200"
 
-When you encounter this format:
-- Read BOTH rows completely, including the side multiplier annotation (×N or ÷N).
-- Output as: "[top-left]:[top-right] ×[N] → [bottom-left]:[bottom-right]"
-  Example: "0.048:0.2 ×1000 → 48:200"
-- The side annotation (×N or ÷N) written beside or between the rows IS part of the calculation — do NOT skip it.
-- This two-row structure counts as a valid 列式 (calculation listing). Treat it the same as writing "0.048÷0.2=48÷X".
-- The multiplier may appear as: "×1000", "÷10", "×5" etc., written to the left/right side or between the two rows.
-- Even if the multiplier is small or positioned at the edge, include it in your output.
+FORMAT B — Divisor annotated between rows (÷N written on both sides or center):
+  Example:
+       210 : 60
+    ÷60        ÷60
+     =3.5 :  1
+  Output as: "210:60 ÷60 → 3.5:1"
+
+FORMAT C — Bracket with divisor outside (ratio in parentheses, ÷N after closing bracket):
+  Example:
+       260( 210 : 60 )÷60
+            =3.5 : 1
+  Output as: "210:60 ÷60 → 3.5:1"
+
+Rules for all formats:
+- Read BOTH rows completely, including the operator annotation (×N or ÷N) wherever it appears.
+- The ÷N or ×N annotation IS part of the calculation — do NOT skip it even if small or at the edge.
+- This two-row structure counts as valid 列式. Treat it the same as writing an explicit equation.
+- The operator may appear as: "×1000", "÷60", "÷10", "×5", etc.
 
 FORBIDDEN:
 - Guessing or inferring what the student meant to write
