@@ -943,6 +943,7 @@ function parseMistakesFromGradingResult(gradingResult) {
       questionText: questionText || questionId || '',
       reason: reason || '需要再次確認作答內容',
       hintText: String(reason || ''),
+      studentAnswerRaw: (typeof linkedDetail?.studentAnswer === 'string' && linkedDetail.studentAnswer.trim()) || undefined,
       questionBbox: normalizeBbox(linkedDetail?.questionBbox),
       answerBbox: normalizeBbox(linkedDetail?.answerBbox)
     })
@@ -969,6 +970,7 @@ function parseMistakesFromGradingResult(gradingResult) {
       questionText: questionId,
       reason,
       hintText: String(reason || ''),
+      studentAnswerRaw: (typeof detail.studentAnswer === 'string' && detail.studentAnswer.trim()) || undefined,
       questionBbox: normalizeBbox(detail.questionBbox),
       answerBbox: normalizeBbox(detail.answerBbox)
     })
@@ -1203,7 +1205,8 @@ async function writeCorrectionQuestionItems(
           source_image_url: resolvedSourceImageUrl,
           crop_image_url: cropImageUrl,
           question_bbox: questionBbox,
-          answer_bbox: answerBbox
+          answer_bbox: answerBbox,
+          student_answer_raw: mistake.studentAnswerRaw || undefined
         }),
         status: 'open'
       })
