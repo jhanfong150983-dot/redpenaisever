@@ -673,7 +673,7 @@ function normalizeClassifyResult(parsed, questionIds) {
     const qt = row?.questionType
     const VALID_QUESTION_TYPES = new Set([
       'word_problem', 'calculation', 'single_choice', 'map_fill', 'map_draw',
-      'diagram_draw', 'multi_check', 'fill_blank', 'true_false'
+      'diagram_draw', 'multi_check', 'fill_blank', 'true_false', 'matching'
     ])
     const questionType = VALID_QUESTION_TYPES.has(qt) ? qt : 'other'
     const VALID_DRAW_TYPES = new Set(['map_symbol', 'grid_geometry', 'connect_dots'])
@@ -1143,6 +1143,9 @@ function buildReadAnswerPrompt(classifyResult) {
   const diagramDrawIds = visibleQuestions
     .filter((q) => q.questionType === 'diagram_draw')
     .map((q) => q.questionId)
+  const matchingIds = visibleQuestions
+    .filter((q) => q.questionType === 'matching')
+    .map((q) => q.questionId)
   // map_draw split by drawType
   const mapDrawSymbolIds = visibleQuestions
     .filter((q) => q.questionType === 'map_draw' && q.drawType !== 'grid_geometry' && q.drawType !== 'connect_dots')
@@ -1196,12 +1199,15 @@ function buildReadAnswerPrompt(classifyResult) {
   const diagramDrawNote = diagramDrawIds.length > 0
     ? `\nDIAGRAM-DRAW questions (塗色題, describe coloring): ${JSON.stringify(diagramDrawIds)}`
     : ''
+  const matchingNote = matchingIds.length > 0
+    ? `\nMATCHING questions (連連看, read ALL pairs as a group): ${JSON.stringify(matchingIds)}`
+    : ''
   return `
 You are an answer reader. Your only job is to report what the student physically wrote or drew in each question's designated answer space. You have NO mathematical knowledge and must NOT solve, infer, or guess.
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}
+${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
@@ -1417,6 +1423,19 @@ For question IDs in DIAGRAM-DRAW list, describe ONLY fresh student coloring/shad
 - If no fresh coloring marks → status="blank", studentAnswerRaw="未作答".
 - FORBIDDEN: describing pre-printed outlines, grid lines, or labels as student marks.
 ` : ''}
+${matchingIds.length > 0 ? `
+MATCHING RULE (連連看):
+For question IDs in MATCHING list, scan the ENTIRE matching section as ONE group.
+- The section has a LEFT column (numbered items like (1)(2)(3)(4)) and a RIGHT column (text options).
+- The student draws lines connecting left items to right items.
+- For EACH left item, follow the drawn line and identify which right item it connects to.
+- Output format per question ID: the text of the right-side item it connects to.
+  Example: if (1) connects to "2公尺/秒", output for question "3-1" → studentAnswerRaw: "2公尺/秒"
+- The question IDs in MATCHING list correspond to left items in order: first ID = (1), second ID = (2), etc.
+- If a line is ambiguous or missing for an item → studentAnswerRaw: "未連線", status: "read"
+- If NO lines drawn at all → status: "blank", studentAnswerRaw: "未作答"
+- FORBIDDEN: outputting the left-side item text as the answer — only output the right-side item it connects to.
+` : ''}
 
 Return:
 {
@@ -1507,6 +1526,12 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
   - 塗色完整性: check if coloring is continuous and covers the correct regions without major gaps.
   - errorType: 'concept' if wrong proportion; 'blank' if no fresh marks described.
+- matching: studentAnswerRaw is the right-side text the student connected to this left-side item (e.g. "2公尺/秒"). The AnswerKey answer field is the correct right-side text.
+  - Compare case-insensitively, ignoring leading/trailing whitespace.
+  - Allow equivalent unit representations (e.g. "km/h" = "公里/小時").
+  - isCorrect = true if the student's text matches the answer (or an equivalent form).
+  - score = maxScore if isCorrect, else 0 (binary scoring per pair).
+  - errorType: 'concept' if wrong connection; 'blank' if "未連線" or "未作答".
 - map_fill: See MAP-FILL SCORING below.
 - map_draw: See MAP-DRAW SCORING below.
 - (If questionCategory is absent, fall back to type-based rules: type=1 → exact match, type=2 → acceptableAnswers match, type=3 → rubric.)
