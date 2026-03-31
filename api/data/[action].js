@@ -2679,7 +2679,7 @@ async function handleSync(req, res) {
         supabaseDb.from('assignments').select('*').eq('owner_id', ownerId),
         supabaseDb
           .from('submissions')
-          .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at')
+          .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result')
           .eq('owner_id', ownerId),
         supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
         supabaseDb
@@ -2900,7 +2900,9 @@ async function handleSync(req, res) {
           createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
           score: row.score ?? undefined,
           feedback: row.feedback ?? undefined,
-          gradingResult: row.grading_result ?? undefined,
+          mistakesCount: Array.isArray(row.grading_result?.mistakes) && row.grading_result.mistakes.length > 0
+            ? row.grading_result.mistakes.length
+            : undefined,
           gradedAt: gradedAt ?? undefined,
           correctionCount: row.correction_count ?? undefined,
           updatedAt: updatedAt ?? undefined
