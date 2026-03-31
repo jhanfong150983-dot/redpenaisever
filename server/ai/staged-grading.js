@@ -63,6 +63,7 @@ const CATEGORY_TO_TYPE = {
   map_fill: 2,
   map_draw: 3,
   diagram_draw: 3,
+  matching: 1,
 }
 
 // Resolve effective type from question (prefer questionCategory, fallback to numeric type)
@@ -448,6 +449,81 @@ function normalizeQuestionIdList(answerKey) {
   return list
 }
 
+const CLASSIFY_ALLOWED_TYPES = new Set([
+  'word_problem',
+  'calculation',
+  'single_choice',
+  'map_fill',
+  'map_draw',
+  'diagram_draw',
+  'multi_check',
+  'fill_blank',
+  'true_false',
+  'matching',
+  'multi_choice',
+  'single_check'
+])
+
+function resolveExpectedQuestionType(question) {
+  const category = ensureString(question?.questionCategory, '').trim()
+  const answerFormat = ensureString(question?.answerFormat, '').trim().toLowerCase()
+  if (answerFormat === 'matching') return 'matching'
+  if (category === 'fill_variants') return 'fill_blank'
+  if (category === 'short_answer') return 'word_problem'
+  if (CLASSIFY_ALLOWED_TYPES.has(category)) return category
+
+  const resolvedType = resolveQuestionType(question)
+  if (resolvedType === 3) return 'word_problem'
+  if (resolvedType === 2) return 'fill_blank'
+  return 'fill_blank'
+}
+
+function resolveMatchingGroupId(question) {
+  const explicit = ensureString(
+    question?.bboxGroupId ?? question?.matchingGroupId ?? question?.unorderedGroupId,
+    ''
+  ).trim()
+  if (explicit) return explicit
+
+  if (Array.isArray(question?.idPath) && question.idPath.length > 0) {
+    const first = ensureString(question.idPath[0], '').trim()
+    if (first) return first
+  }
+
+  const questionId = ensureString(question?.id, '').trim()
+  if (!questionId) return ''
+  const dashIndex = questionId.indexOf('-')
+  if (dashIndex > 0) return questionId.slice(0, dashIndex).trim()
+  return questionId
+}
+
+function resolveBboxPolicyByQuestionType(questionType) {
+  if (questionType === 'map_fill') return 'full_image'
+  if (questionType === 'matching') return 'group_context'
+  return 'question_context'
+}
+
+function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
+  const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
+  const byQuestionId = mapByQuestionId(questions, (item) => item?.id)
+
+  return questionIds.map((questionId) => {
+    const question = byQuestionId.get(questionId)
+    const expectedType = question ? resolveExpectedQuestionType(question) : 'fill_blank'
+    const bboxPolicy = resolveBboxPolicyByQuestionType(expectedType)
+    const spec = {
+      questionId,
+      questionType: expectedType,
+      bboxPolicy
+    }
+    if (bboxPolicy === 'group_context') {
+      const groupId = resolveMatchingGroupId(question)
+      if (groupId) spec.bboxGroupId = groupId
+    }
+    return spec
+  })
+}
+
 function normalizeUnorderedMode(value) {
   return ensureString(value, '').trim().toLowerCase() === 'unordered' ? 'unordered' : 'strict'
 }
@@ -673,7 +749,8 @@ function normalizeClassifyResult(parsed, questionIds) {
     const qt = row?.questionType
     const VALID_QUESTION_TYPES = new Set([
       'word_problem', 'calculation', 'single_choice', 'map_fill', 'map_draw',
-      'diagram_draw', 'multi_check', 'fill_blank', 'true_false', 'matching'
+      'diagram_draw', 'multi_check', 'fill_blank', 'true_false', 'matching',
+      'multi_choice', 'single_check'
     ])
     const questionType = VALID_QUESTION_TYPES.has(qt) ? qt : 'other'
     const VALID_DRAW_TYPES = new Set(['map_symbol', 'grid_geometry', 'connect_dots'])
@@ -696,6 +773,111 @@ function normalizeClassifyResult(parsed, questionIds) {
   const coverage = questionIds.length === 0 ? 0 : visibleCount / questionIds.length
 
   return { alignedQuestions, coverage, unmappedQuestionIds }
+}
+
+function buildBboxUnion(bboxes) {
+  const list = Array.isArray(bboxes)
+    ? bboxes.map((bbox) => normalizeBboxRef(bbox)).filter(Boolean)
+    : []
+  if (list.length === 0) return null
+
+  let minX = 1
+  let minY = 1
+  let maxX = 0
+  let maxY = 0
+  for (const bbox of list) {
+    minX = Math.min(minX, bbox.x)
+    minY = Math.min(minY, bbox.y)
+    maxX = Math.max(maxX, bbox.x + bbox.w)
+    maxY = Math.max(maxY, bbox.y + bbox.h)
+  }
+
+  const width = maxX - minX
+  const height = maxY - minY
+  if (width <= 0 || height <= 0) return null
+
+  return {
+    x: Number(minX.toFixed(4)),
+    y: Number(minY.toFixed(4)),
+    w: Number(width.toFixed(4)),
+    h: Number(height.toFixed(4))
+  }
+}
+
+function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
+  const alignedRaw = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
+  if (alignedRaw.length === 0) return classifyResult
+
+  const specs = Array.isArray(questionSpecs) ? questionSpecs : []
+  const specByQuestionId = mapByQuestionId(specs, (item) => item?.questionId)
+  const fullImageBbox = { x: 0, y: 0, w: 1, h: 1 }
+
+  const alignedQuestions = alignedRaw.map((row) => {
+    const questionId = ensureString(row?.questionId, '').trim()
+    const spec = specByQuestionId.get(questionId)
+    const expectedType = ensureString(spec?.questionType, '').trim()
+    const bboxPolicy = ensureString(spec?.bboxPolicy, '').trim()
+    const bboxGroupId = ensureString(spec?.bboxGroupId, '').trim()
+    const questionType = CLASSIFY_ALLOWED_TYPES.has(expectedType)
+      ? expectedType
+      : ensureString(row?.questionType, '').trim().toLowerCase() || 'other'
+    let questionBbox = normalizeBboxRef(row?.questionBbox ?? row?.question_bbox)
+    let answerBbox = normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox)
+
+    if (bboxPolicy === 'full_image') {
+      questionBbox = fullImageBbox
+      answerBbox = fullImageBbox
+    } else {
+      if (!questionBbox && answerBbox) questionBbox = answerBbox
+      if (!answerBbox && questionBbox) answerBbox = questionBbox
+    }
+
+    return {
+      ...row,
+      questionType,
+      bboxPolicyApplied: bboxPolicy || undefined,
+      bboxGroupId: bboxGroupId || undefined,
+      questionBbox,
+      answerBbox,
+      bracketBbox:
+        questionType === 'single_choice' ? normalizeBboxRef(row?.bracketBbox) : undefined
+    }
+  })
+
+  // matching group_context: same group shares one union bbox.
+  const groupMeta = new Map()
+  for (let index = 0; index < alignedQuestions.length; index += 1) {
+    const row = alignedQuestions[index]
+    if (row?.visible !== true) continue
+    const spec = specByQuestionId.get(row.questionId)
+    if (!spec || spec.bboxPolicy !== 'group_context') continue
+    const groupId = ensureString(spec?.bboxGroupId, '').trim()
+    if (!groupId) continue
+
+    const current = groupMeta.get(groupId) || { indexes: [], bboxes: [] }
+    current.indexes.push(index)
+    if (row?.questionBbox) current.bboxes.push(row.questionBbox)
+    if (row?.answerBbox) current.bboxes.push(row.answerBbox)
+    groupMeta.set(groupId, current)
+  }
+
+  for (const group of groupMeta.values()) {
+    if (!Array.isArray(group?.indexes) || group.indexes.length < 2) continue
+    const union = buildBboxUnion(group.bboxes)
+    if (!union) continue
+    for (const index of group.indexes) {
+      alignedQuestions[index] = {
+        ...alignedQuestions[index],
+        questionBbox: union,
+        answerBbox: union
+      }
+    }
+  }
+
+  return {
+    ...classifyResult,
+    alignedQuestions
+  }
 }
 
 // Extract the text of the final answer line (A:, 答:, Ans:) from full studentAnswerRaw
@@ -958,26 +1140,8 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
-function buildClassifyPrompt(questionIds, answerKeyQuestions, pageBreaks = []) {
-  const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
-
-  // Detect map_fill questions: prefer explicit questionCategory, fall back to heuristic
-  // Heuristic: type=2 + acceptableAnswers >= 3 + referenceAnswer length > 30
-  const mapFillIds = questions
-    .filter((q) => {
-      const qId = ensureString(q?.id).trim()
-      if (!questionIds.includes(qId)) return false
-      if (q?.questionCategory === 'map_fill') return true
-      const isType2 = resolveQuestionType(q) === 2
-      const hasMultipleAcceptable = Array.isArray(q?.acceptableAnswers) && q.acceptableAnswers.length >= 3
-      const hasLongReference = typeof q?.referenceAnswer === 'string' && q.referenceAnswer.length > 30
-      return isType2 && hasMultipleAcceptable && hasLongReference
-    })
-    .map((q) => ensureString(q.id).trim())
-
-  const mapFillSection = mapFillIds.length > 0
-    ? `\n\nMAP-FILL QUESTIONS (地圖填圖題):\nThe following question IDs are map-fill type: ${JSON.stringify(mapFillIds)}\n- For these questions, set questionType="map_fill" and visible=true.\n- Do NOT output answerBbox for map_fill questions (the entire image is the answer area).\n- These questions cover the ENTIRE image — there are no individual bounding boxes.`
-    : ''
+function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = []) {
+  const specs = Array.isArray(questionSpecs) ? questionSpecs : []
 
   // Page boundary section: injected when the submission image is composed of multiple merged photos
   const pageBoundarySection = Array.isArray(pageBreaks) && pageBreaks.length > 0
@@ -996,44 +1160,33 @@ function buildClassifyPrompt(questionIds, answerKeyQuestions, pageBreaks = []) {
 
   return `
 You are stage CLASSIFY.
-Task: identify which question IDs are visible on this student submission image, classify each visible question's type, and locate each visible question's answer region.
+Task: identify which question IDs are visible on this student submission image, and locate each visible question's bbox.
+Do NOT infer question type. Question type is fixed by specs.
 
 Allowed question IDs:
 ${JSON.stringify(questionIds)}
-${mapFillSection}${pageBoundarySection}
+
+Question Specs (source of truth from AnswerKey):
+${JSON.stringify(specs)}
+${pageBoundarySection}
 
 Rules:
 - Use only the allowed question IDs above.
+- For each questionId, questionType MUST exactly match Question Specs.
+- Never re-classify question type based on visual guess.
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
-- questionType="map_fill" if the question ID is listed in MAP-FILL QUESTIONS above.
-- questionType="map_draw" if the question shows a BLANK GRID, COORDINATE SYSTEM, GRID PAPER, or BLANK OUTLINE DIAGRAM and the question stem asks the student to DRAW, MARK, CONNECT DOTS, or PLACE a symbol/shape on it. This includes:
-  - Geographic map symbol placement (畫出颱風位置、以符號標示)
-  - Grid paper geometry drawing (在方格紙上畫正方形、畫三角形)
-  - Connect-the-dots diagrams (依編號連接座標點)
-  For map_draw questions, output answerBbox that frames the ENTIRE diagram/map/grid area.
-  Also output drawType to distinguish the sub-type:
-  - drawType="map_symbol": geographic map — student places a symbol at a coordinate position
-  - drawType="grid_geometry": grid paper — student draws a geometric shape (square, triangle, etc.)
-  - drawType="connect_dots": numbered dots — student connects points in order to form a shape
-- questionType="diagram_draw" if the question shows pre-printed shapes/figures (circles, fraction bars, etc.) and asks the student to COLOR or SHADE a portion of them (e.g., 塗色表示分數、塗出1又2/3個圓). Output answerBbox that frames the entire figure area.
-- questionType="single_choice" if the answer space is a PARENTHESES ( ) and the student writes ONE option symbol (A/B/C/D or 甲/乙/丙/丁 or ①/②/③) inside it. Binary right/wrong scoring.
-- questionType="multi_choice" if the answer space is PARENTHESES ( ) and the student writes MULTIPLE option symbols (comma-separated like "A,C"). Partial credit scoring. Key distinction from single_choice: multiple selections expected.
-- questionType="single_check" if the answer space is a CHECKBOX □ and the student marks ONLY ONE box with ✓/○/×. Binary right/wrong scoring. Key distinction from multi_check: only one box should be marked.
-- questionType="multi_check" if the answer space is CHECKBOXES □ and the student can mark MULTIPLE boxes. Options may be unlabeled blank boxes, or labeled with numbers/letters/symbols. Partial credit scoring.
-  KEY DISTINCTION — 選擇(choice) vs 勾選(check):
-  - 選擇題 (single_choice / multi_choice): the answer space is PARENTHESES ( ) — student writes a symbol inside
-  - 勾選題 (single_check / multi_check): the answer space is CHECKBOXES □ — student marks the box itself
-- questionType="fill_blank" if the question has one or more explicit blank markers printed on paper (underlines ___, empty boxes □, or parentheses ( )) and the student writes text/numbers into those blanks. Takes priority over word_problem and calculation if blank markers are present.
-- questionType="calculation" if the question is a math calculation with NO narrative/story context, NO blank markers (□/___), and the student must write formula steps and a final numeric answer (e.g., 算算看、直式算算看). The answer does NOT require a unit or answer sentence.
-- questionType="word_problem" if the question stem contains a narrative or real-world scenario (應用題, e.g. "小明有X個蘋果..." or "一塊三角形土地...") with NO explicit blank markers, and the answer requires a unit or text answer sentence.
-- Otherwise questionType="other".
-- For visible=true questions (except map_fill), output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
+- bboxPolicy MUST follow Question Specs:
+  - full_image: questionBbox and answerBbox must both be {x:0,y:0,w:1,h:1}.
+  - group_context: questions in the same bboxGroupId MUST share the same questionBbox/answerBbox.
+  - question_context: minimum bbox must include question number + stem + student answer area.
+- For visible=true questions with question_context/group_context, output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
   - Include the question number, question stem text, AND the student's answer area all within the bbox.
   - For map_draw and diagram_draw: frame the entire diagram/map/grid area plus any visible question stem above it.
   - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer.
   - For fill_blank with multiple blanks: frame all blanks and the surrounding question text together.
-  - For single_choice / multi_choice / single_check / multi_check: frame the question stem plus the option rows and answer spaces.
+  - For single_choice / multi_choice / single_check / multi_check / true_false: still include question stem + answer area (no answer-only crop).
+  - For matching(group_context): include the entire left column + right column + connecting lines of the whole group.
   - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
   If the question region cannot be determined, omit answerBbox.
@@ -1046,8 +1199,11 @@ Output:
     {
       "questionId": "string",
       "visible": true,
-      "questionType": "word_problem",
+      "questionType": "single_choice",
+      "bboxPolicyApplied": "question_context",
+      "bboxGroupId": "optional",
       "drawType": "map_symbol",
+      "questionBbox": { "x": 0.08, "y": 0.16, "w": 0.62, "h": 0.18 },
       "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 },
       "bracketBbox": { "x": 0.1, "y": 0.26, "w": 0.25, "h": 0.025 }
     }
@@ -1964,7 +2120,8 @@ export async function runStagedGradingPhaseA({
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
-  const classifyPrompt = buildClassifyPrompt(questionIds, answerKeyQuestions, pageBreaks)
+  const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
+  const classifyPrompt = buildClassifyPrompt(questionIds, classifyQuestionSpecs, pageBreaks)
   logStageStart(pipelineRunId, 'classify')
   const classifyResponse = await executeStage({
     apiKey,
@@ -1997,7 +2154,10 @@ export async function runStagedGradingPhaseA({
   if (!classifyParsed || typeof classifyParsed !== 'object') {
     throw new Error('PhaseA classify parse failed')
   }
-  const classifyResult = normalizeClassifyResult(classifyParsed, questionIds)
+  const classifyResult = applyClassifyQuestionSpecs(
+    normalizeClassifyResult(classifyParsed, questionIds),
+    classifyQuestionSpecs
+  )
   const classifyAligned = classifyResult.alignedQuestions
   logStaged(pipelineRunId, stagedLogLevel, 'classify normalized-summary', {
     coverage: classifyResult.coverage,
@@ -2976,4 +3136,3 @@ export async function runRecheckPipeline({
 
   return { results: parseRecheckResponse(response.data, correctionItems, { requestId: pipelineRunId }) }
 }
-
