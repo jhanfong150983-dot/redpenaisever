@@ -958,7 +958,7 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
-function buildClassifyPrompt(questionIds, answerKeyQuestions) {
+function buildClassifyPrompt(questionIds, answerKeyQuestions, pageBreaks = []) {
   const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
 
   // Detect map_fill questions: prefer explicit questionCategory, fall back to heuristic
@@ -979,13 +979,28 @@ function buildClassifyPrompt(questionIds, answerKeyQuestions) {
     ? `\n\nMAP-FILL QUESTIONS (地圖填圖題):\nThe following question IDs are map-fill type: ${JSON.stringify(mapFillIds)}\n- For these questions, set questionType="map_fill" and visible=true.\n- Do NOT output answerBbox for map_fill questions (the entire image is the answer area).\n- These questions cover the ENTIRE image — there are no individual bounding boxes.`
     : ''
 
+  // Page boundary section: injected when the submission image is composed of multiple merged photos
+  const pageBoundarySection = Array.isArray(pageBreaks) && pageBreaks.length > 0
+    ? (() => {
+        const totalPages = pageBreaks.length + 1
+        const boundaries = []
+        let prev = 0
+        for (let i = 0; i < pageBreaks.length; i++) {
+          boundaries.push(`- Photo ${i + 1} (page ${i + 1}): y=${prev.toFixed(2)} ~ y=${pageBreaks[i].toFixed(2)} → question ID prefix "${i + 1}-"`)
+          prev = pageBreaks[i]
+        }
+        boundaries.push(`- Photo ${totalPages} (page ${totalPages}): y=${prev.toFixed(2)} ~ y=1.00 → question ID prefix "${totalPages}-"`)
+        return `\n\nPAGE BOUNDARIES:\nThis image is composed of ${totalPages} original photos merged vertically. Use each question's bbox y-coordinate to determine which page it belongs to, then verify the prefix matches the AnswerKey question ID.\n${boundaries.join('\n')}\nIMPORTANT: AnswerKey IDs already include the page prefix (e.g. "1-3", "2-1"). Match each visible question to its AnswerKey ID by combining the page number derived from its y-position with the question number printed on the paper.`
+      })()
+    : ''
+
   return `
 You are stage CLASSIFY.
 Task: identify which question IDs are visible on this student submission image, classify each visible question's type, and locate each visible question's answer region.
 
 Allowed question IDs:
 ${JSON.stringify(questionIds)}
-${mapFillSection}
+${mapFillSection}${pageBoundarySection}
 
 Rules:
 - Use only the allowed question IDs above.
@@ -1948,7 +1963,8 @@ export async function runStagedGradingPhaseA({
 
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
-  const classifyPrompt = buildClassifyPrompt(questionIds, answerKeyQuestions)
+  const pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
+  const classifyPrompt = buildClassifyPrompt(questionIds, answerKeyQuestions, pageBreaks)
   logStageStart(pipelineRunId, 'classify')
   const classifyResponse = await executeStage({
     apiKey,
