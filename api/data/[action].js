@@ -2806,6 +2806,7 @@ async function handleSync(req, res) {
           id: row.id,
           name: row.name,
           folder: row.folder ?? undefined,
+          grade: row.grade ?? undefined,
           updatedAt: toMillis(row.updated_at) ?? undefined
         })
       )
