@@ -3152,6 +3152,13 @@ export async function runStagedGradingPhaseA({
           arbitrated_pick: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus?.startsWith('arbitrated_pick')).length,
           needs_review: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
         })
+        logStaged(pipelineRunId, stagedLogLevel, 'AI3 arbiter per-question', Array.from(arbiterByQuestionId.entries()).map(([qId, r]) => ({
+          questionId: qId,
+          arbiterStatus: r.arbiterStatus,
+          finalAnswer: r.finalAnswer,
+          confidence: r.confidence,
+          evidence: r.evidence
+        })))
       }
     } catch (arbiterErr) {
       logStaged(pipelineRunId, stagedLogLevel, 'AI3 arbiter failed (fallback to consistency status)', {
