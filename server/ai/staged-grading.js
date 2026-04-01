@@ -370,6 +370,16 @@ const STEM_LABEL_NUMBER_MAP = {
 
 // A5 輔助：正規化答案字串用於比對
 // - 去除 emoji、勾選符號、結尾方向箭頭、開頭選項前綴、外層括號
+// 正規化 true_false 答案（○/✗ 及其異體）
+function normalizeTrueFalseAnswer(raw) {
+  const s = String(raw ?? '').trim()
+  // 各種「正確」形式 → ○
+  if (/^[○〇Oo]$/.test(s) || /^(?:對|是|正確|ｏ|O|yes|Yes)$/u.test(s)) return '○'
+  // 各種「錯誤」形式 → ✗
+  if (/^[✗✘×Xx叉]$/.test(s) || /^(?:錯|否|不對|不是|no|No)$/u.test(s)) return '✗'
+  return null  // 無法正規化
+}
+
 function normalizeAnswerForComparison(raw) {
   let s = String(raw ?? '').trim()
   // 勾選文字描述 → 只取選項字母
@@ -389,8 +399,10 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/^\([A-Za-z]\)\s+/u, '').trim()
   // 整個字串是「(D)」→「D」
   s = s.replace(/^\(([A-Za-z])\)$/u, '$1').trim()
-  // 正規化多餘空白
-  s = s.replace(/\s+/g, ' ').trim()
+  // 全形數字 → 半形（新增）
+  s = s.replace(/[０-９]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
+  // 去除所有空白（新增：避免有無空白造成誤判）
+  s = s.replace(/\s+/gu, '')
   return s
 }
 
@@ -541,6 +553,13 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
     if (c1 && c2) {
       return c1 === c2 ? 'stable' : 'diff'
     }
+  }
+
+  // true_false：○/✗ 異體字正規化
+  if (questionType === 'true_false') {
+    const t1 = normalizeTrueFalseAnswer(ensureString(read1?.studentAnswerRaw, ''))
+    const t2 = normalizeTrueFalseAnswer(ensureString(read2?.studentAnswerRaw, ''))
+    if (t1 && t2) return t1 === t2 ? 'stable' : 'diff'
   }
 
   const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
@@ -1885,11 +1904,95 @@ Return:
 `.trim()
 }
 
-// Read2 uses the same prompt as Read1 — two independent calls, natural variance catches random errors.
-// Asymmetric skeptic/optimist design removed: it caused Read1 to over-read and Read2 to under-read,
-// resulting in too many diffs and defeating the purpose of the consistency check.
-function buildReReadAnswerPrompt(classifyResult, options = {}) {
+// ── AI2（全局派）：舊 ReRead，看全圖，同 Read1 prompt ──────────────────────
+// Two independent calls, natural variance catches random errors.
+function buildGlobalReadPrompt(classifyResult, options = {}) {
   return buildReadAnswerPrompt(classifyResult, options)
+}
+
+// Keep alias for backward compat
+function buildReReadAnswerPrompt(classifyResult, options = {}) {
+  return buildGlobalReadPrompt(classifyResult, options)
+}
+
+// ── AI1（細節派）：只看 answerBbox 裁切圖，不看全圖 ─────────────────────────
+// The same question-type rules apply, but:
+// - Images sent = one crop per question (NO full submission image)
+// - AI1 CANNOT see question stems or surrounding context
+// - Must apply blank-first strictly (crop may be the answer space only)
+function buildDetailReadPrompt(classifyResult, options = {}) {
+  const basePrompt = buildReadAnswerPrompt(classifyResult, options)
+  return `IMPORTANT — DETAIL READ MODE (AI1):
+You will see a series of CROPPED answer regions, one image per question.
+Each crop is preceded by a label: "--- 題目 [ID]（類型：[type]）---"
+You CANNOT see the full submission. You CANNOT see question stems or neighboring questions.
+
+STRICT RULES FOR CROP-ONLY MODE:
+- blank-first: If no fresh handwriting is visible in the crop → status='blank', studentAnswerRaw=''
+- unreadable: If handwriting exists but is illegible → status='unreadable', studentAnswerRaw=''
+- NEVER infer the answer from the question type or any context. Only read what is physically written.
+- NEVER output an answer you did not physically see in the crop.
+
+${basePrompt}`
+}
+
+// ── AI3（裁判）：比對 AI1/AI2，有依據地裁決 ─────────────────────────────────
+// AI3 does NOT extract student answers. It only reviews AI1/AI2 readings and picks the better one,
+// or declares needs_review if no evidence is found.
+// finalAnswer in output must always be AI1's or AI2's value — never a new reading.
+function buildArbiterPrompt(arbiterItems) {
+  // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status, agreementStatus }]
+  const questionBlocks = arbiterItems.map((item) => {
+    const ai1Str = item.ai1Status === 'blank' ? '（空白）' : item.ai1Status === 'unreadable' ? '（無法辨識）' : `「${item.ai1Answer}」`
+    const ai2Str = item.ai2Status === 'blank' ? '（空白）' : item.ai2Status === 'unreadable' ? '（無法辨識）' : `「${item.ai2Answer}」`
+    return `題目 ${item.questionId}（類型：${item.questionType}）
+  AI1（細節）讀到：${ai1Str}（status: ${item.ai1Status}）
+  AI2（全局）讀到：${ai2Str}（status: ${item.ai2Status}）
+  初步比對：${item.agreementStatus === 'agree' ? 'agree（等價後相同）' : 'disagree（等價後不同）'}
+  [此題裁切圖緊接在下方]`
+  }).join('\n\n---\n\n')
+
+  return `你是學生答案讀取的裁判 AI（AI3）。
+你將看到：(1) 完整作業圖（第一張圖），(2) 每道題的 answerBbox 裁切圖（每題一張，附標籤），
+以及 AI1（細節派，只看裁切圖）和 AI2（全局派，只看全圖）各自的讀取結果。
+
+你的任務是【裁決】，不是重新讀取：
+- 你不需要自行擷取學生答案。finalAnswer 只能從 AI1 或 AI2 的讀取值中擇一。
+- 你的工作是：從全圖與裁切圖中找到具體筆跡特徵，作為裁決的依據（evidence）。
+
+裁決規則：
+若 agree（AI1 = AI2）：
+  → 找出可見的具體筆跡特徵，確認兩者讀取有圖像依據
+  → 若找到 → arbiterStatus="arbitrated_agree"，finalAnswer=任一共識值
+  → 若找不到任何依據 → arbiterStatus="needs_review"
+
+若 disagree（AI1 ≠ AI2）：
+  → 找出圖像證據，判斷哪一方更接近實際筆跡
+  → 若支持 AI1 → arbiterStatus="arbitrated_pick_1"，finalAnswer=AI1的值
+  → 若支持 AI2 → arbiterStatus="arbitrated_pick_2"，finalAnswer=AI2的值
+  → 若無法判斷 → arbiterStatus="needs_review"
+
+⚠️ 必須在 evidence 中引用可見的具體筆跡特徵（位置、形狀、筆畫）。
+⚠️ evidence 為空字串 → 必須輸出 arbiterStatus="needs_review"。
+⚠️ finalAnswer 只能是 AI1 或 AI2 的原始讀取值，禁止自行填入新答案。
+⚠️ agree 時：找到模糊特徵即可；disagree 時需嚴格舉證。
+
+需裁決的題目如下（全圖在最前，各題裁切圖依序附在題目說明之後）：
+
+${questionBlocks}
+
+輸出 JSON，格式如下：
+{
+  "arbitrations": [
+    {
+      "questionId": "...",
+      "arbiterStatus": "arbitrated_agree | arbitrated_pick_1 | arbitrated_pick_2 | needs_review",
+      "finalAnswer": "...",
+      "evidence": "（具體筆跡描述，agree 時找到依據即可，disagree 時需嚴格說明）",
+      "confidence": "high | medium | low"
+    }
+  ]
+}`.trim()
 }
 
 function buildAccessorPrompt(answerKey, readAnswerResult) {
@@ -2459,28 +2562,73 @@ export async function runStagedGradingPhaseA({
   }
   const focusedCheckboxQuestionIds = Array.from(focusedCheckboxCropMap.keys())
 
-  // ── A3 + A4: ReadAnswer + reReadAnswer IN PARALLEL ─────────────────────────
-  // Full-image reads exclude checkbox questions that already have focused crops.
-  const readAnswerPrompt = buildReadAnswerPrompt(classifyResult, {
+  // ── Pre-AI1: Crop ALL visible non-checkbox questions with answerBbox ─────────
+  // These crops are used by AI1 (detail read) and later for teacher review.
+  const allQuestionCropMap = new Map()  // questionId → { data, mimeType }
+  const ai1CropCandidates = classifyAligned.filter(
+    (q) => q.visible && q.answerBbox && q.questionType !== 'map_fill'
+      && !focusedCheckboxCropMap.has(q.questionId)  // exclude already-cropped checkbox questions
+  )
+  if (ai1CropCandidates.length > 0 && inlineImages.length > 0) {
+    const inlineImage = inlineImages[0]
+    const cropResults = await Promise.all(
+      ai1CropCandidates.map(async (q) => {
+        const cropData = await cropInlineImageByBbox(
+          inlineImage.inlineData.data,
+          inlineImage.inlineData.mimeType,
+          q.answerBbox,
+          true
+        )
+        return { questionId: q.questionId, cropData }
+      })
+    )
+    for (const { questionId, cropData } of cropResults) {
+      if (cropData) allQuestionCropMap.set(questionId, cropData)
+    }
+    logStaged(pipelineRunId, stagedLogLevel, 'AI1 crop-all-questions', {
+      candidates: ai1CropCandidates.length,
+      succeeded: allQuestionCropMap.size
+    })
+  }
+  // Merge: checkbox crops also available for AI3 evidence
+  for (const [qId, cropData] of focusedCheckboxCropMap) {
+    allQuestionCropMap.set(qId, cropData)
+  }
+
+  // Build AI1 parts: text prompt + interleaved (label + crop) per question
+  const ai1IncludeIds = Array.from(allQuestionCropMap.keys())
+  const ai1TextPrompt = buildDetailReadPrompt(classifyResult, {
+    includeQuestionIds: ai1IncludeIds.length > 0 ? ai1IncludeIds : undefined
+  })
+  const ai1Parts = [{ text: ai1TextPrompt }]
+  for (const q of classifyAligned) {
+    if (!q.visible) continue
+    const crop = allQuestionCropMap.get(q.questionId)
+    if (!crop) continue
+    ai1Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}）---` })
+    ai1Parts.push({ inlineData: crop })
+  }
+
+  // ── A3(AI1) + A4(AI2): Detail read (crop-only) + Global read (full image) IN PARALLEL ──
+  const globalReadPrompt = buildGlobalReadPrompt(classifyResult, {
     excludeQuestionIds: focusedCheckboxQuestionIds
   })
-  const reReadAnswerPrompt = buildReReadAnswerPrompt(classifyResult, {
-    excludeQuestionIds: focusedCheckboxQuestionIds
-  })
-  logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', {
-    mode: 'full_image_with_focused_checkbox_crop',
-    excludedCheckboxCount: focusedCheckboxQuestionIds.length
+  logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', {
+    ai1CropCount: ai1IncludeIds.length,
+    ai2excludedCheckboxCount: focusedCheckboxQuestionIds.length
   })
   const parallelCalls = [
+    // AI1: detail read (crop images only, no full submission image)
     executeStage({
       apiKey,
       model,
       payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
       timeoutMs: getRemainingBudget(),
       routeHint,
-      routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-      stageContents: [{ role: 'user', parts: [{ text: readAnswerPrompt }, ...submissionImageParts] }]
+      routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+      stageContents: [{ role: 'user', parts: ai1Parts }]
     }),
+    // AI2: global read (full image, same role as original ReRead)
     executeStage({
       apiKey,
       model,
@@ -2488,7 +2636,7 @@ export async function runStagedGradingPhaseA({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-      stageContents: [{ role: 'user', parts: [{ text: reReadAnswerPrompt }, ...submissionImageParts] }]
+      stageContents: [{ role: 'user', parts: [{ text: globalReadPrompt }, ...submissionImageParts] }]
     })
   ]
   let finalAnswerOnlyIdx = -1
@@ -2916,110 +3064,140 @@ export async function runStagedGradingPhaseA({
     }
   })
 
-  // ── A2: CROP — only non-stable questions, for teacher review ──────────────
-  const cropByQuestionId = new Map()
-  const nonStableIds = new Set(
-    questionResultsRaw.filter((q) => q.consistencyStatus !== 'stable').map((q) => q.questionId)
-  )
-  const questionsToCrop = classifyAligned.filter(
-    (q) => nonStableIds.has(q.questionId) && q.answerBbox && q.questionType !== 'map_fill'
-  )
-  if (questionsToCrop.length > 0 && inlineImages.length > 0) {
-    const mainInlineData = inlineImages[0].inlineData
-    const cropResults = await Promise.all(
-      questionsToCrop.map(async (q) => {
-        const cropData = await cropInlineImageByBbox(
-          mainInlineData.data,
-          mainInlineData.mimeType,
-          q.answerBbox,
-          true  // always use actual bbox — Classify now outputs full-question-block bbox
-        )
-        return { questionId: q.questionId, cropData }
-      })
-    )
-    for (const { questionId, cropData } of cropResults) {
-      if (cropData) cropByQuestionId.set(questionId, cropData)
-    }
-    logStaged(pipelineRunId, stagedLogLevel, 'crop summary (non-stable only)', {
-      nonStable: nonStableIds.size,
-      attempted: questionsToCrop.length,
-      succeeded: cropByQuestionId.size
-    })
-  }
-
-  // Attach crop image URLs to non-stable question results.
-  // Priority: per-question crop → full image fallback (for any non-stable question without a crop)
+  // ── Attach crop image URLs for teacher review (uses allQuestionCropMap from pre-AI1 step) ──
+  // Priority: per-question crop (allQuestionCropMap) → full image fallback (map_fill, no bbox, etc.)
+  const cropByQuestionId = allQuestionCropMap  // alias for internal _internal reference
   const fullImageDataUrl = inlineImages.length > 0
     ? `data:${inlineImages[0].inlineData.mimeType};base64,${inlineImages[0].inlineData.data}`
     : undefined
-  const questionResults = questionResultsRaw.map((qr) => {
-    const isNonStable = qr.consistencyStatus !== 'stable'
-    const cropData = cropByQuestionId.get(qr.questionId)
-    let answerCropImageUrl
-    if (cropData) {
-      answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
-    } else if (isNonStable && fullImageDataUrl) {
-      // No per-question crop available (no answerBbox, map_draw, or crop failed) → full image
-      answerCropImageUrl = fullImageDataUrl
-    }
-    return { ...qr, answerCropImageUrl, hasCropImage: cropByQuestionId.has(qr.questionId) }
-  })
 
-  // ── A5.5: AI CONSISTENCY JUDGE (non-single-choice diff 題目讓 AI 判斷是否真的不一致) ──
-  const diffForJudge = questionResults.filter(
-    (q) => q.consistencyStatus === 'diff' && q.questionType !== 'single_choice'
-  )
-  if (diffForJudge.length > 0) {
+  // ── AI3 Arbiter (serial): compare AI1/AI2 results and make evidence-based decision ──
+  // Filter: skip questions where both AI1 and AI2 are blank (auto agree) or both unreadable (auto needs_review)
+  const arbiterItems = questionResultsRaw
+    .filter((qr) => {
+      const s1 = qr.readAnswer1.status
+      const s2 = qr.readAnswer2.status
+      if (s1 === 'blank' && s2 === 'blank') return false
+      if (s1 === 'unreadable' && s2 === 'unreadable') return false
+      return true
+    })
+    .map((qr) => ({
+      questionId: qr.questionId,
+      questionType: qr.questionType,
+      ai1Answer: qr.readAnswer1.studentAnswer,
+      ai1Status: qr.readAnswer1.status,
+      ai2Answer: qr.readAnswer2.studentAnswer,
+      ai2Status: qr.readAnswer2.status,
+      agreementStatus: qr.consistencyStatus === 'stable' ? 'agree' : 'disagree'
+    }))
+
+  const arbiterByQuestionId = new Map()
+  if (arbiterItems.length > 0) {
     try {
-      const judgePrompt = buildConsistencyJudgePrompt(diffForJudge)
-      logStageStart(pipelineRunId, 'consistencyJudge')
-      const judgeResponse = await executeStage({
-        apiKey,
-        model,
-        payload,
-        timeoutMs: getRemainingBudget(),
-        routeHint,
-        routeKey: AI_ROUTE_KEYS.GRADING_CONSISTENCY_JUDGE,
-        stageContents: [{ role: 'user', parts: [{ text: judgePrompt }] }]
-      })
-      logStageEnd(pipelineRunId, 'consistencyJudge', judgeResponse)
-      stageResponses.push(judgeResponse)
-      if (judgeResponse.ok) {
-        const judgeParsed = parseCandidateJson(judgeResponse.data)
-        const judgments = Array.isArray(judgeParsed?.judgments) ? judgeParsed.judgments : []
-        for (const j of judgments) {
-          const qId = ensureString(j?.questionId).trim()
-          const qr = questionResults.find((q) => q.questionId === qId)
-          if (!qr) continue
-          qr.consistencyReason = ensureString(j?.reason, '').slice(0, 200) || undefined
-          if (j?.trulyDifferent === false) {
-            qr.consistencyStatus = 'stable'
-            logStaged(pipelineRunId, stagedLogLevel, 'consistencyJudge promoted to stable', {
-              questionId: qId,
-              reason: qr.consistencyReason
-            })
-          } else {
-            logStaged(pipelineRunId, stagedLogLevel, 'consistencyJudge confirmed diff', {
-              questionId: qId,
-              reason: qr.consistencyReason
-            })
-          }
+      // Build AI3 parts: text prompt + full image + interleaved (label + crop) per question
+      const arbiterPromptText = buildArbiterPrompt(arbiterItems)
+      const arbiterParts = [{ text: arbiterPromptText }, ...submissionImageParts]
+      for (const item of arbiterItems) {
+        const crop = allQuestionCropMap.get(item.questionId)
+        if (crop) {
+          arbiterParts.push({ text: `--- 題目 ${item.questionId} 裁切圖 ---` })
+          arbiterParts.push({ inlineData: crop })
         }
       }
-    } catch (judgeErr) {
-      logStaged(pipelineRunId, stagedLogLevel, 'consistencyJudge failed (fallback to original diff)', {
-        error: judgeErr?.message
+      logStageStart(pipelineRunId, 'AI3-arbiter')
+      const arbiterResponse = await executeStage({
+        apiKey,
+        model,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_ARBITER,
+        stageContents: [{ role: 'user', parts: arbiterParts }]
+      })
+      logStageEnd(pipelineRunId, 'AI3-arbiter', arbiterResponse)
+      stageResponses.push(arbiterResponse)
+      if (arbiterResponse.ok) {
+        const arbiterParsed = parseCandidateJson(arbiterResponse.data)
+        const arbitrations = Array.isArray(arbiterParsed?.arbitrations) ? arbiterParsed.arbitrations : []
+        for (const a of arbitrations) {
+          const qId = ensureString(a?.questionId).trim()
+          if (!qId) continue
+          let arbStatus = ensureString(a?.arbiterStatus, 'needs_review')
+          const evidence = ensureString(a?.evidence, '').trim()
+          // Enforce: empty evidence → needs_review
+          if (!evidence && arbStatus !== 'needs_review') arbStatus = 'needs_review'
+          // Enforce: finalAnswer must be AI1 or AI2 value
+          const item = arbiterItems.find((i) => i.questionId === qId)
+          let finalAnswer = ensureString(a?.finalAnswer, '')
+          if (item && arbStatus !== 'needs_review') {
+            if (finalAnswer !== item.ai1Answer && finalAnswer !== item.ai2Answer) {
+              // AI3 produced a new reading — correct to the side it claimed to support
+              if (arbStatus === 'arbitrated_pick_1') finalAnswer = item.ai1Answer
+              else if (arbStatus === 'arbitrated_pick_2') finalAnswer = item.ai2Answer
+              else finalAnswer = item.ai1Answer  // agree → use AI1
+              stageWarnings.push(`[AI3] qId=${qId} finalAnswer was not AI1/AI2 value, corrected to ${finalAnswer}`)
+            }
+          }
+          arbiterByQuestionId.set(qId, {
+            arbiterStatus: arbStatus,
+            finalAnswer: arbStatus === 'needs_review' ? undefined : finalAnswer,
+            evidence: evidence.slice(0, 500),
+            confidence: ensureString(a?.confidence, 'low')
+          })
+        }
+        logStaged(pipelineRunId, stagedLogLevel, 'AI3 arbiter summary', {
+          sent: arbiterItems.length,
+          received: arbitrations.length,
+          arbitrated_agree: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'arbitrated_agree').length,
+          arbitrated_pick: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus?.startsWith('arbitrated_pick')).length,
+          needs_review: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
+        })
+      }
+    } catch (arbiterErr) {
+      logStaged(pipelineRunId, stagedLogLevel, 'AI3 arbiter failed (fallback to consistency status)', {
+        error: arbiterErr?.message
       })
     }
   }
 
-  const stableCount = questionResults.filter((q) => q.consistencyStatus === 'stable').length
-  const diffCount = questionResults.filter((q) => q.consistencyStatus === 'diff').length
-  const unstableCount = questionResults.filter((q) => q.consistencyStatus === 'unstable').length
-  logStaged(pipelineRunId, stagedLogLevel, 'PhaseA consistency summary', {
-    stableCount,
-    diffCount,
-    unstableCount
+  // Build final questionResults with arbiterResult attached
+  const questionResults = questionResultsRaw.map((qr) => {
+    const arbiterResult = arbiterByQuestionId.get(qr.questionId) ?? (() => {
+      // Auto-determine for questions not processed by AI3
+      const s1 = qr.readAnswer1.status
+      const s2 = qr.readAnswer2.status
+      if (s1 === 'blank' && s2 === 'blank') {
+        return { arbiterStatus: 'arbitrated_agree', finalAnswer: '', evidence: '兩者皆空白', confidence: 'high' }
+      }
+      if (s1 === 'unreadable' && s2 === 'unreadable') {
+        return { arbiterStatus: 'needs_review', finalAnswer: undefined, evidence: '兩者皆無法辨識', confidence: 'low' }
+      }
+      // AI3 didn't return this question (failed or missing) → fall back to consistency status
+      return qr.consistencyStatus === 'stable'
+        ? { arbiterStatus: 'arbitrated_agree', finalAnswer: qr.readAnswer1.studentAnswer, evidence: 'AI3 未回傳，沿用一致性判斷', confidence: 'low' }
+        : { arbiterStatus: 'needs_review', finalAnswer: undefined, evidence: 'AI3 未回傳，需人工審查', confidence: 'low' }
+    })()
+
+    // Attach crop image URL only for needs_review questions (for teacher review UI)
+    const isNeedsReview = arbiterResult.arbiterStatus === 'needs_review'
+    const cropData = allQuestionCropMap.get(qr.questionId)
+    let answerCropImageUrl
+    if (isNeedsReview) {
+      if (cropData) {
+        answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+      } else if (fullImageDataUrl) {
+        answerCropImageUrl = fullImageDataUrl  // fallback for map_fill, no-bbox questions
+      }
+    }
+    return { ...qr, arbiterResult, answerCropImageUrl, hasCropImage: !!cropData }
+  })
+
+  const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
+  const diffCount = 0  // no longer used (legacy compat: kept at 0)
+  const unstableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus === 'needs_review').length
+  logStaged(pipelineRunId, stagedLogLevel, 'PhaseA 3-AI summary', {
+    arbitratedCount: stableCount,
+    needsReviewCount: unstableCount
   })
 
   return {
@@ -3028,6 +3206,7 @@ export async function runStagedGradingPhaseA({
     stableCount,
     diffCount,
     unstableCount,
+    needsReviewCount: unstableCount,
     _internal: {
       answerKey,
       questionIds,

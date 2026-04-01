@@ -3,6 +3,8 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_CLASSIFY: 'grading.classify',
   GRADING_READ_ANSWER: 'grading.read_answer',
   GRADING_RE_READ_ANSWER: 'grading.re_read_answer',
+  GRADING_DETAIL_READ: 'grading.detail_read',
+  GRADING_ARBITER: 'grading.arbiter',
   GRADING_PHASE_A: 'grading.phase_a',
   GRADING_PHASE_B: 'grading.phase_b',
   GRADING_ACCESSOR: 'grading.accessor',
