@@ -2232,7 +2232,6 @@ function buildFinalGradingResult({
 
   const details = []
   let totalScore = 0
-  let unreadableCount = 0
 
   for (const question of keyQuestions) {
     const questionId = ensureString(question?.id).trim()
@@ -2244,8 +2243,6 @@ function buildFinalGradingResult({
     const classify = classifyById.get(questionId)
     const locate = locateById.get(questionId)
     const consistency = consistencyById?.get(questionId)
-
-    if (answer?.status === 'unreadable') unreadableCount += 1
 
     const hasMismatch = answer?.calculationAnswerMismatch === true
     const row = {
@@ -2326,9 +2323,6 @@ function buildFinalGradingResult({
   if (stageMeta.classify.coverage < 1) {
     const missing = keyQuestions.length - Math.round(stageMeta.classify.coverage * keyQuestions.length)
     reviewReasons.push(`有 ${missing} 題未被辨識到，可能漏批`)
-  }
-  if (unreadableCount > 0) {
-    reviewReasons.push(`有 ${unreadableCount} 題答案無法辨識，建議人工確認`)
   }
   // stageWarnings 僅記錄於 log，不推送給老師
 
