@@ -1896,7 +1896,7 @@ function buildAccessorPrompt(answerKey, readAnswerResult) {
   const strictness = answerKey?.strictness || 'standard'
   const strictnessRule =
     strictness === 'strict'
-      ? 'GRADING STRICTNESS: STRICT — The student answer must match the answer key exactly. Word order, factor order in multiplication, punctuation, units, and formatting must all be correct. Any deviation = wrong. Exception: unit pairs listed in the UNIT EQUIVALENCE TABLE below are always treated as identical.'
+      ? 'GRADING STRICTNESS: STRICT — For objective categories (single_choice, true_false, fill_blank, fill_variants, single_check, multi_check, multi_choice), enforce exact correctness per category rules. For rubric categories (calculation, word_problem, short_answer, map_draw, diagram_draw), judge by rubric dimensions and mathematical/concept correctness; do NOT require literal format matching unless the category rule explicitly requires it.'
       : strictness === 'lenient'
         ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, or minor formatting differ. However, unit substitution (e.g. 公尺 for 公分) is still wrong even in lenient mode for fill_blank and word_problem questions. Exception: unit pairs listed in the UNIT EQUIVALENCE TABLE below are always treated as identical.'
         : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, equivalent units per the UNIT EQUIVALENCE TABLE below) but reject wrong meaning, wrong numbers, wrong key terms, or different units.'
@@ -1954,7 +1954,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - isCorrect = (score === maxScore)
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
-- calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
+- calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
 - short_answer: Grade by key concept presence using rubricsDimensions or rubric. No unit checking required.
 - diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
@@ -3323,19 +3323,31 @@ UNIT EQUIVALENCE TABLE — these pairs are ALWAYS treated as identical:
   Note: "時速X公里" (e.g. 時速60公里) = "X km/h" = "X 公里/小時" — treat as identical.
   Note: Different units (e.g. 公尺 vs 公分, kg vs g) are still WRONG even if both appear in this table.
 
-GRADING RULES per questionCategory (use "questionCategory" field if present; otherwise fall back to "type"):
-- single_choice / true_false / fill_blank (or type=1): student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
+GRADING RULES per questionCategory ("questionCategory" is authoritative. Only fall back to "type" when questionCategory is empty):
+- single_choice / true_false / fill_blank: student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
   - fill_blank UNIT RULE: if correctAnswer contains a unit (e.g. "15 公分"), the student's unit must match exactly OR be an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "15 km" = "15 公里" ✓). Units not in the same equivalence pair (e.g. 公尺 ≠ 公分) → not passed.
   - fill_blank DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
-- fill_variants / map_fill (or type=2): student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
-- word_problem (or type=3 with rubricsDimensions): This is a correction submission.
-    * Check BOTH: (1) a calculation formula/process is present, AND (2) an answer sentence starts with "答：" or "A："and contains a number+unit (or full text answer).
+- fill_variants / map_fill: student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
+- word_problem: This is a correction submission.
+    * Check BOTH: (1) a calculation formula/process is present, AND (2) an answer sentence starts with "答：" or "A：" and contains a number+unit (or full text answer).
     * UNIT RULE: if the expected answer has a unit, the student's unit must match OR be an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair → not passed.
     * Must show the student understood the mistake and corrected it meaningfully.
-- short_answer / map_draw (or type=3): This is a correction submission.
+- calculation: This is a correction submission.
+    * Check BOTH: (1) the student shows corrected formula/process or meaningful recalculation, AND (2) final numeric result is correct.
+    * HARD RULE: NEVER require "答：" / "A：" / "Ans:" format for calculation.
+    * If the student writes extra intermediate steps, do not fail only because of extra steps; focus on correctness.
+- short_answer / map_draw: This is a correction submission.
     * Judge based on referenceAnswer and whether the student demonstrates genuine understanding of the concept.
     * The answer does not need to be perfect, but must show the student understood their mistake and addressed it meaningfully.
     * Do NOT pass if the answer is essentially unchanged from the mistake described in mistakeReason.
+
+TYPE FALLBACK (only when questionCategory is missing/empty):
+- type=1 → treat as single_choice/true_false/fill_blank exact-answer mode.
+- type=2 → treat as fill_variants/map_fill acceptableAnswers mode.
+- type=3:
+    * if rubricsDimensions contains a dimension named "答句" → treat as word_problem.
+    * else if rubricsDimensions contains "算式過程" or "最終答案" → treat as calculation.
+    * else → treat as short_answer.
 
 INSERTION MARK (插入符號 ∧ or 入-shape):
 If the student uses a handwritten ∧ or 入-shaped symbol to indicate a text insertion:

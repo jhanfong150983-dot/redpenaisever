@@ -1765,10 +1765,13 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
       questionText: item.question_text || '',
       mistakeReason: item.mistake_reason || '',
       hintGiven: item.hint_text || '',
+      questionCategory: keyQ?.questionCategory || '',
       correctAnswer: keyQ?.answer || '',
       type: keyQ?.type ?? 1,
       acceptableAnswers: Array.isArray(keyQ?.acceptableAnswers) ? keyQ.acceptableAnswers : [],
       referenceAnswer: keyQ?.referenceAnswer || '',
+      rubricsDimensions: Array.isArray(keyQ?.rubricsDimensions) ? keyQ.rubricsDimensions : [],
+      strictness: answerKey?.strictness || 'standard',
       maxScore: Number(keyQ?.maxScore ?? 1)
     }
   })
