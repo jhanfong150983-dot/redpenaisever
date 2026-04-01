@@ -332,6 +332,42 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox 
   }
 }
 
+const CHECKBOX_EQUIVALENT_TYPES = new Set(['single_check', 'multi_check', 'multi_choice'])
+const CHECKBOX_FOCUSED_READ_TYPES = new Set(['single_check', 'multi_check', 'multi_choice'])
+
+const CHINESE_NUMBER_MAP = {
+  一: 1,
+  二: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+  十: 10,
+  兩: 2,
+  两: 2
+}
+
+const CIRCLED_NUMBER_MAP = {
+  '①': 1, '②': 2, '③': 3, '④': 4, '⑤': 5, '⑥': 6, '⑦': 7, '⑧': 8, '⑨': 9, '⑩': 10,
+  '❶': 1, '❷': 2, '❸': 3, '❹': 4, '❺': 5, '❻': 6, '❼': 7, '❽': 8, '❾': 9, '❿': 10
+}
+
+const STEM_LABEL_NUMBER_MAP = {
+  甲: 1,
+  乙: 2,
+  丙: 3,
+  丁: 4,
+  戊: 5,
+  己: 6,
+  庚: 7,
+  辛: 8,
+  壬: 9,
+  癸: 10
+}
+
 // A5 輔助：正規化答案字串用於比對
 // - 去除 emoji、勾選符號、結尾方向箭頭、開頭選項前綴、外層括號
 function normalizeAnswerForComparison(raw) {
@@ -358,6 +394,128 @@ function normalizeAnswerForComparison(raw) {
   return s
 }
 
+function normalizeFullWidthDigits(value) {
+  return ensureString(value, '').replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xFF10))
+}
+
+function parseOrdinalNumber(raw) {
+  const token = normalizeFullWidthDigits(raw).trim()
+  if (!token) return null
+
+  if (/^\d+$/.test(token)) {
+    const n = Number.parseInt(token, 10)
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
+
+  if (CHINESE_NUMBER_MAP[token]) return CHINESE_NUMBER_MAP[token]
+
+  const tenPrefix = token.match(/^十([一二三四五六七八九])$/u)
+  if (tenPrefix) {
+    const tail = CHINESE_NUMBER_MAP[tenPrefix[1]]
+    return tail ? 10 + tail : null
+  }
+
+  const tenSuffix = token.match(/^([一二三四五六七八九])十$/u)
+  if (tenSuffix) {
+    const head = CHINESE_NUMBER_MAP[tenSuffix[1]]
+    return head ? head * 10 : null
+  }
+
+  const tenMiddle = token.match(/^([一二三四五六七八九])十([一二三四五六七八九])$/u)
+  if (tenMiddle) {
+    const head = CHINESE_NUMBER_MAP[tenMiddle[1]]
+    const tail = CHINESE_NUMBER_MAP[tenMiddle[2]]
+    return head && tail ? head * 10 + tail : null
+  }
+
+  return null
+}
+
+function normalizeSelectionToken(rawToken) {
+  let token = ensureString(rawToken, '').trim()
+  if (!token) return ''
+  token = token.replace(/[()（）\[\]【】]/g, '').trim()
+  if (!token) return ''
+
+  if (CIRCLED_NUMBER_MAP[token]) return `#${CIRCLED_NUMBER_MAP[token]}`
+  if (STEM_LABEL_NUMBER_MAP[token]) return `#${STEM_LABEL_NUMBER_MAP[token]}`
+
+  const ordinalMatch = token.match(/^第?\s*([0-9０-９一二三四五六七八九十兩两]+)\s*(?:個|格|項|列|欄)?$/u)
+  if (ordinalMatch) {
+    const n = parseOrdinalNumber(ordinalMatch[1])
+    if (n) return `#${n}`
+  }
+
+  const letterMatch = token.match(/^[A-Za-z]$/)
+  if (letterMatch) {
+    const upper = token.toUpperCase()
+    const idx = upper.charCodeAt(0) - 64
+    if (idx >= 1 && idx <= 26) return `#${idx}`
+    return `@${upper}`
+  }
+
+  const number = parseOrdinalNumber(token)
+  if (number) return `#${number}`
+
+  return token.replace(/\s+/g, '')
+}
+
+function sortSelectionTokens(tokens) {
+  const list = Array.isArray(tokens) ? [...tokens] : []
+  return list.sort((a, b) => {
+    const na = ensureString(a, '').match(/^#(\d+)$/)
+    const nb = ensureString(b, '').match(/^#(\d+)$/)
+    if (na && nb) return Number.parseInt(na[1], 10) - Number.parseInt(nb[1], 10)
+    if (na) return -1
+    if (nb) return 1
+    return ensureString(a, '').localeCompare(ensureString(b, ''), 'zh-Hant')
+  })
+}
+
+function normalizeSelectionAnswerForComparison(raw, questionType) {
+  const text = ensureString(raw, '').trim()
+  if (!text || text === '未作答' || text === '無法辨識') return ''
+
+  const compact = text.replace(/\s+/g, '')
+  const ordinalTokens = []
+  const ordinalRegex = /第\s*([0-9０-９一二三四五六七八九十兩两]+)\s*個/gu
+  let ordinalMatch = ordinalRegex.exec(compact)
+  while (ordinalMatch) {
+    const number = parseOrdinalNumber(ordinalMatch[1])
+    if (number) ordinalTokens.push(`#${number}`)
+    ordinalMatch = ordinalRegex.exec(compact)
+  }
+
+  let tokens = []
+  if (ordinalTokens.length > 0) {
+    tokens = ordinalTokens
+  } else {
+    const normalizedSeparators = compact.replace(/[，、；;｜|\n\r]+/g, ',')
+    tokens = normalizedSeparators
+      .split(',')
+      .map((part) => normalizeSelectionToken(part))
+      .filter(Boolean)
+
+    if (tokens.length <= 1) {
+      const charTokens = [...normalizedSeparators]
+        .map((ch) => normalizeSelectionToken(ch))
+        .filter(Boolean)
+      if (charTokens.length > 1) tokens = charTokens
+    }
+  }
+
+  if (tokens.length === 0) {
+    return normalizeAnswerForComparison(text)
+  }
+
+  if (questionType === 'single_check') {
+    return sortSelectionTokens(tokens).join(',')
+  }
+
+  const uniqueTokens = Array.from(new Set(tokens))
+  return sortSelectionTokens(uniqueTokens).join(',')
+}
+
 // A5 輔助：字元集 Jaccard 相似度（0..1）
 function computeStringSimilarity(a, b) {
   if (a === b) return 1
@@ -370,12 +528,21 @@ function computeStringSimilarity(a, b) {
 
 // A5: 純邏輯一致性比對（不耗 token）
 // read1/read2: { status: 'read'|'blank'|'unreadable', studentAnswerRaw: string }
-function computeConsistencyStatus(read1, read2) {
+function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s1 = ensureString(read1?.status, '').toLowerCase()
   const s2 = ensureString(read2?.status, '').toLowerCase()
   // 兩者皆空白 → 一致（都沒作答）
   if (s1 === 'blank' && s2 === 'blank') return 'stable'
   if (s1 !== 'read' || s2 !== 'read') return 'unstable'
+
+  if (CHECKBOX_EQUIVALENT_TYPES.has(questionType)) {
+    const c1 = normalizeSelectionAnswerForComparison(read1?.studentAnswerRaw, questionType)
+    const c2 = normalizeSelectionAnswerForComparison(read2?.studentAnswerRaw, questionType)
+    if (c1 && c2) {
+      return c1 === c2 ? 'stable' : 'diff'
+    }
+  }
+
   const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
   const a2 = normalizeAnswerForComparison(ensureString(read2?.studentAnswerRaw, ''))
   if (a1 === a2) return 'stable'
@@ -1001,6 +1168,57 @@ function normalizeReadAnswerResult(parsed, questionIds, mismatchIds = new Set())
   return { answers }
 }
 
+function applyAnswerOverrides(parsed, overrideMap) {
+  const sourceAnswers = Array.isArray(parsed?.answers) ? parsed.answers : []
+  const answers = [...sourceAnswers]
+  const indexByQuestionId = new Map()
+  for (let i = 0; i < answers.length; i += 1) {
+    const questionId = ensureString(answers[i]?.questionId, '').trim()
+    if (questionId && !indexByQuestionId.has(questionId)) {
+      indexByQuestionId.set(questionId, i)
+    }
+  }
+
+  for (const [questionIdRaw, overrideRaw] of overrideMap.entries()) {
+    const questionId = ensureString(questionIdRaw, '').trim()
+    if (!questionId || !overrideRaw || typeof overrideRaw !== 'object') continue
+
+    const override = { ...overrideRaw, questionId }
+    const status = ensureString(override.status, '').trim().toLowerCase()
+    const normalizedStatus = ['read', 'blank', 'unreadable'].includes(status)
+      ? status
+      : ensureString(override.studentAnswerRaw, '').trim()
+        ? 'read'
+        : 'blank'
+    const normalizedAnswer =
+      normalizedStatus === 'blank'
+        ? '未作答'
+        : normalizedStatus === 'unreadable'
+          ? '無法辨識'
+          : ensureString(override.studentAnswerRaw, '').trim()
+
+    const nextRow = {
+      ...override,
+      questionId,
+      status: normalizedStatus,
+      studentAnswerRaw: normalizedAnswer
+    }
+
+    if (indexByQuestionId.has(questionId)) {
+      const index = indexByQuestionId.get(questionId)
+      answers[index] = { ...answers[index], ...nextRow }
+    } else {
+      indexByQuestionId.set(questionId, answers.length)
+      answers.push(nextRow)
+    }
+  }
+
+  return {
+    ...(parsed && typeof parsed === 'object' ? parsed : {}),
+    answers
+  }
+}
+
 function normalizeAccessorResult(parsed, answerKey, answers) {
   const answersById = mapByQuestionId(answers, (item) => item?.questionId)
   const scoresRaw = Array.isArray(parsed?.scores) ? parsed.scores : []
@@ -1279,9 +1497,54 @@ Return strict JSON:
 }`.trim()
 }
 
-function buildReadAnswerPrompt(classifyResult) {
+function buildFocusedCheckboxReadPrompt(questionId, questionType) {
+  const normalizedType = ensureString(questionType, '').trim().toLowerCase()
+  const isSingle = normalizedType === 'single_check'
+  const typeLabel = isSingle ? 'SINGLE-CHECK' : normalizedType === 'multi_choice' ? 'MULTI-CHOICE' : 'MULTI-CHECK'
+
+  return `You are reading a CROPPED IMAGE of ONE ${typeLabel} question. The crop belongs to questionId "${questionId}" only.
+
+Your task: detect which option(s) the student marked in this cropped question.
+You do NOT know the correct answer and must NOT guess.
+
+Output token rule (strict):
+1) If options have printed labels (e.g. ①②③, A B C, 甲乙丙, 1 2 3), output ONLY those label tokens.
+2) If options are unlabeled checkboxes, output "第X個" (e.g. 第一個, 第二個) by reading order.
+3) ${isSingle ? 'Output ONE token only.' : 'Output comma-separated tokens with NO spaces, preserving reading order.'}
+4) If no visible mark for this question -> status="blank", studentAnswerRaw="未作答".
+5) If marks are too unclear to determine -> status="unreadable", studentAnswerRaw="無法辨識".
+
+Return strict JSON:
+{
+  "answers": [
+    {
+      "questionId": "${questionId}",
+      "studentAnswerRaw": "${isSingle ? '第二個' : '第一個,第三個'}",
+      "status": "read|blank|unreadable"
+    }
+  ]
+}`.trim()
+}
+
+function buildReadAnswerPrompt(classifyResult, options = {}) {
+  const includedIds = new Set(
+    Array.isArray(options?.includeQuestionIds)
+      ? options.includeQuestionIds.map((id) => ensureString(id, '').trim()).filter(Boolean)
+      : []
+  )
+  const hasIncludeFilter = includedIds.size > 0
+  const excludedIds = new Set(
+    Array.isArray(options?.excludeQuestionIds)
+      ? options.excludeQuestionIds.map((id) => ensureString(id, '').trim()).filter(Boolean)
+      : []
+  )
   const visibleQuestions = Array.isArray(classifyResult?.alignedQuestions)
-    ? classifyResult.alignedQuestions.filter((q) => q.visible)
+    ? classifyResult.alignedQuestions.filter((q) => {
+      const questionId = ensureString(q?.questionId, '').trim()
+      if (!q.visible || !questionId) return false
+      if (hasIncludeFilter && !includedIds.has(questionId)) return false
+      return !excludedIds.has(questionId)
+    })
     : []
   const visibleIds = visibleQuestions.map((q) => q.questionId)
   const singleChoiceIds = visibleQuestions
@@ -1625,8 +1888,8 @@ Return:
 // Read2 uses the same prompt as Read1 — two independent calls, natural variance catches random errors.
 // Asymmetric skeptic/optimist design removed: it caused Read1 to over-read and Read2 to under-read,
 // resulting in too many diffs and defeating the purpose of the consistency check.
-function buildReReadAnswerPrompt(classifyResult) {
-  return buildReadAnswerPrompt(classifyResult)
+function buildReReadAnswerPrompt(classifyResult, options = {}) {
+  return buildReadAnswerPrompt(classifyResult, options)
 }
 
 function buildAccessorPrompt(answerKey, readAnswerResult) {
@@ -2173,13 +2436,47 @@ export async function runStagedGradingPhaseA({
     .filter((q) => q.visible && q.questionType === 'calculation')
     .map((q) => q.questionId)
 
-  // ── A3 + A4: ReadAnswer + reReadAnswer IN PARALLEL (full image) ────────────
-  // Both reads use the full submission image so AI has complete layout context
-  // and cannot misattribute answers across question boundaries due to bad crops.
-  // Crops are done AFTER consistency check, only for non-stable questions (A2).
-  const readAnswerPrompt = buildReadAnswerPrompt(classifyResult)
-  const reReadAnswerPrompt = buildReReadAnswerPrompt(classifyResult)
-  logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', { mode: 'full_image' })
+  // Focused checkbox crops: single_check / multi_check / multi_choice
+  // We pre-crop first, then exclude successful IDs from full-image ReadAnswer.
+  const focusedCheckboxCandidates = classifyAligned.filter(
+    (q) => q.visible && CHECKBOX_FOCUSED_READ_TYPES.has(q.questionType) && q.answerBbox
+  )
+  const focusedCheckboxCropMap = new Map()
+  if (focusedCheckboxCandidates.length > 0 && inlineImages.length > 0) {
+    const inlineImage = inlineImages[0]
+    const cropResults = await Promise.all(
+      focusedCheckboxCandidates.map(async (q) => {
+        const cropData = await cropInlineImageByBbox(
+          inlineImage.inlineData.data,
+          inlineImage.inlineData.mimeType,
+          q.answerBbox,
+          true
+        )
+        return { questionId: q.questionId, cropData }
+      })
+    )
+    for (const { questionId, cropData } of cropResults) {
+      if (cropData) focusedCheckboxCropMap.set(questionId, cropData)
+    }
+    logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox crop prepare', {
+      candidateCount: focusedCheckboxCandidates.length,
+      preparedCount: focusedCheckboxCropMap.size
+    })
+  }
+  const focusedCheckboxQuestionIds = Array.from(focusedCheckboxCropMap.keys())
+
+  // ── A3 + A4: ReadAnswer + reReadAnswer IN PARALLEL ─────────────────────────
+  // Full-image reads exclude checkbox questions that already have focused crops.
+  const readAnswerPrompt = buildReadAnswerPrompt(classifyResult, {
+    excludeQuestionIds: focusedCheckboxQuestionIds
+  })
+  const reReadAnswerPrompt = buildReReadAnswerPrompt(classifyResult, {
+    excludeQuestionIds: focusedCheckboxQuestionIds
+  })
+  logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer image mode', {
+    mode: 'full_image_with_focused_checkbox_crop',
+    excludedCheckboxCount: focusedCheckboxQuestionIds.length
+  })
   const parallelCalls = [
     executeStage({
       apiKey,
@@ -2266,11 +2563,11 @@ export async function runStagedGradingPhaseA({
   if (readAnswerResponse.warnings.length > 0) {
     stageWarnings.push(...readAnswerResponse.warnings.map((w) => `[ReadAnswer] ${w}`))
   }
-  const readAnswerParsed = parseCandidateJson(readAnswerResponse.data)
+  let readAnswerParsed = parseCandidateJson(readAnswerResponse.data)
   if (!readAnswerParsed || typeof readAnswerParsed !== 'object') {
     throw new Error('PhaseA read_answer parse failed')
   }
-  const reReadAnswerParsed = reReadAnswerResponse?.ok
+  let reReadAnswerParsed = reReadAnswerResponse?.ok
     ? parseCandidateJson(reReadAnswerResponse.data)
     : null
 
@@ -2332,18 +2629,128 @@ export async function runStagedGradingPhaseA({
     for (const result of bracketReadResults) {
       if (result) overrideMap.set(result.questionId, result.answer)
     }
-    if (overrideMap.size > 0 && Array.isArray(readAnswerParsed?.answers)) {
-      readAnswerParsed.answers = readAnswerParsed.answers.map((item) => {
-        const override = overrideMap.get(item?.questionId)
-        return override ? { ...item, ...override } : item
-      })
-      if (reReadAnswerParsed && Array.isArray(reReadAnswerParsed?.answers)) {
-        reReadAnswerParsed.answers = reReadAnswerParsed.answers.map((item) => {
-          const override = overrideMap.get(item?.questionId)
-          return override ? { ...item, ...override } : item
-        })
+    if (overrideMap.size > 0) {
+      readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
+      if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
+        reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, overrideMap)
       }
       logStaged(pipelineRunId, 'basic', 'bracket-read overrides applied', { count: overrideMap.size })
+    }
+  }
+
+  // ── A3c: Focused checkbox read (crop-based, context-reduced) ───────────────
+  if (focusedCheckboxCropMap.size > 0) {
+    logStaged(pipelineRunId, 'basic', 'focused-checkbox-read begin', {
+      count: focusedCheckboxCropMap.size
+    })
+    const classifyByQuestionId = mapByQuestionId(classifyAligned, (item) => item?.questionId)
+    const focusedReadResults = await Promise.all(
+      Array.from(focusedCheckboxCropMap.entries()).map(async ([questionId, cropData]) => {
+        const classifyRow = classifyByQuestionId.get(questionId)
+        const questionType = ensureString(classifyRow?.questionType, '').trim().toLowerCase()
+        const focusedPrompt = buildFocusedCheckboxReadPrompt(questionId, questionType)
+        const focusedResponse = await executeStage({
+          apiKey,
+          model,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(),
+          routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+          stageContents: [{ role: 'user', parts: [{ text: focusedPrompt }, { inlineData: cropData }] }]
+        })
+        if (!focusedResponse.ok) {
+          logStaged(pipelineRunId, 'basic', `focused-checkbox-read failed qid=${questionId}`)
+          return null
+        }
+
+        const parsed = parseCandidateJson(focusedResponse.data)
+        const answer = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
+        if (answer) {
+          logStaged(pipelineRunId, 'basic', `focused-checkbox-read result qid=${questionId}`, {
+            questionType,
+            studentAnswerRaw: answer.studentAnswerRaw,
+            status: answer.status
+          })
+        }
+        return answer ? { questionId, answer } : null
+      })
+    )
+
+    const overrideMap = new Map()
+    for (const result of focusedReadResults) {
+      if (result) overrideMap.set(result.questionId, result.answer)
+    }
+
+    if (overrideMap.size > 0) {
+      readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
+      if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
+        reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, overrideMap)
+      }
+      logStaged(pipelineRunId, 'basic', 'focused-checkbox-read overrides applied', {
+        count: overrideMap.size
+      })
+    }
+
+    const missingFocusedIds = focusedCheckboxQuestionIds.filter((questionId) => !overrideMap.has(questionId))
+    if (missingFocusedIds.length > 0) {
+      logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read fallback to full-image', {
+        missingCount: missingFocusedIds.length,
+        questionIds: missingFocusedIds
+      })
+      const fallbackPrompt = buildReadAnswerPrompt(classifyResult, {
+        includeQuestionIds: missingFocusedIds
+      })
+      const fallbackResponse = await executeStage({
+        apiKey,
+        model,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+        stageContents: [{ role: 'user', parts: [{ text: fallbackPrompt }, ...submissionImageParts] }]
+      })
+      if (fallbackResponse.ok) {
+        const fallbackParsed = parseCandidateJson(fallbackResponse.data)
+        const fallbackAnswers = Array.isArray(fallbackParsed?.answers) ? fallbackParsed.answers : []
+        const fallbackOverrideMap = new Map()
+        for (const row of fallbackAnswers) {
+          const qId = ensureString(row?.questionId, '').trim()
+          if (qId && missingFocusedIds.includes(qId)) {
+            fallbackOverrideMap.set(qId, row)
+          }
+        }
+        if (fallbackOverrideMap.size > 0) {
+          readAnswerParsed = applyAnswerOverrides(readAnswerParsed, fallbackOverrideMap)
+          if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
+            reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, fallbackOverrideMap)
+          }
+          for (const qId of fallbackOverrideMap.keys()) {
+            overrideMap.set(qId, fallbackOverrideMap.get(qId))
+          }
+          logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read fallback overrides applied', {
+            count: fallbackOverrideMap.size
+          })
+        }
+      }
+
+      // If still unresolved after focused + fallback, force unreadable to avoid false stable.
+      const unresolvedIds = focusedCheckboxQuestionIds.filter((questionId) => !overrideMap.has(questionId))
+      if (unresolvedIds.length > 0) {
+        const unresolvedOverrideMap = new Map(
+          unresolvedIds.map((questionId) => [
+            questionId,
+            { questionId, status: 'unreadable', studentAnswerRaw: '無法辨識' }
+          ])
+        )
+        readAnswerParsed = applyAnswerOverrides(readAnswerParsed, unresolvedOverrideMap)
+        if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
+          reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, unresolvedOverrideMap)
+        }
+        logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read unresolved forced-unreadable', {
+          count: unresolvedIds.length,
+          questionIds: unresolvedIds
+        })
+      }
     }
   }
 
@@ -2494,7 +2901,9 @@ export async function runStagedGradingPhaseA({
     const read2 = read2ById.get(questionId)
     const classifyRow = classifyAligned.find((q) => q.questionId === questionId)
     const consistencyStatus =
-      read1 && read2 ? computeConsistencyStatus(read1, read2) : 'unstable'
+      read1 && read2
+        ? computeConsistencyStatus(read1, read2, classifyRow?.questionType ?? 'other')
+        : 'unstable'
     return {
       questionId,
       consistencyStatus,
