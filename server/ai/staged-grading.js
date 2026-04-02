@@ -1750,19 +1750,30 @@ STEP 1 — Count how many distinct symbols you see in this box.
 STEP 2 — For each symbol, briefly describe its key strokes.
 STEP 3 — Match to the correct standard symbol using this confusion table:
 
-BOPOMOFO CONFUSION TABLE:
+BOPOMOFO CONFUSION TABLE — high-confusion pairs marked with ⚠️:
+
+⚠️ EASILY CONFUSED GROUP 1 — look similar in handwriting:
+- ㄆ: two horizontal bars + downward stroke on right (like 廾 with right stroke)
+- ㄘ: right-angle hook pointing right (like a backwards capital J with a top bar)
+- ㄣ: hook curling left at bottom (like an upside-down J, no top bar)
+→ Key distinction: ㄆ has TWO horizontal bars; ㄘ has a right-pointing angle; ㄣ has a leftward curl
+
+⚠️ EASILY CONFUSED GROUP 2 — look similar in handwriting:
+- ㄋ: one horizontal stroke at top + vertical going straight down (like 丁)
+- ㄌ: vertical stroke + hook turning right at the bottom (like 乚 with a top)
+→ Key distinction: ㄋ ends straight down; ㄌ ends with a rightward hook
+
+⚠️ EASILY CONFUSED GROUP 3:
+- ㄇ: three-sided box OPEN AT BOTTOM (∩ rotated, like a roof)
+- ㄈ: three-sided box OPEN AT RIGHT (like ㄈ facing right)
+→ Key distinction: which side is open
+
+Other symbols (less commonly confused):
 - ㄅ: vertical stroke + left hook at bottom
-- ㄆ: two horizontal bars + downward stroke on right side
-- ㄇ: three-sided box open at bottom (like ㄇ)
-- ㄈ: three-sided box open at right (like ㄈ)
 - ㄉ: vertical stroke + short left stroke at top
 - ㄊ: cross (+) shape + hook going down-right
-- ㄋ: one horizontal + vertical down (like 丁)
-- ㄌ: vertical + hook turning right at bottom
 - ㄍ: two bent strokes
 - ㄏ: hook with horizontal top (like 厂)
-- ㄘ: right-angle hook pointing right (like backwards J with top bar)
-- ㄣ: hook curling left at bottom (like upside-down J)
 
 STEP 4 — List all identified symbols separated by 、.
 
