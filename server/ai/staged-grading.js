@@ -61,6 +61,7 @@ const CATEGORY_TO_TYPE = {
   word_problem: 3,
   short_answer: 3,
   map_fill: 2,
+  multi_fill: 2,
   map_draw: 3,
   diagram_draw: 3,
   matching: 1,
@@ -733,6 +734,7 @@ const CLASSIFY_ALLOWED_TYPES = new Set([
   'calculation',
   'single_choice',
   'map_fill',
+  'multi_fill',
   'map_draw',
   'diagram_draw',
   'multi_check',
@@ -1055,7 +1057,7 @@ function normalizeClassifyResult(parsed, questionIds) {
     const visible = row?.visible === true
     const qt = row?.questionType
     const VALID_QUESTION_TYPES = new Set([
-      'word_problem', 'calculation', 'single_choice', 'map_fill', 'map_draw',
+      'word_problem', 'calculation', 'single_choice', 'map_fill', 'multi_fill', 'map_draw',
       'diagram_draw', 'multi_check', 'fill_blank', 'true_false', 'matching',
       'multi_choice', 'single_check'
     ])
@@ -1769,6 +1771,9 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
   const mapFillIds = visibleQuestions
     .filter((q) => q.questionType === 'map_fill')
     .map((q) => q.questionId)
+  const multiFillIds = visibleQuestions
+    .filter((q) => q.questionType === 'multi_fill')
+    .map((q) => q.questionId)
   const multiCheckIds = visibleQuestions
     .filter((q) => q.questionType === 'multi_check')
     .map((q) => q.questionId)
@@ -1815,6 +1820,9 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     : ''
   const mapFillNote = mapFillIds.length > 0
     ? `\nMAP-FILL questions (地圖填圖題): ${JSON.stringify(mapFillIds)}`
+    : ''
+  const multiFillNote = multiFillIds.length > 0
+    ? `\nMULTI-FILL questions (多項填入題): ${JSON.stringify(multiFillIds)}`
     : ''
   const mapDrawSymbolNote = mapDrawSymbolIds.length > 0
     ? `\nMAP-DRAW (map_symbol) questions: ${JSON.stringify(mapDrawSymbolIds)}`
@@ -2028,6 +2036,15 @@ MAP-FILL RULE (地圖填圖題):
 - If no printed markers, use spatial descriptions like "左上方", "中間偏右", "右下角".
 - Include ALL student-written text, even if misspelled.
 - status="read" if any handwritten text found, status="blank" if none.
+` : ''}
+${multiFillNote ? `
+MULTI-FILL RULE (多項填入題):
+- For question IDs in MULTI-FILL list, each question is ONE specific blank box in a diagram/map.
+- The answer bbox for each question points to that specific box — read ONLY what is written inside that box.
+- Transcribe ALL codes/symbols the student wrote in the box (e.g., "ㄅ、ㄇ、ㄉ"), faithfully and completely.
+- Output format: exactly what the student wrote, preserving the separator (、or ，).
+- Do NOT infer or guess missing codes. Do NOT read from neighboring boxes.
+- status="read" if any handwritten codes found, status="blank" if box is empty.
 ` : ''}
 ${mapDrawIds.length > 0 ? `
 MAP-DRAW RULES (繪圖/標記題):
@@ -2284,8 +2301,19 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - score = maxScore if isCorrect, else 0 (binary scoring per pair).
   - errorType: 'concept' if wrong connection; 'blank' if "未連線" or "未作答".
 - map_fill: See MAP-FILL SCORING below.
+- multi_fill: See MULTI-FILL SCORING below.
 - map_draw: See MAP-DRAW SCORING below.
 - (If questionCategory is absent, fall back to type-based rules: type=1 → exact match, type=2 → acceptableAnswers match, type=3 → use rubricsDimensions-style concept grading; do NOT use rubric 4-level fallback.)
+
+- MULTI-FILL SCORING (多項填入題): Each question is one blank box; the student writes multiple codes (e.g. "ㄅ、ㄇ、ㄉ").
+  - Parse student codes: split studentAnswerRaw by 、，, and whitespace → normalize each token (strip spaces, full-width→half-width).
+  - Parse correct codes: split the AnswerKey answer field the same way.
+  - Compare as SETS (order-insensitive): correctSet = set of correct codes; studentSet = set of student codes.
+  - correctCount = |studentSet ∩ correctSet|; totalCount = |correctSet|.
+  - score = Math.round(correctCount / totalCount * maxScore).
+  - isCorrect = (correctCount === totalCount && studentSet.size === totalCount) [no extra codes AND all correct].
+  - errorType: 'concept' if wrong/missing codes; 'blank' if studentAnswerRaw is blank/未作答.
+  - scoringReason: list which codes were correct, which were missing, which were extra (if any).
 
 - MAP-FILL SCORING (地圖填圖題): If the AnswerKey question has acceptableAnswers (list of correct names) AND a long referenceAnswer describing positions:
   - The student's answer contains position:name pairs (e.g. "位置A: 泰國, 位置B: 越南").
@@ -3721,6 +3749,7 @@ GRADING RULES per questionCategory ("questionCategory" is authoritative. Only fa
   - fill_blank UNIT RULE: if correctAnswer contains a unit (e.g. "15 公分"), the student's unit must match exactly OR be an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "15 km" = "15 公里" ✓). Units not in the same equivalence pair (e.g. 公尺 ≠ 公分) → not passed.
   - fill_blank DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
 - fill_variants / map_fill: student answer must match ANY entry in acceptableAnswers[]. If acceptableAnswers is empty, fall back to correctAnswer.
+- multi_fill: See MULTI-FILL SCORING above.
 - word_problem: This is a correction submission.
     * Check BOTH: (1) a calculation formula/process is present, AND (2) an answer sentence starts with "答：" or "A：" and contains a number+unit (or full text answer).
     * UNIT RULE: if the expected answer has a unit, the student's unit must match OR be an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair → not passed.
