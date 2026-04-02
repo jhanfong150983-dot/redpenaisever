@@ -746,11 +746,32 @@ const CLASSIFY_ALLOWED_TYPES = new Set([
 function resolveExpectedQuestionType(question) {
   const category = ensureString(question?.questionCategory, '').trim()
   const answerFormat = ensureString(question?.answerFormat, '').trim().toLowerCase()
-  if (answerFormat === 'matching') return 'matching'
+
+  // Priority rules (explicit > structural hints > category/type fallback)
+  // 1) Explicit answerFormat: matching or matching_on_map => matching
+  if (answerFormat === 'matching' || answerFormat === 'matching_on_map') return 'matching'
+
+  // 2) Structural hints: presence of choices + matchingGroupId/unorderedGroupId/bboxGroupId
+  const hasChoices = Array.isArray(question?.choices) && question.choices.length > 0
+  const hasMatchingGroup = Boolean(
+    ensureString(question?.matchingGroupId, '').trim() ||
+      ensureString(question?.unorderedGroupId, '').trim() ||
+      ensureString(question?.bboxGroupId, '').trim()
+  )
+  // If there are explicit choices and a matching group or targets, treat as matching
+  if (hasChoices && (hasMatchingGroup || Array.isArray(question?.targets) || Array.isArray(question?.answerTargets))) {
+    return 'matching'
+  }
+
+  // 3) Map-specific categories should remain map_draw / map_fill when explicitly set
+  if (category === 'map_draw' || category === 'map_fill') return category
+
+  // 4) Some legacy category mappings
   if (category === 'fill_variants') return 'fill_blank'
   if (category === 'short_answer') return 'word_problem'
   if (CLASSIFY_ALLOWED_TYPES.has(category)) return category
 
+  // 5) Fallback to numeric resolveQuestionType (legacy behavior)
   const resolvedType = resolveQuestionType(question)
   if (resolvedType === 3) return 'word_problem'
   if (resolvedType === 2) return 'fill_blank'
