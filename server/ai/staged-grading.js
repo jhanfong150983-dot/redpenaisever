@@ -1739,6 +1739,51 @@ Return strict JSON only. No markdown.
 }`.trim()
 }
 
+function buildFocusedMultiFillReReadPrompt(questionId) {
+  return `You are reading a CROPPED IMAGE of ONE MULTI-FILL answer box. The crop belongs to questionId "${questionId}" only.
+
+This box contains handwritten codes — most likely Bopomofo (注音符號) phonetic symbols.
+
+Your task: carefully identify each symbol using stroke-by-stroke analysis.
+
+STEP 1 — Count how many distinct symbols you see in this box.
+STEP 2 — For each symbol, briefly describe its key strokes.
+STEP 3 — Match to the correct standard symbol using this confusion table:
+
+BOPOMOFO CONFUSION TABLE:
+- ㄅ: vertical stroke + left hook at bottom
+- ㄆ: two horizontal bars + downward stroke on right side
+- ㄇ: three-sided box open at bottom (like ㄇ)
+- ㄈ: three-sided box open at right (like ㄈ)
+- ㄉ: vertical stroke + short left stroke at top
+- ㄊ: cross (+) shape + hook going down-right
+- ㄋ: one horizontal + vertical down (like 丁)
+- ㄌ: vertical + hook turning right at bottom
+- ㄍ: two bent strokes
+- ㄏ: hook with horizontal top (like 厂)
+- ㄘ: right-angle hook pointing right (like backwards J with top bar)
+- ㄣ: hook curling left at bottom (like upside-down J)
+
+STEP 4 — List all identified symbols separated by 、.
+
+Rules:
+- Read ONLY what is inside this box. Do NOT read neighboring boxes.
+- status="read" if any symbols found.
+- status="blank" if completely empty.
+- status="unreadable" if too blurry to identify.
+
+Return strict JSON only. No markdown.
+{
+  "answers": [
+    {
+      "questionId": "${questionId}",
+      "studentAnswerRaw": "ㄅ、ㄇ、ㄉ",
+      "status": "read|blank|unreadable"
+    }
+  ]
+}`.trim()
+}
+
 function buildFocusedCheckboxReadPrompt(questionId, questionType) {
   const normalizedType = ensureString(questionType, '').trim().toLowerCase()
   const isSingle = normalizedType === 'single_check'
@@ -3173,64 +3218,66 @@ export async function runStagedGradingPhaseA({
     }
   }
 
-  // ── A3d: Focused multi_fill read (per-question crop, simple prompt) ───────────────────────────
-  // multi_fill boxes contain small codes (ㄅ/ㄆ/ㄇ etc.) that are easy to confuse in a
-  // multi-question interleaved AI1 call. A dedicated per-question focused call improves accuracy.
-  // Unlike checkbox (A3c), multi_fill is NOT excluded from AI2 → AI3 can still arbitrate.
+  // ── A3d: Focused multi_fill dual-read (two focused calls per question, replacing AI1 + AI2) ────
+  // AI2's full-image read is unreliable for small diagram boxes (reads garbage).
+  // Instead: run two focused crop reads with different prompt strategies, then let AI3 arbitrate.
+  //   read-1 (direct): "transcribe what you see" → overrides AI1 (readAnswerParsed)
+  //   read-2 (analytic): "stroke-by-stroke bopomofo analysis" → overrides AI2 (reReadAnswerParsed)
   const multiFillCropCandidates = classifyAligned.filter(
     (q) => q.visible && q.questionType === 'multi_fill' && allQuestionCropMap.has(q.questionId)
   )
   if (multiFillCropCandidates.length > 0) {
-    logStaged(pipelineRunId, 'basic', 'focused-multifill-read begin', {
+    logStaged(pipelineRunId, 'basic', 'focused-multifill-read begin (dual: direct + analytic)', {
       count: multiFillCropCandidates.length
     })
-    const multiFillFocusedResults = await Promise.all(
+    const multiFillDualResults = await Promise.all(
       multiFillCropCandidates.map(async (q) => {
         const cropData = allQuestionCropMap.get(q.questionId)
-        const focusedPrompt = buildFocusedMultiFillReadPrompt(q.questionId)
-        const focusedResponse = await executeStage({
-          apiKey,
-          model,
-          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-          timeoutMs: getRemainingBudget(),
-          routeHint,
-          routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-          stageContents: [{ role: 'user', parts: [{ text: focusedPrompt }, { inlineData: cropData }] }]
-        })
-        if (!focusedResponse.ok) {
-          logStaged(pipelineRunId, 'basic', `focused-multifill-read failed qid=${q.questionId}`)
-          return null
-        }
-        const parsed = parseCandidateJson(focusedResponse.data)
-        const answer = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
-        if (answer) {
-          logStaged(pipelineRunId, 'basic', `focused-multifill-read result qid=${q.questionId}`, {
-            studentAnswerRaw: answer.studentAnswerRaw,
-            status: answer.status
+        const [res1, res2] = await Promise.all([
+          executeStage({
+            apiKey,
+            model,
+            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+            timeoutMs: getRemainingBudget(),
+            routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReadPrompt(q.questionId) }, { inlineData: cropData }] }]
+          }),
+          executeStage({
+            apiKey,
+            model,
+            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+            timeoutMs: getRemainingBudget(),
+            routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReReadPrompt(q.questionId) }, { inlineData: cropData }] }]
           })
-        }
-        return answer ? { questionId: q.questionId, answer } : null
+        ])
+        const answer1 = res1.ok ? (Array.isArray(parseCandidateJson(res1.data)?.answers) ? parseCandidateJson(res1.data).answers[0] : null) : null
+        const answer2 = res2.ok ? (Array.isArray(parseCandidateJson(res2.data)?.answers) ? parseCandidateJson(res2.data).answers[0] : null) : null
+        logStaged(pipelineRunId, 'basic', `focused-multifill-read dual qid=${q.questionId}`, {
+          read1: answer1 ? { raw: answer1.studentAnswerRaw, status: answer1.status } : null,
+          read2: answer2 ? { raw: answer2.studentAnswerRaw, status: answer2.status } : null
+        })
+        return { questionId: q.questionId, answer1, answer2 }
       })
     )
-    const multiFillOverrideMap = new Map()
-    for (const result of multiFillFocusedResults) {
-      if (result) multiFillOverrideMap.set(result.questionId, result.answer)
+    const multiFillRead1Map = new Map()
+    const multiFillRead2Map = new Map()
+    for (const { questionId, answer1, answer2 } of multiFillDualResults) {
+      if (answer1) multiFillRead1Map.set(questionId, answer1)
+      if (answer2) multiFillRead2Map.set(questionId, answer2)
     }
-    if (multiFillOverrideMap.size > 0) {
-      // Override AI1 only — AI2 keeps its full-image reading so AI3 can arbitrate disagreements
-      readAnswerParsed = applyAnswerOverrides(readAnswerParsed, multiFillOverrideMap)
-      logStaged(pipelineRunId, 'basic', 'focused-multifill-read overrides applied (AI1 only)', {
-        count: multiFillOverrideMap.size
-      })
+    // Override AI1 (readAnswerParsed) with read-1 results
+    if (multiFillRead1Map.size > 0) {
+      readAnswerParsed = applyAnswerOverrides(readAnswerParsed, multiFillRead1Map)
+      logStaged(pipelineRunId, 'basic', 'focused-multifill read-1 overrides applied → AI1', { count: multiFillRead1Map.size })
     }
-    const unresolved = multiFillCropCandidates
-      .map((q) => q.questionId)
-      .filter((qId) => !multiFillOverrideMap.has(qId))
-    if (unresolved.length > 0) {
-      logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill-read unresolved (AI1 will keep crop-read result)', {
-        count: unresolved.length,
-        questionIds: unresolved
-      })
+    // Override AI2 (reReadAnswerParsed) with read-2 results — replacing unreliable full-image reads
+    if (multiFillRead2Map.size > 0) {
+      reReadAnswerParsed = reReadAnswerParsed ?? { answers: [] }
+      reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, multiFillRead2Map)
+      logStaged(pipelineRunId, 'basic', 'focused-multifill read-2 overrides applied → AI2', { count: multiFillRead2Map.size })
     }
   }
 
