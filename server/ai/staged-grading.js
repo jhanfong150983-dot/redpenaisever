@@ -1753,11 +1753,11 @@ STEP 3 — Match to the correct standard symbol using this confusion table:
 BOPOMOFO CONFUSION TABLE — high-confusion pairs marked with ⚠️:
 
 ⚠️ EASILY CONFUSED GROUP 1 — ㄆ / ㄘ / ㄣ / ㄊ:
-- ㄆ: TWO horizontal bars + downward stroke on right
-- ㄘ: right-angle hook pointing right (like backwards J with a top bar)
-- ㄣ: hook curling LEFT at bottom (like upside-down J, no top bar)
-- ㄊ: CROSS (+) shape with hook going down-right (has both horizontal AND vertical crossing)
-→ ㄆ has two bars; ㄘ angles right; ㄣ curls left; ㄊ is a full cross
+- ㄊ: like the character 十 (cross) — horizontal stroke CROSSES through the vertical in the MIDDLE, with the bottom of the vertical curving right. The horizontal bar bisects the vertical.
+- ㄘ: horizontal stroke at the VERY TOP only (does NOT cross/bisect the vertical) + a downward-right stroke below. Like 七 where the top bar does not cross.
+- ㄆ: TWO separate horizontal bars stacked + downward stroke on right (no crossing, two parallel bars)
+- ㄣ: hook curling LEFT at bottom only, no horizontal bar at top
+→ CRITICAL ㄊ vs ㄘ: if the horizontal bar CROSSES through the middle of the vertical → ㄊ; if the horizontal bar is only at the TOP with no crossing → ㄘ
 
 ⚠️ EASILY CONFUSED GROUP 2 — ㄅ / ㄣ:
 - ㄅ: vertical stroke + hook curling LEFT at bottom (opens left)
