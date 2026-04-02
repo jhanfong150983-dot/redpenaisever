@@ -1719,13 +1719,17 @@ function buildFocusedMultiFillReadPrompt(questionId) {
 Your task: read ALL codes/symbols the student wrote inside this box.
 You do NOT know the correct answer and must NOT guess.
 
+IMPORTANT — expected code set: codes in this type of question are almost always Bopomofo symbols from ㄅ to ㄎ only:
+ㄅ ㄆ ㄇ ㄈ ㄉ ㄊ ㄋ ㄌ ㄍ ㄎ
+If you see a symbol that resembles something outside this set, match it to the closest symbol within this set.
+
 Rules:
-1) Transcribe EVERY code/symbol you see (e.g. "ㄅ、ㄇ、ㄉ" or "甲、丙" or "1、3、5").
+1) Transcribe EVERY code/symbol you see (e.g. "ㄅ、ㄇ、ㄉ").
 2) Preserve the student's separators (、or ，). If codes are written with no separator, join them with 、.
 3) Read ONLY what is inside this specific box. Do NOT read from neighboring boxes.
 4) status="read" if any codes/text found inside the box.
 5) status="blank" if the box is completely empty (no student writing).
-6) status="unreadable" if there is writing but it is too blurry/unclear to read any code.
+6) status="unreadable" if too blurry/unclear to identify any symbol.
 
 Return strict JSON only. No markdown.
 {
@@ -1742,22 +1746,26 @@ Return strict JSON only. No markdown.
 function buildFocusedMultiFillReReadPrompt(questionId) {
   return `You are reading a CROPPED IMAGE of ONE MULTI-FILL answer box. The crop belongs to questionId "${questionId}" only.
 
-This box contains handwritten codes — most likely Bopomofo (注音符號) phonetic symbols.
+This box contains handwritten codes — Bopomofo (注音符號) phonetic symbols.
+
+IMPORTANT — allowed symbol set: codes here are almost always from ㄅ to ㄎ only:
+ㄅ ㄆ ㄇ ㄈ ㄉ ㄊ ㄋ ㄌ ㄍ ㄎ
+Symbols outside this range (e.g. ㄘ, ㄣ, ㄙ, ㄒ …) should NOT appear.
+If your stroke analysis leads you toward a symbol outside this set, re-examine — you have likely misidentified it. Find the closest match within ㄅ~ㄎ.
 
 Your task: carefully identify each symbol using stroke-by-stroke analysis.
 
 STEP 1 — Count how many distinct symbols you see in this box.
 STEP 2 — For each symbol, briefly describe its key strokes.
-STEP 3 — Match to the correct standard symbol using this confusion table:
+STEP 3 — Match to the correct symbol within ㄅ~ㄎ using this confusion table:
 
-BOPOMOFO CONFUSION TABLE — high-confusion pairs marked with ⚠️:
+BOPOMOFO CONFUSION TABLE (ㄅ~ㄎ only) — high-confusion pairs marked with ⚠️:
 
-⚠️ EASILY CONFUSED GROUP 1 — ㄆ / ㄘ / ㄣ / ㄊ:
-- ㄊ: like the character 十 (cross) — horizontal stroke CROSSES through the vertical in the MIDDLE, with the bottom of the vertical curving right. The horizontal bar bisects the vertical.
-- ㄘ: horizontal stroke at the VERY TOP only (does NOT cross/bisect the vertical) + a downward-right stroke below. Like 七 where the top bar does not cross.
-- ㄆ: TWO separate horizontal bars stacked + downward stroke on right (no crossing, two parallel bars)
-- ㄣ: hook curling LEFT at bottom only, no horizontal bar at top
-→ CRITICAL ㄊ vs ㄘ: if the horizontal bar CROSSES through the middle of the vertical → ㄊ; if the horizontal bar is only at the TOP with no crossing → ㄘ
+⚠️ EASILY CONFUSED GROUP 1 — ㄆ / ㄊ (plus out-of-range look-alikes ㄘ, ㄣ):
+- ㄊ: like the character 十 (cross) — horizontal stroke CROSSES through the vertical in the MIDDLE. The horizontal bar bisects the vertical. Bottom curves right.
+- ㄆ: TWO separate horizontal bars stacked + downward stroke on right (two parallel bars, no crossing)
+→ CRITICAL: if you think you see ㄘ (top-bar-only + downward hook) → it is more likely ㄊ within the allowed set. Re-examine: does the bar cross the vertical? If yes → ㄊ.
+→ CRITICAL: if you think you see ㄣ (smooth leftward hook, no top) → it is more likely ㄅ. Check for a straight top segment.
 
 ⚠️ EASILY CONFUSED GROUP 2 — ㄅ / ㄣ:
 - ㄅ: looks like a STRAIGHT vertical line on top, then the bottom curves LEFT like a leftward hook. Two distinct parts: straight top + curved bottom. Like a lowercase 'b' mirrored.
