@@ -1760,20 +1760,19 @@ BOPOMOFO CONFUSION TABLE — high-confusion pairs marked with ⚠️:
 → CRITICAL ㄊ vs ㄘ: if the horizontal bar CROSSES through the middle of the vertical → ㄊ; if the horizontal bar is only at the TOP with no crossing → ㄘ
 
 ⚠️ EASILY CONFUSED GROUP 2 — ㄅ / ㄣ:
-- ㄅ: vertical stroke + hook curling LEFT at bottom (opens left)
-- ㄣ: hook curling LEFT at bottom but NO vertical top stroke
-→ ㄅ has a clear vertical stroke above the hook; ㄣ starts directly as a hook
+- ㄅ: looks like a STRAIGHT vertical line on top, then the bottom curves LEFT like a leftward hook. Two distinct parts: straight top + curved bottom. Like a lowercase 'b' mirrored.
+- ㄣ: the ENTIRE stroke is one continuous curve — it curves from start to finish like a fishhook or a backwards 'J'. No straight portion at top.
+→ CRITICAL: does the top portion look STRAIGHT before the hook? → ㄅ. Is the whole thing one smooth curve with no straight part? → ㄣ.
 
-⚠️ EASILY CONFUSED GROUP 3 — ㄉ / ㄌ / ㄆ:
-- ㄉ: vertical stroke + short LEFT-pointing stroke at TOP
-- ㄌ: vertical stroke + hook turning RIGHT at BOTTOM
-- ㄆ: TWO horizontal bars + downward stroke on right
-→ ㄉ has the extra stroke at TOP; ㄌ has the hook at BOTTOM; ㄆ has two bars not one
+⚠️ EASILY CONFUSED GROUP 3 — ㄉ / ㄌ:
+- ㄉ: looks like the character 刀 or like a vertical stroke with a small LEFTWARD stroke branching off the TOP. The accent is at the TOP-LEFT. Think of it as a vertical line wearing a small hat on the upper-left.
+- ㄌ: looks like a walking cane or the letter J — goes straight DOWN then curves/hooks to the RIGHT at the BOTTOM. No extra stroke at top.
+→ CRITICAL: extra stroke at TOP-LEFT → ㄉ. Rightward hook at BOTTOM, nothing at top → ㄌ.
 
 ⚠️ EASILY CONFUSED GROUP 4 — ㄋ / ㄌ:
-- ㄋ: one horizontal stroke at top + vertical going STRAIGHT DOWN (like 丁)
-- ㄌ: vertical stroke + hook turning RIGHT at bottom
-→ ㄋ ends straight down; ㄌ ends with a rightward hook
+- ㄋ: horizontal stroke at top + vertical going STRAIGHT DOWN and ending flat (like 丁). The bottom ends with NO hook.
+- ㄌ: goes straight down then hooks/curves to the RIGHT at the bottom (like a cane). No horizontal stroke at top.
+→ CRITICAL: has a horizontal stroke at TOP → ㄋ. Has a rightward hook at BOTTOM → ㄌ.
 
 ⚠️ EASILY CONFUSED GROUP 5 — ㄇ / ㄈ:
 - ㄇ: three-sided box OPEN AT BOTTOM (like a roof ∩)
