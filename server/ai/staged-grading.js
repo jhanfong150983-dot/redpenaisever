@@ -102,10 +102,6 @@ function splitScoreIntoTwo(totalScore) {
   return [first, second]
 }
 
-function isSocialDomain(domainHint) {
-  return ensureString(domainHint, '').trim() === '社會'
-}
-
 function normalizeShortAnswerQuestion(question, domainHint) {
   if (!question || typeof question !== 'object') return question
   const category = ensureString(question.questionCategory, '').trim()
@@ -123,40 +119,9 @@ function normalizeShortAnswerQuestion(question, domainHint) {
         .filter((dim) => dim.name && dim.criteria)
     : []
 
-  const socialMode = isSocialDomain(domainHint)
   const [firstScore, secondScore] = splitScoreIntoTwo(maxScore)
   let normalizedDimensions = safeDimensions
-  if (socialMode) {
-    const coreDim =
-      safeDimensions.find((dim) =>
-        /核心|結論|答案|主旨|重點|觀點|判斷/.test(`${dim.name}${dim.criteria}`)
-      ) || safeDimensions[0]
-    const evidenceDim =
-      safeDimensions.find(
-        (dim) =>
-          dim !== coreDim &&
-          /依據|理由|文本|證據|說明|脈絡|引用/.test(`${dim.name}${dim.criteria}`)
-      ) || safeDimensions[1]
-
-    normalizedDimensions = [
-      {
-        name: '核心結論',
-        maxScore,
-        criteria:
-          coreDim?.criteria ||
-          (criteriaHint
-            ? `核心結論與重點相符（參考要點：${criteriaHint}）即可。`
-            : '核心結論與重點相符即可。')
-      },
-      {
-        name: '作答依據（補充）',
-        maxScore: 0,
-        criteria:
-          evidenceDim?.criteria ||
-          '若有引用題幹或文本依據可補充完整性；未提供不扣分。'
-      }
-    ]
-  } else if (safeDimensions.length === 0) {
+  if (safeDimensions.length === 0) {
     normalizedDimensions = [
       {
         name: '作答依據',
@@ -779,7 +744,14 @@ const CLASSIFY_ALLOWED_TYPES = new Set([
 ])
 
 function resolveExpectedQuestionType(question) {
-  const category = ensureString(question?.questionCategory, '').trim()
+  let category = ensureString(question?.questionCategory, '').trim()
+  if (!category) {
+    const dimNames = Array.isArray(question?.rubricsDimensions)
+      ? question.rubricsDimensions.map((dim) => ensureString(dim?.name, '')).join('|')
+      : ''
+    if (/算式過程|最終答案/.test(dimNames)) category = 'calculation'
+    else if (resolveQuestionType(question) === 3) category = 'short_answer'
+  }
   const answerFormat = ensureString(question?.answerFormat, '').trim().toLowerCase()
 
   // Priority rules (explicit > structural hints > category/type fallback)
@@ -1387,7 +1359,79 @@ function applyAnswerOverrides(parsed, overrideMap) {
   }
 }
 
-function normalizeAccessorResult(parsed, answerKey, answers) {
+function normalizeRubricDimensionName(value) {
+  return ensureString(value, '')
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+function isRubricDimensionFullyCorrect(dimension) {
+  if (!dimension || typeof dimension !== 'object') return false
+  const score = toFiniteNumber(dimension.score)
+  const maxScore = toFiniteNumber(dimension.maxScore)
+  if (score === null || maxScore === null || maxScore <= 0) return false
+  return score >= maxScore - 0.0001
+}
+
+function findRubricDimension(rubricScores, predicates) {
+  if (!Array.isArray(rubricScores)) return null
+  for (const dimension of rubricScores) {
+    const name = normalizeRubricDimensionName(dimension?.dimension ?? dimension?.name)
+    if (!name) continue
+    if (predicates.some((fn) => fn(name))) return dimension
+  }
+  return null
+}
+
+function applyLenientFocusOverride(normalized, question, answerKey, domainHint) {
+  const strictness = ensureString(answerKey?.strictness, 'standard').trim().toLowerCase()
+  if (strictness !== 'lenient') return normalized
+  if (!normalized || typeof normalized !== 'object') return normalized
+  if (normalized.errorType === 'blank' || normalized.errorType === 'unreadable') return normalized
+
+  const category = ensureString(question?.questionCategory, '').trim()
+  const domain = ensureString(domainHint, '').trim()
+  const rubricScores = Array.isArray(normalized.rubricScores) ? normalized.rubricScores : []
+
+  const toFullScore = (reason) => ({
+    ...normalized,
+    score: normalized.maxScore,
+    isCorrect: true,
+    needExplain: false,
+    errorType: 'none',
+    scoringReason: reason || normalized.scoringReason
+  })
+
+  if (category === 'calculation') {
+    const finalAnswerDimension = findRubricDimension(rubricScores, [
+      (name) => name.includes('最終答案'),
+      (name) => name.includes('finalanswer')
+    ])
+    if (isRubricDimensionFullyCorrect(finalAnswerDimension)) {
+      return toFullScore('寬鬆模式：最終答案正確，整題判定通過。')
+    }
+    return normalized
+  }
+
+  if (category === 'short_answer' && (domain === '社會' || domain === '自然')) {
+    const coreConclusionDimension = findRubricDimension(rubricScores, [
+      (name) => name.includes('核心'),
+      (name) => name.includes('結論'),
+      (name) => name.includes('主旨'),
+      (name) => name.includes('重點'),
+      (name) => name.includes('觀點'),
+      (name) => name.includes('判斷')
+    ])
+    if (isRubricDimensionFullyCorrect(coreConclusionDimension)) {
+      return toFullScore('寬鬆模式：核心結論正確，整題判定通過。')
+    }
+    return normalized
+  }
+
+  return normalized
+}
+
+function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
   const answersById = mapByQuestionId(answers, (item) => item?.questionId)
   const scoresRaw = Array.isArray(parsed?.scores) ? parsed.scores : []
   const byQuestionId = mapByQuestionId(scoresRaw, (item) => item?.questionId)
@@ -1435,7 +1479,7 @@ function normalizeAccessorResult(parsed, answerKey, answers) {
         : !isCorrect || readStatus !== 'read'
     const scoreConfidence = clampInt(row?.scoreConfidence, 0, 100, readStatus === 'read' ? 70 : 0)
 
-    const normalized = {
+    const normalizedBase = {
       questionId,
       score,
       maxScore,
@@ -1454,8 +1498,9 @@ function normalizeAccessorResult(parsed, answerKey, answers) {
       rubricScores: Array.isArray(row?.rubricScores) ? row.rubricScores : undefined
     }
 
+    const normalized = applyLenientFocusOverride(normalizedBase, question, answerKey, domainHint)
     scores.push(normalized)
-    totalScore += score
+    totalScore += toFiniteNumber(normalized.score) ?? 0
   }
 
   return {
@@ -2158,6 +2203,13 @@ function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
       : strictness === 'lenient'
         ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, or minor formatting differ. However, unit substitution (e.g. 公尺 for 公分) is still wrong even in lenient mode for fill_blank and word_problem questions. Exception: unit pairs listed in the UNIT EQUIVALENCE TABLE below are always treated as identical.'
         : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, equivalent units per the UNIT EQUIVALENCE TABLE below) but reject wrong meaning, wrong numbers, wrong key terms, or different units.'
+  const lenientFocusPolicy =
+    strictness === 'lenient'
+      ? `LENIENT FOCUS POLICY (only when strictness = lenient):
+- calculation: prioritize 最終答案. If final numeric result is correct, allow full score even when process writing is incomplete/non-standard.
+- short_answer when Domain is "社會" or "自然": prioritize 核心結論. If core conclusion is semantically correct, allow full score even when supporting evidence is brief.
+- This policy must NOT be applied when strictness is strict/standard.`
+      : ''
 
   const compactAnswerKey = {
     questions: Array.isArray(answerKey?.questions) ? answerKey.questions : [],
@@ -2175,6 +2227,7 @@ function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
 You are stage Assessor. Score each question by comparing student answers to the answer key.
 
 ${strictnessRule}
+${lenientFocusPolicy}
 
 Domain: ${JSON.stringify(domainHint || null)}
 
@@ -2216,8 +2269,9 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
+  - LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score even if 算式過程 is weak/incomplete.
 - short_answer: Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback. No unit checking required.
-  - SOCIAL LENIENT RULE: if Domain is "社會", core conclusion is decisive. If the student's core conclusion is semantically correct, it should pass even when supporting evidence is brief or omitted.
+  - LENIENT FOCUS: when strictness = lenient and Domain is "社會" or "自然", core conclusion is decisive. If core conclusion is semantically correct, allow full score even when supporting evidence is brief.
   - Do NOT require fixed answer-sentence format (e.g. "答：" / "A:") for short_answer.
 - diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
@@ -3453,7 +3507,12 @@ export async function runStagedGradingPhaseB({
   if (!accessorParsed || typeof accessorParsed !== 'object') {
     throw new Error('PhaseB accessor parse failed')
   }
-  const accessorResult = normalizeAccessorResult(accessorParsed, answerKey, finalReadAnswerResult.answers)
+  const accessorResult = normalizeAccessorResult(
+    accessorParsed,
+    answerKey,
+    finalReadAnswerResult.answers,
+    internalContext?.domainHint
+  )
   const accessorScores = Array.isArray(accessorResult.scores) ? accessorResult.scores : []
   const explainQuestionIds = accessorScores
     .filter((s) => s?.isCorrect !== true || s?.needExplain === true)
@@ -3670,10 +3729,12 @@ GRADING RULES per questionCategory ("questionCategory" is authoritative. Only fa
     * Check BOTH: (1) the student shows corrected formula/process or meaningful recalculation, AND (2) final numeric result is correct.
     * HARD RULE: NEVER require "答：" / "A：" / "Ans:" format for calculation.
     * If the student writes extra intermediate steps, do not fail only because of extra steps; focus on correctness.
+    * LENIENT FOCUS RULE: when item.strictness = "lenient", prioritize 最終答案. If final numeric answer is correct, allow pass even if process is brief.
 - short_answer / map_draw: This is a correction submission.
     * Judge based on referenceAnswer and whether the student demonstrates genuine understanding of the concept.
     * The answer does not need to be perfect, but must show the student understood their mistake and addressed it meaningfully.
-    * SOCIAL LENIENT RULE: when questionCategory=short_answer and item.domain is "社會", treat core conclusion as decisive. If core conclusion is semantically correct, pass even if supporting evidence is brief or omitted.
+    * LENIENT FOCUS RULE: when item.strictness = "lenient":
+      - if questionCategory=short_answer and item.domain is "社會" or "自然": treat core conclusion as decisive. If core conclusion is semantically correct, pass even if supporting evidence is brief.
     * Do NOT require fixed answer sentence format such as "答：" / "A：" for short_answer.
     * Do NOT pass if the answer is essentially unchanged from the mistake described in mistakeReason.
 
