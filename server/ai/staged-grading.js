@@ -90,6 +90,99 @@ function ensureString(value, fallback = '') {
   return typeof value === 'string' ? value : fallback
 }
 
+function roundToTenth(value) {
+  return Math.round(Number(value) * 10) / 10
+}
+
+function splitScoreIntoTwo(totalScore) {
+  const safeTotal = Number.isFinite(Number(totalScore)) && Number(totalScore) > 0 ? Number(totalScore) : 0
+  if (safeTotal <= 0) return [0, 0]
+  const first = roundToTenth(safeTotal / 2)
+  const second = roundToTenth(safeTotal - first)
+  return [first, second]
+}
+
+function normalizeShortAnswerQuestion(question) {
+  if (!question || typeof question !== 'object') return question
+  const category = ensureString(question.questionCategory, '').trim()
+  if (category !== 'short_answer') return question
+
+  const maxScore = Number.isFinite(Number(question.maxScore)) ? Number(question.maxScore) : 0
+  const criteriaHint = ensureString(question.referenceAnswer, '').trim()
+  const safeDimensions = Array.isArray(question.rubricsDimensions)
+    ? question.rubricsDimensions
+        .map((dim) => ({
+          name: ensureString(dim?.name, '').trim(),
+          maxScore: Number.isFinite(Number(dim?.maxScore)) ? Number(dim.maxScore) : 0,
+          criteria: ensureString(dim?.criteria, '').trim()
+        }))
+        .filter((dim) => dim.name && dim.criteria)
+    : []
+
+  const [firstScore, secondScore] = splitScoreIntoTwo(maxScore)
+  let normalizedDimensions = safeDimensions
+  if (safeDimensions.length === 0) {
+    normalizedDimensions = [
+      {
+        name: '作答依據',
+        maxScore: firstScore,
+        criteria: '有根據題目提供的資料或文本作答，指出關鍵依據。'
+      },
+      {
+        name: '結論表達',
+        maxScore: secondScore,
+        criteria: criteriaHint
+          ? `結論與重點相符（參考要點：${criteriaHint}），表達完整清楚。`
+          : '結論與重點相符，表達完整清楚。'
+      }
+    ]
+  } else if (safeDimensions.length === 1) {
+    normalizedDimensions = [
+      { ...safeDimensions[0], maxScore: firstScore },
+      {
+        name: '結論表達',
+        maxScore: secondScore,
+        criteria: criteriaHint
+          ? `結論與重點相符（參考要點：${criteriaHint}），表達完整清楚。`
+          : '結論與重點相符，表達完整清楚。'
+      }
+    ]
+  }
+
+  return {
+    ...question,
+    type: 3,
+    rubricsDimensions: normalizedDimensions,
+    rubric: undefined
+  }
+}
+
+function normalizeAnswerKeyForRubricScoring(answerKey) {
+  if (!answerKey || typeof answerKey !== 'object') {
+    return { answerKey, convertedShortAnswerIds: [] }
+  }
+  const questions = Array.isArray(answerKey.questions) ? answerKey.questions : []
+  if (questions.length === 0) return { answerKey, convertedShortAnswerIds: [] }
+
+  const convertedShortAnswerIds = []
+  const normalizedQuestions = questions.map((question) => {
+    const normalized = normalizeShortAnswerQuestion(question)
+    const isConverted =
+      normalized !== question &&
+      ensureString(question?.questionCategory, '').trim() === 'short_answer'
+    if (isConverted) {
+      const questionId = ensureString(question?.id, '').trim()
+      if (questionId) convertedShortAnswerIds.push(questionId)
+    }
+    return normalized
+  })
+
+  return {
+    answerKey: { ...answerKey, questions: normalizedQuestions },
+    convertedShortAnswerIds
+  }
+}
+
 function normalizeEvidenceText(value) {
   return ensureString(value, '')
     .trim()
@@ -2065,7 +2158,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
-- short_answer: Grade by key concept presence using rubricsDimensions or rubric. No unit checking required.
+- short_answer: Grade by key concept presence using rubricsDimensions only (at least two dimensions: 作答依據 + 結論表達). Do NOT use rubric 4-level fallback. No unit checking required.
 - diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
   - 塗色完整性: check if coloring is continuous and covers the correct regions without major gaps.
@@ -2078,7 +2171,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - errorType: 'concept' if wrong connection; 'blank' if "未連線" or "未作答".
 - map_fill: See MAP-FILL SCORING below.
 - map_draw: See MAP-DRAW SCORING below.
-- (If questionCategory is absent, fall back to type-based rules: type=1 → exact match, type=2 → acceptableAnswers match, type=3 → rubric.)
+- (If questionCategory is absent, fall back to type-based rules: type=1 → exact match, type=2 → acceptableAnswers match, type=3 → use rubricsDimensions-style concept grading; do NOT use rubric 4-level fallback.)
 
 - MAP-FILL SCORING (地圖填圖題): If the AnswerKey question has acceptableAnswers (list of correct names) AND a long referenceAnswer describing positions:
   - The student's answer contains position:name pairs (e.g. "位置A: 泰國, 位置B: 越南").
@@ -2460,10 +2553,20 @@ export async function runStagedGradingPhaseA({
 }) {
   const pipelineRunId = createPipelineRunId(internalContext?.requestId)
   const stagedLogLevel = getStagedLogLevel()
-  const answerKey = internalContext?.resolvedAnswerKey
+  const resolvedAnswerKey = internalContext?.resolvedAnswerKey
+  const { answerKey, convertedShortAnswerIds } =
+    normalizeAnswerKeyForRubricScoring(resolvedAnswerKey)
   if (!answerKey || typeof answerKey !== 'object') {
     logStaged(pipelineRunId, stagedLogLevel, 'PhaseA skip reason=missing_answer_key')
     return null
+  }
+  if (convertedShortAnswerIds.length > 0) {
+    logStaged(
+      pipelineRunId,
+      stagedLogLevel,
+      'normalized short_answer to rubricsDimensions',
+      { count: convertedShortAnswerIds.length, questionIds: convertedShortAnswerIds }
+    )
   }
   const questionIds = normalizeQuestionIdList(answerKey)
   if (questionIds.length === 0) {
