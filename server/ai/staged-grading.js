@@ -123,31 +123,37 @@ function normalizeShortAnswerQuestion(question, domainHint) {
         .filter((dim) => dim.name && dim.criteria)
     : []
 
-  const [firstScore, secondScore] = splitScoreIntoTwo(maxScore)
   const socialMode = isSocialDomain(domainHint)
+  const [firstScore, secondScore] = splitScoreIntoTwo(maxScore)
   let normalizedDimensions = safeDimensions
-  if (safeDimensions.length === 0 && socialMode) {
+  if (socialMode) {
+    const coreDim =
+      safeDimensions.find((dim) =>
+        /核心|結論|答案|主旨|重點|觀點|判斷/.test(`${dim.name}${dim.criteria}`)
+      ) || safeDimensions[0]
+    const evidenceDim =
+      safeDimensions.find(
+        (dim) =>
+          dim !== coreDim &&
+          /依據|理由|文本|證據|說明|脈絡|引用/.test(`${dim.name}${dim.criteria}`)
+      ) || safeDimensions[1]
+
     normalizedDimensions = [
       {
         name: '核心結論',
         maxScore,
-        criteria: criteriaHint
-          ? `核心結論與重點相符（參考要點：${criteriaHint}）即可。`
-          : '核心結論與重點相符即可。'
+        criteria:
+          coreDim?.criteria ||
+          (criteriaHint
+            ? `核心結論與重點相符（參考要點：${criteriaHint}）即可。`
+            : '核心結論與重點相符即可。')
       },
       {
         name: '作答依據（補充）',
         maxScore: 0,
-        criteria: '若有引用題幹或文本依據可補充完整性；未提供不扣分。'
-      }
-    ]
-  } else if (safeDimensions.length === 1 && socialMode) {
-    normalizedDimensions = [
-      { ...safeDimensions[0], maxScore },
-      {
-        name: '作答依據（補充）',
-        maxScore: 0,
-        criteria: '若有引用題幹或文本依據可補充完整性；未提供不扣分。'
+        criteria:
+          evidenceDim?.criteria ||
+          '若有引用題幹或文本依據可補充完整性；未提供不扣分。'
       }
     ]
   } else if (safeDimensions.length === 0) {
