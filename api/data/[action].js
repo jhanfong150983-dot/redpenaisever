@@ -112,6 +112,12 @@ function toNumber(value) {
   return null
 }
 
+function normalizeScoringMode(value) {
+  if (value === 'unscored') return 'unscored'
+  if (value === 'scored') return 'scored'
+  return null
+}
+
 function compactObject(obj) {
   return Object.fromEntries(
     Object.entries(obj).filter(([, value]) => value !== undefined)
@@ -2854,6 +2860,7 @@ async function handleSync(req, res) {
             totalPages: row.total_pages,
             domain: row.domain ?? undefined,
             folder: row.folder ?? undefined,
+            scoringMode: normalizeScoringMode(row.scoring_mode) ?? undefined,
             priorWeightTypes: row.prior_weight_types ?? undefined,
             answerKey: row.answer_key ?? undefined,
             conceptTags: row.concept_tags ?? undefined,
@@ -3230,20 +3237,24 @@ async function handleSync(req, res) {
       const assignmentRows = await buildUpsertRows(
         'assignments',
         assignments.filter((a) => a?.id && a?.classroomId),
-        (a) =>
-          compactObject({
+        (a) => {
+          const scoringMode =
+            normalizeScoringMode(a.scoringMode ?? a.scoring_mode) ?? undefined
+          return compactObject({
             id: a.id,
             classroom_id: a.classroomId,
             title: a.title,
             total_pages: a.totalPages,
             domain: a.domain ?? undefined,
             folder: a.folder,
+            scoring_mode: scoringMode,
             prior_weight_types: a.priorWeightTypes ?? undefined,
             answer_key: a.answerKey ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(a.updatedAt ?? a.updated_at) ?? nowIso
           })
+        }
       )
 
       if (assignmentRows.length > 0) {
