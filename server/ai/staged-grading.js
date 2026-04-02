@@ -1752,26 +1752,35 @@ STEP 3 — Match to the correct standard symbol using this confusion table:
 
 BOPOMOFO CONFUSION TABLE — high-confusion pairs marked with ⚠️:
 
-⚠️ EASILY CONFUSED GROUP 1 — look similar in handwriting:
-- ㄆ: two horizontal bars + downward stroke on right (like 廾 with right stroke)
-- ㄘ: right-angle hook pointing right (like a backwards capital J with a top bar)
-- ㄣ: hook curling left at bottom (like an upside-down J, no top bar)
-→ Key distinction: ㄆ has TWO horizontal bars; ㄘ has a right-pointing angle; ㄣ has a leftward curl
+⚠️ EASILY CONFUSED GROUP 1 — ㄆ / ㄘ / ㄣ / ㄊ:
+- ㄆ: TWO horizontal bars + downward stroke on right
+- ㄘ: right-angle hook pointing right (like backwards J with a top bar)
+- ㄣ: hook curling LEFT at bottom (like upside-down J, no top bar)
+- ㄊ: CROSS (+) shape with hook going down-right (has both horizontal AND vertical crossing)
+→ ㄆ has two bars; ㄘ angles right; ㄣ curls left; ㄊ is a full cross
 
-⚠️ EASILY CONFUSED GROUP 2 — look similar in handwriting:
-- ㄋ: one horizontal stroke at top + vertical going straight down (like 丁)
-- ㄌ: vertical stroke + hook turning right at the bottom (like 乚 with a top)
-→ Key distinction: ㄋ ends straight down; ㄌ ends with a rightward hook
+⚠️ EASILY CONFUSED GROUP 2 — ㄅ / ㄣ:
+- ㄅ: vertical stroke + hook curling LEFT at bottom (opens left)
+- ㄣ: hook curling LEFT at bottom but NO vertical top stroke
+→ ㄅ has a clear vertical stroke above the hook; ㄣ starts directly as a hook
 
-⚠️ EASILY CONFUSED GROUP 3:
-- ㄇ: three-sided box OPEN AT BOTTOM (∩ rotated, like a roof)
-- ㄈ: three-sided box OPEN AT RIGHT (like ㄈ facing right)
-→ Key distinction: which side is open
+⚠️ EASILY CONFUSED GROUP 3 — ㄉ / ㄌ / ㄆ:
+- ㄉ: vertical stroke + short LEFT-pointing stroke at TOP
+- ㄌ: vertical stroke + hook turning RIGHT at BOTTOM
+- ㄆ: TWO horizontal bars + downward stroke on right
+→ ㄉ has the extra stroke at TOP; ㄌ has the hook at BOTTOM; ㄆ has two bars not one
 
-Other symbols (less commonly confused):
-- ㄅ: vertical stroke + left hook at bottom
-- ㄉ: vertical stroke + short left stroke at top
-- ㄊ: cross (+) shape + hook going down-right
+⚠️ EASILY CONFUSED GROUP 4 — ㄋ / ㄌ:
+- ㄋ: one horizontal stroke at top + vertical going STRAIGHT DOWN (like 丁)
+- ㄌ: vertical stroke + hook turning RIGHT at bottom
+→ ㄋ ends straight down; ㄌ ends with a rightward hook
+
+⚠️ EASILY CONFUSED GROUP 5 — ㄇ / ㄈ:
+- ㄇ: three-sided box OPEN AT BOTTOM (like a roof ∩)
+- ㄈ: three-sided box OPEN AT RIGHT (like ㄈ)
+→ check which side has no stroke
+
+Other symbols:
 - ㄍ: two bent strokes
 - ㄏ: hook with horizontal top (like 厂)
 
