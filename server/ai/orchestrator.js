@@ -111,10 +111,10 @@ export async function runAiPipeline({
           answerKey: _internal.answerKey,
           questionIds: _internal.questionIds,
           classifyResult: _internal.classifyResult,
-          readAnswerResult: _internal.readAnswerResult,
           pipelineRunId: _internal.pipelineRunId,
           stagedLogLevel: _internal.stagedLogLevel
-          // cropByQuestionId deliberately excluded (base64 images are too large for round-trip)
+          // readAnswerResult excluded: Phase B uses finalAnswers (teacher-confirmed), not AI1 raw reads
+          // cropByQuestionId excluded: base64 images are too large for round-trip
         }
         pipelineResult = {
           status: 200,

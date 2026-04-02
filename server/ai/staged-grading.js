@@ -2772,11 +2772,9 @@ export async function runStagedGradingPhaseA({
       if (result) overrideMap.set(result.questionId, result.answer)
     }
     if (overrideMap.size > 0) {
+      // Override AI1 (detail read) only — AI2 keeps its independent full-image reading so AI3 can arbitrate
       readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
-      if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
-        reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, overrideMap)
-      }
-      logStaged(pipelineRunId, 'basic', 'bracket-read overrides applied', { count: overrideMap.size })
+      logStaged(pipelineRunId, 'basic', 'bracket-read overrides applied (AI1 only)', { count: overrideMap.size })
     }
   }
 
@@ -2824,11 +2822,9 @@ export async function runStagedGradingPhaseA({
     }
 
     if (overrideMap.size > 0) {
+      // Override AI1 (detail read) only — AI2 keeps its independent full-image reading so AI3 can arbitrate
       readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
-      if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
-        reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, overrideMap)
-      }
-      logStaged(pipelineRunId, 'basic', 'focused-checkbox-read overrides applied', {
+      logStaged(pipelineRunId, 'basic', 'focused-checkbox-read overrides applied (AI1 only)', {
         count: overrideMap.size
       })
     }
@@ -2862,14 +2858,12 @@ export async function runStagedGradingPhaseA({
           }
         }
         if (fallbackOverrideMap.size > 0) {
+          // Override AI1 only — AI2 keeps full-image reading for AI3 arbitration
           readAnswerParsed = applyAnswerOverrides(readAnswerParsed, fallbackOverrideMap)
-          if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
-            reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, fallbackOverrideMap)
-          }
           for (const qId of fallbackOverrideMap.keys()) {
             overrideMap.set(qId, fallbackOverrideMap.get(qId))
           }
-          logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read fallback overrides applied', {
+          logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read fallback overrides applied (AI1 only)', {
             count: fallbackOverrideMap.size
           })
         }
@@ -2884,11 +2878,9 @@ export async function runStagedGradingPhaseA({
             { questionId, status: 'unreadable', studentAnswerRaw: '無法辨識' }
           ])
         )
+        // Force unreadable on AI1 only — AI2 may still have a valid full-image read for AI3 to use
         readAnswerParsed = applyAnswerOverrides(readAnswerParsed, unresolvedOverrideMap)
-        if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
-          reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, unresolvedOverrideMap)
-        }
-        logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read unresolved forced-unreadable', {
+        logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read unresolved forced-unreadable (AI1 only)', {
           count: unresolvedIds.length,
           questionIds: unresolvedIds
         })
@@ -2896,17 +2888,23 @@ export async function runStagedGradingPhaseA({
     }
   }
 
-  // Mismatch detection for word problems (A3 calc result vs FinalAnswerOnly)
+  // ── Mismatch detection: collect candidates from word_problem + calculation, then batch retry ──
+  // A "candidate" = first-pass read shows calc-process result ≠ stated final answer.
+  // Batch retry sends all candidates in one AI call to confirm (avoid serial per-question calls).
   const mismatchIds = new Set()
+
+  // Candidates: { questionId, calcResult, firstPassNum, type: 'word_problem'|'calculation' }
+  const mismatchCandidates = []
+  const mainById = mapByQuestionId(
+    Array.isArray(readAnswerParsed?.answers) ? readAnswerParsed.answers : [],
+    (item) => item?.questionId
+  )
+
   if (wordProblemIds.length > 0 && finalAnswerOnlyResponse?.ok) {
     const finalOnlyParsed = parseCandidateJson(finalAnswerOnlyResponse.data)
     if (finalOnlyParsed && typeof finalOnlyParsed === 'object') {
       const finalOnlyById = mapByQuestionId(
         Array.isArray(finalOnlyParsed.answers) ? finalOnlyParsed.answers : [],
-        (item) => item?.questionId
-      )
-      const mainById = mapByQuestionId(
-        Array.isArray(readAnswerParsed?.answers) ? readAnswerParsed.answers : [],
         (item) => item?.questionId
       )
       for (const questionId of wordProblemIds) {
@@ -2915,61 +2913,19 @@ export async function runStagedGradingPhaseA({
         if (!mainRow || !finalOnlyRow) continue
         if (finalOnlyRow.status === 'blank' || finalOnlyRow.status === 'unreadable') continue
         const calcResult = extractLastEquationResult(ensureString(mainRow.studentAnswerRaw, ''))
-        const finalNum = extractAnswerNumber(ensureString(finalOnlyRow.studentAnswerRaw, ''))
-        if (calcResult && finalNum && calcResult !== finalNum) {
-          const retryResponse = await executeStage({
-            apiKey,
-            model,
-            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-            timeoutMs: getRemainingBudget(),
-            routeHint,
-            routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-            stageContents: [
-              {
-                role: 'user',
-                parts: [
-                  { text: buildWordProblemFinalAnswerPrompt([questionId]) },
-                  ...submissionImageParts
-                ]
-              }
-            ]
-          })
-          stageResponses.push(retryResponse)
-          if (retryResponse.ok) {
-            const retryParsed = parseCandidateJson(retryResponse.data)
-            const retryRow = Array.isArray(retryParsed?.answers)
-              ? retryParsed.answers.find((a) => ensureString(a?.questionId).trim() === questionId)
-              : null
-            const retryNum = retryRow
-              ? extractAnswerNumber(ensureString(retryRow.studentAnswerRaw, ''))
-              : null
-            if (retryNum && calcResult !== retryNum) {
-              mismatchIds.add(questionId)
-              stageWarnings.push(
-                `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} calc=${calcResult} stated=${retryNum}`
-              )
-            }
-          } else {
-            mismatchIds.add(questionId)
-            stageWarnings.push(
-              `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} calc=${calcResult} stated=${finalNum}`
-            )
-          }
+        const firstPassNum = extractAnswerNumber(ensureString(finalOnlyRow.studentAnswerRaw, ''))
+        if (calcResult && firstPassNum && calcResult !== firstPassNum) {
+          mismatchCandidates.push({ questionId, calcResult, firstPassNum, type: 'word_problem' })
         }
       }
     }
   }
 
-  // Mismatch detection for calculation questions (A3 last-= result vs calcFinalAnswer)
   if (calculationIds.length > 0 && calcFinalAnswerResponse?.ok) {
     const calcFinalParsed = parseCandidateJson(calcFinalAnswerResponse.data)
     if (calcFinalParsed && typeof calcFinalParsed === 'object') {
       const calcFinalById = mapByQuestionId(
         Array.isArray(calcFinalParsed.answers) ? calcFinalParsed.answers : [],
-        (item) => item?.questionId
-      )
-      const mainById = mapByQuestionId(
-        Array.isArray(readAnswerParsed?.answers) ? readAnswerParsed.answers : [],
         (item) => item?.questionId
       )
       for (const questionId of calculationIds) {
@@ -2978,50 +2934,68 @@ export async function runStagedGradingPhaseA({
         if (!mainRow || !calcFinalRow) continue
         if (calcFinalRow.status === 'blank' || calcFinalRow.status === 'unreadable') continue
         const calcResult = extractLastEquationResult(ensureString(mainRow.studentAnswerRaw, ''))
-        const finalNum = ensureString(calcFinalRow.studentAnswerRaw, '').replace(/,/g, '').trim()
-        if (calcResult && finalNum && calcResult !== finalNum) {
-          // Retry once with a fresh calculation final-answer read to confirm mismatch
-          const retryResponse = await executeStage({
-            apiKey,
-            model,
-            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-            timeoutMs: getRemainingBudget(),
-            routeHint,
-            routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-            stageContents: [
-              {
-                role: 'user',
-                parts: [
-                  { text: buildCalculationFinalAnswerPrompt([questionId]) },
-                  ...submissionImageParts
-                ]
-              }
-            ]
-          })
-          stageResponses.push(retryResponse)
-          if (retryResponse.ok) {
-            const retryParsed = parseCandidateJson(retryResponse.data)
-            const retryRow = Array.isArray(retryParsed?.answers)
-              ? retryParsed.answers.find((a) => ensureString(a?.questionId).trim() === questionId)
-              : null
-            const retryNum = retryRow
-              ? ensureString(retryRow.studentAnswerRaw, '').replace(/,/g, '').trim()
-              : null
-            if (retryNum && calcResult !== retryNum) {
-              mismatchIds.add(questionId)
-              stageWarnings.push(
-                `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} calc=${calcResult} stated=${retryNum}`
-              )
-            }
-          } else {
-            mismatchIds.add(questionId)
-            stageWarnings.push(
-              `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} calc=${calcResult} stated=${finalNum}`
-            )
-          }
+        const firstPassNum = ensureString(calcFinalRow.studentAnswerRaw, '').replace(/,/g, '').trim()
+        if (calcResult && firstPassNum && calcResult !== firstPassNum) {
+          mismatchCandidates.push({ questionId, calcResult, firstPassNum, type: 'calculation' })
         }
       }
     }
+  }
+
+  // Batch retry: send all mismatch candidates in one AI call
+  if (mismatchCandidates.length > 0) {
+    const wordCandidateIds = mismatchCandidates.filter((c) => c.type === 'word_problem').map((c) => c.questionId)
+    const calcCandidateIds = mismatchCandidates.filter((c) => c.type === 'calculation').map((c) => c.questionId)
+
+    // Build a combined prompt covering both types in one call
+    const retryParts = []
+    if (wordCandidateIds.length > 0) retryParts.push({ text: buildWordProblemFinalAnswerPrompt(wordCandidateIds) })
+    if (calcCandidateIds.length > 0) retryParts.push({ text: buildCalculationFinalAnswerPrompt(calcCandidateIds) })
+    retryParts.push(...submissionImageParts)
+
+    const retryResponse = await executeStage({
+      apiKey,
+      model,
+      payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+      timeoutMs: getRemainingBudget(),
+      routeHint,
+      routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+      stageContents: [{ role: 'user', parts: retryParts }]
+    })
+    stageResponses.push(retryResponse)
+
+    if (retryResponse.ok) {
+      const retryParsed = parseCandidateJson(retryResponse.data)
+      const retryAnswers = Array.isArray(retryParsed?.answers) ? retryParsed.answers : []
+      const retryById = mapByQuestionId(retryAnswers, (a) => a?.questionId)
+
+      for (const { questionId, calcResult, firstPassNum, type } of mismatchCandidates) {
+        const retryRow = retryById.get(questionId)
+        const retryNum = retryRow
+          ? type === 'word_problem'
+            ? extractAnswerNumber(ensureString(retryRow.studentAnswerRaw, ''))
+            : ensureString(retryRow.studentAnswerRaw, '').replace(/,/g, '').trim()
+          : null
+        if (retryNum && calcResult !== retryNum) {
+          mismatchIds.add(questionId)
+          stageWarnings.push(
+            `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} type=${type} calc=${calcResult} stated=${retryNum}`
+          )
+        }
+      }
+    } else {
+      // Retry failed — conservatively flag all candidates as mismatch
+      for (const { questionId, calcResult, firstPassNum, type } of mismatchCandidates) {
+        mismatchIds.add(questionId)
+        stageWarnings.push(
+          `[ReadAnswer] CALC_ANSWER_MISMATCH questionId=${questionId} type=${type} calc=${calcResult} stated=${firstPassNum} (retry-failed)`
+        )
+      }
+    }
+    logStaged(pipelineRunId, stagedLogLevel, 'mismatch batch-retry', {
+      candidates: mismatchCandidates.length,
+      confirmed: mismatchIds.size
+    })
   }
 
   // Normalize read1 with mismatch flags & unordered remap
