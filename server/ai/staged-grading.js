@@ -1773,14 +1773,14 @@ BOPOMOFO CONFUSION TABLE (ㄅ~ㄎ only) — high-confusion pairs marked with ⚠
 → CRITICAL: does the top portion look STRAIGHT before the hook? → ㄅ. Is the whole thing one smooth curve with no straight part? → ㄣ.
 
 ⚠️ EASILY CONFUSED GROUP 3 — ㄉ / ㄌ:
-- ㄉ: looks like the character 刀 or like a vertical stroke with a small LEFTWARD stroke branching off the TOP. The accent is at the TOP-LEFT. Think of it as a vertical line wearing a small hat on the upper-left.
-- ㄌ: looks like a walking cane or the letter J — goes straight DOWN then curves/hooks to the RIGHT at the BOTTOM. No extra stroke at top.
-→ CRITICAL: extra stroke at TOP-LEFT → ㄉ. Rightward hook at BOTTOM, nothing at top → ㄌ.
+- ㄉ: TOP is completely CLEAN — no stroke protruding at top. Main stroke goes down and curves/hooks to the LEFT at the bottom.
+- ㄌ: TOP has a small PROTRUDING stroke sticking out (a visible bump or cap at the top). Then goes down and hooks to the RIGHT at the bottom.
+→ CRITICAL: clean top + leftward hook at bottom → ㄉ. Protruding bump at top + rightward hook at bottom → ㄌ.
 
 ⚠️ EASILY CONFUSED GROUP 4 — ㄋ / ㄌ:
-- ㄋ: horizontal stroke at top + vertical going STRAIGHT DOWN and ending flat (like 丁). The bottom ends with NO hook.
-- ㄌ: goes straight down then hooks/curves to the RIGHT at the bottom (like a cane). No horizontal stroke at top.
-→ CRITICAL: has a horizontal stroke at TOP → ㄋ. Has a rightward hook at BOTTOM → ㄌ.
+- ㄋ: horizontal stroke at top + vertical going STRAIGHT DOWN and ending flat (like 丁). Bottom ends with NO hook.
+- ㄌ: small PROTRUDING bump at top + goes down + hooks to the RIGHT at bottom.
+→ CRITICAL: bottom ends FLAT/STRAIGHT → ㄋ. Bottom hooks to the RIGHT → ㄌ.
 
 ⚠️ EASILY CONFUSED GROUP 5 — ㄇ / ㄈ:
 - ㄇ: three-sided box OPEN AT BOTTOM (like a roof ∩)
