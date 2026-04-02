@@ -2057,8 +2057,9 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
 - fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
 - multi_check / multi_choice: The answer field contains comma-separated correct tokens (e.g. "①,③" or "A,C"). Parse BOTH student answer and correct answer as comma-separated token sets (order-insensitive).
-  - correct = tokens in student ∩ answer_tokens
-  - wrong = tokens in student − answer_tokens
+  - OPEN-ENDED OTHER RULE: If referenceAnswer contains "其他選項：#N" (e.g. "其他選項：#4" or "其他選項：#4；參考：XXX"), token #N is an open-ended free-write option. Before computing correct/wrong sets, REMOVE #N from student_tokens. Student selecting or not selecting 其他 does NOT affect score in any way.
+  - correct = tokens in student_tokens ∩ answer_tokens
+  - wrong = tokens in student_tokens − answer_tokens
   - score = max(0, round((|correct| − |wrong|) / |answer_tokens| × maxScore))
   - isCorrect = (score === maxScore)
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
