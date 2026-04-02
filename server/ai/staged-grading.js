@@ -2802,6 +2802,12 @@ export async function runStagedGradingPhaseA({
     visibleCount: classifyAligned.filter((q) => q.visible).length,
     bboxCount: classifyAligned.filter((q) => q.answerBbox).length
   })
+  const multiFillBboxDebug = classifyAligned
+    .filter((q) => q.visible && q.questionType === 'multi_fill')
+    .map((q) => ({ questionId: q.questionId, answerBbox: q.answerBbox }))
+  if (multiFillBboxDebug.length > 0) {
+    logStaged(pipelineRunId, 'basic', 'multi_fill answerBbox coords', multiFillBboxDebug)
+  }
 
   const wordProblemIds = classifyAligned
     .filter((q) => q.visible && q.questionType === 'word_problem')
