@@ -1772,12 +1772,18 @@ CALCULATION (questions in CALCULATION list):
 - Copy exactly as written: "25×6=150" → output "25×6=150"; wrong calc "6+3=8" → output "6+3=8".
 - Include the final answer line if present (e.g. "答: 150" or just "= 150").
 - If the work area is blank (no fresh marks) → status="blank".
+- VERTICAL FORMAT (直式): If the student uses a vertical layout (直式加/減/乘/除), convert it to a horizontal equation for output. Copy the student's written numbers exactly — do NOT recalculate or correct errors.
+  - 直式除法: identify dividend (被除數), divisor (除數), quotient (商), remainder (餘數 if any). Output as "[dividend]÷[divisor]=[quotient]" or "[dividend]÷[divisor]=[quotient]…[remainder]" if remainder > 0.
+  - 直式乘法: identify multiplicand, multiplier, product. Output as "[multiplicand]×[multiplier]=[product]".
+  - 直式加法/減法: output as "[top]±[bottom]=[result]".
+  - CRITICAL: Copy the student's written numbers as-is. If the student wrote a wrong quotient (e.g. 25 instead of 26), output 25. NEVER verify or correct the arithmetic.
 
 WORD-PROBLEM (questions in WORD-PROBLEM list):
 - Read the ENTIRE answer work area: ALL formula lines, intermediate steps, AND the final answer sentence (答:/A:/Ans:).
 - Copy ALL student-written content in reading order (top to bottom, left to right).
 - Include the final answer sentence if present (e.g. "答: 小明走了120公尺").
 - If the work area is blank (no fresh marks) → status="blank".
+- VERTICAL FORMAT (直式): Same conversion rule as CALCULATION above — convert 直式 to horizontal equation, copy student's numbers faithfully without correction.
 
 PROPORTION TABLE FORMAT (比例式格式) — applies to WORD-PROBLEM and CALCULATION questions:
 Students in Taiwan write ratio-scaling in several visual layouts. ALL of the following count as valid 列式:
