@@ -102,7 +102,11 @@ function splitScoreIntoTwo(totalScore) {
   return [first, second]
 }
 
-function normalizeShortAnswerQuestion(question) {
+function isSocialDomain(domainHint) {
+  return ensureString(domainHint, '').trim() === '社會'
+}
+
+function normalizeShortAnswerQuestion(question, domainHint) {
   if (!question || typeof question !== 'object') return question
   const category = ensureString(question.questionCategory, '').trim()
   if (category !== 'short_answer') return question
@@ -120,8 +124,33 @@ function normalizeShortAnswerQuestion(question) {
     : []
 
   const [firstScore, secondScore] = splitScoreIntoTwo(maxScore)
+  const socialMode = isSocialDomain(domainHint)
   let normalizedDimensions = safeDimensions
-  if (safeDimensions.length === 0) {
+  if (safeDimensions.length === 0 && socialMode) {
+    normalizedDimensions = [
+      {
+        name: '核心結論',
+        maxScore,
+        criteria: criteriaHint
+          ? `核心結論與重點相符（參考要點：${criteriaHint}）即可。`
+          : '核心結論與重點相符即可。'
+      },
+      {
+        name: '作答依據（補充）',
+        maxScore: 0,
+        criteria: '若有引用題幹或文本依據可補充完整性；未提供不扣分。'
+      }
+    ]
+  } else if (safeDimensions.length === 1 && socialMode) {
+    normalizedDimensions = [
+      { ...safeDimensions[0], maxScore },
+      {
+        name: '作答依據（補充）',
+        maxScore: 0,
+        criteria: '若有引用題幹或文本依據可補充完整性；未提供不扣分。'
+      }
+    ]
+  } else if (safeDimensions.length === 0) {
     normalizedDimensions = [
       {
         name: '作答依據',
@@ -157,7 +186,7 @@ function normalizeShortAnswerQuestion(question) {
   }
 }
 
-function normalizeAnswerKeyForRubricScoring(answerKey) {
+function normalizeAnswerKeyForRubricScoring(answerKey, domainHint) {
   if (!answerKey || typeof answerKey !== 'object') {
     return { answerKey, convertedShortAnswerIds: [] }
   }
@@ -166,7 +195,7 @@ function normalizeAnswerKeyForRubricScoring(answerKey) {
 
   const convertedShortAnswerIds = []
   const normalizedQuestions = questions.map((question) => {
-    const normalized = normalizeShortAnswerQuestion(question)
+    const normalized = normalizeShortAnswerQuestion(question, domainHint)
     const isConverted =
       normalized !== question &&
       ensureString(question?.questionCategory, '').trim() === 'short_answer'
@@ -2115,7 +2144,7 @@ ${questionBlocks}
 }`.trim()
 }
 
-function buildAccessorPrompt(answerKey, readAnswerResult) {
+function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
   const strictness = answerKey?.strictness || 'standard'
   const strictnessRule =
     strictness === 'strict'
@@ -2140,6 +2169,8 @@ function buildAccessorPrompt(answerKey, readAnswerResult) {
 You are stage Assessor. Score each question by comparing student answers to the answer key.
 
 ${strictnessRule}
+
+Domain: ${JSON.stringify(domainHint || null)}
 
 AnswerKey:
 ${JSON.stringify(compactAnswerKey)}
@@ -2179,7 +2210,9 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
-- short_answer: Grade by key concept presence using rubricsDimensions only (at least two dimensions: 作答依據 + 結論表達). Do NOT use rubric 4-level fallback. No unit checking required.
+- short_answer: Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback. No unit checking required.
+  - SOCIAL LENIENT RULE: if Domain is "社會", core conclusion is decisive. If the student's core conclusion is semantically correct, it should pass even when supporting evidence is brief or omitted.
+  - Do NOT require fixed answer-sentence format (e.g. "答：" / "A:") for short_answer.
 - diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
   - 塗色完整性: check if coloring is continuous and covers the correct regions without major gaps.
@@ -2576,7 +2609,7 @@ export async function runStagedGradingPhaseA({
   const stagedLogLevel = getStagedLogLevel()
   const resolvedAnswerKey = internalContext?.resolvedAnswerKey
   const { answerKey, convertedShortAnswerIds } =
-    normalizeAnswerKeyForRubricScoring(resolvedAnswerKey)
+    normalizeAnswerKeyForRubricScoring(resolvedAnswerKey, internalContext?.domainHint)
   if (!answerKey || typeof answerKey !== 'object') {
     logStaged(pipelineRunId, stagedLogLevel, 'PhaseA skip reason=missing_answer_key')
     return null
@@ -3377,7 +3410,11 @@ export async function runStagedGradingPhaseB({
   const finalReadAnswerResult = finalAnswersToReadAnswerResult(finalAnswers)
 
   // ── B1: ACCESSOR ─────────────────────────────────────────────────────────
-  const accessorPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult)
+  const accessorPrompt = buildAccessorPrompt(
+    answerKey,
+    finalReadAnswerResult,
+    internalContext?.domainHint
+  )
   logStageStart(pipelineRunId, 'Accessor')
   const accessorResponse = await executeStage({
     apiKey,
@@ -3630,6 +3667,8 @@ GRADING RULES per questionCategory ("questionCategory" is authoritative. Only fa
 - short_answer / map_draw: This is a correction submission.
     * Judge based on referenceAnswer and whether the student demonstrates genuine understanding of the concept.
     * The answer does not need to be perfect, but must show the student understood their mistake and addressed it meaningfully.
+    * SOCIAL LENIENT RULE: when questionCategory=short_answer and item.domain is "社會", treat core conclusion as decisive. If core conclusion is semantically correct, pass even if supporting evidence is brief or omitted.
+    * Do NOT require fixed answer sentence format such as "答：" / "A：" for short_answer.
     * Do NOT pass if the answer is essentially unchanged from the mistake described in mistakeReason.
 
 TYPE FALLBACK (only when questionCategory is missing/empty):

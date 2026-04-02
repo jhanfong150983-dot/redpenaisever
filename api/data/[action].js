@@ -1778,7 +1778,8 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
       referenceAnswer: keyQ?.referenceAnswer || '',
       rubricsDimensions: Array.isArray(keyQ?.rubricsDimensions) ? keyQ.rubricsDimensions : [],
       strictness: answerKey?.strictness || 'standard',
-      maxScore: Number(keyQ?.maxScore ?? 1)
+      maxScore: Number(keyQ?.maxScore ?? 1),
+      domain: assignment?.domain || ''
     }
   })
 
