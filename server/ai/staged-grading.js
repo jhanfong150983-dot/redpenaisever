@@ -1712,6 +1712,32 @@ Return strict JSON:
 }`.trim()
 }
 
+function buildFocusedMultiFillReadPrompt(questionId) {
+  return `You are reading a CROPPED IMAGE of ONE MULTI-FILL question. The crop belongs to questionId "${questionId}" only.
+
+Your task: read ALL codes/symbols the student wrote inside this box.
+You do NOT know the correct answer and must NOT guess.
+
+Rules:
+1) Transcribe EVERY code/symbol you see (e.g. "ㄅ、ㄇ、ㄉ" or "甲、丙" or "1、3、5").
+2) Preserve the student's separators (、or ，). If codes are written with no separator, join them with 、.
+3) Read ONLY what is inside this specific box. Do NOT read from neighboring boxes.
+4) status="read" if any codes/text found inside the box.
+5) status="blank" if the box is completely empty (no student writing).
+6) status="unreadable" if there is writing but it is too blurry/unclear to read any code.
+
+Return strict JSON only. No markdown.
+{
+  "answers": [
+    {
+      "questionId": "${questionId}",
+      "studentAnswerRaw": "ㄅ、ㄇ、ㄉ",
+      "status": "read|blank|unreadable"
+    }
+  ]
+}`.trim()
+}
+
 function buildFocusedCheckboxReadPrompt(questionId, questionType) {
   const normalizedType = ensureString(questionType, '').trim().toLowerCase()
   const isSingle = normalizedType === 'single_check'
@@ -3137,6 +3163,67 @@ export async function runStagedGradingPhaseA({
           questionIds: unresolvedIds
         })
       }
+    }
+  }
+
+  // ── A3d: Focused multi_fill read (per-question crop, simple prompt) ───────────────────────────
+  // multi_fill boxes contain small codes (ㄅ/ㄆ/ㄇ etc.) that are easy to confuse in a
+  // multi-question interleaved AI1 call. A dedicated per-question focused call improves accuracy.
+  // Unlike checkbox (A3c), multi_fill is NOT excluded from AI2 → AI3 can still arbitrate.
+  const multiFillCropCandidates = classifyAligned.filter(
+    (q) => q.visible && q.questionType === 'multi_fill' && allQuestionCropMap.has(q.questionId)
+  )
+  if (multiFillCropCandidates.length > 0) {
+    logStaged(pipelineRunId, 'basic', 'focused-multifill-read begin', {
+      count: multiFillCropCandidates.length
+    })
+    const multiFillFocusedResults = await Promise.all(
+      multiFillCropCandidates.map(async (q) => {
+        const cropData = allQuestionCropMap.get(q.questionId)
+        const focusedPrompt = buildFocusedMultiFillReadPrompt(q.questionId)
+        const focusedResponse = await executeStage({
+          apiKey,
+          model,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(),
+          routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+          stageContents: [{ role: 'user', parts: [{ text: focusedPrompt }, { inlineData: cropData }] }]
+        })
+        if (!focusedResponse.ok) {
+          logStaged(pipelineRunId, 'basic', `focused-multifill-read failed qid=${q.questionId}`)
+          return null
+        }
+        const parsed = parseCandidateJson(focusedResponse.data)
+        const answer = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
+        if (answer) {
+          logStaged(pipelineRunId, 'basic', `focused-multifill-read result qid=${q.questionId}`, {
+            studentAnswerRaw: answer.studentAnswerRaw,
+            status: answer.status
+          })
+        }
+        return answer ? { questionId: q.questionId, answer } : null
+      })
+    )
+    const multiFillOverrideMap = new Map()
+    for (const result of multiFillFocusedResults) {
+      if (result) multiFillOverrideMap.set(result.questionId, result.answer)
+    }
+    if (multiFillOverrideMap.size > 0) {
+      // Override AI1 only — AI2 keeps its full-image reading so AI3 can arbitrate disagreements
+      readAnswerParsed = applyAnswerOverrides(readAnswerParsed, multiFillOverrideMap)
+      logStaged(pipelineRunId, 'basic', 'focused-multifill-read overrides applied (AI1 only)', {
+        count: multiFillOverrideMap.size
+      })
+    }
+    const unresolved = multiFillCropCandidates
+      .map((q) => q.questionId)
+      .filter((qId) => !multiFillOverrideMap.has(qId))
+    if (unresolved.length > 0) {
+      logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill-read unresolved (AI1 will keep crop-read result)', {
+        count: unresolved.length,
+        questionIds: unresolved
+      })
     }
   }
 
