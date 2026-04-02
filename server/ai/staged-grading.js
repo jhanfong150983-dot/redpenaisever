@@ -61,7 +61,7 @@ const CATEGORY_TO_TYPE = {
   word_problem: 3,
   short_answer: 3,
   map_fill: 2,
-  multi_fill: 2,
+  multi_fill: 1,
   map_draw: 3,
   diagram_draw: 3,
   matching: 1,
