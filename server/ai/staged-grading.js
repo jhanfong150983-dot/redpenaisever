@@ -382,7 +382,7 @@ function extractInlineImages(contents) {
 // useActualBbox=true：直接使用 bbox 的實際範圍（map_draw 等大面積區域用）
 const FIXED_CROP_W = 0.55  // 佔圖寬的 55%
 const FIXED_CROP_H = 0.20  // 佔圖高的 20%
-async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false) {
+async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
   if (!bbox || !imageBase64) return null
   try {
     const { default: sharp } = await import('sharp')
@@ -393,8 +393,8 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox 
 
     let px, py, px2, py2
     if (useActualBbox) {
-      // 直接使用 bbox 實際範圍，加 5% 邊距
-      const pad = 0.03
+      // 直接使用 bbox 實際範圍，加 pad 邊距（預設 0.03，可透過 customPad 覆蓋）
+      const pad = customPad !== null ? customPad : 0.03
       px = Math.max(0, bbox.x - pad)
       py = Math.max(0, bbox.y - pad)
       px2 = Math.min(1, bbox.x + bbox.w + pad)
@@ -1750,7 +1750,11 @@ Return strict JSON only. No markdown.
 }
 
 function buildFocusedMultiFillReReadPrompt(questionId) {
-  return `You are reading a CROPPED IMAGE of ONE MULTI-FILL answer box. The crop belongs to questionId "${questionId}" only.
+  return `You are reading a WIDE CROPPED IMAGE centered on ONE MULTI-FILL answer box. The crop belongs to questionId "${questionId}" only.
+
+⚠️ WIDE CROP NOTICE: This image is intentionally wider than the answer box to provide context.
+The target answer box is located in the CENTER of this image. Focus ONLY on the central region.
+Neighboring boxes or printed text near the edges are NOT part of this question — ignore them.
 
 This box contains handwritten codes — Bopomofo (注音符號) phonetic symbols.
 
@@ -1796,12 +1800,14 @@ You MUST output only symbols from this list. If your analysis leads to a symbol 
 6) ㄇ vs ㄈ: check which side is open — bottom open → ㄇ, right side open → ㄈ.
 
 STEP 4 — List all identified symbols separated by 、.
+STEP 5 — For each symbol, rate your confidence: HIGH (clearly identifiable) or LOW (ambiguous/unclear strokes). List any LOW-confidence symbols in uncertainChars.
 
 Rules:
-- Read ONLY what is inside this box. Do NOT read neighboring boxes.
+- Read ONLY what is inside the central box. Do NOT read neighboring boxes.
 - status="read" if any symbols found.
 - status="blank" if completely empty.
 - status="unreadable" if too blurry to identify.
+- uncertainChars: array of symbols you are NOT fully confident about (e.g. ["ㄌ"]). Empty array if all confident.
 
 Return strict JSON only. No markdown.
 {
@@ -1809,7 +1815,8 @@ Return strict JSON only. No markdown.
     {
       "questionId": "${questionId}",
       "studentAnswerRaw": "ㄅ、ㄇ、ㄉ",
-      "status": "read|blank|unreadable"
+      "status": "read|blank|unreadable",
+      "uncertainChars": []
     }
   ]
 }`.trim()
@@ -2297,10 +2304,13 @@ function buildArbiterPrompt(arbiterItems) {
   const questionBlocks = arbiterItems.map((item) => {
     const ai1Str = item.ai1Status === 'blank' ? '（空白）' : item.ai1Status === 'unreadable' ? '（無法辨識）' : `「${item.ai1Answer}」`
     const ai2Str = item.ai2Status === 'blank' ? '（空白）' : item.ai2Status === 'unreadable' ? '（無法辨識）' : `「${item.ai2Answer}」`
+    const disagreementNote = item.agreementStatus === 'disagree' && item.disagreementReason === 'uncertain_chars'
+      ? ' ⚠️ 注意：讀取值相同但 AI2 對部分字符信心不足（uncertain_chars），請仔細查看筆跡；若無法確認 → needs_review'
+      : ''
     return `題目 ${item.questionId}（類型：${item.questionType}）
   AI1（細節）讀到：${ai1Str}（status: ${item.ai1Status}）
   AI2（全局）讀到：${ai2Str}（status: ${item.ai2Status}）
-  初步比對：${item.agreementStatus === 'agree' ? 'agree（等價後相同）' : 'disagree（等價後不同）'}
+  初步比對：${item.agreementStatus === 'agree' ? 'agree（等價後相同）' : 'disagree（等價後不同）'}${disagreementNote}
   [此題裁切圖緊接在下方]`
   }).join('\n\n---\n\n')
 
@@ -3318,9 +3328,15 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, 'basic', 'focused-multifill-read begin (dual: direct + analytic)', {
       count: multiFillCropCandidates.length
     })
+    const inlineImage = inlineImages[0]
     const multiFillDualResults = await Promise.all(
       multiFillCropCandidates.map(async (q) => {
-        const cropData = allQuestionCropMap.get(q.questionId)
+        // read1: tight crop (pad=0.03) — same as allQuestionCropMap
+        const cropTight = allQuestionCropMap.get(q.questionId)
+        // read2: wide crop (pad=0.08) — more context, different view to catch bbox misalignment
+        const cropWide = inlineImage
+          ? await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, true, 0.08)
+          : cropTight
         const [res1, res2] = await Promise.all([
           executeStage({
             apiKey,
@@ -3329,7 +3345,7 @@ export async function runStagedGradingPhaseA({
             timeoutMs: getRemainingBudget(),
             routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReadPrompt(q.questionId) }, { inlineData: cropData }] }]
+            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReadPrompt(q.questionId) }, { inlineData: cropTight }] }]
           }),
           executeStage({
             apiKey,
@@ -3338,23 +3354,32 @@ export async function runStagedGradingPhaseA({
             timeoutMs: getRemainingBudget(),
             routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReReadPrompt(q.questionId) }, { inlineData: cropData }] }]
+            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReReadPrompt(q.questionId) }, { inlineData: cropWide ?? cropTight }] }]
           })
         ])
         const answer1 = res1.ok ? (Array.isArray(parseCandidateJson(res1.data)?.answers) ? parseCandidateJson(res1.data).answers[0] : null) : null
         const answer2 = res2.ok ? (Array.isArray(parseCandidateJson(res2.data)?.answers) ? parseCandidateJson(res2.data).answers[0] : null) : null
         logStaged(pipelineRunId, 'basic', `focused-multifill-read dual qid=${q.questionId}`, {
           read1: answer1 ? { raw: answer1.studentAnswerRaw, status: answer1.status } : null,
-          read2: answer2 ? { raw: answer2.studentAnswerRaw, status: answer2.status } : null
+          read2: answer2 ? { raw: answer2.studentAnswerRaw, status: answer2.status, uncertain: answer2.uncertainChars } : null
         })
         return { questionId: q.questionId, answer1, answer2 }
       })
     )
     const multiFillRead1Map = new Map()
     const multiFillRead2Map = new Map()
+    const multiFillUncertainIds = new Set()  // read2 reported uncertainChars → force needs_review
     for (const { questionId, answer1, answer2 } of multiFillDualResults) {
       if (answer1) multiFillRead1Map.set(questionId, answer1)
       if (answer2) multiFillRead2Map.set(questionId, answer2)
+      if (answer2 && Array.isArray(answer2.uncertainChars) && answer2.uncertainChars.length > 0) {
+        multiFillUncertainIds.add(questionId)
+      }
+    }
+    if (multiFillUncertainIds.size > 0) {
+      logStaged(pipelineRunId, 'basic', 'focused-multifill uncertain chars detected', {
+        questionIds: [...multiFillUncertainIds]
+      })
     }
     // Override AI1 (readAnswerParsed) with read-1 results
     if (multiFillRead1Map.size > 0) {
@@ -3519,6 +3544,17 @@ export async function runStagedGradingPhaseA({
     }
   })
 
+  // ── Force diff for multi_fill questions where read2 reported uncertainChars ──
+  // Even if AI1 == AI2 (agree), uncertain chars mean the reading may be wrong → send to human review
+  if (typeof multiFillUncertainIds !== 'undefined' && multiFillUncertainIds.size > 0) {
+    for (const qr of questionResultsRaw) {
+      if (multiFillUncertainIds.has(qr.questionId) && qr.consistencyStatus === 'stable') {
+        qr.consistencyStatus = 'diff'
+        qr.consistencyReason = 'uncertain_chars'
+      }
+    }
+  }
+
   // ── Attach crop image URLs for teacher review (uses allQuestionCropMap from pre-AI1 step) ──
   // Priority: per-question crop (allQuestionCropMap) → full image fallback (map_fill, no bbox, etc.)
   const cropByQuestionId = allQuestionCropMap  // alias for internal _internal reference
@@ -3543,7 +3579,8 @@ export async function runStagedGradingPhaseA({
       ai1Status: qr.readAnswer1.status,
       ai2Answer: qr.readAnswer2.studentAnswer,
       ai2Status: qr.readAnswer2.status,
-      agreementStatus: qr.consistencyStatus === 'stable' ? 'agree' : 'disagree'
+      agreementStatus: qr.consistencyStatus === 'stable' ? 'agree' : 'disagree',
+      disagreementReason: qr.consistencyReason === 'uncertain_chars' ? 'uncertain_chars' : undefined
     }))
 
   const arbiterByQuestionId = new Map()
