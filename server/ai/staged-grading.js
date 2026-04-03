@@ -2447,6 +2447,9 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score even if 算式過程 is weak/incomplete.
 - short_answer: Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback. No unit checking required.
   - ⚠️ OPEN-CHOICE DIMENSION RULE: When a dimension's criteria says "完成選擇即可，無對錯" (or similar), award full marks for that dimension as long as the student made any choice — regardless of WHICH option they chose. This applies to "承上題" follow-up questions where students choose one aspect from the previous question and explain it. Do NOT deduct points for choosing 休閒娛樂 vs 文化傳承 vs 教育 etc. — all valid options from the preceding question are equally acceptable.
+    - IMPLICIT CHOICE COUNTS: The student does NOT need to name the layer explicitly. If their explanation clearly describes one layer (e.g. "娛樂身心" → 休閒娛樂 layer), treat that as a valid choice. Do NOT compare their explanation to other unchosen layers.
+    - FORBIDDEN: Once a layer is identified (explicit or implicit), do NOT penalize the student for not addressing other layers (e.g. 教化人心, 文化傳承). Doing so is a violation of this rule.
+    - This rule applies BEFORE any strictness-based evaluation — it cannot be overridden by strictness settings.
   - ⚠️ RUBRIC CRITERIA LANGUAGE WARNING: Dimension criteria often use phrases like "準確提及「X」、「Y」或「Z」" or "說出 [keyword]". These describe the TARGET CONCEPT, NOT a literal text requirement. Do NOT do keyword matching. Judge whether the student's answer conveys the SAME MEANING as the listed concept(s), regardless of specific wording used.
   - LENIENT FOCUS: when strictness = lenient and Domain is "社會" or "自然", apply the following generalizable rules:
     1. CORE FIRST: Identify the dimension marked as 核心/結論/主旨. If the student's answer semantically covers this core — even in different words — award full score for the entire question. Do NOT deduct for missing supporting evidence or methods.
@@ -2460,11 +2463,13 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
        - e.g. criteria "準確提及「消除隔閡」、「增進感情」或「化解衝突」" → "讓漳泉子弟感情變好" ✓, "使雙方減少敵對" ✓, "希望大家和睦" ✓ (all capture the same concept)
        - This rule applies even if criteria uses strong language like "準確" or "明確" — those words describe concept clarity, not verbatim matching.
   - Do NOT require fixed answer-sentence format (e.g. "答：" / "A:") for short_answer.
-  - ⚠️ MINIMUM EXPRESSION STANDARD (applies to ALL strictness levels, including lenient):
+  - ⚠️ MINIMUM EXPRESSION STANDARD (HIGHEST PRIORITY — overrides ALL other rules including LENIENT FOCUS and CORE FIRST):
     Even if the core concept is correct, the student must express it as a reasonably complete thought — not a bare fragment.
-    FAIL standard (cap score at 50% of maxScore even if concept is right):
+    CHECK THIS RULE FIRST before applying any strictness-based evaluation.
+    FAIL standard (HARD CAP: score MUST NOT exceed 50% of maxScore — do NOT give full marks even if concept matches):
       - Answer is ≤4 characters AND lacks any verb context or connector
-      - e.g. "加感情"（3字, no connector）✗, "增進感情"（4字, bare noun phrase）✗, "文化傳承"（4字）✗
+      - e.g. "加感情"（3字, no connector）→ HARD CAP at 50% ✗, "增進感情"（4字, bare noun phrase）→ HARD CAP ✗, "文化傳承"（4字）→ HARD CAP ✗
+      - IMPORTANT: "語意一致" or "核心意思正確" does NOT exempt a FAIL answer from this cap. The cap is unconditional.
     PASS standard (concept check applies normally):
       - Contains a verb context, connector, or subject that shows understanding
       - e.g. "為了增進感情" ✓, "讓人增進感情" ✓, "可以加強彼此感情" ✓, "增進彼此的感情" ✓ (>4字 with 的)
