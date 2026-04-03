@@ -3511,8 +3511,14 @@ export async function runStagedGradingPhaseA({
           const evidence = ensureString(a?.evidence, '').trim()
           // Enforce: empty evidence → needs_review
           if (!evidence && arbStatus !== 'needs_review') arbStatus = 'needs_review'
-          // Enforce: finalAnswer must be AI1 or AI2 value
           const item = arbiterItems.find((i) => i.questionId === qId)
+          // Rescue: AI3 self-contradiction — says needs_review but has evidence AND was sent as agree
+          // This happens when AI3 correctly identifies agreement but forgets to flip the status.
+          if (arbStatus === 'needs_review' && evidence && item?.agreementStatus === 'agree') {
+            arbStatus = 'arbitrated_agree'
+            stageWarnings.push(`[AI3] qId=${qId} needs_review overridden to arbitrated_agree (agree+evidence contradiction)`)
+          }
+          // Enforce: finalAnswer must be AI1 or AI2 value
           let finalAnswer = ensureString(a?.finalAnswer, '')
           if (item && arbStatus !== 'needs_review') {
             if (finalAnswer !== item.ai1Answer && finalAnswer !== item.ai2Answer) {
