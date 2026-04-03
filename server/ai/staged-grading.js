@@ -1759,37 +1759,28 @@ STEP 1 — Count how many distinct symbols you see in this box.
 STEP 2 — For each symbol, briefly describe its key strokes.
 STEP 3 — Match to the correct symbol within ㄅ~ㄎ using this confusion table:
 
-BOPOMOFO CONFUSION TABLE (ㄅ~ㄎ only) — high-confusion pairs marked with ⚠️:
-
-⚠️ EASILY CONFUSED GROUP 1 — ㄆ / ㄊ (plus out-of-range look-alikes ㄘ, ㄣ):
-- ㄊ: like the character 十 (cross) — horizontal stroke CROSSES through the vertical in the MIDDLE. The horizontal bar bisects the vertical. Bottom curves right.
-- ㄆ: TWO separate horizontal bars stacked + downward stroke on right (two parallel bars, no crossing)
-→ CRITICAL: if you think you see ㄘ (top-bar-only + downward hook) → it is more likely ㄊ within the allowed set. Re-examine: does the bar cross the vertical? If yes → ㄊ.
-→ CRITICAL: if you think you see ㄣ (smooth leftward hook, no top) → it is more likely ㄅ. Check for a straight top segment.
-
-⚠️ EASILY CONFUSED GROUP 2 — ㄅ / ㄣ:
-- ㄅ: looks like a STRAIGHT vertical line on top, then the bottom curves LEFT like a leftward hook. Two distinct parts: straight top + curved bottom. Like a lowercase 'b' mirrored.
-- ㄣ: the ENTIRE stroke is one continuous curve — it curves from start to finish like a fishhook or a backwards 'J'. No straight portion at top.
-→ CRITICAL: does the top portion look STRAIGHT before the hook? → ㄅ. Is the whole thing one smooth curve with no straight part? → ㄣ.
-
-⚠️ EASILY CONFUSED GROUP 3 — ㄉ / ㄌ:
-- ㄉ: TOP is completely CLEAN — no stroke protruding at top. Main stroke goes down and curves/hooks to the LEFT at the bottom.
-- ㄌ: TOP has a small PROTRUDING stroke sticking out (a visible bump or cap at the top). Then goes down and hooks to the RIGHT at the bottom.
-→ CRITICAL: clean top + leftward hook at bottom → ㄉ. Protruding bump at top + rightward hook at bottom → ㄌ.
-
-⚠️ EASILY CONFUSED GROUP 4 — ㄋ / ㄌ:
-- ㄋ: horizontal stroke at top + vertical going STRAIGHT DOWN and ending flat (like 丁). Bottom ends with NO hook.
-- ㄌ: small PROTRUDING bump at top + goes down + hooks to the RIGHT at bottom.
-→ CRITICAL: bottom ends FLAT/STRAIGHT → ㄋ. Bottom hooks to the RIGHT → ㄌ.
-
-⚠️ EASILY CONFUSED GROUP 5 — ㄇ / ㄈ:
-- ㄇ: three-sided box OPEN AT BOTTOM (like a roof ∩)
-- ㄈ: three-sided box OPEN AT RIGHT (like ㄈ)
-→ check which side has no stroke
-
-Other symbols:
+ALLOWED SYMBOL DICTIONARY (ㄅ~ㄎ, 10 symbols total):
+- ㄅ: straight vertical segment at top + leftward hook at bottom (two distinct parts)
+- ㄆ: TWO parallel horizontal bars stacked + downward stroke on right
+- ㄇ: three-sided box, OPEN AT BOTTOM (like a roof ∩)
+- ㄈ: three-sided box, OPEN AT RIGHT
+- ㄉ: top is completely CLEAN (nothing sticking out) + main stroke hooks to the LEFT at bottom
+- ㄊ: like 十 (cross) — horizontal bar BISECTS the vertical in the MIDDLE, bottom curves right
+- ㄋ: horizontal stroke at top + vertical going straight down, ends FLAT (like 丁, no hook)
+- ㄌ: small PROTRUDING bump at top + goes down + hooks to the RIGHT at bottom
 - ㄍ: two bent strokes
-- ㄏ: hook with horizontal top (like 厂)
+- ㄎ: like ㄅ (straight top + leftward hook) but with an EXTRA horizontal bar at the very top
+
+You MUST output only symbols from this list. If your analysis leads to a symbol not in this list, re-examine and pick the closest match from the 10 above.
+
+⚠️ HIGH-CONFUSION PAIRS — pay extra attention:
+
+1) ㄅ vs ㄎ: both have vertical + leftward hook. ONLY difference: ㄎ has an extra horizontal bar at the very TOP.
+2) ㄅ vs ㄉ: ㄅ has a clear straight segment before the hook; ㄉ top is clean but the whole stroke feels more like one flowing curve hooking LEFT.
+3) ㄉ vs ㄌ: ㄉ → clean top + LEFT hook at bottom. ㄌ → protruding bump at top + RIGHT hook at bottom. Direction of hook and top are BOTH opposite.
+4) ㄋ vs ㄌ: ㄋ → horizontal at top + flat bottom (no hook). ㄌ → bump at top + rightward hook at bottom.
+5) ㄆ vs ㄊ: ㄆ → two PARALLEL bars (no crossing). ㄊ → one bar CROSSING through the vertical. Also: if it looks like ㄘ (bar only at top, no crossing) → re-examine, it is likely ㄊ.
+6) ㄇ vs ㄈ: check which side is open — bottom open → ㄇ, right side open → ㄈ.
 
 STEP 4 — List all identified symbols separated by 、.
 
