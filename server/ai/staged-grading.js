@@ -57,6 +57,7 @@ const CATEGORY_TO_TYPE = {
   fill_blank: 1,
   fill_variants: 2,
   multi_check: 2,
+  multi_check_other: 2,
   calculation: 3,
   word_problem: 3,
   short_answer: 3,
@@ -426,8 +427,8 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox 
   }
 }
 
-const CHECKBOX_EQUIVALENT_TYPES = new Set(['single_check', 'multi_check', 'multi_choice'])
-const CHECKBOX_FOCUSED_READ_TYPES = new Set(['single_check', 'multi_check', 'multi_choice'])
+const CHECKBOX_EQUIVALENT_TYPES = new Set(['single_check', 'multi_check', 'multi_choice', 'multi_check_other'])
+const CHECKBOX_FOCUSED_READ_TYPES = new Set(['single_check', 'multi_check', 'multi_choice', 'multi_check_other'])
 
 const CHINESE_NUMBER_MAP = {
   一: 1,
@@ -738,6 +739,7 @@ const CLASSIFY_ALLOWED_TYPES = new Set([
   'map_draw',
   'diagram_draw',
   'multi_check',
+  'multi_check_other',
   'fill_blank',
   'true_false',
   'matching',
@@ -1058,7 +1060,7 @@ function normalizeClassifyResult(parsed, questionIds) {
     const qt = row?.questionType
     const VALID_QUESTION_TYPES = new Set([
       'word_problem', 'calculation', 'single_choice', 'map_fill', 'multi_fill', 'map_draw',
-      'diagram_draw', 'multi_check', 'fill_blank', 'true_false', 'matching',
+      'diagram_draw', 'multi_check', 'multi_check_other', 'fill_blank', 'true_false', 'matching',
       'multi_choice', 'single_check'
     ])
     const questionType = VALID_QUESTION_TYPES.has(qt) ? qt : 'other'
@@ -1618,7 +1620,7 @@ Rules:
   - For map_draw and diagram_draw: frame the entire diagram/map/grid area plus any visible question stem above it.
   - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer.
   - For fill_blank with multiple blanks: frame all blanks and the surrounding question text together.
-  - For single_choice / multi_choice / single_check / multi_check / true_false: still include question stem + answer area (no answer-only crop).
+  - For single_choice / multi_choice / single_check / multi_check / multi_check_other / true_false: still include question stem + answer area (no answer-only crop).
   - For multi_fill: each sub-question maps to ONE specific blank box in the diagram. answerBbox must be a TIGHT crop of ONLY that single box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box.
   - For matching(group_context): include the entire left column + right column + connecting lines of the whole group.
   - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
@@ -1662,7 +1664,7 @@ Rules:
   - For calculation / word_problem: include all formula lines, intermediate steps, and the final answer line.
   - For fill_blank with multiple blanks: include all blanks and the question text together.
   - For single_choice / multi_choice: include the option rows and the parentheses where the student wrote.
-  - For single_check / multi_check: include all checkbox options and the student's marks.
+  - For single_check / multi_check / multi_check_other: include all checkbox options and the student's marks (including any text written next to the last 其他 option).
   - For map_draw / diagram_draw: include the entire drawn/colored area plus the question stem.
 - Also output answerBbox for the precise region where the student actually wrote their answer (tighter than questionBbox). This helps highlight the specific wrong content.
 - All bboxes normalized to [0,1]: { "x": top-left x, "y": top-left y, "w": width, "h": height }.
@@ -1816,6 +1818,7 @@ Return strict JSON only. No markdown.
 function buildFocusedCheckboxReadPrompt(questionId, questionType) {
   const normalizedType = ensureString(questionType, '').trim().toLowerCase()
   const isSingle = normalizedType === 'single_check'
+  const isMultiOther = normalizedType === 'multi_check_other'
   const typeLabel = isSingle ? 'SINGLE-CHECK' : normalizedType === 'multi_choice' ? 'MULTI-CHOICE' : 'MULTI-CHECK'
 
   return `You are reading a CROPPED IMAGE of ONE ${typeLabel} question. The crop belongs to questionId "${questionId}" only.
@@ -1829,13 +1832,18 @@ Output token rule (strict):
 3) ${isSingle ? 'Output ONE token only.' : 'Output comma-separated tokens with NO spaces, preserving reading order.'}
 4) If no visible mark for this question -> status="blank", studentAnswerRaw="未作答".
 5) If marks are too unclear to determine -> status="unreadable", studentAnswerRaw="無法辨識".
+${isMultiOther ? `6) OPEN-ENDED LAST OPTION: The LAST checkbox option is an open-ended "其他：___" field.
+   - If the student checked the last option AND wrote text next to it, append the text after the token using "：" separator.
+   - Example: if last option is (4) and student wrote "轉為文風鼎盛的社會", output token as "(4)：轉為文風鼎盛的社會".
+   - If checked but no text written, output the token normally (e.g. "(4)").
+   - If not checked, omit the token entirely (same as other options).` : ''}
 
 Return strict JSON:
 {
   "answers": [
     {
       "questionId": "${questionId}",
-      "studentAnswerRaw": "${isSingle ? '第二個' : '第一個,第三個'}",
+      "studentAnswerRaw": "${isSingle ? '第二個' : isMultiOther ? '第一個,第三個,第四個：學生手寫的其他內容' : '第一個,第三個'}",
       "status": "read|blank|unreadable"
     }
   ]
@@ -2412,6 +2420,12 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - score = max(0, round((|correct| − |wrong|) / |answer_tokens| × maxScore))
   - isCorrect = (score === maxScore)
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
+- multi_check_other: Same as multi_check BUT the LAST checkbox option is always an open-ended "其他：___" field — no answer key markup required.
+  - Parse student tokens from studentAnswerRaw (strip any "：text" suffix from tokens before processing).
+  - Identify the 其他 token: the highest-numbered token in student_tokens ∪ answer_tokens. REMOVE it from student_tokens before scoring (do NOT count as correct or wrong).
+  - Apply the same correct/wrong/score formula as multi_check using the filtered student_tokens.
+  - isCorrect = (score === maxScore).
+  - errorType: same as multi_check.
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
   - LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score even if 算式過程 is weak/incomplete.
