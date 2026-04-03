@@ -1723,6 +1723,10 @@ IMPORTANT — expected code set: codes in this type of question are almost alway
 ㄅ ㄆ ㄇ ㄈ ㄉ ㄊ ㄋ ㄌ ㄍ ㄎ
 If you see a symbol that resembles something outside this set, match it to the closest symbol within this set.
 
+⚠️ CRITICAL LOOK-ALIKE PAIRS (check these before finalizing):
+- ㄉ vs ㄌ: look at the TOP first — ㄉ has NOTHING at the top (completely clean); ㄌ has a small protrusion/bump sticking out at the top-left. This is the primary test; hook direction is secondary.
+- ㄅ vs ㄋ: ㄅ is TWO SEPARATE strokes (short upper stroke + lower stroke hooking LEFT); ㄋ is ONE CONTINUOUS flow (horizontal top → straight down → curves RIGHT). If you see a clear break between upper and lower → ㄅ.
+
 Rules:
 1) Transcribe EVERY code/symbol you see (e.g. "ㄅ、ㄇ、ㄉ").
 2) Preserve the student's separators (、or ，). If codes are written with no separator, join them with 、.
@@ -1777,8 +1781,15 @@ You MUST output only symbols from this list. If your analysis leads to a symbol 
 
 1) ㄅ vs ㄎ: both have vertical + leftward hook. ONLY difference: ㄎ has an extra horizontal bar at the very TOP.
 2) ㄅ vs ㄉ: ㄅ has a clear straight segment before the hook; ㄉ top is clean but the whole stroke feels more like one flowing curve hooking LEFT.
-3) ㄉ vs ㄌ: ㄉ → clean top + LEFT hook at bottom. ㄌ → protruding bump at top + RIGHT hook at bottom. Direction of hook and top are BOTH opposite.
-4) ㄋ vs ㄌ: ㄋ → horizontal at top + flat bottom (no hook). ㄌ → bump at top + rightward hook at bottom.
+3) ㄉ vs ㄌ: PRIMARY TEST — look at the TOP ONLY first:
+  - Top is completely CLEAN, nothing sticking out → ㄉ (then confirm: hook at bottom goes LEFT)
+  - Top has ANY small protrusion or bump at top-left, even tiny → ㄌ (then confirm: hook at bottom goes RIGHT)
+  ⚠️ Trust the top over the hook. If the hook direction is ambiguous, the top is the final answer.
+4) ㄋ vs ㄌ: ㄋ → horizontal bar at top + flat/straight bottom (NO hook). ㄌ → small bump at top + rightward hook at bottom.
+7) ㄅ vs ㄋ:
+  - ㄅ: TWO SEPARATE parts — a short upper segment (diagonal or short vertical), then a SECOND stroke that hooks LEFT at the bottom. Look for the break/angle between the two parts.
+  - ㄋ: ONE CONTINUOUS stroke — horizontal top → straight down → curves RIGHT at the bottom. No break, flows continuously.
+  - Primary test: two-stroke structure → ㄅ; single continuous flow → ㄋ. Secondary: LEFT hook → ㄅ; RIGHT curve → ㄋ.
 5) ㄆ vs ㄊ: ㄆ → two PARALLEL bars (no crossing). ㄊ → one bar CROSSING through the vertical. Also: if it looks like ㄘ (bar only at top, no crossing) → re-examine, it is likely ㄊ.
 6) ㄇ vs ㄈ: check which side is open — bottom open → ㄇ, right side open → ㄈ.
 
@@ -2265,10 +2276,11 @@ const BOPOMOFO_ARBITER_GUIDE = `
 
 高混淆對（裁決時特別注意）：
 1. ㄅ vs ㄎ：都是直線＋左勾，差別只在 ㄎ 頂端多一橫
-2. ㄉ vs ㄌ：ㄉ 頂端乾淨＋左勾；ㄌ 頂端有突出＋右勾（方向相反）
-3. ㄆ vs ㄊ：ㄆ 是兩條平行橫畫；ㄊ 是橫畫貫穿垂直線
-4. ㄋ vs ㄌ：ㄋ 底端平收；ㄌ 底端向右勾
-5. ㄇ vs ㄈ：看哪一側開口
+2. ㄉ vs ㄌ：【主要判斷：看頂端】ㄉ 頂端完全乾淨（什麼都沒有）→ ㄉ；頂端有任何突出小撇（再小也算）→ ㄌ。鉤的方向是次要確認（ㄉ左勾、ㄌ右勾）。
+3. ㄅ vs ㄋ：ㄅ 是兩段式（上方短撇＋下方左鉤），兩段之間有明顯斷點或折角；ㄋ 是一筆連續（頂端橫畫→直下→右彎），無斷點。主要測試：看到明顯斷點→ㄅ；一筆流暢→ㄋ。
+4. ㄆ vs ㄊ：ㄆ 是兩條平行橫畫；ㄊ 是橫畫貫穿垂直線
+5. ㄋ vs ㄌ：ㄋ 底端平收無勾；ㄌ 底端向右勾
+6. ㄇ vs ㄈ：看哪一側開口
 `.trim()
 
 function buildArbiterPrompt(arbiterItems) {
