@@ -2460,6 +2460,15 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
        - e.g. criteria "準確提及「消除隔閡」、「增進感情」或「化解衝突」" → "讓漳泉子弟感情變好" ✓, "使雙方減少敵對" ✓, "希望大家和睦" ✓ (all capture the same concept)
        - This rule applies even if criteria uses strong language like "準確" or "明確" — those words describe concept clarity, not verbatim matching.
   - Do NOT require fixed answer-sentence format (e.g. "答：" / "A:") for short_answer.
+  - ⚠️ MINIMUM EXPRESSION STANDARD (applies to ALL strictness levels, including lenient):
+    Even if the core concept is correct, the student must express it as a reasonably complete thought — not a bare fragment.
+    FAIL standard (cap score at 50% of maxScore even if concept is right):
+      - Answer is ≤4 characters AND lacks any verb context or connector
+      - e.g. "加感情"（3字, no connector）✗, "增進感情"（4字, bare noun phrase）✗, "文化傳承"（4字）✗
+    PASS standard (concept check applies normally):
+      - Contains a verb context, connector, or subject that shows understanding
+      - e.g. "為了增進感情" ✓, "讓人增進感情" ✓, "可以加強彼此感情" ✓, "增進彼此的感情" ✓ (>4字 with 的)
+    This rule does NOT apply to fill_blank, multi_fill, or calculation questions.
 - diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
   - 塗色完整性: check if coloring is continuous and covers the correct regions without major gaps.
