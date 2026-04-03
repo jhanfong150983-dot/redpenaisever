@@ -2416,7 +2416,14 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
   - LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score even if 算式過程 is weak/incomplete.
 - short_answer: Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback. No unit checking required.
-  - LENIENT FOCUS: when strictness = lenient and Domain is "社會" or "自然", core conclusion is decisive. If core conclusion is semantically correct, allow full score even when supporting evidence is brief.
+  - LENIENT FOCUS: when strictness = lenient and Domain is "社會" or "自然", apply the following generalizable rules:
+    1. CORE FIRST: Identify the dimension marked as 核心/結論/主旨. If the student's answer semantically covers this core — even in different words — award full score for the entire question. Do NOT deduct for missing supporting evidence or methods.
+    2. SEMANTIC EQUIVALENCE: Accept answers that express the same idea from a different angle. Common patterns:
+       - Positive framing ≈ negative framing of the same outcome (e.g. "增進感情" ≈ "化解衝突"; "促進合作" ≈ "減少紛爭")
+       - General statement ≈ specific instance (e.g. "促進群體和諧" ≈ "消除漳泉隔閡"; "改善關係" ≈ "消除敵對")
+       - Cause ≈ stated effect when clearly implied (e.g. "增進了解" implies conflict reduction)
+    3. PURPOSE vs. METHOD: If the question asks WHY (purpose/reason), a correct statement of purpose earns full credit even if the student omits the specific method or mechanism described in the model answer.
+    4. WRONG CONCEPT GUARD: Do NOT award full credit if the student's core idea refers to a different concept entirely (e.g. answering with an economic reason when the question is about social harmony). Semantic equivalence applies only within the same conceptual domain.
   - Do NOT require fixed answer-sentence format (e.g. "答：" / "A:") for short_answer.
 - diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
