@@ -2424,6 +2424,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - STEP 1 — Parse studentAnswerRaw: split into tokens. If the 其他 token has text appended (format "token：text", e.g. "(4)：轉為文風鼎盛的社會"), extract and store the text separately, then strip it from the token.
   - STEP 2 — Identify and REMOVE the 其他 token: the highest-numbered token in student_tokens ∪ answer_tokens. ALWAYS remove it from student_tokens. It is NEVER counted in the correct/wrong formula.
   - STEP 3 — Score the remaining tokens using the standard multi_check formula (correct − wrong).
+    - ⚠️ EMPTY REFERENCE GUARD: If referenceAnswer is empty/null/blank (teacher did not specify correct fixed options), treat ALL fixed-option tokens as neither correct nor wrong → score = maxScore (full marks for fixed-option portion). Do NOT penalize any fixed option when reference is absent.
   - STEP 4 — Evaluate 其他 text (only if student checked 其他 AND text is non-empty):
     - Use the question context visible in the image and the answer key referenceAnswer (if provided) to judge whether the text is a reasonable/valid answer for this question.
     - If REASONABLE: note "其他選項文字合理" in scoringReason. Does NOT add to score.
