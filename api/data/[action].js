@@ -124,6 +124,68 @@ function compactObject(obj) {
   )
 }
 
+function summarizeLogValue(value, depth = 0) {
+  if (depth > 2) return '[MaxDepth]'
+  if (value === null || value === undefined) return value
+  if (typeof value === 'string') {
+    return value.length > 500 ? `${value.slice(0, 500)}...<truncated>` : value
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value
+  if (Array.isArray(value)) {
+    return value.slice(0, 10).map((item) => summarizeLogValue(item, depth + 1))
+  }
+  if (value instanceof Error) {
+    return getErrorDiagnostics(value, depth + 1)
+  }
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, 20)
+        .map(([key, item]) => [key, summarizeLogValue(item, depth + 1)])
+    )
+  }
+  return String(value)
+}
+
+function getErrorDiagnostics(error, depth = 0) {
+  if (!error || typeof error !== 'object') {
+    return { value: String(error) }
+  }
+
+  const diagnostics = compactObject({
+    type: Object.prototype.toString.call(error),
+    name: typeof error.name === 'string' ? error.name : undefined,
+    message: typeof error.message === 'string' ? error.message : undefined,
+    code: typeof error.code === 'string' ? error.code : undefined,
+    status:
+      typeof error.status === 'number' || typeof error.status === 'string'
+        ? error.status
+        : undefined,
+    details: typeof error.details === 'string' ? error.details : undefined,
+    hint: typeof error.hint === 'string' ? error.hint : undefined,
+    stack: typeof error.stack === 'string' ? error.stack : undefined
+  })
+
+  if (error.cause && depth < 3) {
+    diagnostics.cause = getErrorDiagnostics(error.cause, depth + 1)
+  }
+
+  diagnostics.raw = summarizeLogValue(error, depth + 1)
+  return diagnostics
+}
+
+function wrapError(message, cause) {
+  const err = new Error(message)
+  if (cause !== undefined) {
+    try {
+      err.cause = cause
+    } catch {
+      // ignore
+    }
+  }
+  return err
+}
+
 function clampInteger(value, min, max, fallback) {
   const parsed = toNumber(value)
   if (!Number.isFinite(parsed)) return fallback
@@ -5999,14 +6061,22 @@ async function handleRefreshAssignmentSummary(req, res) {
 
   const supabaseDb = getSupabaseAdmin()
   const nowIso = new Date().toISOString()
+  const traceId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const logPrefix = `[refresh-assignment-summary][${traceId}]`
+
+  console.log(`${logPrefix} start owner=${user.id} assignment=${assignmentId}`)
 
   // 標記為 running
-  await supabaseDb
+  const { error: runningErr } = await supabaseDb
     .from('assignment_summaries')
     .upsert(
       { owner_id: user.id, assignment_id: assignmentId, status: 'running', updated_at: nowIso },
       { onConflict: 'owner_id,assignment_id' }
     )
+
+  if (runningErr) {
+    console.error(`${logPrefix} failed to set running status`, getErrorDiagnostics(runningErr))
+  }
 
   // 回傳 202 讓前端不等待，後續在背景完成
   res.status(202).json({ success: true, status: 'running' })
@@ -6021,7 +6091,13 @@ async function handleRefreshAssignmentSummary(req, res) {
       .eq('owner_id', user.id)
       .in('status', ['graded', 'correction_passed', 'correction_pending_review'])
 
-    if (subErr) throw new Error(subErr.message)
+    if (subErr) {
+      console.error(`${logPrefix} submissions query failed`, getErrorDiagnostics(subErr))
+      throw wrapError(
+        `submissions_query_failed: ${subErr.message || 'unknown'}`,
+        subErr
+      )
+    }
     if (!submissions || submissions.length === 0) {
       await supabaseDb
         .from('assignment_summaries')
@@ -6037,22 +6113,37 @@ async function handleRefreshAssignmentSummary(req, res) {
     const studentIds = [...new Set(submissions.map(s => s.student_id).filter(Boolean))]
     const studentNameMap = {}
     if (studentIds.length > 0) {
-      const { data: studentRows } = await supabaseDb
+      const { data: studentRows, error: studentRowsErr } = await supabaseDb
         .from('students')
         .select('id, name')
         .in('id', studentIds)
+      if (studentRowsErr) {
+        console.error(`${logPrefix} students query failed`, getErrorDiagnostics(studentRowsErr))
+        throw wrapError(
+          `students_query_failed: ${studentRowsErr.message || 'unknown'}`,
+          studentRowsErr
+        )
+      }
       if (studentRows) {
         studentRows.forEach(s => { studentNameMap[s.id] = s.name })
       }
     }
 
     // 3. 讀取答案鍵的 concept_code（從 assignments 表）
-    const { data: assignment } = await supabaseDb
+    const { data: assignment, error: assignmentErr } = await supabaseDb
       .from('assignments')
       .select('answer_key')
       .eq('id', assignmentId)
       .eq('owner_id', user.id)
       .maybeSingle()
+
+    if (assignmentErr) {
+      console.error(`${logPrefix} assignments query failed`, getErrorDiagnostics(assignmentErr))
+      throw wrapError(
+        `assignments_query_failed: ${assignmentErr.message || 'unknown'}`,
+        assignmentErr
+      )
+    }
 
     const conceptByQuestion = {}
     if (assignment?.answer_key) {
@@ -6154,14 +6245,21 @@ ${studentLines || '（無錯誤）'}
     })
 
     const ok = Number(pipelineResult.status) >= 200 && Number(pipelineResult.status) < 300
-    if (!ok) throw new Error('Gemini 呼叫失敗')
+    if (!ok) {
+      console.error(`${logPrefix} runAiPipeline failed`, {
+        status: pipelineResult.status,
+        routeKey: pipelineResult.data?.routeKey,
+        pipeline: pipelineResult.data?._pipeline
+      })
+      throw wrapError(`gemini_call_failed: status=${pipelineResult.status}`)
+    }
 
     const rawText = pipelineResult.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
     const cleanText = rawText.replace(/```json|```/g, '').trim()
     const parsed = JSON.parse(cleanText)
 
     // 6. 寫入 assignment_summaries
-    await supabaseDb
+    const { error: readyUpsertErr } = await supabaseDb
       .from('assignment_summaries')
       .upsert(
         {
@@ -6181,9 +6279,17 @@ ${studentLines || '（無錯誤）'}
         { onConflict: 'owner_id,assignment_id' }
       )
 
+    if (readyUpsertErr) {
+      console.error(`${logPrefix} ready upsert failed`, getErrorDiagnostics(readyUpsertErr))
+      throw wrapError(
+        `ready_upsert_failed: ${readyUpsertErr.message || 'unknown'}`,
+        readyUpsertErr
+      )
+    }
+
   } catch (err) {
-    console.error('[refresh-assignment-summary] error:', err)
-    await supabaseDb
+    console.error(`${logPrefix} error`, getErrorDiagnostics(err))
+    const { error: failedUpsertErr } = await supabaseDb
       .from('assignment_summaries')
       .upsert(
         {
@@ -6195,6 +6301,10 @@ ${studentLines || '（無錯誤）'}
         },
         { onConflict: 'owner_id,assignment_id' }
       )
+
+    if (failedUpsertErr) {
+      console.error(`${logPrefix} failed-status upsert failed`, getErrorDiagnostics(failedUpsertErr))
+    }
   }
 }
 
