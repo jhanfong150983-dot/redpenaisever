@@ -2300,63 +2300,87 @@ const BOPOMOFO_ARBITER_GUIDE = `
 `.trim()
 
 function buildArbiterPrompt(arbiterItems) {
-  // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status, agreementStatus }]
+  // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status, agreementStatus, disagreementReason }]
   const hasMultiFill = arbiterItems.some((item) => item.questionType === 'multi_fill')
   const questionBlocks = arbiterItems.map((item) => {
     const ai1Str = item.ai1Status === 'blank' ? '（空白）' : item.ai1Status === 'unreadable' ? '（無法辨識）' : `「${item.ai1Answer}」`
     const ai2Str = item.ai2Status === 'blank' ? '（空白）' : item.ai2Status === 'unreadable' ? '（無法辨識）' : `「${item.ai2Answer}」`
-    const disagreementNote = item.agreementStatus === 'disagree' && item.disagreementReason === 'uncertain_chars'
-      ? ' ⚠️ 注意：讀取值相同但 AI2 對部分字符信心不足（uncertain_chars），請仔細查看筆跡；若無法確認 → needs_review'
+    const isAgree = item.agreementStatus === 'agree'
+    const modeNote = isAgree
+      ? 'mode: agree_review（兩者等價後相同）→ 請評估 agreementSupport'
+      : 'mode: disagree_review（兩者等價後不同）→ 請分別評估 ai1Support 與 ai2Support'
+    const uncertainNote = item.disagreementReason === 'uncertain_chars'
+      ? '\n  ⚠️ 注意：AI2 對部分字符信心不足（uncertain_chars），即使表面相同也請仔細確認筆跡'
       : ''
     return `題目 ${item.questionId}（類型：${item.questionType}）
   AI1（細節）讀到：${ai1Str}（status: ${item.ai1Status}）
   AI2（全局）讀到：${ai2Str}（status: ${item.ai2Status}）
-  初步比對：${item.agreementStatus === 'agree' ? 'agree（等價後相同）' : 'disagree（等價後不同）'}${disagreementNote}
+  ${modeNote}${uncertainNote}
   [此題裁切圖緊接在下方]`
   }).join('\n\n---\n\n')
 
-  return `你是學生答案讀取的裁判 AI（AI3）。
+  return `你是學生答案讀取的鑑識人員（AI3）。
 你將看到：(1) 完整作業圖（第一張圖），(2) 每道題的 answerBbox 裁切圖（每題一張，附標籤），
 以及 AI1（細節派，只看裁切圖）和 AI2（全局派，只看全圖）各自的讀取結果。
 
-你的任務是【裁決】，不是重新讀取：
-- 你不需要自行擷取學生答案。finalAnswer 只能從 AI1 或 AI2 的讀取值中擇一。
-- 你的工作是：從全圖與裁切圖中找到具體筆跡特徵，作為裁決的依據（evidence）。
+你的任務是【鑑識】，不是裁決、不是重新讀取：
+- 針對每道題，評估圖像對 AI1 和 AI2 各自讀取值的支持程度。
+- 最終決定由系統根據你的評估自動執行，你只需如實回報圖像支持強度。
 
-裁決規則：
-若 agree（AI1 = AI2）：
-  → 找出可見的具體筆跡特徵，確認兩者讀取有圖像依據
-  → 若找到 → arbiterStatus="arbitrated_agree"，finalAnswer=任一共識值
-  → 若找不到任何依據 → arbiterStatus="needs_review"
+支持程度（support）定義：
+  "strong"     ：有明確、清晰的圖像特徵支持此讀取值（可指出具體筆跡位置或形狀）
+  "weak"       ：有部分支持，但圖像模糊、字跡不清，或有疑慮，無法完全放心
+  "unsupported"：缺乏關鍵圖像依據，或圖像與讀取值明顯矛盾
 
-若 disagree（AI1 ≠ AI2）：
-  → 找出圖像證據，判斷哪一方更接近實際筆跡
-  → 若支持 AI1 → arbiterStatus="arbitrated_pick_1"，finalAnswer=AI1的值
-  → 若支持 AI2 → arbiterStatus="arbitrated_pick_2"，finalAnswer=AI2的值
-  → 若無法判斷 → arbiterStatus="needs_review"
+鑑識規則：
+情境 A — agree_review（AI1 與 AI2 讀取相同）：
+  → 評估這個共識是否有圖像支持
+  → 輸出：{ "mode": "agree_review", "agreementSupport": "strong | weak | unsupported" }
+  → ⚠️ 不得因「兩者相同」就草率給 strong，必須確實觀察到筆跡依據
 
-⚠️ 必須在 evidence 中引用可見的具體筆跡特徵（位置、形狀、筆畫）。
-⚠️ evidence 為空字串 → 必須輸出 arbiterStatus="needs_review"。
-⚠️ finalAnswer 只能是 AI1 或 AI2 的原始讀取值，禁止自行填入新答案。
-⚠️ agree 時：找到模糊特徵即可；disagree 時需嚴格舉證。
+情境 B — disagree_review（AI1 與 AI2 讀取不同）：
+  → 分別獨立評估 AI1 和 AI2 各自的圖像支持程度，兩者互不影響
+  → 輸出：{ "mode": "disagree_review", "ai1Support": "strong | weak | unsupported", "ai2Support": "strong | weak | unsupported" }
+  → ⚠️ 即使你傾向支持一方，另一方也要誠實評估，不得為了強化結論而壓低另一方
+
+⚠️ 若圖像不清晰、筆跡無法確認 → 降評為 weak 或 unsupported，不得勉強給 strong。
+⚠️ 你不需要也不應該自行產生答案或做最終選擇。
 
 ${hasMultiFill ? BOPOMOFO_ARBITER_GUIDE + '\n' : ''}
-需裁決的題目如下（全圖在最前，各題裁切圖依序附在題目說明之後）：
+需鑑識的題目如下（全圖在最前，各題裁切圖依序附在題目說明之後）：
 
 ${questionBlocks}
 
-輸出 JSON，格式如下：
+輸出 JSON，格式如下（每道題擇一情境）：
 {
-  "arbitrations": [
-    {
-      "questionId": "...",
-      "arbiterStatus": "arbitrated_agree | arbitrated_pick_1 | arbitrated_pick_2 | needs_review",
-      "finalAnswer": "...",
-      "evidence": "（具體筆跡描述，agree 時找到依據即可，disagree 時需嚴格說明）",
-      "confidence": "high | medium | low"
-    }
+  "forensics": [
+    { "questionId": "...", "mode": "agree_review", "agreementSupport": "strong | weak | unsupported" },
+    { "questionId": "...", "mode": "disagree_review", "ai1Support": "strong | weak | unsupported", "ai2Support": "strong | weak | unsupported" }
   ]
 }`.trim()
+}
+
+// Apply forensic decision table to produce arbiterStatus + finalAnswer
+function applyForensicDecision(forensic, ai1Answer, ai2Answer) {
+  const mode = ensureString(forensic?.mode, '')
+  if (mode === 'agree_review') {
+    if (forensic.agreementSupport === 'strong') {
+      return { arbiterStatus: 'arbitrated_agree', finalAnswer: ai1Answer }
+    }
+    return { arbiterStatus: 'needs_review' }
+  }
+  if (mode === 'disagree_review') {
+    const ai1Support = ensureString(forensic.ai1Support, '')
+    const ai2Support = ensureString(forensic.ai2Support, '')
+    if (ai1Support === 'strong' && ai2Support === 'unsupported') {
+      return { arbiterStatus: 'arbitrated_pick_1', finalAnswer: ai1Answer }
+    }
+    if (ai2Support === 'strong' && ai1Support === 'unsupported') {
+      return { arbiterStatus: 'arbitrated_pick_2', finalAnswer: ai2Answer }
+    }
+    return { arbiterStatus: 'needs_review' }
+  }
+  return { arbiterStatus: 'needs_review' }
 }
 
 function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
@@ -3625,58 +3649,48 @@ export async function runStagedGradingPhaseA({
       stageResponses.push(arbiterResponse)
       if (arbiterResponse.ok) {
         const arbiterParsed = parseCandidateJson(arbiterResponse.data)
-        const arbitrations = Array.isArray(arbiterParsed?.arbitrations) ? arbiterParsed.arbitrations : []
-        for (const a of arbitrations) {
-          const qId = ensureString(a?.questionId).trim()
+        const forensics = Array.isArray(arbiterParsed?.forensics) ? arbiterParsed.forensics : []
+        for (const f of forensics) {
+          const qId = ensureString(f?.questionId).trim()
           if (!qId) continue
-          let arbStatus = ensureString(a?.arbiterStatus, 'needs_review')
-          const evidence = ensureString(a?.evidence, '').trim()
-          // Enforce: empty evidence → needs_review
-          if (!evidence && arbStatus !== 'needs_review') arbStatus = 'needs_review'
           const item = arbiterItems.find((i) => i.questionId === qId)
-          // Rescue: AI3 self-contradiction — says needs_review but has evidence AND was sent as agree
-          // This happens when AI3 correctly identifies agreement but forgets to flip the status.
-          if (arbStatus === 'needs_review' && evidence && item?.agreementStatus === 'agree') {
-            arbStatus = 'arbitrated_agree'
-            stageWarnings.push(`[AI3] qId=${qId} needs_review overridden to arbitrated_agree (agree+evidence contradiction)`)
+          if (!item) continue
+          // multi_fill disagree → always force needs_review
+          if (item.questionType === 'multi_fill' && item.agreementStatus === 'disagree') {
+            stageWarnings.push(`[AI3] qId=${qId} multi_fill disagree → forced needs_review`)
+            arbiterByQuestionId.set(qId, {
+              arbiterStatus: 'needs_review',
+              forensicMode: ensureString(f.mode, ''),
+              ai1Support: f.ai1Support,
+              ai2Support: f.ai2Support
+            })
+            continue
           }
-          // multi_fill disagree → always force needs_review (bopomofo symbols are too visually similar;
-          // AI3 pick is unreliable when reads disagree — send to human review instead)
-          if (item?.questionType === 'multi_fill' && item?.agreementStatus === 'disagree' && arbStatus !== 'needs_review') {
-            stageWarnings.push(`[AI3] qId=${qId} multi_fill disagree → forced needs_review (was ${arbStatus})`)
-            arbStatus = 'needs_review'
-          }
-          // Enforce: finalAnswer must be AI1 or AI2 value
-          let finalAnswer = ensureString(a?.finalAnswer, '')
-          if (item && arbStatus !== 'needs_review') {
-            if (finalAnswer !== item.ai1Answer && finalAnswer !== item.ai2Answer) {
-              // AI3 produced a new reading — correct to the side it claimed to support
-              if (arbStatus === 'arbitrated_pick_1') finalAnswer = item.ai1Answer
-              else if (arbStatus === 'arbitrated_pick_2') finalAnswer = item.ai2Answer
-              else finalAnswer = item.ai1Answer  // agree → use AI1
-              stageWarnings.push(`[AI3] qId=${qId} finalAnswer was not AI1/AI2 value, corrected to ${finalAnswer}`)
-            }
-          }
+          const decision = applyForensicDecision(f, item.ai1Answer, item.ai2Answer)
           arbiterByQuestionId.set(qId, {
-            arbiterStatus: arbStatus,
-            finalAnswer: arbStatus === 'needs_review' ? undefined : finalAnswer,
-            evidence: evidence.slice(0, 500),
-            confidence: ensureString(a?.confidence, 'low')
+            arbiterStatus: decision.arbiterStatus,
+            finalAnswer: decision.finalAnswer,
+            forensicMode: ensureString(f.mode, ''),
+            agreementSupport: f.agreementSupport,
+            ai1Support: f.ai1Support,
+            ai2Support: f.ai2Support
           })
         }
-        logStaged(pipelineRunId, stagedLogLevel, 'AI3 arbiter summary', {
+        logStaged(pipelineRunId, stagedLogLevel, 'AI3 forensic summary', {
           sent: arbiterItems.length,
-          received: arbitrations.length,
+          received: forensics.length,
           arbitrated_agree: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'arbitrated_agree').length,
           arbitrated_pick: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus?.startsWith('arbitrated_pick')).length,
           needs_review: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
         })
-        logStaged(pipelineRunId, stagedLogLevel, 'AI3 arbiter per-question', Array.from(arbiterByQuestionId.entries()).map(([qId, r]) => ({
+        logStaged(pipelineRunId, stagedLogLevel, 'AI3 forensic per-question', Array.from(arbiterByQuestionId.entries()).map(([qId, r]) => ({
           questionId: qId,
           arbiterStatus: r.arbiterStatus,
           finalAnswer: r.finalAnswer,
-          confidence: r.confidence,
-          evidence: r.evidence
+          forensicMode: r.forensicMode,
+          agreementSupport: r.agreementSupport,
+          ai1Support: r.ai1Support,
+          ai2Support: r.ai2Support
         })))
       }
     } catch (arbiterErr) {
@@ -3693,15 +3707,15 @@ export async function runStagedGradingPhaseA({
       const s1 = qr.readAnswer1.status
       const s2 = qr.readAnswer2.status
       if (s1 === 'blank' && s2 === 'blank') {
-        return { arbiterStatus: 'arbitrated_agree', finalAnswer: '', evidence: '兩者皆空白', confidence: 'high' }
+        return { arbiterStatus: 'arbitrated_agree', finalAnswer: '' }
       }
       if (s1 === 'unreadable' && s2 === 'unreadable') {
-        return { arbiterStatus: 'needs_review', finalAnswer: undefined, evidence: '兩者皆無法辨識', confidence: 'low' }
+        return { arbiterStatus: 'needs_review' }
       }
       // AI3 didn't return this question (failed or missing) → fall back to consistency status
       return qr.consistencyStatus === 'stable'
-        ? { arbiterStatus: 'arbitrated_agree', finalAnswer: qr.readAnswer1.studentAnswer, evidence: 'AI3 未回傳，沿用一致性判斷', confidence: 'low' }
-        : { arbiterStatus: 'needs_review', finalAnswer: undefined, evidence: 'AI3 未回傳，需人工審查', confidence: 'low' }
+        ? { arbiterStatus: 'arbitrated_agree', finalAnswer: qr.readAnswer1.studentAnswer }
+        : { arbiterStatus: 'needs_review' }
     })()
 
     // Attach crop image URL only for needs_review questions (for teacher review UI)
