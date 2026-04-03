@@ -2247,8 +2247,33 @@ ${basePrompt}`
 // AI3 does NOT extract student answers. It only reviews AI1/AI2 readings and picks the better one,
 // or declares needs_review if no evidence is found.
 // finalAnswer in output must always be AI1's or AI2's value — never a new reading.
+const BOPOMOFO_ARBITER_GUIDE = `
+⚠️ MULTI-FILL 注音裁決指引（適用於 questionType=multi_fill 的題目）：
+這類題目的答案是注音符號代號（ㄅ~ㄎ），手寫時容易辨識錯誤。裁決時請依據以下字典判斷：
+
+允許的符號（ㄅ~ㄎ，共10個）：
+- ㄅ: 上方直線段＋底端向左勾（兩段式）
+- ㄆ: 兩條平行橫畫疊加＋右側向下筆畫
+- ㄇ: 三邊框，底部開口（像屋頂∩）
+- ㄈ: 三邊框，右側開口
+- ㄉ: 頂端完全乾淨（無突出）＋底端向左勾
+- ㄊ: 像「十」字，橫畫貫穿垂直線中間，底端向右彎
+- ㄋ: 頂端橫畫＋垂直往下平收（像丁，底端無勾）
+- ㄌ: 頂端有突出小撇＋底端向右勾
+- ㄍ: 兩個彎折筆畫
+- ㄎ: 像ㄅ但頂端多一條橫畫
+
+高混淆對（裁決時特別注意）：
+1. ㄅ vs ㄎ：都是直線＋左勾，差別只在 ㄎ 頂端多一橫
+2. ㄉ vs ㄌ：ㄉ 頂端乾淨＋左勾；ㄌ 頂端有突出＋右勾（方向相反）
+3. ㄆ vs ㄊ：ㄆ 是兩條平行橫畫；ㄊ 是橫畫貫穿垂直線
+4. ㄋ vs ㄌ：ㄋ 底端平收；ㄌ 底端向右勾
+5. ㄇ vs ㄈ：看哪一側開口
+`.trim()
+
 function buildArbiterPrompt(arbiterItems) {
   // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status, agreementStatus }]
+  const hasMultiFill = arbiterItems.some((item) => item.questionType === 'multi_fill')
   const questionBlocks = arbiterItems.map((item) => {
     const ai1Str = item.ai1Status === 'blank' ? '（空白）' : item.ai1Status === 'unreadable' ? '（無法辨識）' : `「${item.ai1Answer}」`
     const ai2Str = item.ai2Status === 'blank' ? '（空白）' : item.ai2Status === 'unreadable' ? '（無法辨識）' : `「${item.ai2Answer}」`
@@ -2284,6 +2309,7 @@ function buildArbiterPrompt(arbiterItems) {
 ⚠️ finalAnswer 只能是 AI1 或 AI2 的原始讀取值，禁止自行填入新答案。
 ⚠️ agree 時：找到模糊特徵即可；disagree 時需嚴格舉證。
 
+${hasMultiFill ? BOPOMOFO_ARBITER_GUIDE + '\n' : ''}
 需裁決的題目如下（全圖在最前，各題裁切圖依序附在題目說明之後）：
 
 ${questionBlocks}
