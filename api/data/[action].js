@@ -5967,6 +5967,14 @@ export default async function handler(req, res) {
     await handleGetConceptMap(req, res)
     return
   }
+  if (action === 'upsert-ai3-forensic-log') {
+    await handleUpsertAi3ForensicLog(req, res)
+    return
+  }
+  if (action === 'update-ai3-forensic-log') {
+    await handleUpdateAi3ForensicLog(req, res)
+    return
+  }
   res.status(404).json({ error: 'Not Found' })
 }
 
@@ -6345,4 +6353,122 @@ async function handleAssignmentStateSummary(req, res) {
   }
 
   res.status(200).json({ byAssignment })
+}
+
+
+// ─────────────────────────────────────────────────────────
+// handleUpsertAi3ForensicLog
+// POST /api/data/upsert-ai3-forensic-log
+// Called after Phase A completes; inserts one row per question per submission.
+// ─────────────────────────────────────────────────────────
+async function handleUpsertAi3ForensicLog(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const rows = Array.isArray(body.rows) ? body.rows : []
+  if (rows.length === 0) {
+    res.status(400).json({ error: 'rows is required' })
+    return
+  }
+  const now = new Date().toISOString()
+  const dbRows = rows.map((r) => ({
+    owner_id: user.id,
+    assignment_id: ensureStr(r.assignmentId),
+    student_id: ensureStr(r.studentId),
+    submission_id: ensureStr(r.submissionId),
+    question_id: ensureStr(r.questionId),
+    question_type: ensureStr(r.questionType),
+    ai1_answer: r.ai1Answer ?? null,
+    ai1_status: r.ai1Status ?? null,
+    ai2_answer: r.ai2Answer ?? null,
+    ai2_status: r.ai2Status ?? null,
+    consistency_status: r.consistencyStatus ?? null,
+    forensic_mode: r.forensicMode ?? null,
+    agreement_support: r.agreementSupport ?? null,
+    ai1_support: r.ai1Support ?? null,
+    ai2_support: r.ai2Support ?? null,
+    system_decision: ensureStr(r.systemDecision),
+    auto_confirmed_answer: r.autoConfirmedAnswer ?? null,
+    updated_at: now,
+  }))
+  try {
+    const supabaseDb = getSupabaseAdmin()
+    const { error } = await supabaseDb
+      .from('ai3_forensic_log')
+      .upsert(dbRows, { onConflict: 'owner_id,submission_id,question_id' })
+    if (error) {
+      console.error('[upsert-ai3-forensic-log] supabase error:', error)
+      res.status(500).json({ error: error.message })
+      return
+    }
+    res.status(200).json({ ok: true, count: dbRows.length })
+  } catch (err) {
+    console.error('[upsert-ai3-forensic-log] error:', err)
+    res.status(500).json({ error: 'Internal Server Error' })
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// handleUpdateAi3ForensicLog
+// POST /api/data/update-ai3-forensic-log
+// Called after Phase B completes per submission; updates teacher decision + Phase B results.
+// ─────────────────────────────────────────────────────────
+async function handleUpdateAi3ForensicLog(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const rows = Array.isArray(body.rows) ? body.rows : []
+  if (rows.length === 0) {
+    res.status(400).json({ error: 'rows is required' })
+    return
+  }
+  const now = new Date().toISOString()
+  // Build update patch per row using individual UPDATE calls
+  try {
+    const supabaseDb = getSupabaseAdmin()
+    for (const r of rows) {
+      const patch = {
+        final_answer: r.finalAnswer ?? null,
+        final_answer_source: r.finalAnswerSource ?? null,
+        teacher_review_pick: r.teacherReviewPick ?? null,
+        reviewed_at: r.reviewedAt ?? null,
+        phase_b_is_correct: r.phaseBIsCorrect ?? null,
+        phase_b_score: r.phaseBScore ?? null,
+        phase_b_max_score: r.phaseBMaxScore ?? null,
+        graded_at: r.gradedAt ?? null,
+        updated_at: now,
+      }
+      const { error } = await supabaseDb
+        .from('ai3_forensic_log')
+        .update(patch)
+        .eq('owner_id', user.id)
+        .eq('submission_id', ensureStr(r.submissionId))
+        .eq('question_id', ensureStr(r.questionId))
+      if (error) {
+        console.error('[update-ai3-forensic-log] supabase error:', error)
+      }
+    }
+    res.status(200).json({ ok: true, count: rows.length })
+  } catch (err) {
+    console.error('[update-ai3-forensic-log] error:', err)
+    res.status(500).json({ error: 'Internal Server Error' })
+  }
+}
+
+function ensureStr(val) {
+  return typeof val === 'string' ? val.trim() : String(val ?? '')
 }
