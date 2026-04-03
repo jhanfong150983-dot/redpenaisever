@@ -2420,12 +2420,17 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - score = max(0, round((|correct| − |wrong|) / |answer_tokens| × maxScore))
   - isCorrect = (score === maxScore)
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
-- multi_check_other: Same as multi_check BUT the LAST checkbox option is always an open-ended "其他：___" field — no answer key markup required.
-  - Parse student tokens from studentAnswerRaw (strip any "：text" suffix from tokens before processing).
-  - Identify the 其他 token: the highest-numbered token in student_tokens ∪ answer_tokens. REMOVE it from student_tokens before scoring (do NOT count as correct or wrong).
-  - Apply the same correct/wrong/score formula as multi_check using the filtered student_tokens.
+- multi_check_other: Same as multi_check BUT the LAST checkbox option is an open-ended "其他：___" field.
+  - STEP 1 — Parse studentAnswerRaw: split into tokens. If the 其他 token has text appended (format "token：text", e.g. "(4)：轉為文風鼎盛的社會"), extract and store the text separately, then strip it from the token.
+  - STEP 2 — Identify and REMOVE the 其他 token: the highest-numbered token in student_tokens ∪ answer_tokens. ALWAYS remove it from student_tokens. It is NEVER counted in the correct/wrong formula.
+  - STEP 3 — Score the remaining tokens using the standard multi_check formula (correct − wrong).
+  - STEP 4 — Evaluate 其他 text (only if student checked 其他 AND text is non-empty):
+    - Use the question context visible in the image and the answer key referenceAnswer (if provided) to judge whether the text is a reasonable/valid answer for this question.
+    - If REASONABLE: note "其他選項文字合理" in scoringReason. Does NOT add to score.
+    - If UNREASONABLE: note "其他選項文字不合理" in scoringReason. Does NOT deduct from score.
+    - ⚠️ 其他 text is NEVER penalized regardless of reasonableness — it only affects scoringReason.
   - isCorrect = (score === maxScore).
-  - errorType: same as multi_check.
+  - errorType: same as multi_check (based on non-其他 tokens only).
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
   - LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score even if 算式過程 is weak/incomplete.
