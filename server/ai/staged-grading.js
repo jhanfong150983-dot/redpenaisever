@@ -3544,6 +3544,12 @@ export async function runStagedGradingPhaseA({
             arbStatus = 'arbitrated_agree'
             stageWarnings.push(`[AI3] qId=${qId} needs_review overridden to arbitrated_agree (agree+evidence contradiction)`)
           }
+          // multi_fill disagree → always force needs_review (bopomofo symbols are too visually similar;
+          // AI3 pick is unreliable when reads disagree — send to human review instead)
+          if (item?.questionType === 'multi_fill' && item?.agreementStatus === 'disagree' && arbStatus !== 'needs_review') {
+            stageWarnings.push(`[AI3] qId=${qId} multi_fill disagree → forced needs_review (was ${arbStatus})`)
+            arbStatus = 'needs_review'
+          }
           // Enforce: finalAnswer must be AI1 or AI2 value
           let finalAnswer = ensureString(a?.finalAnswer, '')
           if (item && arbStatus !== 'needs_review') {
