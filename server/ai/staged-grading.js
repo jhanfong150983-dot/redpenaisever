@@ -3655,17 +3655,6 @@ export async function runStagedGradingPhaseA({
           if (!qId) continue
           const item = arbiterItems.find((i) => i.questionId === qId)
           if (!item) continue
-          // multi_fill disagree → always force needs_review
-          if (item.questionType === 'multi_fill' && item.agreementStatus === 'disagree') {
-            stageWarnings.push(`[AI3] qId=${qId} multi_fill disagree → forced needs_review`)
-            arbiterByQuestionId.set(qId, {
-              arbiterStatus: 'needs_review',
-              forensicMode: ensureString(f.mode, ''),
-              ai1Support: f.ai1Support,
-              ai2Support: f.ai2Support
-            })
-            continue
-          }
           const decision = applyForensicDecision(f, item.ai1Answer, item.ai2Answer)
           arbiterByQuestionId.set(qId, {
             arbiterStatus: decision.arbiterStatus,
