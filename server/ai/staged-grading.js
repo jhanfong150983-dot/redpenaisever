@@ -3583,16 +3583,6 @@ export async function runStagedGradingPhaseA({
     }
   })
 
-  // ── Force diff for multi_fill questions where read2 reported uncertainChars ──
-  // Even if AI1 == AI2 (agree), uncertain chars mean the reading may be wrong → send to human review
-  if (typeof multiFillUncertainIds !== 'undefined' && multiFillUncertainIds.size > 0) {
-    for (const qr of questionResultsRaw) {
-      if (multiFillUncertainIds.has(qr.questionId) && qr.consistencyStatus === 'stable') {
-        qr.consistencyStatus = 'diff'
-        qr.consistencyReason = 'uncertain_chars'
-      }
-    }
-  }
 
   // ── Attach crop image URLs for teacher review (uses allQuestionCropMap from pre-AI1 step) ──
   // Priority: per-question crop (allQuestionCropMap) → full image fallback (map_fill, no bbox, etc.)
