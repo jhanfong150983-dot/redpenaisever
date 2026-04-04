@@ -3645,6 +3645,17 @@ export async function runStagedGradingPhaseA({
           if (!qId) continue
           const item = arbiterItems.find((i) => i.questionId === qId)
           if (!item) continue
+          // multi_fill disagree → always needs_review regardless of AI3 rating
+          // (注音符號視覺相似度高，AI3 鑑識同樣容易誤判，只有 agree 才信任自動通過)
+          if (item.questionType === 'multi_fill' && item.agreementStatus === 'disagree') {
+            arbiterByQuestionId.set(qId, {
+              arbiterStatus: 'needs_review',
+              forensicMode: ensureString(f.mode, ''),
+              ai1Support: f.ai1Support,
+              ai2Support: f.ai2Support
+            })
+            continue
+          }
           const decision = applyForensicDecision(f, item.ai1Answer, item.ai2Answer)
           arbiterByQuestionId.set(qId, {
             arbiterStatus: decision.arbiterStatus,
