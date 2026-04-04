@@ -6033,7 +6033,7 @@ async function handleGetAssignmentSummary(req, res) {
   const supabaseDb = getSupabaseAdmin()
   const { data, error } = await supabaseDb
     .from('assignment_summaries')
-    .select('status, class_summary, class_suggestion, minority_summary, minority_suggestion, student_summaries, sample_count')
+    .select('status, class_summary, class_suggestion, minority_summary, minority_suggestion, student_summaries, sample_count, updated_at, error_message')
     .eq('owner_id', user.id)
     .eq('assignment_id', assignmentId)
     .maybeSingle()
@@ -6239,18 +6239,24 @@ ${studentLines || '（無錯誤）'}
 - 若有課綱概念代碼（如 N-4-12），請在摘要中引用讓老師知道是哪個單元
 - class_suggestion 和 minority_suggestion 要具體可執行，不要太籠統`
 
-    // 5. 呼叫 Gemini
+    // 5. 呼叫 Gemini（加 240s 超時，確保在 Vercel 300s kill 前能寫入 failed）
     const apiKey = getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY')
     if (!apiKey) throw new Error('Server API Key missing')
 
     const summaryModel = getEnvValue('SYSTEM_GEMINI_MODEL') || 'gemini-3-flash-preview'
-    const pipelineResult = await runAiPipeline({
-      apiKey,
-      model: summaryModel,
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      requestedRouteKey: 'report.teacher_summary',
-      routeHint: { source: 'data' }
-    })
+    const SUMMARY_TIMEOUT_MS = 240_000
+    const pipelineResult = await Promise.race([
+      runAiPipeline({
+        apiKey,
+        model: summaryModel,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        requestedRouteKey: 'report.teacher_summary',
+        routeHint: { source: 'data' }
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('summary_generation_timeout: exceeded 240s')), SUMMARY_TIMEOUT_MS)
+      )
+    ])
 
     const ok = Number(pipelineResult.status) >= 200 && Number(pipelineResult.status) < 300
     if (!ok) {
