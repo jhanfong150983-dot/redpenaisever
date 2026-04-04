@@ -6074,22 +6074,7 @@ async function handleRefreshAssignmentSummary(req, res) {
 
   console.log(`${logPrefix} start owner=${user.id} assignment=${assignmentId}`)
 
-  // 標記為 running
-  const { error: runningErr } = await supabaseDb
-    .from('assignment_summaries')
-    .upsert(
-      { owner_id: user.id, assignment_id: assignmentId, status: 'running', updated_at: nowIso },
-      { onConflict: 'owner_id,assignment_id' }
-    )
-
-  if (runningErr) {
-    console.error(`${logPrefix} failed to set running status`, getErrorDiagnostics(runningErr))
-  }
-
-  // 回傳 202 讓前端不等待，後續在背景完成
-  res.status(202).json({ success: true, status: 'running' })
-
-  // ── 背景執行（Vercel Node runtime 允許在 res.json 後繼續執行直到 function timeout）──
+  // ── 同步執行：等 Gemini 完成後再回傳，避免 Vercel 背景執行不可靠導致卡 running ──
   try {
     // 1. 讀取此作業所有已批改的 submissions
     const { data: submissions, error: subErr } = await supabaseDb
@@ -6301,24 +6286,25 @@ ${studentLines || '（無錯誤）'}
       )
     }
 
+    console.log(`${logPrefix} done`)
+    res.status(200).json({ success: true, status: 'ready' })
+
   } catch (err) {
     console.error(`${logPrefix} error`, getErrorDiagnostics(err))
-    const { error: failedUpsertErr } = await supabaseDb
+    const errMsg = err instanceof Error ? err.message : String(err)
+    await supabaseDb
       .from('assignment_summaries')
       .upsert(
         {
           owner_id: user.id,
           assignment_id: assignmentId,
           status: 'failed',
-          error_message: err instanceof Error ? err.message : String(err),
+          error_message: errMsg,
           updated_at: new Date().toISOString()
         },
         { onConflict: 'owner_id,assignment_id' }
       )
-
-    if (failedUpsertErr) {
-      console.error(`${logPrefix} failed-status upsert failed`, getErrorDiagnostics(failedUpsertErr))
-    }
+    res.status(500).json({ success: false, error: errMsg })
   }
 }
 
