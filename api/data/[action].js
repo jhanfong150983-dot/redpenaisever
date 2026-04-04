@@ -35,30 +35,16 @@ const DEFAULT_TEACHER_PREFERENCES = {
   max_correction_attempts: DEFAULT_CORRECTION_ATTEMPT_LIMIT,
   lock_upload_after_graded: true,
   require_full_page_count: true,
-  notification_enabled: true,
-  notification_channel: 'in_app',
-  notification_events: {
-    submission_uploaded: true,
-    grading_completed: true,
-    correction_dispatched: true,
-    correction_submitted: true,
-    correction_limit_reached: true,
-    correction_due_reminder: true
-  },
   correction_dispatch_mode: 'manual',
   correction_due_at: null,
-  student_feedback_visibility: 'score_reason',
-  notification_digest: 'instant',
-  quiet_hours_enabled: false,
-  quiet_hours_start: '22:00',
-  quiet_hours_end: '07:00'
+  student_feedback_visibility: 'score_reason'
 }
 
 const TEACHER_PREFERENCES_BASE_SELECT =
   'owner_id, student_portal_enabled, show_score_to_students, max_correction_attempts, lock_upload_after_graded, require_full_page_count'
 
 const TEACHER_PREFERENCES_EXTENDED_SELECT =
-  `${TEACHER_PREFERENCES_BASE_SELECT}, notification_enabled, notification_channel, notification_events, correction_dispatch_mode, correction_due_at, student_feedback_visibility, notification_digest, quiet_hours_enabled, quiet_hours_start, quiet_hours_end`
+  `${TEACHER_PREFERENCES_BASE_SELECT}, correction_dispatch_mode, correction_due_at, student_feedback_visibility`
 
 function resolveAction(req) {
   const actionParam = req.query?.action
@@ -688,37 +674,6 @@ function normalizeDueAt(value) {
   return iso || null
 }
 
-function normalizeNotificationEvents(value) {
-  const defaults = DEFAULT_TEACHER_PREFERENCES.notification_events
-  const source = value && typeof value === 'object' ? value : {}
-  return {
-    submission_uploaded:
-      typeof source.submission_uploaded === 'boolean'
-        ? source.submission_uploaded
-        : defaults.submission_uploaded,
-    grading_completed:
-      typeof source.grading_completed === 'boolean'
-        ? source.grading_completed
-        : defaults.grading_completed,
-    correction_dispatched:
-      typeof source.correction_dispatched === 'boolean'
-        ? source.correction_dispatched
-        : defaults.correction_dispatched,
-    correction_submitted:
-      typeof source.correction_submitted === 'boolean'
-        ? source.correction_submitted
-        : defaults.correction_submitted,
-    correction_limit_reached:
-      typeof source.correction_limit_reached === 'boolean'
-        ? source.correction_limit_reached
-        : defaults.correction_limit_reached,
-    correction_due_reminder:
-      typeof source.correction_due_reminder === 'boolean'
-        ? source.correction_due_reminder
-        : defaults.correction_due_reminder
-  }
-}
-
 function isTeacherPreferencesLegacySchemaError(error) {
   const message = typeof error?.message === 'string' ? error.message : ''
   return /teacher_preferences/i.test(message) && /column/i.test(message) && /does not exist/i.test(message)
@@ -744,16 +699,6 @@ function normalizeTeacherPreferences(ownerId, data = {}) {
     // 系統硬規則：批改後一律鎖定重交、頁數不符一律阻擋
     lock_upload_after_graded: true,
     require_full_page_count: true,
-    notification_enabled:
-      typeof data.notification_enabled === 'boolean'
-        ? data.notification_enabled
-        : DEFAULT_TEACHER_PREFERENCES.notification_enabled,
-    notification_channel: normalizeEnum(
-      data.notification_channel,
-      ['in_app', 'email', 'both', 'none'],
-      DEFAULT_TEACHER_PREFERENCES.notification_channel
-    ),
-    notification_events: normalizeNotificationEvents(data.notification_events),
     correction_dispatch_mode: normalizeEnum(
       data.correction_dispatch_mode,
       ['manual', 'auto'],
@@ -764,23 +709,6 @@ function normalizeTeacherPreferences(ownerId, data = {}) {
       data.student_feedback_visibility,
       ['status_only', 'score_only', 'score_reason', 'full'],
       DEFAULT_TEACHER_PREFERENCES.student_feedback_visibility
-    ),
-    notification_digest: normalizeEnum(
-      data.notification_digest,
-      ['instant', 'daily'],
-      DEFAULT_TEACHER_PREFERENCES.notification_digest
-    ),
-    quiet_hours_enabled:
-      typeof data.quiet_hours_enabled === 'boolean'
-        ? data.quiet_hours_enabled
-        : DEFAULT_TEACHER_PREFERENCES.quiet_hours_enabled,
-    quiet_hours_start: normalizeTimeString(
-      data.quiet_hours_start,
-      DEFAULT_TEACHER_PREFERENCES.quiet_hours_start
-    ),
-    quiet_hours_end: normalizeTimeString(
-      data.quiet_hours_end,
-      DEFAULT_TEACHER_PREFERENCES.quiet_hours_end
     )
   }
 }
@@ -838,43 +766,6 @@ async function getTeacherPreferences(supabaseDb, ownerId) {
 
   return normalizeTeacherPreferences(ownerId, data)
 }
-
-// ─── Notification helpers ────────────────────────────────────────────────────
-
-function isInQuietHours(preferences) {
-  if (!preferences.quiet_hours_enabled) return false
-  const start = typeof preferences.quiet_hours_start === 'string'
-    ? preferences.quiet_hours_start : '22:00'
-  const end = typeof preferences.quiet_hours_end === 'string'
-    ? preferences.quiet_hours_end : '07:00'
-  const now = new Date()
-  // Taiwan is UTC+8; approximate local minute-of-day
-  const localMinutes = (now.getUTCHours() * 60 + now.getUTCMinutes() + 8 * 60) % (24 * 60)
-  const toMinutes = (hhmm) => {
-    const [h, m] = hhmm.split(':').map(Number)
-    return (h || 0) * 60 + (m || 0)
-  }
-  const s = toMinutes(start)
-  const e = toMinutes(end)
-  return s <= e ? localMinutes >= s && localMinutes < e
-    : localMinutes >= s || localMinutes < e
-}
-
-async function createTeacherNotification(supabaseDb, ownerId, event, data, preferences) {
-  try {
-    if (!preferences || !preferences.notification_enabled) return
-    const events = preferences.notification_events || {}
-    if (events[event] === false) return
-    if (isInQuietHours(preferences)) return
-    await supabaseDb
-      .from('teacher_notifications')
-      .insert({ owner_id: ownerId, event, data: data || {} })
-  } catch {
-    // notifications are non-critical; swallow errors silently
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 function buildStudentClassroomKey(context) {
   return `${context.ownerId}::${context.classroomId}::${context.id}`
@@ -1469,12 +1360,6 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     assignmentIds
   )
 
-  const pendingNotifications = {
-    grading_completed: [],
-    correction_submitted: [],
-    correction_limit_reached: []
-  }
-
   for (const row of submissionRows) {
     const assignmentId = row.assignment_id
     const studentId = row.student_id
@@ -1672,57 +1557,6 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     )
 
     stateMap.set(key, nextState)
-
-    // Collect notification event for batch processing after the loop
-    if (source === 'student_correction') {
-      if (status === 'correction_failed') {
-        pendingNotifications.correction_limit_reached.push({ assignmentId, studentId })
-      } else {
-        pendingNotifications.correction_submitted.push({ assignmentId, studentId })
-      }
-    } else if (isGraded && existingState?.graded_once !== true) {
-      pendingNotifications.grading_completed.push({ assignmentId, studentId })
-    }
-  }
-
-  // Create aggregated notifications (one per assignment per event type)
-  const allNotifAssignmentIds = [
-    ...new Set(
-      Object.values(pendingNotifications).flat().map((r) => r.assignmentId)
-    )
-  ]
-  const assignmentTitleMap = new Map()
-  if (allNotifAssignmentIds.length > 0) {
-    const { data: assignmentRows } = await supabaseDb
-      .from('assignments')
-      .select('id, title')
-      .eq('owner_id', ownerId)
-      .in('id', allNotifAssignmentIds)
-    for (const row of assignmentRows || []) {
-      if (row.id && row.title) assignmentTitleMap.set(row.id, row.title)
-    }
-  }
-
-  for (const [event, rows] of Object.entries(pendingNotifications)) {
-    if (rows.length === 0) continue
-    const byAssignment = new Map()
-    for (const r of rows) {
-      const list = byAssignment.get(r.assignmentId) || []
-      list.push(r.studentId)
-      byAssignment.set(r.assignmentId, list)
-    }
-    for (const [aId, sIds] of byAssignment.entries()) {
-      await createTeacherNotification(
-        supabaseDb, ownerId, event,
-        {
-          assignmentId: aId,
-          assignmentTitle: assignmentTitleMap.get(aId) ?? undefined,
-          count: sIds.length,
-          studentIds: sIds
-        },
-        preferences
-      )
-    }
   }
 }
 
@@ -2545,14 +2379,6 @@ async function handleCorrectionDispatchToggle(req, res) {
         }
       )
       activatedCount += 1
-    }
-
-    if (enable && activatedCount > 0) {
-      const dispatchPrefs = await getTeacherPreferences(supabaseDb, user.id)
-      await createTeacherNotification(supabaseDb, user.id, 'correction_dispatched', {
-        assignmentId,
-        count: activatedCount
-      }, dispatchPrefs)
     }
 
     res.status(200).json({
@@ -3903,18 +3729,6 @@ async function handleTeacherPreferences(req, res) {
               current.max_correction_attempts
             )
           : undefined,
-      notification_enabled:
-        typeof body.notificationEnabled === 'boolean'
-          ? body.notificationEnabled
-          : undefined,
-      notification_channel:
-        ['in_app', 'email', 'both', 'none'].includes(body.notificationChannel)
-          ? body.notificationChannel
-          : undefined,
-      notification_events:
-        body.notificationEvents && typeof body.notificationEvents === 'object'
-          ? normalizeNotificationEvents(body.notificationEvents)
-          : undefined,
       correction_dispatch_mode:
         ['manual', 'auto'].includes(body.correctionDispatchMode)
           ? body.correctionDispatchMode
@@ -3928,28 +3742,6 @@ async function handleTeacherPreferences(req, res) {
           body.studentFeedbackVisibility
         )
           ? body.studentFeedbackVisibility
-          : undefined,
-      notification_digest:
-        ['instant', 'daily'].includes(body.notificationDigest)
-          ? body.notificationDigest
-          : undefined,
-      quiet_hours_enabled:
-        typeof body.quietHoursEnabled === 'boolean'
-          ? body.quietHoursEnabled
-          : undefined,
-      quiet_hours_start:
-        body.quietHoursStart !== undefined
-          ? normalizeTimeString(
-              body.quietHoursStart,
-              DEFAULT_TEACHER_PREFERENCES.quiet_hours_start
-            )
-          : undefined,
-      quiet_hours_end:
-        body.quietHoursEnd !== undefined
-          ? normalizeTimeString(
-              body.quietHoursEnd,
-              DEFAULT_TEACHER_PREFERENCES.quiet_hours_end
-            )
           : undefined
     })
 
@@ -3978,57 +3770,6 @@ async function handleTeacherPreferences(req, res) {
       error: err instanceof Error ? err.message : '更新偏好設定失敗'
     })
   }
-}
-
-async function handleTeacherNotifications(req, res) {
-  const { user } = await getAuthUser(req, res)
-  if (!user) {
-    res.status(401).json({ error: 'Unauthorized' })
-    return
-  }
-
-  const supabaseDb = getSupabaseAdmin()
-
-  // GET: return unread notifications (latest 50)
-  if (req.method === 'GET') {
-    try {
-      const { data, error } = await supabaseDb
-        .from('teacher_notifications')
-        .select('id, event, data, is_read, created_at')
-        .eq('owner_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(50)
-      if (error) throw new Error(error.message)
-      const unreadCount = (data || []).filter((n) => !n.is_read).length
-      res.status(200).json({ notifications: data || [], unreadCount })
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : '讀取通知失敗' })
-    }
-    return
-  }
-
-  // POST: mark notifications as read
-  if (req.method === 'POST') {
-    try {
-      const body = parseJsonBody(req)
-      const ids = Array.isArray(body?.ids) ? body.ids.filter(Number.isFinite) : null
-      const query = supabaseDb
-        .from('teacher_notifications')
-        .update({ is_read: true })
-        .eq('owner_id', user.id)
-      if (ids && ids.length > 0) {
-        query.in('id', ids)
-      }
-      const { error } = await query
-      if (error) throw new Error(error.message)
-      res.status(200).json({ success: true })
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : '標記通知失敗' })
-    }
-    return
-  }
-
-  res.status(405).json({ error: 'Method Not Allowed' })
 }
 
 async function handleStudentsBatchUpsert(req, res) {
@@ -4778,16 +4519,6 @@ async function handleStudentSubmission(req, res) {
             : currentState?.last_status_reason
       })
     )
-
-    // Notify teacher when student uploads (non-correction)
-    if (mode === 'upload') {
-      const ownerPrefs = await getTeacherPreferences(supabaseDb, ownerId)
-      await createTeacherNotification(supabaseDb, ownerId, 'submission_uploaded', {
-        assignmentId,
-        studentId: studentContext.id,
-        studentName: studentContext.name || undefined
-      }, ownerPrefs)
-    }
 
     let correctionResult = null
     if (mode === 'correction') {
@@ -5881,10 +5612,6 @@ export default async function handler(req, res) {
   }
   if (action === 'teacher-preferences') {
     await handleTeacherPreferences(req, res)
-    return
-  }
-  if (action === 'teacher-notifications') {
-    await handleTeacherNotifications(req, res)
     return
   }
   if (action === 'students-batch-upsert') {

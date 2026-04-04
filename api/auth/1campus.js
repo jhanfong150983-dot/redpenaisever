@@ -711,7 +711,6 @@ async function mergeCampus1IntoGoogleAccount(supabaseAdmin, oldUserId, googleUse
     'tag_ability_map',
     'tag_dictionary',
     'tag_dictionary_state',
-    'teacher_notifications',
     'teacher_preferences'
   ]
   for (const table of ownerTables) {

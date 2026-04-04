@@ -225,7 +225,7 @@ export default async function handler(req, res) {
           'assignment_student_state', 'assignment_tag_aggregates', 'assignment_tag_state',
           'correction_attempt_logs', 'correction_question_items', 'deleted_records',
           'domain_tag_aggregates', 'tag_ability_map', 'tag_dictionary',
-          'tag_dictionary_state', 'teacher_notifications', 'teacher_preferences'
+          'tag_dictionary_state', 'teacher_preferences'
         ]
         for (const table of ownerTables) {
           await supabaseAdmin.from(table).update({ owner_id: user.id }).eq('owner_id', oldUserId)
