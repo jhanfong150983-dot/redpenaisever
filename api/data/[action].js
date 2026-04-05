@@ -4497,9 +4497,10 @@ async function handleStudentSubmission(req, res) {
           updated_at: new Date().toISOString()
         }))
       if (disputeRows.length > 0) {
-        await supabaseDb
+        const { error: disputeError } = await supabaseDb
           .from('correction_question_items')
           .upsert(disputeRows, { onConflict: 'owner_id,assignment_id,student_id,attempt_no,question_id' })
+        if (disputeError) throw new Error(`申訴寫入失敗: ${disputeError.message}`)
       }
     }
 
