@@ -1540,79 +1540,95 @@ async function handleUserStats(req, res, supabaseAdmin) {
   }
 
   try {
-    // 1. 获取所有用户基本信息
+    // 1. 取得所有非管理者帳號（教師）
     const { data: users, error: usersError } = await supabaseAdmin
       .from('profiles')
       .select('id, email, name, avatar_url, role, permission_tier, ink_balance, created_at, updated_at')
+      .neq('role', 'admin')
       .order('created_at', { ascending: false })
 
     if (usersError) throw usersError
 
-    // 2. 批量查询统计数据 - 班级数
-    const { data: classroomStats } = await supabaseAdmin
-      .from('classrooms')
-      .select('owner_id')
+    // 2-6. 批量查詢統計資料（平行執行）
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    const [
+      classroomStatsResult,
+      studentListResult,
+      assignmentStatsResult,
+      submissionStatsResult,
+      inkStatsResult,
+      classroomNamesResult,
+    ] = await Promise.all([
+      supabaseAdmin.from('classrooms').select('owner_id'),
+      supabaseAdmin.from('students').select('id, name, owner_id, classroom_id'),
+      supabaseAdmin.from('assignments').select('owner_id'),
+      supabaseAdmin.from('submissions').select('owner_id, student_id, graded_at, created_at'),
+      supabaseAdmin.from('ink_ledger').select('user_id, delta').lt('delta', 0).gte('created_at', thirtyDaysAgo),
+      supabaseAdmin.from('classrooms').select('id, name'),
+    ])
 
+    // 班級數
     const classroomCountMap = {}
-    classroomStats?.forEach(row => {
+    classroomStatsResult.data?.forEach(row => {
       classroomCountMap[row.owner_id] = (classroomCountMap[row.owner_id] || 0) + 1
     })
 
-    // 3. 批量查询统计数据 - 学生数
-    const { data: studentStats } = await supabaseAdmin
-      .from('students')
-      .select('owner_id')
-
-    const studentCountMap = {}
-    studentStats?.forEach(row => {
-      studentCountMap[row.owner_id] = (studentCountMap[row.owner_id] || 0) + 1
-    })
-
-    // 4. 批量查询统计数据 - 作业数
-    const { data: assignmentStats } = await supabaseAdmin
-      .from('assignments')
-      .select('owner_id')
-
+    // 作業數
     const assignmentCountMap = {}
-    assignmentStats?.forEach(row => {
+    assignmentStatsResult.data?.forEach(row => {
       assignmentCountMap[row.owner_id] = (assignmentCountMap[row.owner_id] || 0) + 1
     })
 
-    // 5. 批量查询统计数据 - 提交总数和已批改数
-    const { data: submissionStats } = await supabaseAdmin
-      .from('submissions')
-      .select('owner_id, graded_at')
-
-    const submissionCountMap = {}
-    const gradedCountMap = {}
-    submissionStats?.forEach(row => {
+    // 繳交數 / 批改數（以 teacher owner_id 和 student_id 分別統計）
+    const submissionCountMap = {}   // by owner_id
+    const gradedCountMap = {}       // by owner_id
+    const studentSubCountMap = {}   // by student_id
+    const studentGradedCountMap = {} // by student_id
+    const studentLastActiveMap = {}  // by student_id
+    submissionStatsResult.data?.forEach(row => {
       submissionCountMap[row.owner_id] = (submissionCountMap[row.owner_id] || 0) + 1
-      if (row.graded_at) {
-        gradedCountMap[row.owner_id] = (gradedCountMap[row.owner_id] || 0) + 1
+      if (row.graded_at) gradedCountMap[row.owner_id] = (gradedCountMap[row.owner_id] || 0) + 1
+      if (row.student_id) {
+        studentSubCountMap[row.student_id] = (studentSubCountMap[row.student_id] || 0) + 1
+        if (row.graded_at) studentGradedCountMap[row.student_id] = (studentGradedCountMap[row.student_id] || 0) + 1
+        const ts = row.created_at || row.graded_at
+        if (ts && (!studentLastActiveMap[row.student_id] || ts > studentLastActiveMap[row.student_id])) {
+          studentLastActiveMap[row.student_id] = ts
+        }
       }
     })
 
-    // 6. 批量查询统计数据 - 墨水消耗（最近30天）
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-    const { data: inkStats } = await supabaseAdmin
-      .from('ink_ledger')
-      .select('user_id, delta')
-      .lt('delta', 0)  // 只统计消耗（负数）
-      .gte('created_at', thirtyDaysAgo)
-
+    // 墨水消耗
     const inkUsedMap = {}
-    inkStats?.forEach(row => {
+    inkStatsResult.data?.forEach(row => {
       inkUsedMap[row.user_id] = (inkUsedMap[row.user_id] || 0) + Math.abs(row.delta)
     })
 
-    // 7. 组合数据
+    // 班級名稱 map
+    const classroomNameMap = {}
+    classroomNamesResult.data?.forEach(c => { classroomNameMap[c.id] = c.name })
+
+    // 學生列表 by owner_id
+    const studentsByOwner = {}
+    studentListResult.data?.forEach(s => {
+      if (!studentsByOwner[s.owner_id]) studentsByOwner[s.owner_id] = []
+      studentsByOwner[s.owner_id].push({
+        studentId: s.id,
+        studentName: s.name || '未命名',
+        classroomName: classroomNameMap[s.classroom_id] || '',
+        submissionCount: studentSubCountMap[s.id] || 0,
+        gradedCount: studentGradedCountMap[s.id] || 0,
+        lastActiveAt: studentLastActiveMap[s.id] || null,
+      })
+    })
+
+    // 組合教師資料
     const userStats = (users || []).map(user => {
       const classroomCount = classroomCountMap[user.id] || 0
-      const studentCount = studentCountMap[user.id] || 0
-      const assignmentCount = assignmentCountMap[user.id] || 0
+      const students = (studentsByOwner[user.id] || [])
+        .sort((a, b) => b.submissionCount - a.submissionCount)
       const submissionCount = submissionCountMap[user.id] || 0
       const gradedCount = gradedCountMap[user.id] || 0
-      const totalInkUsed = inkUsedMap[user.id] || 0
 
       return {
         userId: user.id,
@@ -1625,22 +1641,21 @@ async function handleUserStats(req, res, supabaseAdmin) {
         createdAt: user.created_at,
         updatedAt: user.updated_at,
         classroomCount,
-        studentCount,
-        assignmentCount,
+        studentCount: students.length,
+        assignmentCount: assignmentCountMap[user.id] || 0,
         submissionCount,
         gradedCount,
-        gradingProgress: submissionCount > 0
-          ? Math.round((gradedCount / submissionCount) * 100)
-          : 0,
-        totalInkUsed,
-        lastActiveAt: user.updated_at
+        gradingProgress: submissionCount > 0 ? Math.round((gradedCount / submissionCount) * 100) : 0,
+        totalInkUsed: inkUsedMap[user.id] || 0,
+        lastActiveAt: user.updated_at,
+        students,
       }
     })
 
     res.status(200).json({ users: userStats })
   } catch (err) {
     console.error('Error fetching user stats:', err)
-    res.status(500).json({ error: '获取用户统计数据失败' })
+    res.status(500).json({ error: '取得使用者統計資料失敗' })
   }
 }
 
@@ -1940,6 +1955,56 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       .map(([date, count]) => ({ date, count }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
+    // 10. 學生使用概覽
+    const { data: allStudents } = await supabaseAdmin
+      .from('students')
+      .select('id, name, owner_id, classroom_id')
+
+    const { data: allStudentSubs } = await supabaseAdmin
+      .from('submissions')
+      .select('student_id, graded_at, owner_id')
+
+    // 抓教師名稱 for top students
+    const { data: teacherProfiles } = await supabaseAdmin
+      .from('profiles')
+      .select('id, name')
+      .neq('role', 'admin')
+
+    const { data: classroomNames } = await supabaseAdmin
+      .from('classrooms')
+      .select('id, name')
+
+    const teacherNameMap = {}
+    teacherProfiles?.forEach(t => { teacherNameMap[t.id] = t.name })
+    const classroomNameMap = {}
+    classroomNames?.forEach(c => { classroomNameMap[c.id] = c.name })
+
+    const stuSubCountMap = {}
+    const stuGradedCountMap = {}
+    allStudentSubs?.forEach(row => {
+      if (!row.student_id) return
+      stuSubCountMap[row.student_id] = (stuSubCountMap[row.student_id] || 0) + 1
+      if (row.graded_at) stuGradedCountMap[row.student_id] = (stuGradedCountMap[row.student_id] || 0) + 1
+    })
+
+    const totalStudents = allStudents?.length || 0
+    const activeStudents = allStudents?.filter(s => (stuSubCountMap[s.id] || 0) > 0).length || 0
+    const neverSubmitted = totalStudents - activeStudents
+    const totalSubs = Object.values(stuSubCountMap).reduce((a, b) => a + b, 0)
+    const avgSubmissionsPerStudent = totalStudents > 0 ? Math.round((totalSubs / totalStudents) * 10) / 10 : 0
+
+    const topActiveStudents = (allStudents || [])
+      .map(s => ({
+        name: s.name || '未命名',
+        teacherName: teacherNameMap[s.owner_id] || '',
+        classroomName: classroomNameMap[s.classroom_id] || '',
+        submissionCount: stuSubCountMap[s.id] || 0,
+        gradedCount: stuGradedCountMap[s.id] || 0,
+      }))
+      .filter(s => s.submissionCount > 0)
+      .sort((a, b) => b.submissionCount - a.submissionCount)
+      .slice(0, 10)
+
     const analytics = {
       overview: {
         totalUsers: totalUsersResult.count || 0,
@@ -1959,7 +2024,14 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       },
       topPackages,
       recentInkLedger: recentInkLedger || [],
-      userGrowth: userGrowthArray
+      userGrowth: userGrowthArray,
+      studentOverview: {
+        totalStudents,
+        activeStudents,
+        neverSubmitted,
+        avgSubmissionsPerStudent,
+        topActiveStudents,
+      }
     }
 
     return res.status(200).json(analytics)
