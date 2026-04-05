@@ -1622,35 +1622,37 @@ async function handleUserStats(req, res, supabaseAdmin) {
       })
     })
 
-    // 組合教師資料
-    const userStats = (users || []).map(user => {
-      const classroomCount = classroomCountMap[user.id] || 0
-      const students = (studentsByOwner[user.id] || [])
-        .sort((a, b) => b.submissionCount - a.submissionCount)
-      const submissionCount = submissionCountMap[user.id] || 0
-      const gradedCount = gradedCountMap[user.id] || 0
+    // 組合教師資料（只保留有班級的帳號）
+    const userStats = (users || [])
+      .map(user => {
+        const classroomCount = classroomCountMap[user.id] || 0
+        const students = (studentsByOwner[user.id] || [])
+          .sort((a, b) => b.submissionCount - a.submissionCount)
+        const submissionCount = submissionCountMap[user.id] || 0
+        const gradedCount = gradedCountMap[user.id] || 0
 
-      return {
-        userId: user.id,
-        email: user.email,
-        name: user.name,
-        avatarUrl: user.avatar_url,
-        inkBalance: user.ink_balance || 0,
-        role: user.role || 'user',
-        permissionTier: user.permission_tier || 'basic',
-        createdAt: user.created_at,
-        updatedAt: user.updated_at,
-        classroomCount,
-        studentCount: students.length,
-        assignmentCount: assignmentCountMap[user.id] || 0,
-        submissionCount,
-        gradedCount,
-        gradingProgress: submissionCount > 0 ? Math.round((gradedCount / submissionCount) * 100) : 0,
-        totalInkUsed: inkUsedMap[user.id] || 0,
-        lastActiveAt: user.updated_at,
-        students,
-      }
-    })
+        return {
+          userId: user.id,
+          email: user.email,
+          name: user.name,
+          avatarUrl: user.avatar_url,
+          inkBalance: user.ink_balance || 0,
+          role: user.role || 'user',
+          permissionTier: user.permission_tier || 'basic',
+          createdAt: user.created_at,
+          updatedAt: user.updated_at,
+          classroomCount,
+          studentCount: students.length,
+          assignmentCount: assignmentCountMap[user.id] || 0,
+          submissionCount,
+          gradedCount,
+          gradingProgress: submissionCount > 0 ? Math.round((gradedCount / submissionCount) * 100) : 0,
+          totalInkUsed: inkUsedMap[user.id] || 0,
+          lastActiveAt: user.updated_at,
+          students,
+        }
+      })
+      .filter(u => u.classroomCount > 0)
 
     res.status(200).json({ users: userStats })
   } catch (err) {
@@ -1779,221 +1781,155 @@ async function handleAnalytics(req, res, supabaseAdmin) {
   }
 
   try {
-    // 1. 系統概覽統計
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+
+    // ── 平行批次撈取所有原始資料 ──────────────────────────────────────────────
     const [
-      totalUsersResult,
-      totalOrdersResult,
-      totalRevenueResult,
-      totalInkDistributedResult,
-      activeUsersResult
+      teacherProfilesResult,
+      classroomsResult,
+      studentsResult,
+      submissionsResult,
+      inkLedgerAllResult,
+      inkLedger30dResult,
+      ordersResult,
+      packageStatsResult,
+      recentInkLedgerResult,
     ] = await Promise.all([
-      supabaseAdmin
-        .from('profiles')
-        .select('id', { count: 'exact', head: true }),
-
-      supabaseAdmin
-        .from('ink_orders')
-        .select('id', { count: 'exact', head: true })
-        .eq('status', 'paid'),
-
-      supabaseAdmin
-        .from('ink_orders')
-        .select('amount_twd')
-        .eq('status', 'paid'),
-
-      supabaseAdmin
-        .from('ink_ledger')
-        .select('delta')
-        .gt('delta', 0),
-
-      supabaseAdmin
-        .from('profiles')
-        .select('id', { count: 'exact', head: true })
-        .gte('updated_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
+      supabaseAdmin.from('profiles').select('id, email, name, avatar_url, ink_balance, created_at').neq('role', 'admin').order('created_at', { ascending: false }),
+      supabaseAdmin.from('classrooms').select('id, name, owner_id'),
+      supabaseAdmin.from('students').select('id, name, owner_id, classroom_id'),
+      supabaseAdmin.from('submissions').select('student_id, owner_id, graded_at, created_at'),
+      supabaseAdmin.from('ink_ledger').select('user_id, delta, reason, created_at'),
+      supabaseAdmin.from('ink_ledger').select('user_id, delta, reason, created_at').gte('created_at', thirtyDaysAgo),
+      supabaseAdmin.from('ink_orders').select('id, status, amount_twd, package_id, package_label, drops, bonus_drops, created_at').order('created_at', { ascending: false }),
+      supabaseAdmin.from('ink_orders').select('package_id, package_label, drops, bonus_drops').eq('status', 'paid').not('package_id', 'is', null),
+      supabaseAdmin.from('ink_ledger').select('id, user_id, delta, reason, metadata, created_at, profiles:user_id(email,name)').order('created_at', { ascending: false }).limit(50),
     ])
 
-    const totalRevenue = totalRevenueResult.data?.reduce((sum, order) => sum + (order.amount_twd || 0), 0) || 0
-    const totalInkDistributed = totalInkDistributedResult.data?.reduce((sum, ledger) => sum + (ledger.delta || 0), 0) || 0
+    const allTeachers = teacherProfilesResult.data || []
+    const allClassrooms = classroomsResult.data || []
+    const allStudents = studentsResult.data || []
+    const allSubmissions = submissionsResult.data || []
+    const inkLedgerAll = inkLedgerAllResult.data || []
+    const inkLedger30d = inkLedger30dResult.data || []
+    const allOrders = ordersResult.data || []
 
-    // 2. 最近註冊的用戶
-    const { data: recentUsers } = await supabaseAdmin
-      .from('profiles')
-      .select('id, email, name, avatar_url, created_at')
-      .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
-      .order('created_at', { ascending: false })
-      .limit(10)
+    // ── 基礎 map ─────────────────────────────────────────────────────────────
+    const teacherNameMap = {}
+    allTeachers.forEach(t => { teacherNameMap[t.id] = t.name })
+    const classroomNameMap = {}
+    const classroomOwnerMap = {}
+    allClassrooms.forEach(c => { classroomNameMap[c.id] = c.name; classroomOwnerMap[c.id] = c.owner_id })
 
-    // 3. 最活躍用戶
-    const { data: inkUsageData } = await supabaseAdmin
-      .from('ink_ledger')
-      .select('user_id, delta')
-      .lt('delta', 0)
-      .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
-
-    const userUsageMap = {}
-    inkUsageData?.forEach(record => {
-      if (!userUsageMap[record.user_id]) {
-        userUsageMap[record.user_id] = 0
-      }
-      userUsageMap[record.user_id] += Math.abs(record.delta)
+    // 教師有哪些班級
+    const teacherClassroomCountMap = {}
+    allClassrooms.forEach(c => {
+      teacherClassroomCountMap[c.owner_id] = (teacherClassroomCountMap[c.owner_id] || 0) + 1
     })
 
-    const topUserIds = Object.entries(userUsageMap)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10)
-      .map(([userId]) => userId)
-
-    const { data: topUsers } = topUserIds.length > 0
-      ? await supabaseAdmin
-          .from('profiles')
-          .select('id, email, name, avatar_url, ink_balance')
-          .in('id', topUserIds)
-      : { data: [] }
-
-    const topUsersWithUsage = topUsers?.map(user => ({
-      ...user,
-      ink_used: userUsageMap[user.id] || 0
-    })).sort((a, b) => b.ink_used - a.ink_used) || []
-
-    // 4. 訂單統計
-    const { data: recentOrders } = await supabaseAdmin
-      .from('ink_orders')
-      .select('id, status, amount_twd, created_at')
-      .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
-      .order('created_at', { ascending: false })
-
-    const ordersByStatus = {
-      paid: recentOrders?.filter(o => o.status === 'paid').length || 0,
-      pending: recentOrders?.filter(o => o.status === 'pending').length || 0,
-      cancelled: recentOrders?.filter(o => o.status === 'cancelled').length || 0
-    }
-
-    const recentRevenue = recentOrders?.filter(o => o.status === 'paid').reduce((sum, o) => sum + (o.amount_twd || 0), 0) || 0
-
-    // 5. 每日訂單趨勢
-    const dailyOrders = {}
-    recentOrders?.forEach(order => {
-      if (order.status === 'paid') {
-        const date = order.created_at.split('T')[0]
-        if (!dailyOrders[date]) {
-          dailyOrders[date] = { count: 0, revenue: 0 }
-        }
-        dailyOrders[date].count++
-        dailyOrders[date].revenue += order.amount_twd || 0
-      }
+    // 教師有哪些學生
+    const teacherStudentCountMap = {}
+    allStudents.forEach(s => {
+      teacherStudentCountMap[s.owner_id] = (teacherStudentCountMap[s.owner_id] || 0) + 1
     })
 
-    const dailyOrdersArray = Object.entries(dailyOrders)
-      .map(([date, data]) => ({ date, ...data }))
-      .sort((a, b) => a.date.localeCompare(b.date))
+    // 教師有哪些作業（需再撈一次或從 submissions 推算）
+    // 用 submissions 推算每位教師的作業數（assignment 層面無資料，略）
 
-    // 6. 熱門購買方案
-    const { data: packageStats } = await supabaseAdmin
-      .from('ink_orders')
-      .select('package_id, package_label, drops, bonus_drops')
-      .eq('status', 'paid')
-      .not('package_id', 'is', null)
+    // ── ═══════════════ 教師儀表板 ═══════════════ ──
 
-    const packageSalesMap = {}
-    packageStats?.forEach(order => {
-      const key = order.package_id
-      if (!packageSalesMap[key]) {
-        packageSalesMap[key] = {
-          package_id: order.package_id,
-          package_label: order.package_label,
-          drops: order.drops,
-          bonus_drops: order.bonus_drops,
-          sales_count: 0
-        }
-      }
-      packageSalesMap[key].sales_count++
+    // 教師成長趨勢（30天）
+    const teacherGrowthMap = {}
+    allTeachers.filter(t => t.created_at >= thirtyDaysAgo).forEach(t => {
+      const date = t.created_at.split('T')[0]
+      teacherGrowthMap[date] = (teacherGrowthMap[date] || 0) + 1
     })
-
-    const topPackages = Object.values(packageSalesMap)
-      .sort((a, b) => b.sales_count - a.sales_count)
-      .slice(0, 5)
-
-    // 7. 墨水點數統計
-    const { data: allProfiles } = await supabaseAdmin
-      .from('profiles')
-      .select('ink_balance')
-
-    const totalInkBalance = allProfiles?.reduce((sum, p) => sum + (p.ink_balance || 0), 0) || 0
-    const avgInkBalance = allProfiles?.length > 0 ? Math.round(totalInkBalance / allProfiles.length) : 0
-
-    // 8. 最近墨水點數變動記錄
-    const { data: recentInkLedger } = await supabaseAdmin
-      .from('ink_ledger')
-      .select(`
-        id,
-        user_id,
-        delta,
-        reason,
-        metadata,
-        created_at,
-        profiles:user_id (
-          email,
-          name
-        )
-      `)
-      .order('created_at', { ascending: false })
-      .limit(50)
-
-    // 9. 用戶成長趨勢
-    const { data: userGrowthData } = await supabaseAdmin
-      .from('profiles')
-      .select('created_at')
-      .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
-
-    const dailyNewUsers = {}
-    userGrowthData?.forEach(user => {
-      const date = user.created_at.split('T')[0]
-      dailyNewUsers[date] = (dailyNewUsers[date] || 0) + 1
-    })
-
-    const userGrowthArray = Object.entries(dailyNewUsers)
+    const dailyTeacherGrowth = Object.entries(teacherGrowthMap)
       .map(([date, count]) => ({ date, count }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
-    // 10. 學生使用概覽
-    const { data: allStudents } = await supabaseAdmin
-      .from('students')
-      .select('id, name, owner_id, classroom_id')
+    // 每日活躍教師數（有批改動作：correction_usage in ink_ledger 30天）
+    const dailyActiveTeacherMap = {}
+    inkLedger30d.filter(r => r.reason === 'correction_usage').forEach(r => {
+      const date = r.created_at.split('T')[0]
+      if (!dailyActiveTeacherMap[date]) dailyActiveTeacherMap[date] = new Set()
+      dailyActiveTeacherMap[date].add(r.user_id)
+    })
+    const dailyActiveTeachers = Object.entries(dailyActiveTeacherMap)
+      .map(([date, set]) => ({ date, count: set.size }))
+      .sort((a, b) => a.date.localeCompare(b.date))
 
-    const { data: allStudentSubs } = await supabaseAdmin
-      .from('submissions')
-      .select('student_id, graded_at, owner_id')
+    // 教師參與率（曾批改過 / 總教師數）
+    const teachersWhoGraded = new Set(inkLedgerAll.filter(r => r.reason === 'correction_usage').map(r => r.user_id))
+    const teachersWithClassrooms = allTeachers.filter(t => (teacherClassroomCountMap[t.id] || 0) > 0)
+    const teacherParticipationRate = teachersWithClassrooms.length > 0
+      ? Math.round((teachersWhoGraded.size / teachersWithClassrooms.length) * 100) : 0
 
-    // 抓教師名稱 for top students
-    const { data: teacherProfiles } = await supabaseAdmin
-      .from('profiles')
-      .select('id, name')
-      .neq('role', 'admin')
+    // 活躍度排名（30天墨水消耗）
+    const teacherInkUsed30d = {}
+    inkLedger30d.filter(r => r.delta < 0).forEach(r => {
+      teacherInkUsed30d[r.user_id] = (teacherInkUsed30d[r.user_id] || 0) + Math.abs(r.delta)
+    })
+    const topActiveTeachers = allTeachers
+      .map(t => ({ id: t.id, name: t.name, email: t.email, inkUsed30d: teacherInkUsed30d[t.id] || 0 }))
+      .filter(t => t.inkUsed30d > 0)
+      .sort((a, b) => b.inkUsed30d - a.inkUsed30d)
+      .slice(0, 10)
 
-    const { data: classroomNames } = await supabaseAdmin
-      .from('classrooms')
-      .select('id, name')
+    // 最近註冊教師
+    const recentTeachers = allTeachers
+      .filter(t => t.created_at >= thirtyDaysAgo)
+      .slice(0, 10)
 
-    const teacherNameMap = {}
-    teacherProfiles?.forEach(t => { teacherNameMap[t.id] = t.name })
-    const classroomNameMap = {}
-    classroomNames?.forEach(c => { classroomNameMap[c.id] = c.name })
+    // 平均每位教師的班級/學生數
+    const teacherCount = teachersWithClassrooms.length || 1
+    const avgClassroomsPerTeacher = Math.round((allClassrooms.length / teacherCount) * 10) / 10
+    const avgStudentsPerTeacher = Math.round((allStudents.length / teacherCount) * 10) / 10
 
+    // ── ═══════════════ 學生儀表板 ═══════════════ ──
+
+    // 學生繳交統計 maps
     const stuSubCountMap = {}
     const stuGradedCountMap = {}
-    allStudentSubs?.forEach(row => {
+    allSubmissions.forEach(row => {
       if (!row.student_id) return
       stuSubCountMap[row.student_id] = (stuSubCountMap[row.student_id] || 0) + 1
       if (row.graded_at) stuGradedCountMap[row.student_id] = (stuGradedCountMap[row.student_id] || 0) + 1
     })
 
-    const totalStudents = allStudents?.length || 0
-    const activeStudents = allStudents?.filter(s => (stuSubCountMap[s.id] || 0) > 0).length || 0
+    const totalStudents = allStudents.length
+    const activeStudents = allStudents.filter(s => (stuSubCountMap[s.id] || 0) > 0).length
     const neverSubmitted = totalStudents - activeStudents
-    const totalSubs = Object.values(stuSubCountMap).reduce((a, b) => a + b, 0)
-    const avgSubmissionsPerStudent = totalStudents > 0 ? Math.round((totalSubs / totalStudents) * 10) / 10 : 0
+    const totalSubCount = Object.values(stuSubCountMap).reduce((a, b) => a + b, 0)
+    const totalGradedCount = Object.values(stuGradedCountMap).reduce((a, b) => a + b, 0)
+    const avgSubmissionsPerStudent = totalStudents > 0 ? Math.round((totalSubCount / totalStudents) * 10) / 10 : 0
+    const submissionRate = totalStudents > 0 ? Math.round((activeStudents / totalStudents) * 100) : 0
+    const gradingCompletionRate = totalSubCount > 0 ? Math.round((totalGradedCount / totalSubCount) * 100) : 0
 
-    const topActiveStudents = (allStudents || [])
+    // 每日活躍學生趨勢（30天，distinct student per day）
+    const dailyStudentMap = {}
+    allSubmissions
+      .filter(s => s.student_id && s.created_at >= thirtyDaysAgo)
+      .forEach(s => {
+        const date = s.created_at.split('T')[0]
+        if (!dailyStudentMap[date]) dailyStudentMap[date] = new Set()
+        dailyStudentMap[date].add(s.student_id)
+      })
+    const dailyActiveStudents = Object.entries(dailyStudentMap)
+      .map(([date, set]) => ({ date, count: set.size }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+
+    // 繳交峰值時段（24h，UTC+8）
+    const submissionByHour = Array.from({ length: 24 }, (_, h) => ({ hour: h, count: 0 }))
+    allSubmissions.forEach(s => {
+      if (!s.created_at) return
+      const utcHour = new Date(s.created_at).getUTCHours()
+      const localHour = (utcHour + 8) % 24
+      submissionByHour[localHour].count++
+    })
+
+    // Top 10 活躍學生
+    const topActiveStudents = allStudents
       .map(s => ({
         name: s.name || '未命名',
         teacherName: teacherNameMap[s.owner_id] || '',
@@ -2005,36 +1941,100 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       .sort((a, b) => b.submissionCount - a.submissionCount)
       .slice(0, 10)
 
-    const analytics = {
-      overview: {
-        totalUsers: totalUsersResult.count || 0,
-        activeUsers: activeUsersResult.count || 0,
-        totalOrders: totalOrdersResult.count || 0,
-        totalRevenue,
-        totalInkDistributed,
-        totalInkBalance,
-        avgInkBalance
+    // ── ═══════════════ 墨水儀表板 ═══════════════ ──
+
+    // 每日墨水消耗趨勢（30天）
+    const dailyInkMap = {}
+    inkLedger30d.filter(r => r.delta < 0).forEach(r => {
+      const date = r.created_at.split('T')[0]
+      dailyInkMap[date] = (dailyInkMap[date] || 0) + Math.abs(r.delta)
+    })
+    const dailyInkConsumption = Object.entries(dailyInkMap)
+      .map(([date, consumed]) => ({ date, consumed }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+
+    // 累計發放 vs 消耗
+    const totalInkDistributed = inkLedgerAll.filter(r => r.delta > 0).reduce((s, r) => s + r.delta, 0)
+    const totalInkConsumed = inkLedgerAll.filter(r => r.delta < 0).reduce((s, r) => s + Math.abs(r.delta), 0)
+    const totalInkBalance = totalInkDistributed - totalInkConsumed
+
+    // 訂單處理
+    const paidOrders = allOrders.filter(o => o.status === 'paid')
+    const recentOrders30d = allOrders.filter(o => o.created_at >= thirtyDaysAgo)
+    const totalRevenue = paidOrders.reduce((s, o) => s + (o.amount_twd || 0), 0)
+    const recentRevenue = recentOrders30d.filter(o => o.status === 'paid').reduce((s, o) => s + (o.amount_twd || 0), 0)
+
+    const ordersByStatus = {
+      paid: recentOrders30d.filter(o => o.status === 'paid').length,
+      pending: recentOrders30d.filter(o => o.status === 'pending').length,
+      cancelled: recentOrders30d.filter(o => o.status === 'cancelled').length,
+    }
+
+    const dailyOrderMap = {}
+    recentOrders30d.filter(o => o.status === 'paid').forEach(o => {
+      const date = o.created_at.split('T')[0]
+      if (!dailyOrderMap[date]) dailyOrderMap[date] = { count: 0, revenue: 0 }
+      dailyOrderMap[date].count++
+      dailyOrderMap[date].revenue += o.amount_twd || 0
+    })
+    const dailyOrderTrend = Object.entries(dailyOrderMap)
+      .map(([date, d]) => ({ date, ...d }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+
+    // 熱門方案
+    const packageSalesMap = {}
+    ;(packageStatsResult.data || []).forEach(o => {
+      const key = o.package_id
+      if (!packageSalesMap[key]) packageSalesMap[key] = { package_id: o.package_id, package_label: o.package_label, drops: o.drops, bonus_drops: o.bonus_drops, sales_count: 0 }
+      packageSalesMap[key].sales_count++
+    })
+    const topPackages = Object.values(packageSalesMap).sort((a, b) => b.sales_count - a.sales_count).slice(0, 5)
+
+    // 付費轉換率、平均客單價
+    const payingTeacherIds = new Set(paidOrders.map(o => o.user_id).filter(Boolean))
+    const payingTeacherRate = teachersWithClassrooms.length > 0
+      ? Math.round((payingTeacherIds.size / teachersWithClassrooms.length) * 100) : 0
+    const avgOrderValue = paidOrders.length > 0 ? Math.round(totalRevenue / paidOrders.length) : 0
+
+    // ── 組合回傳 ─────────────────────────────────────────────────────────────
+    return res.status(200).json({
+      teacherDashboard: {
+        dailyTeacherGrowth,
+        dailyActiveTeachers,
+        teacherParticipationRate,
+        topActiveTeachers,
+        recentTeachers,
+        totalTeachers: teachersWithClassrooms.length,
+        avgClassroomsPerTeacher,
+        avgStudentsPerTeacher,
       },
-      recentUsers: recentUsers || [],
-      topUsers: topUsersWithUsage,
-      orders: {
-        byStatus: ordersByStatus,
-        recentRevenue,
-        dailyTrend: dailyOrdersArray
-      },
-      topPackages,
-      recentInkLedger: recentInkLedger || [],
-      userGrowth: userGrowthArray,
-      studentOverview: {
+      studentDashboard: {
         totalStudents,
         activeStudents,
         neverSubmitted,
+        submissionRate,
+        gradingCompletionRate,
         avgSubmissionsPerStudent,
+        dailyActiveStudents,
+        submissionByHour,
         topActiveStudents,
-      }
-    }
-
-    return res.status(200).json(analytics)
+      },
+      inkDashboard: {
+        totalInkDistributed,
+        totalInkConsumed,
+        totalInkBalance,
+        totalRevenue,
+        recentRevenue,
+        dailyInkConsumption,
+        dailyOrderTrend,
+        ordersByStatus,
+        topPackages,
+        payingTeacherRate,
+        avgOrderValue,
+        totalOrders: paidOrders.length,
+        recentInkLedger: recentInkLedgerResult.data || [],
+      },
+    })
 
   } catch (error) {
     console.error('Analytics error:', error)
