@@ -1848,9 +1848,9 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       .map(([date, count]) => ({ date, count }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
-    // 每日活躍教師數（有批改動作：correction_usage in ink_ledger 30天）
+    // 每日活躍教師數（有 AI 使用扣點：delta < 0，30天）
     const dailyActiveTeacherMap = {}
-    inkLedger30d.filter(r => r.reason === 'correction_usage').forEach(r => {
+    inkLedger30d.filter(r => r.delta < 0).forEach(r => {
       const date = r.created_at.split('T')[0]
       if (!dailyActiveTeacherMap[date]) dailyActiveTeacherMap[date] = new Set()
       dailyActiveTeacherMap[date].add(r.user_id)
@@ -1859,8 +1859,8 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       .map(([date, set]) => ({ date, count: set.size }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
-    // 教師參與率（曾批改過 / 總教師數）
-    const teachersWhoGraded = new Set(inkLedgerAll.filter(r => r.reason === 'correction_usage').map(r => r.user_id))
+    // 教師參與率（曾有 AI 使用扣點 / 總教師數）
+    const teachersWhoGraded = new Set(inkLedgerAll.filter(r => r.delta < 0).map(r => r.user_id))
     const teachersWithClassrooms = allTeachers.filter(t => (teacherClassroomCountMap[t.id] || 0) > 0)
     const teacherParticipationRate = teachersWithClassrooms.length > 0
       ? Math.round((teachersWhoGraded.size / teachersWithClassrooms.length) * 100) : 0
@@ -1876,9 +1876,9 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       .sort((a, b) => b.inkUsed30d - a.inkUsed30d)
       .slice(0, 10)
 
-    // 最近註冊教師
+    // 最近註冊教師（只含有班級的帳號）
     const recentTeachers = allTeachers
-      .filter(t => t.created_at >= thirtyDaysAgo)
+      .filter(t => t.created_at >= thirtyDaysAgo && (teacherClassroomCountMap[t.id] || 0) > 0)
       .slice(0, 10)
 
     // 平均每位教師的班級/學生數
