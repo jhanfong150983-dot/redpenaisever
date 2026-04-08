@@ -1623,6 +1623,7 @@ Rules:
   - For single_choice / multi_choice / single_check / multi_check / multi_check_other / true_false: still include question stem + answer area (no answer-only crop).
   - For multi_fill: each sub-question maps to ONE specific blank box in the diagram. answerBbox must be a TIGHT crop of ONLY that single box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box.
     ORDERING RULE: When multi_fill boxes have no printed question numbers, assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). The sub-question with the smallest id suffix (e.g. "2-1-1") MUST map to the topmost box; the next id ("2-1-2") to the next box below; and so on. Do NOT re-order based on visual importance or content — position is the only criterion.
+  - For question IDs ending in "-p" (calculation process paired questions, e.g. "1-1-A-p"): answerBbox must be a TIGHT crop of ONLY the formula/calculation line labeled with the corresponding letter (e.g. for "1-1-A-p", frame ONLY the "A：___÷___=___" formula line in the student's work area). Do NOT include the parent question stem, the table above, or adjacent formula lines (B, C, D lines). Each "-p" sub-question maps to exactly ONE labeled formula line.
   - For matching(group_context): include the entire left column + right column + connecting lines of the whole group.
   - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
@@ -2091,6 +2092,7 @@ CALCULATION (questions in CALCULATION list):
 - Copy exactly as written: "25×6=150" → output "25×6=150"; wrong calc "6+3=8" → output "6+3=8".
 - Include the final answer line if present (e.g. "答: 150" or just "= 150").
 - If the work area is blank (no fresh marks) → status="blank".
+- For question IDs ending in "-p" (e.g. "1-1-A-p"): the cropped image shows ONLY the labeled formula line for that letter. Read only that single formula line — do NOT read adjacent lines (B, C, D). The label letter (A:, B:, etc.) is a printed prefix and should NOT be included in the student answer output.
 - VERTICAL FORMAT (直式): If the student uses a vertical layout (直式加/減/乘/除), convert it to a horizontal equation for output. Copy the student's written numbers exactly — do NOT recalculate or correct errors.
   - 直式除法: identify dividend (被除數), divisor (除數), quotient (商), remainder (餘數 if any). Output as "[dividend]÷[divisor]=[quotient]" or "[dividend]÷[divisor]=[quotient]…[remainder]" if remainder > 0.
   - 直式乘法: identify multiplicand, multiplier, product. Output as "[multiplicand]×[multiplier]=[product]".
