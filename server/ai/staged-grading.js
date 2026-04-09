@@ -2090,6 +2090,7 @@ CALCULATION (questions in CALCULATION list):
 - Copy ALL calculation content written by the student, including intermediate steps.
 - Copy exactly as written: "25×6=150" → output "25×6=150"; wrong calc "6+3=8" → output "6+3=8".
 - Include the final answer line if present (e.g. "答: 150" or just "= 150").
+- STRIP printed question labels: do NOT include any printed label that appears before the student's formula (e.g. "東北亞：", "A：", "B：", "①：", "(1)"). Output only from the first digit, operator, or bracket of the student's written content.
 - If the work area is blank (no fresh marks) → status="blank".
 - VERTICAL FORMAT (直式): If the student uses a vertical layout (直式加/減/乘/除), convert it to a horizontal equation for output. Copy the student's written numbers exactly — do NOT recalculate or correct errors.
   - 直式除法: identify dividend (被除數), divisor (除數), quotient (商), remainder (餘數 if any). Output as "[dividend]÷[divisor]=[quotient]" or "[dividend]÷[divisor]=[quotient]…[remainder]" if remainder > 0.
