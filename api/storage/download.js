@@ -64,10 +64,104 @@ async function isAdminUser(supabaseDb, userId) {
   return data?.role?.toLowerCase?.() === 'admin'
 }
 
+// ── answer-sheet helpers ─────────────────────────────────────────────────────
+
+const MAX_ANSWER_SHEET_PAGES = 10
+const MAX_ANSWER_SHEET_IMAGE_SIZE = 2 * 1024 * 1024
+
+function answerSheetPath(assignmentId, pageIndex) {
+  return `answer-sheets/${assignmentId}/page-${pageIndex}.webp`
+}
+
+async function verifyAssignmentOwnership(supabaseDb, assignmentId, userId) {
+  const { data: assignment, error } = await supabaseDb
+    .from('assignments')
+    .select('id, owner_id')
+    .eq('id', assignmentId)
+    .maybeSingle()
+  if (error) return { ok: false, status: 500, error: error.message }
+  if (assignment && assignment.owner_id !== userId) {
+    return { ok: false, status: 403, error: 'Forbidden' }
+  }
+  return { ok: true, assignment }
+}
+
+async function handleAnswerSheetDownload(req, res, user, supabaseDb) {
+  const assignmentId = Array.isArray(req.query?.assignmentId)
+    ? req.query.assignmentId[0] : req.query?.assignmentId
+  const pageIndexRaw = Array.isArray(req.query?.pageIndex)
+    ? req.query.pageIndex[0] : req.query?.pageIndex
+
+  if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
+  const pageIndex = pageIndexRaw !== undefined ? parseInt(pageIndexRaw, 10) : 0
+  if (isNaN(pageIndex) || pageIndex < 0) { res.status(400).json({ error: 'Invalid pageIndex' }); return }
+
+  const own = await verifyAssignmentOwnership(supabaseDb, assignmentId, user.id)
+  if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+  if (!own.assignment) { res.status(404).json({ error: 'Assignment not found' }); return }
+
+  const { data, error: downloadError } = await supabaseDb.storage
+    .from('homework-images').download(answerSheetPath(assignmentId, pageIndex))
+  if (downloadError || !data) { res.status(404).json({ error: 'Image not found' }); return }
+
+  const buffer = Buffer.from(await data.arrayBuffer())
+  res.setHeader('Content-Type', 'image/webp')
+  res.setHeader('Content-Length', buffer.length)
+  res.setHeader('Cache-Control', 'private, max-age=3600')
+  res.status(200).send(buffer)
+}
+
+async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
+  const { assignmentId, imagesBase64 } = req.body ?? {}
+  if (!assignmentId || typeof assignmentId !== 'string') {
+    res.status(400).json({ error: 'Missing assignmentId' }); return
+  }
+  if (!Array.isArray(imagesBase64) || imagesBase64.length === 0) {
+    res.status(400).json({ error: 'Missing imagesBase64 array' }); return
+  }
+  if (imagesBase64.length > MAX_ANSWER_SHEET_PAGES) {
+    res.status(400).json({ error: `Too many pages (max ${MAX_ANSWER_SHEET_PAGES})` }); return
+  }
+
+  const own = await verifyAssignmentOwnership(supabaseDb, assignmentId, user.id)
+  if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+
+  const paths = []
+  for (let i = 0; i < imagesBase64.length; i++) {
+    const base64 = imagesBase64[i]
+    if (typeof base64 !== 'string') { res.status(400).json({ error: `imagesBase64[${i}] is not a string` }); return }
+    const buffer = Buffer.from(base64.replace(/^data:[^;]+;base64,/, ''), 'base64')
+    if (buffer.length > MAX_ANSWER_SHEET_IMAGE_SIZE) {
+      res.status(400).json({ error: `Page ${i} exceeds max size of 2 MB` }); return
+    }
+    const { error: uploadError } = await supabaseDb.storage
+      .from('homework-images')
+      .upload(answerSheetPath(assignmentId, i), buffer, { contentType: 'image/webp', upsert: true })
+    if (uploadError) { res.status(500).json({ error: `Upload failed for page ${i}: ${uploadError.message}` }); return }
+    paths.push(answerSheetPath(assignmentId, i))
+  }
+  res.status(200).json({ paths })
+}
+
+// ── main handler ─────────────────────────────────────────────────────────────
+
 export default async function handler(req, res) {
   if (handleCors(req, res)) {
     return
   }
+
+  // POST → answer sheet upload
+  if (req.method === 'POST') {
+    try {
+      const { user } = await getAuthUser(req, res)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+      await handleAnswerSheetUpload(req, res, user, getSupabaseAdmin())
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' })
+    }
+    return
+  }
+
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method Not Allowed' })
     return
@@ -80,6 +174,16 @@ export default async function handler(req, res) {
       return
     }
 
+    const supabaseDb = getSupabaseAdmin()
+
+    // GET with assignmentId → answer sheet download
+    const assignmentIdParam = req.query?.assignmentId
+    if (assignmentIdParam) {
+      await handleAnswerSheetDownload(req, res, user, supabaseDb)
+      return
+    }
+
+    // GET with submissionId → original submission image download
     const submissionIdParam = req.query?.submissionId
     let submissionId = Array.isArray(submissionIdParam)
       ? submissionIdParam[0]
