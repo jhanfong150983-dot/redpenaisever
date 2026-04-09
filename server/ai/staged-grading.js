@@ -831,6 +831,9 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       const groupId = resolveMatchingGroupId(question)
       if (groupId) spec.bboxGroupId = groupId
     }
+    // answerBboxHint: from answer key extraction, helps classify AI locate answer area on student paper
+    const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
+    if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
     return spec
   })
 }
@@ -1609,6 +1612,7 @@ Rules:
 - Use only the allowed question IDs above.
 - For each questionId, questionType MUST exactly match Question Specs.
 - Never re-classify question type based on visual guess.
+- If a spec includes answerBboxHint, use it as a starting reference for where the answer area is located on the student paper. Adjust based on actual visual inspection — the hint is approximate (derived from the answer sheet, not the student paper).
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - bboxPolicy MUST follow Question Specs:
@@ -1974,12 +1978,19 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
   const matchingNote = matchingIds.length > 0
     ? `\nMATCHING questions (連連看, read ALL pairs as a group): ${JSON.stringify(matchingIds)}`
     : ''
+
+  // Per-question answer bbox hints (from classify + answer key): help AI locate each answer area
+  const questionsWithBbox = visibleQuestions.filter((q) => q.answerBbox)
+  const bboxHintNote = questionsWithBbox.length > 0
+    ? `\n\n== ANSWER AREA LOCATION HINTS ==\nFor the following questions, the answer area is approximately at these normalized coordinates (x/y=top-left, w/h=width/height, all 0-1):\n${questionsWithBbox.map((q) => `- "${q.questionId}": x=${q.answerBbox.x.toFixed(3)}, y=${q.answerBbox.y.toFixed(3)}, w=${q.answerBbox.w.toFixed(3)}, h=${q.answerBbox.h.toFixed(3)}`).join('\n')}\nUse these as a guide to locate the student's answer space, but always verify by looking at the image.`
+    : ''
+
   return `
 You are an answer reader. Your only job is to report what the student physically wrote or drew in each question's designated answer space. You have NO mathematical knowledge and must NOT solve, infer, or guess.
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}
+${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
