@@ -5827,6 +5827,7 @@ async function handleRefreshAssignmentSummary(req, res) {
             error_message: '尚無批改資料', updated_at: new Date().toISOString() },
           { onConflict: 'owner_id,assignment_id' }
         )
+      res.status(200).json({ success: false, status: 'failed', error: '尚無批改資料' })
       return
     }
 
@@ -5914,14 +5915,19 @@ async function handleRefreshAssignmentSummary(req, res) {
     }
 
     const sampleCount = submissions.length
-    const errorCount = studentErrors.length
+    // 限制 prompt 大小：最多 40 位學生，每位最多 5 個錯誤
+    const cappedStudentErrors = studentErrors.slice(0, 40).map(s => ({
+      ...s,
+      errors: s.errors.slice(0, 5)
+    }))
+    const errorCount = cappedStudentErrors.length
 
     // 4. 建立 AI prompt
     const conceptContext = Object.keys(conceptByQuestion).length > 0
       ? `\n作業涵蓋的課綱概念：\n${Object.entries(conceptByQuestion).map(([qId, c]) => `第${qId}題：${c.code} ${c.label}`).join('\n')}\n`
       : ''
 
-    const studentLines = studentErrors.map(s => {
+    const studentLines = cappedStudentErrors.map(s => {
       const errLines = s.errors.map(e => {
         const conceptStr = e.concept ? `（${e.concept}）` : ''
         return `  第${e.questionId}題${conceptStr}：${e.reason || '答錯'}`
@@ -5952,12 +5958,12 @@ ${studentLines || '（無錯誤）'}
 - 若有課綱概念代碼（如 N-4-12），請在摘要中引用讓老師知道是哪個單元
 - class_suggestion 和 minority_suggestion 要具體可執行，不要太籠統`
 
-    // 5. 呼叫 Gemini（加 240s 超時，確保在 Vercel 300s kill 前能寫入 failed）
+    // 5. 呼叫 Gemini（加 120s 超時，保留足夠空間給 DB 查詢 + catch 寫入，確保在 Vercel 300s kill 前完成）
     const apiKey = getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY')
     if (!apiKey) throw new Error('Server API Key missing')
 
     const summaryModel = getEnvValue('SYSTEM_GEMINI_MODEL') || 'gemini-3-flash-preview'
-    const SUMMARY_TIMEOUT_MS = 240_000
+    const SUMMARY_TIMEOUT_MS = 120_000
     const pipelineResult = await Promise.race([
       runAiPipeline({
         apiKey,
