@@ -663,6 +663,15 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   // 長答案：字元相似度 ≥ 0.75 視為一致（應對語意相近但措辭不同的描述）
   const longer = Math.max(a1.length, a2.length)
   if (longer >= 6 && computeStringSimilarity(a1, a2) >= 0.75) return 'stable'
+  // 包含關係檢查：短答案字元幾乎全出現在長答案裡，且長度差距明顯
+  // → 長答案很可能多讀了題幹文字，短答案才是真正的作答內容
+  const [shorterA, longerA] = a1.length <= a2.length ? [a1, a2] : [a2, a1]
+  if (shorterA.length >= 6 && longerA.length >= shorterA.length * 1.3) {
+    const shorterChars = new Set([...shorterA])
+    const longerChars = new Set([...longerA])
+    const containment = [...shorterChars].filter((c) => longerChars.has(c)).length / shorterChars.size
+    if (containment >= 0.85) return 'stable'
+  }
   return 'diff'
 }
 
