@@ -49,7 +49,82 @@ async function cropAnswerKeyBbox(imageBase64, mimeType, bbox, pad = 0.02) {
   }
 }
 
-async function postProcessAnswerKeyWithCrops(pipelineResult, contents) {
+function buildAnswerKeyLocatePrompt(questions) {
+  const lines = questions.map((q) => {
+    const answer = typeof q.answer === 'string' && q.answer ? q.answer : ''
+    const ref = typeof q.referenceAnswer === 'string' && q.referenceAnswer ? q.referenceAnswer : ''
+    const text = answer || ref
+    return `- id="${q.id}" category="${q.questionCategory || ''}" answer="${text}"`
+  }).join('\n')
+  return `You are a visual locator for an answer key image.
+
+For each question below, find the PRINTED answer text on the image and return its bounding box.
+
+Questions:
+${lines}
+
+Return strict JSON only:
+{
+  "locations": [
+    { "questionId": "1", "answerBbox": {"x": 0.52, "y": 0.12, "w": 0.04, "h": 0.02} }
+  ]
+}
+
+Rules:
+- The bbox must be ACCURATE and TIGHT around the actual printed answer characters you can visually confirm
+- Use the known answer text as a visual search key to locate it on the image
+- x/y = top-left corner, w/h = width/height, all normalized [0,1]
+- do NOT output placeholder or estimated coordinates
+- Omit any question whose answer text you cannot find or confirm visually
+- Each question is independent — locate each one from scratch, do NOT shift bbox to avoid overlap`
+}
+
+async function locateAnswerKeyBboxes(questions, inlineImages, apiKey, model) {
+  // Group questions by page; only locate questions that have a text answer to search for
+  const locatableQ = questions.filter((q) => {
+    const text = (typeof q.answer === 'string' && q.answer) || (typeof q.referenceAnswer === 'string' && q.referenceAnswer)
+    return Boolean(text)
+  })
+  if (locatableQ.length === 0) return new Map()
+
+  const byPage = new Map()
+  for (const q of locatableQ) {
+    const pageIdx = typeof q.pageIndex === 'number' ? q.pageIndex : 0
+    if (!byPage.has(pageIdx)) byPage.set(pageIdx, [])
+    byPage.get(pageIdx).push(q)
+  }
+
+  const bboxMap = new Map()
+  for (const [pageIdx, pageQuestions] of byPage) {
+    const img = inlineImages[Math.min(pageIdx, inlineImages.length - 1)]
+    if (!img) continue
+    const prompt = buildAnswerKeyLocatePrompt(pageQuestions)
+    try {
+      const locateResp = await callGeminiGenerateContent({
+        apiKey,
+        model,
+        contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: img }] }]
+      })
+      if (!locateResp.ok) continue
+      const rawText = locateResp.data?.candidates?.[0]?.content?.parts?.[0]?.text
+      if (!rawText) continue
+      let parsed
+      try { parsed = JSON.parse(rawText.replace(/```json|```/g, '').trim()) } catch { continue }
+      for (const loc of (Array.isArray(parsed?.locations) ? parsed.locations : [])) {
+        const qId = String(loc?.questionId ?? '').trim()
+        const bbox = loc?.answerBbox
+        if (qId && bbox && typeof bbox.x === 'number' && typeof bbox.y === 'number') {
+          bboxMap.set(qId, bbox)
+        }
+      }
+    } catch (err) {
+      console.warn('[orchestrator] locate page', pageIdx, 'failed:', err?.message)
+    }
+  }
+  return bboxMap
+}
+
+async function postProcessAnswerKeyWithCrops(pipelineResult, contents, apiKey, model) {
   const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text
   if (!rawText) return pipelineResult
   let parsed
@@ -59,13 +134,20 @@ async function postProcessAnswerKeyWithCrops(pipelineResult, contents) {
   const inlineImages = extractInlineImagesFromContents(contents)
   if (inlineImages.length === 0) return pipelineResult
 
+  // Step 2: dedicated locate AI for accurate bboxes
+  const locatedBboxMap = await locateAnswerKeyBboxes(questions, inlineImages, apiKey, model)
+  console.log(`[orchestrator] answer_key.locate: ${locatedBboxMap.size}/${questions.length} questions located`)
+
   const croppedQuestions = await Promise.all(questions.map(async (q) => {
-    if (!q.answerBbox) return q
+    // Prefer locate bbox (more accurate), fall back to extract bbox
+    const bbox = locatedBboxMap.get(q.id) ?? q.answerBbox ?? null
+    if (!bbox) return q
     const pageIdx = typeof q.pageIndex === 'number' ? q.pageIndex : 0
     const img = inlineImages[Math.min(pageIdx, inlineImages.length - 1)]
     if (!img) return q
-    const cropUrl = await cropAnswerKeyBbox(img.data, img.mimeType, q.answerBbox)
-    return cropUrl ? { ...q, cropImageUrl: cropUrl } : q
+    const cropUrl = await cropAnswerKeyBbox(img.data, img.mimeType, bbox)
+    const updatedQ = { ...q, answerBbox: bbox }  // update answerBbox with more accurate locate result
+    return cropUrl ? { ...updatedQ, cropImageUrl: cropUrl } : updatedQ
   }))
 
   const newText = JSON.stringify({ ...parsed, questions: croppedQuestions })
@@ -261,13 +343,13 @@ export async function runAiPipeline({
       console.log(`${logPrefix} [DEBUG] ${resolvedRouteKey} response:\n${rawText}`)
     }
 
-    // Post-process: add Sharp crops for each question's answerBbox
+    // Post-process: dedicated locate AI + Sharp crops
     if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
       try {
-        pipelineResult = await postProcessAnswerKeyWithCrops(pipelineResult, contents)
-        console.log(`${logPrefix} [answer_key.extract] crop post-processing done`)
+        pipelineResult = await postProcessAnswerKeyWithCrops(pipelineResult, contents, apiKey, model)
+        console.log(`${logPrefix} [answer_key.extract] locate+crop post-processing done`)
       } catch (err) {
-        console.warn(`${logPrefix} [answer_key.extract] crop post-processing failed:`, err?.message)
+        console.warn(`${logPrefix} [answer_key.extract] locate+crop post-processing failed:`, err?.message)
       }
     }
   }
