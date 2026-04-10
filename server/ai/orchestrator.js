@@ -49,34 +49,89 @@ async function cropAnswerKeyBbox(imageBase64, mimeType, bbox, pad = 0.02) {
   }
 }
 
-function buildAnswerKeyLocatePrompt(questions) {
-  const lines = questions.map((q) => {
-    const answer = typeof q.answer === 'string' && q.answer ? q.answer : ''
-    const ref = typeof q.referenceAnswer === 'string' && q.referenceAnswer ? q.referenceAnswer : ''
-    const text = answer || ref
-    return `- id="${q.id}" category="${q.questionCategory || ''}" answer="${text}"`
-  }).join('\n')
-  return `You are a visual locator for an answer key image.
+// ── answer key locate: spec builders (mirrors classify logic) ─────────────────
 
-For each question below, find the PRINTED answer text on the image and return its bounding box.
-
-Questions:
-${lines}
-
-Return strict JSON only:
-{
-  "locations": [
-    { "questionId": "1", "answerBbox": {"x": 0.52, "y": 0.12, "w": 0.04, "h": 0.02} }
-  ]
+function resolveQuestionTypeForLocate(q) {
+  const category = String(q?.questionCategory ?? '').trim()
+  const answerFormat = String(q?.answerFormat ?? '').trim().toLowerCase()
+  if (answerFormat === 'matching' || answerFormat === 'matching_on_map') return 'matching'
+  const valid = new Set([
+    'word_problem', 'calculation', 'single_choice', 'map_fill', 'multi_fill',
+    'map_draw', 'diagram_draw', 'multi_check', 'multi_check_other',
+    'fill_blank', 'true_false', 'matching', 'multi_choice', 'single_check', 'short_answer'
+  ])
+  if (category === 'fill_variants') return 'fill_blank'
+  if (valid.has(category)) return category
+  return 'fill_blank'
 }
 
+function resolveBboxPolicyForLocate(questionType) {
+  if (questionType === 'map_fill') return 'full_image'
+  if (questionType === 'matching') return 'group_context'
+  return 'question_context'
+}
+
+function resolveGroupIdForLocate(q) {
+  const explicit = String(q?.bboxGroupId ?? q?.matchingGroupId ?? q?.unorderedGroupId ?? '').trim()
+  if (explicit) return explicit
+  if (Array.isArray(q?.idPath) && q.idPath.length > 0) return String(q.idPath[0]).trim()
+  const id = String(q?.id ?? '').trim()
+  const dash = id.indexOf('-')
+  return dash > 0 ? id.slice(0, dash) : id
+}
+
+function buildAnswerKeyLocateSpecs(questions) {
+  return questions.map((q) => {
+    const questionType = resolveQuestionTypeForLocate(q)
+    const bboxPolicy = resolveBboxPolicyForLocate(questionType)
+    const spec = { questionId: q.id, questionType, bboxPolicy }
+    if (bboxPolicy === 'group_context') {
+      const groupId = resolveGroupIdForLocate(q)
+      if (groupId) spec.bboxGroupId = groupId
+    }
+    const answerText = (typeof q.answer === 'string' && q.answer)
+      || (typeof q.referenceAnswer === 'string' && q.referenceAnswer)
+      || ''
+    if (answerText) spec.answerText = answerText
+    return spec
+  })
+}
+
+function buildAnswerKeyLocatePrompt(questions) {
+  const specs = buildAnswerKeyLocateSpecs(questions)
+  return `You are stage ANSWER_KEY_LOCATE.
+Task: on this answer key image, locate where each question's printed answer text appears and output answerBbox.
+Use the provided answerText as a visual search key. Do NOT guess or infer answers.
+
+Question Specs:
+${JSON.stringify(specs)}
+
 Rules:
-- The bbox must be ACCURATE and TIGHT around the actual printed answer characters you can visually confirm
-- Use the known answer text as a visual search key to locate it on the image
-- x/y = top-left corner, w/h = width/height, all normalized [0,1]
-- do NOT output placeholder or estimated coordinates
-- Omit any question whose answer text you cannot find or confirm visually
-- Each question is independent — locate each one from scratch, do NOT shift bbox to avoid overlap`
+- Use only the questionIds listed in specs.
+- bboxPolicy MUST be followed:
+  - full_image: answerBbox must be {x:0,y:0,w:1,h:1}.
+  - group_context: ALL questions with the same bboxGroupId MUST share the exact same answerBbox.
+  - question_context: locate the specific printed answer for this question.
+- For question_context, output answerBbox that frames the printed answer area:
+  - For fill_blank: frame the printed answer text and its surrounding line/blank space.
+  - For single_choice / true_false: frame the printed answer symbol (e.g. "A", "○") within its bracket or space — include the bracket/parenthesis row.
+  - For multi_choice / multi_check / multi_check_other / single_check: frame all printed answer tokens and their option rows.
+  - For multi_fill: each sub-question maps to ONE specific printed value in the diagram. answerBbox must be a TIGHT crop of ONLY that single value — do NOT include neighboring sub-question values. Sub-question bboxes MUST NOT overlap each other.
+    ORDERING RULE: assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary).
+  - For word_problem / calculation / short_answer: frame the reference answer or scoring rubric text below the question stem.
+  - For matching (group_context): frame the entire left column + right column + connecting lines of the whole group.
+  - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
+  Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
+  If the answer text cannot be located visually, omit answerBbox for that question.
+- Each question is INDEPENDENT — do NOT shift bbox to avoid overlap with other questions.
+- Return strict JSON only.
+
+Output:
+{
+  "locations": [
+    { "questionId": "1", "answerBbox": { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } }
+  ]
+}`.trim()
 }
 
 async function locateAnswerKeyBboxes(questions, inlineImages, apiKey, model) {
