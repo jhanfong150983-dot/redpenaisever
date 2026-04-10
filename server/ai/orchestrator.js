@@ -7,6 +7,76 @@ import {
   runStagedGradingPhaseB
 } from './staged-grading.js'
 
+// ── answer key crop helpers ───────────────────────────────────────────────────
+
+function extractInlineImagesFromContents(contents) {
+  const images = []
+  for (const content of (contents || [])) {
+    if (!Array.isArray(content?.parts)) continue
+    for (const part of content.parts) {
+      if (part?.inlineData?.data && part?.inlineData?.mimeType) {
+        images.push(part.inlineData)
+      }
+    }
+  }
+  return images
+}
+
+async function cropAnswerKeyBbox(imageBase64, mimeType, bbox, pad = 0.02) {
+  if (!bbox || !imageBase64) return null
+  try {
+    const { default: sharp } = await import('sharp')
+    const buffer = Buffer.from(imageBase64, 'base64')
+    const { width, height } = await sharp(buffer).metadata()
+    if (!width || !height) return null
+    const px = Math.max(0, bbox.x - pad)
+    const py = Math.max(0, bbox.y - pad)
+    const px2 = Math.min(1, bbox.x + bbox.w + pad)
+    const py2 = Math.min(1, bbox.y + bbox.h + pad)
+    const x = Math.round(px * width)
+    const y = Math.round(py * height)
+    const w = Math.min(width - x, Math.max(1, Math.round((px2 - px) * width)))
+    const h = Math.min(height - y, Math.max(1, Math.round((py2 - py) * height)))
+    if (w <= 0 || h <= 0) return null
+    const cropBuffer = await sharp(buffer)
+      .extract({ left: x, top: y, width: w, height: h })
+      .jpeg({ quality: 90 })
+      .toBuffer()
+    return `data:image/jpeg;base64,${cropBuffer.toString('base64')}`
+  } catch (err) {
+    console.warn('[orchestrator] crop failed:', err?.message)
+    return null
+  }
+}
+
+async function postProcessAnswerKeyWithCrops(pipelineResult, contents) {
+  const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text
+  if (!rawText) return pipelineResult
+  let parsed
+  try { parsed = JSON.parse(rawText.replace(/```json|```/g, '').trim()) } catch { return pipelineResult }
+  const questions = Array.isArray(parsed?.questions) ? parsed.questions : []
+  if (questions.length === 0) return pipelineResult
+  const inlineImages = extractInlineImagesFromContents(contents)
+  if (inlineImages.length === 0) return pipelineResult
+
+  const croppedQuestions = await Promise.all(questions.map(async (q) => {
+    if (!q.answerBbox) return q
+    const pageIdx = typeof q.pageIndex === 'number' ? q.pageIndex : 0
+    const img = inlineImages[Math.min(pageIdx, inlineImages.length - 1)]
+    if (!img) return q
+    const cropUrl = await cropAnswerKeyBbox(img.data, img.mimeType, q.answerBbox)
+    return cropUrl ? { ...q, cropImageUrl: cropUrl } : q
+  }))
+
+  const newText = JSON.stringify({ ...parsed, questions: croppedQuestions })
+  const candidates = pipelineResult.data?.candidates ?? []
+  const newCandidates = [
+    { ...candidates[0], content: { ...candidates[0]?.content, parts: [{ text: newText }] } },
+    ...candidates.slice(1)
+  ]
+  return { ...pipelineResult, data: { ...pipelineResult.data, candidates: newCandidates } }
+}
+
 async function executeSinglePipelineCall({
   apiKey,
   model,
@@ -189,6 +259,16 @@ export async function runAiPipeline({
     if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT || resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS) {
       const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
       console.log(`${logPrefix} [DEBUG] ${resolvedRouteKey} response:\n${rawText}`)
+    }
+
+    // Post-process: add Sharp crops for each question's answerBbox
+    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
+      try {
+        pipelineResult = await postProcessAnswerKeyWithCrops(pipelineResult, contents)
+        console.log(`${logPrefix} [answer_key.extract] crop post-processing done`)
+      } catch (err) {
+        console.warn(`${logPrefix} [answer_key.extract] crop post-processing failed:`, err?.message)
+      }
     }
   }
   const responseStatus = Number(pipelineResult.status) || 500
