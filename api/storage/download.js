@@ -206,8 +206,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 後端始終使用 service role key 繞過 RLS
-    const supabaseDb = getSupabaseAdmin()
+    // 後端始終使用 service role key 繞過 RLS（已在上方取得 supabaseDb）
 
     const { data: submission, error: submissionError } = await supabaseDb
       .from('submissions')
