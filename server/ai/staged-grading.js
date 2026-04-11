@@ -496,9 +496,11 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/^\([A-Za-z]\)\s+/u, '').trim()
   // 整個字串是「(D)」→「D」
   s = s.replace(/^\(([A-Za-z])\)$/u, '$1').trim()
-  // 全形數字 → 半形（新增）
+  // 全形數字 → 半形
   s = s.replace(/[０-９]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
-  // 去除所有空白（新增：避免有無空白造成誤判）
+  // 全形逗號 → 半形（比對用，不分語言領域）
+  s = s.replace(/，/gu, ',')
+  // 去除所有空白（避免有無空白造成誤判）
   s = s.replace(/\s+/gu, '')
   return s
 }
