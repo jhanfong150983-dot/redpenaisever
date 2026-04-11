@@ -429,6 +429,8 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox 
 
 const CHECKBOX_EQUIVALENT_TYPES = new Set(['single_check', 'multi_check', 'multi_choice', 'multi_check_other'])
 const CHECKBOX_FOCUSED_READ_TYPES = new Set(['single_check', 'multi_check', 'multi_choice', 'multi_check_other'])
+// 位置型勾選題：答案是順序數字（①③ / 第一個 / (1)），統一顯示為純數字（1,3）
+const POSITION_SELECTION_TYPES = new Set(['single_check', 'multi_check', 'multi_check_other'])
 
 const CHINESE_NUMBER_MAP = {
   一: 1,
@@ -621,6 +623,38 @@ function normalizeSelectionAnswerForComparison(raw, questionType) {
 
   const uniqueTokens = Array.from(new Set(tokens))
   return sortSelectionTokens(uniqueTokens).join(',')
+}
+
+// 位置型勾選題顯示正規化：①,③ / 第一個,第三個 / (1),(3) → 1,3
+function normalizeSelectionAnswerToDisplay(raw, questionType) {
+  const normalized = normalizeSelectionAnswerForComparison(raw, questionType)
+  if (!normalized) return raw
+  return normalized.split(',').map(t => {
+    const m = t.match(/^#(\d+)$/)
+    if (m) return m[1]
+    const atM = t.match(/^@([A-Z]+)$/)
+    if (atM) return atM[1]
+    return t
+  }).join(',')
+}
+
+// 對 readAnswerResult 中的位置型勾選題套用顯示正規化
+function applySelectionDisplayNormalization(readResult, answerKey) {
+  const typeByQuestionId = new Map(
+    (answerKey?.questions ?? []).map(q => [
+      ensureString(q?.id, '').trim(),
+      ensureString(q?.questionCategory, '').trim()
+    ])
+  )
+  return {
+    ...readResult,
+    answers: readResult.answers.map(answer => {
+      if (answer.status !== 'read') return answer
+      const qType = typeByQuestionId.get(answer.questionId)
+      if (!POSITION_SELECTION_TYPES.has(qType)) return answer
+      return { ...answer, studentAnswerRaw: normalizeSelectionAnswerToDisplay(answer.studentAnswerRaw, qType) }
+    })
+  }
 }
 
 // A5 輔助：字元集 Jaccard 相似度（0..1）
@@ -3565,13 +3599,19 @@ export async function runStagedGradingPhaseA({
   }
 
   // Normalize read1 with mismatch flags & unordered remap
-  let readAnswerResult = normalizeReadAnswerResult(readAnswerParsed, questionIds, mismatchIds)
+  let readAnswerResult = applySelectionDisplayNormalization(
+    normalizeReadAnswerResult(readAnswerParsed, questionIds, mismatchIds),
+    answerKey
+  )
   const unorderedRemap = remapReadAnswersForUnorderedGroups(answerKey, readAnswerResult)
   readAnswerResult = { ...readAnswerResult, answers: unorderedRemap.answers }
 
   // Normalize read2 (independent — no mismatch flags)
   const reReadAnswerResult = reReadAnswerParsed
-    ? normalizeReadAnswerResult(reReadAnswerParsed, questionIds, new Set())
+    ? applySelectionDisplayNormalization(
+        normalizeReadAnswerResult(reReadAnswerParsed, questionIds, new Set()),
+        answerKey
+      )
     : { answers: [] }
 
   // ── A5: CONSISTENCY CHECK (pure logic, no crops yet) ─────────────────────
