@@ -3132,12 +3132,13 @@ export async function runStagedGradingPhaseA({
   }
 
   // ── A3(AI1) + A4(AI2): Detail read (crop-only) + Global read (full image) IN PARALLEL ──
-  const globalReadPrompt = buildGlobalReadPrompt(classifyResult, {
-    excludeQuestionIds: focusedCheckboxQuestionIds
-  })
+  // AI2 reads ALL questions from the full image including checkbox types (single_check/multi_check/multi_check_other).
+  // Checkmarks are visually clear enough for global-image reading; no exclusion needed.
+  // AI1 still uses focused checkbox crops for its own read.
+  const globalReadPrompt = buildGlobalReadPrompt(classifyResult)
   logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', {
     ai1CropCount: ai1IncludeIds.length,
-    ai2excludedCheckboxCount: focusedCheckboxQuestionIds.length
+    ai2excludedCheckboxCount: 0
   })
   const parallelCalls = [
     // AI1: detail read (crop images only, no full submission image)
