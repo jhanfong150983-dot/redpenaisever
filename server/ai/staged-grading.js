@@ -1907,23 +1907,23 @@ Your task: detect which option(s) the student marked in this cropped question.
 You do NOT know the correct answer and must NOT guess.
 
 Output token rule (strict):
-1) If options have printed labels (e.g. ①②③, A B C, 甲乙丙, 1 2 3), output ONLY those label tokens.
-2) If options are unlabeled checkboxes, output "第X個" (e.g. 第一個, 第二個) by reading order.
-3) ${isSingle ? 'Output ONE token only.' : 'Output comma-separated tokens with NO spaces, preserving reading order.'}
+1) Output the 1-based position number of each checked box (count in reading order: left-to-right, top-to-bottom). Output "1" for 1st box, "2" for 2nd, etc.
+2) NEVER output label text, printed symbols, or option content — only position numbers.
+3) ${isSingle ? 'Output ONE number only.' : 'Output comma-separated numbers with NO spaces, preserving reading order.'}
 4) If no visible mark for this question -> status="blank", studentAnswerRaw="未作答".
 5) If marks are too unclear to determine -> status="unreadable", studentAnswerRaw="無法辨識".
 ${isMultiOther ? `6) OPEN-ENDED LAST OPTION: The LAST checkbox option is an open-ended "其他：___" field.
-   - If the student checked the last option AND wrote text next to it, append the text after the token using "：" separator.
-   - Example: if last option is (4) and student wrote "轉為文風鼎盛的社會", output token as "(4)：轉為文風鼎盛的社會".
-   - If checked but no text written, output the token normally (e.g. "(4)").
-   - If not checked, omit the token entirely (same as other options).` : ''}
+   - If the student checked the last option AND wrote text next to it, append the text after the number using "：" separator.
+   - Example: if last option is the 4th box and student wrote "轉為文風鼎盛的社會", output as "4：轉為文風鼎盛的社會".
+   - If checked but no text written, output the number normally (e.g. "4").
+   - If not checked, omit it entirely (same as other options).` : ''}
 
 Return strict JSON:
 {
   "answers": [
     {
       "questionId": "${questionId}",
-      "studentAnswerRaw": "${isSingle ? '第二個' : isMultiOther ? '第一個,第三個,第四個：學生手寫的其他內容' : '第一個,第三個'}",
+      "studentAnswerRaw": "${isSingle ? '2' : isMultiOther ? '1,3,4：學生手寫的其他內容' : '1,3'}",
       "status": "read|blank|unreadable"
     }
   ]
@@ -1965,6 +1965,9 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     .map((q) => q.questionId)
   const multiCheckIds = visibleQuestions
     .filter((q) => q.questionType === 'multi_check')
+    .map((q) => q.questionId)
+  const multiCheckOtherIds = visibleQuestions
+    .filter((q) => q.questionType === 'multi_check_other')
     .map((q) => q.questionId)
   const multiChoiceIds = visibleQuestions
     .filter((q) => q.questionType === 'multi_choice')
@@ -2023,13 +2026,16 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     ? `\nMAP-DRAW (connect_dots) questions: ${JSON.stringify(mapDrawConnectIds)}`
     : ''
   const multiCheckNote = multiCheckIds.length > 0
-    ? `\nMULTI-CHECK questions (多選勾選, output comma-separated tokens; use printed labels if any, else 第X個 in reading order): ${JSON.stringify(multiCheckIds)}`
+    ? `\nMULTI-CHECK questions (多選勾選, output comma-separated 1-based position numbers of checked boxes — NEVER output label text or option content): ${JSON.stringify(multiCheckIds)}`
+    : ''
+  const multiCheckOtherNote = multiCheckOtherIds.length > 0
+    ? `\nMULTI-CHECK-OTHER questions (多選勾選含其他, same as MULTI-CHECK but LAST option is open-ended "其他：___"; output 1-based position numbers; if 其他 is checked AND has written text, append "：[text]" to that number, e.g. "1,3,4：轉為文風鼎盛的社會"): ${JSON.stringify(multiCheckOtherIds)}`
     : ''
   const multiChoiceNote = multiChoiceIds.length > 0
     ? `\nMULTI-CHOICE questions (多選選擇, output comma-separated option symbols written inside parentheses; e.g. "A,C" or "①,③"): ${JSON.stringify(multiChoiceIds)}`
     : ''
   const singleCheckNote = singleCheckIds.length > 0
-    ? `\nSINGLE-CHECK questions (單選勾選, output ONE token for the single marked checkbox; use printed label if any, else 第X個 in reading order): ${JSON.stringify(singleCheckIds)}`
+    ? `\nSINGLE-CHECK questions (單選勾選, output the 1-based position number of the checked box: "1" for the 1st box, "2" for the 2nd, etc. — NEVER output label text or option content): ${JSON.stringify(singleCheckIds)}`
     : ''
   const fillBlankNote = fillBlankIds.length > 0
     ? `\nFILL-BLANK questions (填空題, output comma-separated blank contents): ${JSON.stringify(fillBlankIds)}`
@@ -2058,7 +2064,7 @@ You are an answer reader. Your only job is to report what the student physically
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}
+${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
@@ -2146,25 +2152,24 @@ TRUE-FALSE (questions in TRUE-FALSE list):
 - Do NOT append any explanatory text (e.g. output "○" NOT "○ 正確").
 
 SINGLE-CHECK (questions in SINGLE-CHECK list):
-- Answer space is CHECKBOX □ — output ONE token for the single marked box.
-- STRICT FORMAT PRIORITY — apply the FIRST matching rule:
-  1. Printed labels exist (①②③ / A B C / 甲乙丙): use ONLY the label character. Template: "<label>". Example: "①" or "A"
-  2. Unlabeled boxes: use "第X個" where X is 一/二/三/四/五/六/七/八/九/十, counting in reading order.
-- ABSOLUTELY FORBIDDEN: outputting the text/sentence content of the option box.
+- Answer space is CHECKBOX □ — output the 1-based position number of the single checked box.
+- Count boxes in reading order (left-to-right, top-to-bottom). Output "1" for the 1st box, "2" for the 2nd, etc.
+- ABSOLUTELY FORBIDDEN: outputting any label text, printed symbols, or option content. Output ONLY the number.
 - If no box is marked → blank.
 
 MULTI-CHECK (questions in MULTI-CHECK list):
-- Answer space is CHECKBOXES □ — output comma-separated selected options with NO spaces.
-- STRICT FORMAT PRIORITY — apply the FIRST matching rule, never mix rules across options:
-  1. Printed labels exist (①②③ / A B C / 1 2 3 / 甲乙丙): use ONLY the label character(s). Template: "<label>". Example: "①,③" or "A,C"
-  2. Unlabeled boxes (no printed label next to any box): use ONLY "第X個" where X is 一/二/三/四/五/六/七/八/九/十.
-     Count in READING ORDER:
-     - Vertical Chinese text with boxes in a HORIZONTAL ROW (each box above a vertical-text column): count RIGHT-to-LEFT. Rightmost box = 第一個.
-     - Horizontal text with boxes in a HORIZONTAL ROW: count LEFT-to-RIGHT. Leftmost box = 第一個.
-     - Boxes in a VERTICAL COLUMN: count TOP-to-BOTTOM. Topmost box = 第一個.
-     Template: "第X個". Example: "第一個,第三個"
-- LOCK THE RULE: identify the rule (1 or 2) from the FIRST option you see. Apply that SAME rule to ALL selected options in this question. Never switch rules mid-answer.
-- ABSOLUTELY FORBIDDEN: outputting the text/sentence content of the option box. FORBIDDEN: mixing label tokens with 第X個 tokens. FORBIDDEN: plain digits (1,2,3) for unlabeled boxes — always use 第X個.
+- Answer space is CHECKBOXES □ — output comma-separated 1-based position numbers of the checked boxes, in reading order (left-to-right, top-to-bottom).
+- Output "1" for the 1st box, "2" for the 2nd, etc. Example: "1,3" if 1st and 3rd are checked.
+- ABSOLUTELY FORBIDDEN: outputting any label text, printed symbols, or option content. Output ONLY numbers.
+
+MULTI-CHECK-OTHER (questions in MULTI-CHECK-OTHER list):
+- Same as MULTI-CHECK but the LAST checkbox option is an open-ended "其他：___" field.
+- For regular options: output their 1-based position number normally.
+- For the 其他 (last) option:
+  - If checked AND student wrote text next to it: output "N：[text]" (e.g. "4：轉為文風鼎盛的社會").
+  - If checked but no text written: output just the number (e.g. "4").
+  - If not checked: omit it.
+- Example: "1,3,4：轉為文風鼎盛的社會" (1st and 3rd regular options + 其他 with text).
 
 FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
@@ -2401,14 +2406,14 @@ function buildArbiterPrompt(arbiterItems) {
       : ''
     return `題目 ${item.questionId}（類型：${item.questionType}）
   AI1（細節）讀到：${ai1Str}（status: ${item.ai1Status}）
-  AI2（全局）讀到：${ai2Str}（status: ${item.ai2Status}）
+  AI2（全局派）讀到：${ai2Str}（status: ${item.ai2Status}）
   ${modeNote}${uncertainNote}
   [此題裁切圖緊接在下方]`
   }).join('\n\n---\n\n')
 
   return `你是學生答案讀取的鑑識人員（AI3）。
-你將看到：(1) 完整作業圖（第一張圖），(2) 每道題的 answerBbox 裁切圖（每題一張，附標籤），
-以及 AI1（細節派，只看裁切圖）和 AI2（全局派，只看全圖）各自的讀取結果。
+你將看到：完整作業圖（第一張圖）以及每道題的 answerBbox 裁切圖（每題一張，附標籤），
+以及 AI1（細節派）和 AI2（全局派）各自以裁切圖讀取的結果。
 
 你的任務是【鑑識】，不是裁決、不是重新讀取：
 - 針對每道題，評估圖像對 AI1 和 AI2 各自讀取值的支持程度。
@@ -3166,10 +3171,11 @@ export async function runStagedGradingPhaseA({
   // ── A3(AI1) + A4(AI2): Detail read + Global read IN PARALLEL ──
   // AI2 now uses the same per-question crops as AI1 (instead of the full image).
   // Reason: full-image reading caused AI2 to read the wrong row in table-style
-  // calculation questions (positional confusion in dense answer grids).
-  // Per-question crops anchor AI2 to the correct answer cell while still
-  // allowing independent transcription with its own reading style/prompt.
-  const globalReadPrompt = buildGlobalReadPrompt(classifyResult)
+  // calculation questions (positional confusion in dense answer grids), and also
+  // caused single_check to output option text characters instead of symbol labels.
+  // Per-question crops anchor AI2 to the correct answer cell; using buildDetailReadPrompt
+  // ensures the prompt correctly describes the crop-based format.
+  const globalReadPrompt = buildDetailReadPrompt(classifyResult)
   const ai2Parts = [{ text: globalReadPrompt }]
   for (const q of classifyAligned) {
     if (!q.visible) continue
@@ -3337,7 +3343,7 @@ export async function runStagedGradingPhaseA({
       if (result) overrideMap.set(result.questionId, result.answer)
     }
     if (overrideMap.size > 0) {
-      // Override AI1 (detail read) only — AI2 keeps its independent full-image reading so AI3 can arbitrate
+      // Override AI1 (detail read) only — AI2 keeps its independent crop reading so AI3 can arbitrate
       readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
       logStaged(pipelineRunId, 'basic', 'bracket-read overrides applied (AI1 only)', { count: overrideMap.size })
     }
@@ -3387,7 +3393,7 @@ export async function runStagedGradingPhaseA({
     }
 
     if (overrideMap.size > 0) {
-      // Override AI1 (detail read) only — AI2 keeps its independent full-image reading so AI3 can arbitrate
+      // Override AI1 (detail read) only — AI2 keeps its independent crop reading so AI3 can arbitrate
       readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
       logStaged(pipelineRunId, 'basic', 'focused-checkbox-read overrides applied (AI1 only)', {
         count: overrideMap.size
@@ -3423,7 +3429,7 @@ export async function runStagedGradingPhaseA({
           }
         }
         if (fallbackOverrideMap.size > 0) {
-          // Override AI1 only — AI2 keeps full-image reading for AI3 arbitration
+          // Override AI1 only — AI2 keeps its independent crop reading for AI3 arbitration
           readAnswerParsed = applyAnswerOverrides(readAnswerParsed, fallbackOverrideMap)
           for (const qId of fallbackOverrideMap.keys()) {
             overrideMap.set(qId, fallbackOverrideMap.get(qId))
@@ -3443,7 +3449,7 @@ export async function runStagedGradingPhaseA({
             { questionId, status: 'unreadable', studentAnswerRaw: '無法辨識' }
           ])
         )
-        // Force unreadable on AI1 only — AI2 may still have a valid full-image read for AI3 to use
+        // Force unreadable on AI1 only — AI2 may still have a valid crop read for AI3 to use
         readAnswerParsed = applyAnswerOverrides(readAnswerParsed, unresolvedOverrideMap)
         logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read unresolved forced-unreadable (AI1 only)', {
           count: unresolvedIds.length,
