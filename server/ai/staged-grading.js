@@ -698,9 +698,13 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
   const a2 = normalizeAnswerForComparison(ensureString(read2?.studentAnswerRaw, ''))
   if (a1 === a2) return 'stable'
-  // 長答案：字元相似度 ≥ 0.75 視為一致（應對語意相近但措辭不同的描述）
-  const longer = Math.max(a1.length, a2.length)
-  if (longer >= 6 && computeStringSimilarity(a1, a2) >= 0.75) return 'stable'
+  // 計算題：不使用字元集相似度（不同算式可能共享相同數字/符號，Jaccard 會誤判）
+  // 只做精確比對和後段的包含關係檢查
+  if (questionType !== 'calculation') {
+    // 長答案：字元相似度 ≥ 0.75 視為一致（應對語意相近但措辭不同的描述）
+    const longer = Math.max(a1.length, a2.length)
+    if (longer >= 6 && computeStringSimilarity(a1, a2) >= 0.75) return 'stable'
+  }
   // 包含關係檢查：短答案是長答案的 substring，且長度差距明顯
   // → 長答案很可能多讀了鄰近題目或標籤文字，短答案才是真正的作答內容
   // 無最短長度限制，涵蓋如「英國人」(3字) 或「360」等短答案
@@ -3159,17 +3163,27 @@ export async function runStagedGradingPhaseA({
     ai1Parts.push({ inlineData: crop })
   }
 
-  // ── A3(AI1) + A4(AI2): Detail read (crop-only) + Global read (full image) IN PARALLEL ──
-  // AI2 reads ALL questions from the full image including checkbox types (single_check/multi_check/multi_check_other).
-  // Checkmarks are visually clear enough for global-image reading; no exclusion needed.
-  // AI1 still uses focused checkbox crops for its own read.
+  // ── A3(AI1) + A4(AI2): Detail read + Global read IN PARALLEL ──
+  // AI2 now uses the same per-question crops as AI1 (instead of the full image).
+  // Reason: full-image reading caused AI2 to read the wrong row in table-style
+  // calculation questions (positional confusion in dense answer grids).
+  // Per-question crops anchor AI2 to the correct answer cell while still
+  // allowing independent transcription with its own reading style/prompt.
   const globalReadPrompt = buildGlobalReadPrompt(classifyResult)
+  const ai2Parts = [{ text: globalReadPrompt }]
+  for (const q of classifyAligned) {
+    if (!q.visible) continue
+    const crop = allQuestionCropMap.get(q.questionId)
+    if (!crop) continue
+    ai2Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}）---` })
+    ai2Parts.push({ inlineData: crop })
+  }
   logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', {
     ai1CropCount: ai1IncludeIds.length,
-    ai2excludedCheckboxCount: 0
+    ai2CropCount: ai2Parts.filter((p) => p.inlineData).length
   })
   const parallelCalls = [
-    // AI1: detail read (crop images only, no full submission image)
+    // AI1: detail read (crop images only)
     executeStage({
       apiKey,
       model,
@@ -3179,7 +3193,7 @@ export async function runStagedGradingPhaseA({
       routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
       stageContents: [{ role: 'user', parts: ai1Parts }]
     }),
-    // AI2: global read (full image, same role as original ReRead)
+    // AI2: global read (same per-question crops as AI1, different prompt/reading style)
     executeStage({
       apiKey,
       model,
@@ -3187,7 +3201,7 @@ export async function runStagedGradingPhaseA({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-      stageContents: [{ role: 'user', parts: [{ text: globalReadPrompt }, ...submissionImageParts] }]
+      stageContents: [{ role: 'user', parts: ai2Parts }]
     })
   ]
   let finalAnswerOnlyIdx = -1
