@@ -492,6 +492,8 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/\p{Emoji_Presentation}/gu, '').trim()
   // 去除結尾方向箭頭
   s = s.replace(/[↗↘↙↖→←↑↓⬆⬇⬅➡]+$/u, '').trim()
+  // 數學推導箭號正規化（→ ⇒ → =>，用於計算題中段的推導符號，如 0.55 → 0.56）
+  s = s.replace(/[→⇒]/gu, '=>')
   // 去除開頭「(A) 文字」中的選項前綴（後面有空白+其他內容才移除）
   s = s.replace(/^\([A-Za-z]\)\s+/u, '').trim()
   // 整個字串是「(D)」→「D」
@@ -699,16 +701,33 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   // 長答案：字元相似度 ≥ 0.75 視為一致（應對語意相近但措辭不同的描述）
   const longer = Math.max(a1.length, a2.length)
   if (longer >= 6 && computeStringSimilarity(a1, a2) >= 0.75) return 'stable'
-  // 包含關係檢查：短答案字元幾乎全出現在長答案裡，且長度差距明顯
-  // → 長答案很可能多讀了題幹文字，短答案才是真正的作答內容
+  // 包含關係檢查：短答案是長答案的 substring，且長度差距明顯
+  // → 長答案很可能多讀了鄰近題目或標籤文字，短答案才是真正的作答內容
+  // 無最短長度限制，涵蓋如「英國人」(3字) 或「360」等短答案
   const [shorterA, longerA] = a1.length <= a2.length ? [a1, a2] : [a2, a1]
-  if (shorterA.length >= 6 && longerA.length >= shorterA.length * 1.3) {
-    const shorterChars = new Set([...shorterA])
-    const longerChars = new Set([...longerA])
-    const containment = [...shorterChars].filter((c) => longerChars.has(c)).length / shorterChars.size
-    if (containment >= 0.85) return 'stable'
+  if (shorterA.length > 0 && longerA.includes(shorterA) && longerA.length >= shorterA.length * 1.3) {
+    return 'stable'
   }
   return 'diff'
+}
+
+// 包含關係成立時，回傳應優先使用的原始答案（較短、較精確的那個）。
+// 若 AI1 已是較短的一方（預設即使用 AI1），回傳 null 不需覆寫。
+// 若 AI2 較短，回傳 AI2 的原始答案，供 Phase A 結果建構時覆寫 finalAnswer。
+function getContainmentPreferredRaw(read1, read2, questionType) {
+  if (CHECKBOX_EQUIVALENT_TYPES.has(questionType) || questionType === 'true_false') return null
+  const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
+  const a2 = normalizeAnswerForComparison(ensureString(read2?.studentAnswerRaw, ''))
+  if (!a1 || !a2 || a1 === a2) return null
+  const a1IsShorter = a1.length <= a2.length
+  const [shorterA, longerA] = a1IsShorter ? [a1, a2] : [a2, a1]
+  if (shorterA.length === 0) return null
+  if (!longerA.includes(shorterA)) return null
+  if (longerA.length < shorterA.length * 1.3) return null
+  // AI1 較短 → 預設用 AI1，無需覆寫
+  if (a1IsShorter) return null
+  // AI2 較短 → 回傳 AI2 原始答案
+  return ensureString(read2?.studentAnswerRaw, '') || null
 }
 
 // 將老師確認的 finalAnswers 陣列轉換為 readAnswerResult 格式（供 Accessor 使用）
@@ -3636,9 +3655,14 @@ export async function runStagedGradingPhaseA({
       read1 && read2
         ? computeConsistencyStatus(read1, read2, classifyRow?.questionType ?? 'other')
         : 'unstable'
+    // 包含關係時，若 AI2 較短，記錄應覆寫的答案（在最終結果建構時套用）
+    const containmentPreferredRaw = consistencyStatus === 'stable' && read1 && read2
+      ? getContainmentPreferredRaw(read1, read2, classifyRow?.questionType ?? 'other')
+      : null
     return {
       questionId,
       consistencyStatus,
+      containmentPreferredRaw,
       consistencyReason: undefined,
       questionType: classifyRow?.questionType ?? 'other',
       readAnswer1: {
@@ -3763,7 +3787,7 @@ export async function runStagedGradingPhaseA({
 
   // Build final questionResults with arbiterResult attached
   const questionResults = questionResultsRaw.map((qr) => {
-    const arbiterResult = arbiterByQuestionId.get(qr.questionId) ?? (() => {
+    let arbiterResult = arbiterByQuestionId.get(qr.questionId) ?? (() => {
       // Auto-determine for questions not processed by AI3
       const s1 = qr.readAnswer1.status
       const s2 = qr.readAnswer2.status
@@ -3778,6 +3802,10 @@ export async function runStagedGradingPhaseA({
         ? { arbiterStatus: 'arbitrated_agree', finalAnswer: qr.readAnswer1.studentAnswer }
         : { arbiterStatus: 'needs_review' }
     })()
+    // 包含關係覆寫：AI2 較短時，用 AI2 答案取代 AI1（更精確，避免多讀鄰近內容）
+    if (arbiterResult.arbiterStatus === 'arbitrated_agree' && qr.containmentPreferredRaw) {
+      arbiterResult = { ...arbiterResult, finalAnswer: qr.containmentPreferredRaw }
+    }
 
     // Attach crop image URL only for needs_review questions (for teacher review UI)
     const isNeedsReview = arbiterResult.arbiterStatus === 'needs_review'
