@@ -948,8 +948,15 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     // not student submission space; causes misalignment. Classify uses answer key reference image directly.
     // const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
     // if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
+    // anchorHint only helps for multi_fill and fill_blank sub-questions (3+ ID segments, e.g. "1-2-1").
+    // For single_choice / single_check / etc., the hint describes the answer key's circled option, which
+    // causes classify to narrow the bbox onto just that option text — shifting it upward.
+    const anchorHintUsefulTypes = new Set(['multi_fill', 'fill_blank'])
+    const isSubQuestion = questionId.split('-').length >= 3
     const akAnchorHint = ensureString(question?.anchorHint, '').trim()
-    if (akAnchorHint) spec.anchorHint = akAnchorHint
+    if (akAnchorHint && anchorHintUsefulTypes.has(expectedType) && (expectedType !== 'fill_blank' || isSubQuestion)) {
+      spec.anchorHint = akAnchorHint
+    }
     return spec
   })
 }
