@@ -1205,8 +1205,11 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
       : ensureString(row?.questionType, '').trim().toLowerCase() || 'other'
     let questionBbox = normalizeBboxRef(row?.questionBbox ?? row?.question_bbox)
     let answerBbox = normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox)
-    // readBbox: tight answer-only crop for fill_blank (excludes question stem)
-    const readBbox = questionType === 'fill_blank'
+    // readBbox: tight answer-only crop for fill_blank single-blank questions
+    // Sub-question fill_blank (3+ segments, e.g. "1-2-1") uses answerBbox directly — no readBbox needed
+    const isSubQuestionFillBlank = questionType === 'fill_blank' &&
+      questionId.split('-').length >= 3
+    const readBbox = (questionType === 'fill_blank' && !isSubQuestionFillBlank)
       ? normalizeBboxRef(row?.readBbox ?? row?.read_bbox) ?? null
       : null
 
@@ -1701,7 +1704,8 @@ Rules:
   - Include the question number, question stem text, AND the student's answer area all within the bbox.
   - For map_draw and diagram_draw: frame the entire diagram/map/grid area plus any visible question stem above it.
   - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer. If the calculation question has a table cell (student fills a value in a table) AND a work/formula area elsewhere on the page, the answerBbox must cover BOTH the table cell AND the work area — do NOT crop just the table cell alone.
-  - For fill_blank with multiple blanks: frame all blanks and the surrounding question text together for answerBbox. Additionally output readBbox: a TIGHT crop of ONLY the blank writing area(s), excluding the question stem text. readBbox is used by AI for reading — make it as tight as possible around the actual blank line(s) where the student writes.
+  - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must be a TIGHT crop of ONLY that single blank box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box. ORDERING RULE: assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). Do NOT re-order based on content — position is the only criterion. readBbox is NOT needed for sub-question fill_blank (answerBbox is already tight).
+  - For fill_blank with a single blank (questionId has 1–2 segments, e.g. "3", "1-2"): frame the blank and surrounding question text for answerBbox. Additionally output readBbox: a TIGHT crop of ONLY the blank writing area, excluding the question stem text.
   - For single_choice / multi_choice / single_check / multi_check / multi_check_other / true_false: still include question stem + answer area (no answer-only crop).
   - For multi_fill: each sub-question maps to ONE specific blank box in the diagram. answerBbox must be a TIGHT crop of ONLY that single box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box.
     ORDERING RULE: When multi_fill boxes have no printed question numbers, assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). The sub-question with the smallest id suffix (e.g. "2-1-1") MUST map to the topmost box; the next id ("2-1-2") to the next box below; and so on. Do NOT re-order based on visual importance or content — position is the only criterion.
