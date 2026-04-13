@@ -1692,7 +1692,9 @@ Rules:
 - Use only the allowed question IDs above.
 - For each questionId, questionType MUST exactly match Question Specs.
 - Never re-classify question type based on visual guess.
-- If ANSWER_KEY_REFERENCE image(s) are provided: the teacher's correct answers are typically written in red ink directly inside each answer area. Use the red handwritten text as a precise visual anchor to identify where each answer area is located on the worksheet. The student paper (STUDENT_SUBMISSION) has the same printed layout — locate the corresponding answer area at the same position and output its bbox.
+- If ANSWER_KEY_REFERENCE image(s) are provided, follow this two-step process for each question:
+  STEP 1 — Find the answer area on ANSWER_KEY_REFERENCE: The teacher's correct answers are written in red ink directly inside each answer area. Locate the red handwritten text for this question. That red text region is the answer area. Ignore any pre-printed example content (範例/例) — only red handwritten ink marks the real answer area.
+  STEP 2 — Map to STUDENT_SUBMISSION: The student paper has the same printed layout. Use the position found in Step 1 to locate the corresponding area on STUDENT_SUBMISSION. Output that region as answerBbox. The student will have written their answer in that same area.
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - bboxPolicy MUST follow Question Specs:
