@@ -899,8 +899,10 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       const groupId = resolveMatchingGroupId(question)
       if (groupId) spec.bboxGroupId = groupId
     }
-    const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
-    if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
+    // answerBboxHint disabled — hint coordinates are from answer key image space,
+    // not student submission space; causes misalignment. Classify uses answer key reference image directly.
+    // const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
+    // if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
     return spec
   })
 }
