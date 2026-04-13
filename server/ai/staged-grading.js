@@ -2553,9 +2553,12 @@ ${questionBlocks}
 function applyForensicDecision(forensic, ai1Answer, ai2Answer) {
   const mode = ensureString(forensic?.mode, '')
   if (mode === 'agree_review') {
-    if (forensic.agreementSupport === 'strong') {
+    if (forensic.agreementSupport === 'strong' || forensic.agreementSupport === 'weak') {
+      // strong: AI3 明確確認圖片支持此讀取結果
+      // weak: AI3 認為圖片稍微模糊，但兩個獨立 AI 讀出相同答案本身就是強證據，放行
       return { arbiterStatus: 'arbitrated_agree', finalAnswer: ai1Answer }
     }
+    // unsupported: AI3 認為圖片不支持此讀取 → 保留人工審查
     return { arbiterStatus: 'needs_review' }
   }
   if (mode === 'disagree_review') {
