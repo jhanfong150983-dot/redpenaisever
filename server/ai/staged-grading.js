@@ -1651,7 +1651,7 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
-function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = []) {
+function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answerKeyPageCount = 0) {
   const specs = Array.isArray(questionSpecs) ? questionSpecs : []
 
   // Page boundary section: injected when the submission image is composed of multiple merged photos
@@ -1669,11 +1669,15 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = []) {
       })()
     : ''
 
+  const imageReferenceSection = answerKeyPageCount > 0
+    ? `\nIMAGE ORDER:\n- Image 1${answerKeyPageCount > 1 ? `–${answerKeyPageCount}` : ''}: ANSWER_KEY_REFERENCE — the same worksheet with correct answers filled in. Use ONLY as a spatial reference to locate where each answer area is on the paper. Do NOT read answers from these images.\n- Image ${answerKeyPageCount + 1}: STUDENT_SUBMISSION — the student's paper. Locate bboxes and read student answers from this image only.\n`
+    : ''
+
   return `
 You are stage CLASSIFY.
 Task: identify which question IDs are visible on this student submission image, and locate each visible question's bbox.
 Do NOT infer question type. Question type is fixed by specs.
-
+${imageReferenceSection}
 Allowed question IDs:
 ${JSON.stringify(questionIds)}
 
@@ -1685,7 +1689,8 @@ Rules:
 - Use only the allowed question IDs above.
 - For each questionId, questionType MUST exactly match Question Specs.
 - Never re-classify question type based on visual guess.
-- If a spec includes answerBboxHint, use it as a starting reference for where the answer area is located on the student paper. Adjust based on actual visual inspection — the hint is approximate (derived from the answer sheet, not the student paper).
+- If ANSWER_KEY_REFERENCE image(s) are provided, use them to identify the exact position and shape of each answer area on the worksheet. The student paper (STUDENT_SUBMISSION) has the same printed layout — locate the corresponding answer area at the same position.
+- If a spec includes answerBboxHint, use it as an additional reference for where the answer area is located. Adjust based on actual visual inspection — the hint is approximate.
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - bboxPolicy MUST follow Question Specs:
@@ -3028,7 +3033,12 @@ export async function runStagedGradingPhaseA({
     return null
   }
   const submissionImageParts = [inlineImages[0]]
-  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length}`)
+  // 答案卷參考圖（用於 classify 定位）
+  const rawAnswerKeyImages = Array.isArray(internalContext?.answerKeyImages) ? internalContext.answerKeyImages : []
+  const answerKeyImageParts = rawAnswerKeyImages.map(img => ({
+    inlineData: { mimeType: img.mimeType || 'image/webp', data: img.data }
+  }))
+  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length}`)
 
   const stageResponses = []
   const stageWarnings = []
@@ -3040,7 +3050,7 @@ export async function runStagedGradingPhaseA({
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
   const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
-  const classifyPrompt = buildClassifyPrompt(questionIds, classifyQuestionSpecs, pageBreaks)
+  const classifyPrompt = buildClassifyPrompt(questionIds, classifyQuestionSpecs, pageBreaks, answerKeyImageParts.length)
   logStageStart(pipelineRunId, 'classify')
   const classifyResponse = await executeStage({
     apiKey,
@@ -3049,7 +3059,7 @@ export async function runStagedGradingPhaseA({
     timeoutMs: getRemainingBudget(),
     routeHint,
     routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-    stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...submissionImageParts] }]
+    stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...answerKeyImageParts, ...submissionImageParts] }]
   })
   logStageEnd(pipelineRunId, 'classify', classifyResponse)
   stageResponses.push(classifyResponse)

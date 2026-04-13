@@ -218,6 +218,30 @@ function maskUserId(userId) {
   return raw.length <= 8 ? raw : `${raw.slice(0, 4)}...${raw.slice(-4)}`
 }
 
+async function fetchAnswerSheetImagesForClassify(supabaseAdmin, userId, assignmentId) {
+  try {
+    const { data: assignment } = await supabaseAdmin
+      .from('assignments')
+      .select('id, owner_id')
+      .eq('id', assignmentId)
+      .maybeSingle()
+    if (!assignment || assignment.owner_id !== userId) return []
+
+    const images = []
+    for (let i = 0; i < 10; i++) {
+      const path = `answer-sheets/${assignmentId}/page-${i}.webp`
+      const { data, error } = await supabaseAdmin.storage.from('homework-images').download(path)
+      if (error || !data) break
+      const buffer = Buffer.from(await data.arrayBuffer())
+      images.push({ mimeType: 'image/webp', data: buffer.toString('base64') })
+    }
+    return images
+  } catch (err) {
+    console.warn('[AnswerSheet] fetchAnswerSheetImagesForClassify failed:', err?.message || err)
+    return []
+  }
+}
+
 async function resolveInkSession(supabaseAdmin, userId, inkSessionId) {
   if (!inkSessionId) return { ok: false, reason: 'no_session_id' }
 
@@ -478,6 +502,17 @@ export default async function handler(req, res) {
     return
   }
 
+  // ── 答案卷參考圖（Phase A classify 使用）────────────────────────────────────
+  let answerKeyImages = []
+  if (routeKey === 'grading.phase_a' && payload?.assignmentId) {
+    answerKeyImages = await fetchAnswerSheetImagesForClassify(
+      supabaseAdmin, user.id, payload.assignmentId
+    )
+    if (answerKeyImages.length > 0) {
+      console.log(`📷 [AnswerSheet] 載入 ${answerKeyImages.length} 頁答案卷圖 assignmentId=${payload.assignmentId}`)
+    }
+  }
+
   try {
     const pipelineResult = await runAiPipeline({
       apiKey,
@@ -495,7 +530,8 @@ export default async function handler(req, res) {
         requestId,
         enableStagedGrading,
         gradingMode,
-        readAnswerSplitMode
+        readAnswerSplitMode,
+        answerKeyImages
       }
     })
 
