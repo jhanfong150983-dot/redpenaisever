@@ -4110,50 +4110,83 @@ export async function runStagedGradingPhaseB({
   // 將老師確認的 finalAnswers 轉為 readAnswerResult 格式
   const finalReadAnswerResult = finalAnswersToReadAnswerResult(finalAnswers)
 
-  // ── B1: ACCESSOR ─────────────────────────────────────────────────────────
-  const accessorPrompt = buildAccessorPrompt(
-    answerKey,
-    finalReadAnswerResult,
-    internalContext?.domainHint
-  )
-  logStageStart(pipelineRunId, 'Accessor')
-  const accessorResponse = await executeStage({
-    apiKey,
-    model,
-    payload,
-    timeoutMs: getRemainingBudget(),
-    routeHint,
-    routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
-    stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }, ...submissionImageParts] }]
-  })
-  logStageEnd(pipelineRunId, 'Accessor', accessorResponse)
-  stageResponses.push(accessorResponse)
-  if (!accessorResponse.ok) {
-    return {
-      status: accessorResponse.status,
-      data: accessorResponse.data,
-      pipelineMeta: {
-        pipeline: STAGED_PIPELINE_NAME,
-        prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
-        modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
-        warnings: stageResponses.flatMap((r) => r.warnings || []),
-        metrics: { stage: 'accessor' }
+  // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
+  const allAnswerIds = finalReadAnswerResult.answers.map((a) => ensureString(a?.questionId).trim())
+  const page1AnswerIds = allAnswerIds.filter((id) => id.startsWith('1-'))
+  const page2AnswerIds = allAnswerIds.filter((id) => id.startsWith('2-'))
+  const otherAnswerIds = allAnswerIds.filter((id) => !id.startsWith('1-') && !id.startsWith('2-'))
+  const canSplitAccessor = page1AnswerIds.length > 0 && page2AnswerIds.length > 0
+
+  let accessorResult
+  if (canSplitAccessor) {
+    const p1Ids = new Set([...otherAnswerIds, ...page1AnswerIds])
+    const p2Ids = new Set(page2AnswerIds)
+    const filterAk = (ids) => ({ ...answerKey, questions: (answerKey?.questions || []).filter((q) => ids.has(ensureString(q?.id).trim())) })
+    const filterRar = (ids) => ({ answers: finalReadAnswerResult.answers.filter((a) => ids.has(ensureString(a?.questionId).trim())) })
+    const ak1 = filterAk(p1Ids); const ak2 = filterAk(p2Ids)
+    const rar1 = filterRar(p1Ids); const rar2 = filterRar(p2Ids)
+
+    logStageStart(pipelineRunId, 'Accessor-p1')
+    logStageStart(pipelineRunId, 'Accessor-p2')
+    const [accessorResp1, accessorResp2] = await Promise.all([
+      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak1, rar1, internalContext?.domainHint) }, ...submissionImageParts] }] }),
+      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak2, rar2, internalContext?.domainHint) }, ...submissionImageParts] }] })
+    ])
+    logStageEnd(pipelineRunId, 'Accessor-p1', accessorResp1)
+    logStageEnd(pipelineRunId, 'Accessor-p2', accessorResp2)
+    stageResponses.push(accessorResp1, accessorResp2)
+    if (!accessorResp1.ok || !accessorResp2.ok) {
+      const failed = !accessorResp1.ok ? accessorResp1 : accessorResp2
+      return {
+        status: failed.status,
+        data: failed.data,
+        pipelineMeta: {
+          pipeline: STAGED_PIPELINE_NAME,
+          prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
+          modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
+          warnings: stageResponses.flatMap((r) => r.warnings || []),
+          metrics: { stage: 'accessor' }
+        }
       }
     }
+    if (accessorResp1.warnings.length > 0) stageWarnings.push(...accessorResp1.warnings.map((w) => `[Accessor-p1] ${w}`))
+    if (accessorResp2.warnings.length > 0) stageWarnings.push(...accessorResp2.warnings.map((w) => `[Accessor-p2] ${w}`))
+    const parsed1 = parseCandidateJson(accessorResp1.data)
+    const parsed2 = parseCandidateJson(accessorResp2.data)
+    if (!parsed1 || typeof parsed1 !== 'object' || !parsed2 || typeof parsed2 !== 'object') {
+      throw new Error('PhaseB accessor parse failed (per-page)')
+    }
+    const result1 = normalizeAccessorResult(parsed1, ak1, rar1.answers, internalContext?.domainHint)
+    const result2 = normalizeAccessorResult(parsed2, ak2, rar2.answers, internalContext?.domainHint)
+    accessorResult = { scores: [...(result1.scores || []), ...(result2.scores || [])] }
+  } else {
+    const accessorPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint)
+    logStageStart(pipelineRunId, 'Accessor')
+    const accessorResponse = await executeStage({
+      apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+      routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+      stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }, ...submissionImageParts] }]
+    })
+    logStageEnd(pipelineRunId, 'Accessor', accessorResponse)
+    stageResponses.push(accessorResponse)
+    if (!accessorResponse.ok) {
+      return {
+        status: accessorResponse.status,
+        data: accessorResponse.data,
+        pipelineMeta: {
+          pipeline: STAGED_PIPELINE_NAME,
+          prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
+          modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
+          warnings: stageResponses.flatMap((r) => r.warnings || []),
+          metrics: { stage: 'accessor' }
+        }
+      }
+    }
+    if (accessorResponse.warnings.length > 0) stageWarnings.push(...accessorResponse.warnings.map((w) => `[Accessor] ${w}`))
+    const accessorParsed = parseCandidateJson(accessorResponse.data)
+    if (!accessorParsed || typeof accessorParsed !== 'object') throw new Error('PhaseB accessor parse failed')
+    accessorResult = normalizeAccessorResult(accessorParsed, answerKey, finalReadAnswerResult.answers, internalContext?.domainHint)
   }
-  if (accessorResponse.warnings.length > 0) {
-    stageWarnings.push(...accessorResponse.warnings.map((w) => `[Accessor] ${w}`))
-  }
-  const accessorParsed = parseCandidateJson(accessorResponse.data)
-  if (!accessorParsed || typeof accessorParsed !== 'object') {
-    throw new Error('PhaseB accessor parse failed')
-  }
-  const accessorResult = normalizeAccessorResult(
-    accessorParsed,
-    answerKey,
-    finalReadAnswerResult.answers,
-    internalContext?.domainHint
-  )
   const accessorScores = Array.isArray(accessorResult.scores) ? accessorResult.scores : []
   const explainQuestionIds = accessorScores
     .filter((s) => s?.isCorrect !== true || s?.needExplain === true)
@@ -4197,41 +4230,8 @@ export async function runStagedGradingPhaseB({
     logStaged(pipelineRunId, stagedLogLevel, 'skip stage=explain reason=no_wrong_questions')
   }
 
-  // ── B3: LOCATE (only wrong questions — for student correction preview) ──────
-  const wrongQuestionIds = accessorScores
-    .filter((s) => s?.isCorrect !== true)
-    .map((s) => ensureString(s?.questionId).trim())
-    .filter(Boolean)
-
-  let locateResult = { locatedQuestions: [] }
-  if (wrongQuestionIds.length > 0) {
-    const locatePrompt = buildLocatePrompt(wrongQuestionIds)
-    logStageStart(pipelineRunId, 'locate')
-    const locateResponse = await executeStage({
-      apiKey,
-      model,
-      payload,
-      timeoutMs: getRemainingBudget(),
-      routeHint,
-      routeKey: AI_ROUTE_KEYS.GRADING_LOCATE,
-      stageContents: [{ role: 'user', parts: [{ text: locatePrompt }, ...submissionImageParts] }]
-    })
-    logStageEnd(pipelineRunId, 'locate', locateResponse)
-    stageResponses.push(locateResponse)
-    if (locateResponse.ok) {
-      if (locateResponse.warnings.length > 0) {
-        stageWarnings.push(...locateResponse.warnings.map((w) => `[locate] ${w}`))
-      }
-      const locateParsed = parseCandidateJson(locateResponse.data)
-      if (locateParsed && typeof locateParsed === 'object') {
-        locateResult = normalizeLocateResult(locateParsed, wrongQuestionIds)
-      }
-    } else {
-      stageWarnings.push(`[locate] status=${locateResponse.status}`)
-    }
-  } else {
-    logStaged(pipelineRunId, stagedLogLevel, 'skip stage=locate reason=no_wrong_questions')
-  }
+  // B3: Locate removed — bbox from Phase A Classify is accurate enough
+  const locateResult = { locatedQuestions: [] }
 
   // 建立 consistencyById（從 phaseAResult，並注入 finalAnswerSource）
   const consistencyById = mapByQuestionId(phaseAResult.questionResults, (item) => item?.questionId)
