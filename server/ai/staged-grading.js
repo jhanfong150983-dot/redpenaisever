@@ -903,6 +903,8 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     // not student submission space; causes misalignment. Classify uses answer key reference image directly.
     // const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
     // if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
+    const akAnchorHint = ensureString(question?.anchorHint, '').trim()
+    if (akAnchorHint) spec.anchorHint = akAnchorHint
     return spec
   })
 }
@@ -1714,11 +1716,12 @@ Rules:
   - Include the question number, question stem text, AND the student's answer area all within the bbox.
   - For map_draw and diagram_draw: frame the entire diagram/map/grid area plus any visible question stem above it.
   - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer. If the calculation question has a table cell (student fills a value in a table) AND a work/formula area elsewhere on the page, the answerBbox must cover BOTH the table cell AND the work area — do NOT crop just the table cell alone.
-  - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must be a TIGHT crop of ONLY that single blank box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box. ORDERING RULE: assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). Do NOT re-order based on content — position is the only criterion. readBbox is NOT needed for sub-question fill_blank (answerBbox is already tight).
+  - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must be a TIGHT crop of ONLY that single blank box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box. ANCHOR RULE (takes priority): if the spec includes anchorHint, use it as the PRIMARY locator — find the blank cell described by that anchorHint text (e.g. "欄標題為「22」的格子" means look for the cell whose column header reads "22"). Only fall back to ORDERING RULE when no anchorHint is provided. ORDERING RULE (fallback only): assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). Do NOT re-order based on content — position is the only criterion. readBbox is NOT needed for sub-question fill_blank (answerBbox is already tight).
   - For fill_blank with a single blank (questionId has 1–2 segments, e.g. "3", "1-2"): frame the blank and surrounding question text for answerBbox. Additionally output readBbox: a TIGHT crop of ONLY the blank writing area, excluding the question stem text.
   - For single_choice / multi_choice / single_check / multi_check / multi_check_other / true_false: still include question stem + answer area (no answer-only crop).
   - For multi_fill: each sub-question maps to ONE specific blank box in the diagram. answerBbox must be a TIGHT crop of ONLY that single box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box.
-    ORDERING RULE: When multi_fill boxes have no printed question numbers, assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). The sub-question with the smallest id suffix (e.g. "2-1-1") MUST map to the topmost box; the next id ("2-1-2") to the next box below; and so on. Do NOT re-order based on visual importance or content — position is the only criterion.
+    ANCHOR RULE (takes priority): if the spec includes anchorHint, use it as the PRIMARY locator — find the blank box described by anchorHint text. Only fall back to ORDERING RULE when no anchorHint is provided.
+    ORDERING RULE (fallback only): When multi_fill boxes have no printed question numbers, assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). The sub-question with the smallest id suffix (e.g. "2-1-1") MUST map to the topmost box; the next id ("2-1-2") to the next box below; and so on. Do NOT re-order based on visual importance or content — position is the only criterion.
   - For matching(group_context): include the entire left column + right column + connecting lines of the whole group.
   - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
@@ -3064,6 +3067,11 @@ export async function runStagedGradingPhaseA({
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
   const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
+  // Log anchorHint specs so we can verify hints are correct before trusting them
+  const specsWithAnchor = classifyQuestionSpecs.filter((s) => s.anchorHint)
+  if (specsWithAnchor.length > 0) {
+    logStaged(pipelineRunId, 'basic', 'classify anchorHint specs', specsWithAnchor.map((s) => ({ id: s.questionId, anchorHint: s.anchorHint })))
+  }
   const classifyPrompt = buildClassifyPrompt(questionIds, classifyQuestionSpecs, pageBreaks, answerKeyImageParts.length)
   logStageStart(pipelineRunId, 'classify')
   const classifyResponse = await executeStage({
