@@ -549,6 +549,10 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/，/gu, ',')
   // 去除所有空白（避免有無空白造成誤判）
   s = s.replace(/\s+/gu, '')
+  // 去除題目標籤前綴（如「西遊記：360×45/180=90°」→「360×45/180=90°」）
+  // AI 有時會誤讀答案旁的欄位標題，將其作為答案的一部分
+  // 僅當冒號後接數字時才移除，避免誤刪答案本體
+  s = s.replace(/^[\p{Unified_Ideograph}]+[：:](?=\d)/u, '')
   return s
 }
 
