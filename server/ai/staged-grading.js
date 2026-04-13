@@ -899,9 +899,9 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       const groupId = resolveMatchingGroupId(question)
       if (groupId) spec.bboxGroupId = groupId
     }
-    // answerBboxHint: from answer key extraction, helps classify AI locate answer area on student paper
-    const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
-    if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
+    // answerBboxHint: temporarily disabled — answer key reference image now provides spatial context
+    // const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
+    // if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
     return spec
   })
 }
@@ -1693,7 +1693,6 @@ Rules:
 - For each questionId, questionType MUST exactly match Question Specs.
 - Never re-classify question type based on visual guess.
 - If ANSWER_KEY_REFERENCE image(s) are provided, use them to identify the exact position and shape of each answer area on the worksheet. The student paper (STUDENT_SUBMISSION) has the same printed layout — locate the corresponding answer area at the same position.
-- If a spec includes answerBboxHint, use it as an additional reference for where the answer area is located. Adjust based on actual visual inspection — the hint is approximate.
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - bboxPolicy MUST follow Question Specs:
