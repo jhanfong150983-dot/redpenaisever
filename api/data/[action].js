@@ -1389,6 +1389,18 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
       continue
     }
 
+    // Guard: if teacher has already recalled this student's correction (status='graded')
+    // and this is the same correction submission that was already processed, do NOT
+    // revert the state back to correction_required. This prevents the sync push/pull
+    // loop from overwriting the teacher's recall action.
+    if (
+      source === 'student_correction' &&
+      existingStatus === 'graded' &&
+      existingState?.current_submission_id === row.id
+    ) {
+      continue
+    }
+
     if (!isGraded) {
       let nextStatus = source === 'student_correction' ? 'correction_in_progress' : 'uploaded'
       let nextReason = undefined
