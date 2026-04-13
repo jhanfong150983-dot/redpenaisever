@@ -1692,7 +1692,7 @@ Rules:
 - Use only the allowed question IDs above.
 - For each questionId, questionType MUST exactly match Question Specs.
 - Never re-classify question type based on visual guess.
-- If ANSWER_KEY_REFERENCE image(s) are provided, use them to identify the exact position and shape of each answer area on the worksheet. The student paper (STUDENT_SUBMISSION) has the same printed layout — locate the corresponding answer area at the same position.
+- If ANSWER_KEY_REFERENCE image(s) are provided: the teacher's correct answers are typically written in red ink directly inside each answer area. Use the red handwritten text as a precise visual anchor to identify where each answer area is located on the worksheet. The student paper (STUDENT_SUBMISSION) has the same printed layout — locate the corresponding answer area at the same position and output its bbox.
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - bboxPolicy MUST follow Question Specs:
