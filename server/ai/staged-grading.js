@@ -1673,7 +1673,12 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
     : ''
 
   const imageReferenceSection = answerKeyPageCount > 0
-    ? `\nIMAGE ORDER:\n- Image 1${answerKeyPageCount > 1 ? `–${answerKeyPageCount}` : ''}: ANSWER_KEY_REFERENCE — the same worksheet with correct answers filled in. Use ONLY as a spatial reference to locate where each answer area is on the paper. Do NOT read answers from these images.\n- Image ${answerKeyPageCount + 1}: STUDENT_SUBMISSION — the student's paper. Locate bboxes and read student answers from this image only.\n`
+    ? (() => {
+        const refLines = Array.from({ length: answerKeyPageCount }, (_, i) =>
+          `- Image ${i + 1}: ANSWER_KEY_REFERENCE page ${i + 1} — question IDs with prefix "${i + 1}-" are on this page. Use ONLY as spatial reference (do NOT read answers from this image).`
+        ).join('\n')
+        return `\nIMAGE ORDER:\n${refLines}\n- Image ${answerKeyPageCount + 1}: STUDENT_SUBMISSION — the student's paper. Locate bboxes and read student answers from this image only.\n`
+      })()
     : ''
 
   return `
