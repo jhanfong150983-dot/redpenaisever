@@ -3106,6 +3106,18 @@ export async function runStagedGradingPhaseA({
     visibleCount: classifyAligned.filter((q) => q.visible).length,
     bboxCount: classifyAligned.filter((q) => q.answerBbox).length
   })
+  // Detailed bbox log for every visible question (helps debug wrong positioning)
+  logStaged(pipelineRunId, 'basic', 'classify bbox detail', classifyAligned
+    .filter((q) => q.visible)
+    .map((q) => ({
+      id: q.questionId,
+      type: q.questionType,
+      x: q.answerBbox ? +q.answerBbox.x.toFixed(3) : null,
+      y: q.answerBbox ? +q.answerBbox.y.toFixed(3) : null,
+      w: q.answerBbox ? +q.answerBbox.w.toFixed(3) : null,
+      h: q.answerBbox ? +q.answerBbox.h.toFixed(3) : null,
+    }))
+  )
   const multiFillBboxDebug = classifyAligned
     .filter((q) => q.visible && q.questionType === 'multi_fill')
     .map((q) => ({ questionId: q.questionId, answerBbox: q.answerBbox }))
