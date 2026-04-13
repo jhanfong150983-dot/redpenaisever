@@ -899,9 +899,8 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       const groupId = resolveMatchingGroupId(question)
       if (groupId) spec.bboxGroupId = groupId
     }
-    // answerBboxHint: temporarily disabled — answer key reference image now provides spatial context
-    // const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
-    // if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
+    const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
+    if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
     return spec
   })
 }
