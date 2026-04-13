@@ -3138,138 +3138,97 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, 'basic', 'classify anchorHint specs', specsWithAnchor.map((s) => ({ id: s.questionId, anchorHint: s.anchorHint })))
   }
 
-  // Per-page parallel classify: split submission into page 1 / page 2 and run two classify calls in parallel.
-  // Condition: questions span two pages (both "1-" and "2-" prefixes present) AND we have 2+ answer key images.
+  // Per-page parallel classify: two calls in parallel, each with half the questions.
+  // No answer key reference images — anchorHint handles fill_blank/multi_fill cell location.
+  // Both calls receive the FULL merged student image (no crop) to avoid aspect-ratio mismatch.
+  // pageBreaks hint in the prompt tells classify which y-range belongs to each page.
   const page1Ids = questionIds.filter((id) => id.startsWith('1-'))
   const page2Ids = questionIds.filter((id) => id.startsWith('2-'))
   const otherIds = questionIds.filter((id) => !id.startsWith('1-') && !id.startsWith('2-'))
-  const canSplitPerPage = page1Ids.length > 0 && page2Ids.length > 0 && answerKeyImageParts.length >= 2
+  const canSplitPerPage = page1Ids.length > 0 && page2Ids.length > 0
 
   logStageStart(pipelineRunId, 'classify')
 
   let classifyResult
 
   if (canSplitPerPage) {
-    // Split merged submission image into per-page crops
-    const submissionImg = submissionImageParts[0]?.inlineData
-    const splitYHint = pageBreaks.length > 0 ? pageBreaks[0] : 0.5
-    const splitResult = await splitSubmissionImageForClassify(submissionImg?.data, submissionImg?.mimeType, splitYHint)
+    const splitY = pageBreaks.length > 0 ? pageBreaks[0] : 0.5
+    logStaged(pipelineRunId, stagedLogLevel, 'classify per-page split', {
+      splitY,
+      page1IdCount: page1Ids.length + otherIds.length,
+      page2IdCount: page2Ids.length
+    })
 
-    if (splitResult) {
-      const { page1InlineData, page2InlineData, actualSplitY } = splitResult
-      logStaged(pipelineRunId, stagedLogLevel, 'classify per-page split', {
-        actualSplitY: +actualSplitY.toFixed(3),
-        page1IdCount: page1Ids.length + otherIds.length,
-        page2IdCount: page2Ids.length
-      })
+    const allPage1Ids = [...otherIds, ...page1Ids]
+    const page1Specs = classifyQuestionSpecs.filter((s) => allPage1Ids.includes(s.questionId))
+    const page2Specs = classifyQuestionSpecs.filter((s) => page2Ids.includes(s.questionId))
+    // Pass pageBreaks so each call knows its y-range; answerKeyPageCount=0 (no answer key images)
+    const page1Prompt = buildClassifyPrompt(allPage1Ids, page1Specs, [splitY], 0)
+    const page2Prompt = buildClassifyPrompt(page2Ids, page2Specs, [splitY], 0)
 
-      const allPage1Ids = [...otherIds, ...page1Ids]
-      const page1Specs = classifyQuestionSpecs.filter((s) => allPage1Ids.includes(s.questionId))
-      const page2Specs = classifyQuestionSpecs.filter((s) => page2Ids.includes(s.questionId))
-      const page1Prompt = buildClassifyPrompt(allPage1Ids, page1Specs, [], 1)
-      const page2Prompt = buildClassifyPrompt(page2Ids, page2Specs, [], 1)
-
-      const [classifyResp1, classifyResp2] = await Promise.all([
-        executeStage({
-          apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
-          routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-          stageContents: [{ role: 'user', parts: [{ text: page1Prompt }, answerKeyImageParts[0], { inlineData: page1InlineData }] }]
-        }),
-        executeStage({
-          apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
-          routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-          stageContents: [{ role: 'user', parts: [{ text: page2Prompt }, answerKeyImageParts[1], { inlineData: page2InlineData }] }]
-        })
-      ])
-
-      logStageEnd(pipelineRunId, 'classify-p1', classifyResp1)
-      logStageEnd(pipelineRunId, 'classify-p2', classifyResp2)
-      stageResponses.push(classifyResp1, classifyResp2)
-      if (classifyResp1.warnings.length > 0) stageWarnings.push(...classifyResp1.warnings.map((w) => `[classify-p1] ${w}`))
-      if (classifyResp2.warnings.length > 0) stageWarnings.push(...classifyResp2.warnings.map((w) => `[classify-p2] ${w}`))
-
-      if (!classifyResp1.ok || !classifyResp2.ok) {
-        const failedResp = !classifyResp1.ok ? classifyResp1 : classifyResp2
-        return {
-          status: failedResp.status,
-          data: failedResp.data,
-          pipelineMeta: {
-            pipeline: STAGED_PIPELINE_NAME,
-            prepareLatencyMs: failedResp.prepareLatencyMs,
-            modelLatencyMs: failedResp.modelLatencyMs,
-            warnings: failedResp.warnings,
-            metrics: { stage: 'classify' }
-          }
-        }
-      }
-
-      const parsed1 = parseCandidateJson(classifyResp1.data)
-      const parsed2 = parseCandidateJson(classifyResp2.data)
-      if (!parsed1 || !parsed2 || typeof parsed1 !== 'object' || typeof parsed2 !== 'object') {
-        throw new Error('PhaseA classify parse failed (per-page)')
-      }
-
-      // Normalize per-page results then remap bboxes to full-image coordinates
-      const norm1 = normalizeClassifyResult(parsed1, allPage1Ids)
-      const norm2 = normalizeClassifyResult(parsed2, page2Ids)
-      const remapBbox = (bbox, pageIdx) => remapBboxToFullImage(bbox, pageIdx, actualSplitY)
-
-      const remapped1 = norm1.alignedQuestions.map((q) => ({
-        ...q,
-        questionBbox: remapBbox(q.questionBbox, 0),
-        answerBbox: remapBbox(q.answerBbox, 0),
-        readBbox: remapBbox(q.readBbox, 0),
-        bracketBbox: remapBbox(q.bracketBbox, 0)
-      }))
-      const remapped2 = norm2.alignedQuestions.map((q) => ({
-        ...q,
-        questionBbox: remapBbox(q.questionBbox, 1),
-        answerBbox: remapBbox(q.answerBbox, 1),
-        readBbox: remapBbox(q.readBbox, 1),
-        bracketBbox: remapBbox(q.bracketBbox, 1)
-      }))
-
-      const byId = new Map([...remapped1, ...remapped2].map((q) => [q.questionId, q]))
-      const mergedAligned = questionIds.map((id) => byId.get(id) ?? { questionId: id, visible: false, questionType: 'fill_blank' })
-      const visibleCountMerged = mergedAligned.filter((q) => q.visible).length
-      const pixelBboxRejected = [...(norm1.pixelBboxRejected ?? []), ...(norm2.pixelBboxRejected ?? [])]
-
-      const mergedNormResult = {
-        alignedQuestions: mergedAligned,
-        coverage: questionIds.length === 0 ? 0 : visibleCountMerged / questionIds.length,
-        unmappedQuestionIds: [...norm1.unmappedQuestionIds, ...norm2.unmappedQuestionIds],
-        pixelBboxRejected
-      }
-      classifyResult = applyClassifyQuestionSpecs(mergedNormResult, classifyQuestionSpecs)
-    } else {
-      // Image split failed — fall back to single classify
-      logStaged(pipelineRunId, stagedLogLevel, 'classify per-page split failed, falling back to single classify')
-      const classifyPrompt = buildClassifyPrompt(questionIds, classifyQuestionSpecs, pageBreaks, answerKeyImageParts.length)
-      const classifyResponse = await executeStage({
+    const [classifyResp1, classifyResp2] = await Promise.all([
+      executeStage({
         apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-        stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...answerKeyImageParts, ...submissionImageParts] }]
+        stageContents: [{ role: 'user', parts: [{ text: page1Prompt }, ...submissionImageParts] }]
+      }),
+      executeStage({
+        apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+        stageContents: [{ role: 'user', parts: [{ text: page2Prompt }, ...submissionImageParts] }]
       })
-      logStageEnd(pipelineRunId, 'classify', classifyResponse)
-      stageResponses.push(classifyResponse)
-      if (!classifyResponse.ok) {
-        return {
-          status: classifyResponse.status, data: classifyResponse.data,
-          pipelineMeta: { pipeline: STAGED_PIPELINE_NAME, prepareLatencyMs: classifyResponse.prepareLatencyMs, modelLatencyMs: classifyResponse.modelLatencyMs, warnings: classifyResponse.warnings, metrics: { stage: 'classify' } }
+    ])
+
+    logStageEnd(pipelineRunId, 'classify-p1', classifyResp1)
+    logStageEnd(pipelineRunId, 'classify-p2', classifyResp2)
+    stageResponses.push(classifyResp1, classifyResp2)
+    if (classifyResp1.warnings.length > 0) stageWarnings.push(...classifyResp1.warnings.map((w) => `[classify-p1] ${w}`))
+    if (classifyResp2.warnings.length > 0) stageWarnings.push(...classifyResp2.warnings.map((w) => `[classify-p2] ${w}`))
+
+    if (!classifyResp1.ok || !classifyResp2.ok) {
+      const failedResp = !classifyResp1.ok ? classifyResp1 : classifyResp2
+      return {
+        status: failedResp.status,
+        data: failedResp.data,
+        pipelineMeta: {
+          pipeline: STAGED_PIPELINE_NAME,
+          prepareLatencyMs: failedResp.prepareLatencyMs,
+          modelLatencyMs: failedResp.modelLatencyMs,
+          warnings: failedResp.warnings,
+          metrics: { stage: 'classify' }
         }
       }
-      if (classifyResponse.warnings.length > 0) stageWarnings.push(...classifyResponse.warnings.map((w) => `[classify] ${w}`))
-      const classifyParsed = parseCandidateJson(classifyResponse.data)
-      if (!classifyParsed || typeof classifyParsed !== 'object') throw new Error('PhaseA classify parse failed')
-      classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, questionIds), classifyQuestionSpecs)
     }
+
+    const parsed1 = parseCandidateJson(classifyResp1.data)
+    const parsed2 = parseCandidateJson(classifyResp2.data)
+    if (!parsed1 || !parsed2 || typeof parsed1 !== 'object' || typeof parsed2 !== 'object') {
+      throw new Error('PhaseA classify parse failed (per-page)')
+    }
+
+    // No coordinate remapping needed — both calls used the full student image
+    const norm1 = normalizeClassifyResult(parsed1, allPage1Ids)
+    const norm2 = normalizeClassifyResult(parsed2, page2Ids)
+
+    const byId = new Map([...norm1.alignedQuestions, ...norm2.alignedQuestions].map((q) => [q.questionId, q]))
+    const mergedAligned = questionIds.map((id) => byId.get(id) ?? { questionId: id, visible: false, questionType: 'fill_blank' })
+    const visibleCountMerged = mergedAligned.filter((q) => q.visible).length
+    const pixelBboxRejected = [...(norm1.pixelBboxRejected ?? []), ...(norm2.pixelBboxRejected ?? [])]
+
+    const mergedNormResult = {
+      alignedQuestions: mergedAligned,
+      coverage: questionIds.length === 0 ? 0 : visibleCountMerged / questionIds.length,
+      unmappedQuestionIds: [...norm1.unmappedQuestionIds, ...norm2.unmappedQuestionIds],
+      pixelBboxRejected
+    }
+    classifyResult = applyClassifyQuestionSpecs(mergedNormResult, classifyQuestionSpecs)
   } else {
-    // Single classify (single page or insufficient answer key images)
-    const classifyPrompt = buildClassifyPrompt(questionIds, classifyQuestionSpecs, pageBreaks, answerKeyImageParts.length)
+    // Single classify (single page)
+    const classifyPrompt = buildClassifyPrompt(questionIds, classifyQuestionSpecs, pageBreaks, 0)
     const classifyResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-      stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...answerKeyImageParts, ...submissionImageParts] }]
+      stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...submissionImageParts] }]
     })
     logStageEnd(pipelineRunId, 'classify', classifyResponse)
     stageResponses.push(classifyResponse)
