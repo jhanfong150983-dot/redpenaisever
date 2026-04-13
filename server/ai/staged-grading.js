@@ -248,6 +248,8 @@ function normalizeBboxRef(value) {
   const h = toFiniteNumber(value.h)
   if ([x, y, w, h].some((item) => item === null)) return null
   if (w <= 0 || h <= 0) return null
+  // Reject absolute-pixel coordinates (classify occasionally outputs px instead of normalized 0-1)
+  if (x > 2 || y > 2 || w > 2 || h > 2) return null
   return { x, y, w, h }
 }
 
@@ -1157,7 +1159,20 @@ function normalizeClassifyResult(parsed, questionIds) {
   const visibleCount = alignedQuestions.filter((item) => item.visible).length
   const coverage = questionIds.length === 0 ? 0 : visibleCount / questionIds.length
 
-  return { alignedQuestions, coverage, unmappedQuestionIds }
+  // Detect questions whose bbox was rejected due to absolute-pixel coordinates
+  const pixelBboxRejected = alignedQuestions
+    .filter((q) => q.visible && !q.answerBbox)
+    .map((q) => {
+      const raw = byQuestionId.get(q.questionId)
+      const ab = raw?.answerBbox ?? raw?.answer_bbox
+      return ab && (ab.x > 2 || ab.y > 2 || ab.w > 2 || ab.h > 2) ? q.questionId : null
+    })
+    .filter(Boolean)
+  if (pixelBboxRejected.length > 0) {
+    console.warn('[classify] absolute-pixel bbox rejected (non-normalized), questions will be unread:', pixelBboxRejected)
+  }
+
+  return { alignedQuestions, coverage, unmappedQuestionIds, pixelBboxRejected }
 }
 
 function buildBboxUnion(bboxes) {
@@ -3113,7 +3128,8 @@ export async function runStagedGradingPhaseA({
   logStaged(pipelineRunId, stagedLogLevel, 'classify normalized-summary', {
     coverage: classifyResult.coverage,
     visibleCount: classifyAligned.filter((q) => q.visible).length,
-    bboxCount: classifyAligned.filter((q) => q.answerBbox).length
+    bboxCount: classifyAligned.filter((q) => q.answerBbox).length,
+    ...(classifyResult.pixelBboxRejected?.length > 0 && { pixelBboxRejected: classifyResult.pixelBboxRejected })
   })
   // Detailed bbox log for every visible question (helps debug wrong positioning)
   logStaged(pipelineRunId, 'basic', 'classify bbox detail', classifyAligned
