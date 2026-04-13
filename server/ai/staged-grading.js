@@ -1608,10 +1608,15 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
     if (score < 0) score = 0
     if (score > maxScore) score = maxScore
 
+    // Hard override: blank/unreadable always score=0 regardless of model output
+    if (readStatus === 'blank' || readStatus === 'unreadable') score = 0
+
     const isCorrect =
-      typeof row?.isCorrect === 'boolean'
-        ? row.isCorrect
-        : maxScore > 0 && score >= maxScore
+      (readStatus === 'blank' || readStatus === 'unreadable')
+        ? false
+        : typeof row?.isCorrect === 'boolean'
+          ? row.isCorrect
+          : maxScore > 0 && score >= maxScore
 
     const matchType = ensureString(row?.matchType, '').trim() || (readStatus || 'unreadable')
     const scoringReason = ensureString(row?.scoringReason, '').trim()
