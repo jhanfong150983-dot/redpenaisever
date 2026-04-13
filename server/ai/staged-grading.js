@@ -710,6 +710,23 @@ function applySelectionDisplayNormalization(readResult, answerKey) {
   }
 }
 
+// diagram_draw 專用比對：提取「標籤:數值」對，排序後比對，忽略描述語句差異
+// 例：「香蕉 23%」「西瓜 25%」→ "西瓜:25|香蕉:23|..."
+// 需要單位（% ° 份 票 人 度）以避免誤匹配分數分子（如「1/6 90份」中的「1」）
+function normalizeDiagramDrawForComparison(raw) {
+  const s = ensureString(raw, '')
+  const pairs = []
+  // 中文標籤 1-8 字 或 拉丁字母 2-20 字，後接空白+整數+單位
+  const re = /([\u4e00-\u9fff\u3400-\u4dbf\uF900-\uFAFF]{1,8}|[A-Za-z]{2,20})\s+(\d+)[°%份票人度]/gu
+  let m
+  while ((m = re.exec(s)) !== null) {
+    const val = parseInt(m[2], 10)
+    if (val > 0) pairs.push(`${m[1]}:${val}`)
+  }
+  if (pairs.length < 2) return null
+  return [...new Set(pairs)].sort().join('|')
+}
+
 // A5 輔助：字元集 Jaccard 相似度（0..1）
 function computeStringSimilarity(a, b) {
   if (a === b) return 1
@@ -742,6 +759,16 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
     const t1 = normalizeTrueFalseAnswer(ensureString(read1?.studentAnswerRaw, ''))
     const t2 = normalizeTrueFalseAnswer(ensureString(read2?.studentAnswerRaw, ''))
     if (t1 && t2) return t1 === t2 ? 'stable' : 'diff'
+  }
+
+  // diagram_draw（圓形圖/塗色題）：提取標籤-數值對比對，忽略描述用字差異
+  // 例：AI1「分為四個區域，標記為香蕉23%...」vs AI2「分為四個區塊，標註香蕉23%...」→ stable
+  if (questionType === 'diagram_draw') {
+    const p1 = normalizeDiagramDrawForComparison(read1?.studentAnswerRaw)
+    const p2 = normalizeDiagramDrawForComparison(read2?.studentAnswerRaw)
+    if (p1 !== null && p2 !== null) {
+      return p1 === p2 ? 'stable' : 'diff'
+    }
   }
 
   const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
