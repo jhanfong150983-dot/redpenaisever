@@ -118,7 +118,9 @@ Rules:
   - For multi_choice / multi_check / multi_check_other / single_check: frame all printed answer tokens and their option rows.
   - For multi_fill: each sub-question maps to ONE specific printed value in the diagram. answerBbox must be a TIGHT crop of ONLY that single value — do NOT include neighboring sub-question values. Sub-question bboxes MUST NOT overlap each other.
     ORDERING RULE: assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary).
-  - For word_problem / calculation / short_answer: frame the reference answer or scoring rubric text below the question stem.
+  - For word_problem: frame the ENTIRE student answer work area — from the FIRST formula/calculation line all the way down to the LAST "答：" or "A：" line. Do NOT crop only the "答：" line; all calculation steps must be included.
+  - For calculation: frame the ENTIRE calculation work area — all formula lines and the final numeric result. Include all 橫式 and 直式 steps.
+  - For short_answer: frame the reference answer or scoring rubric text below the question stem.
   - For matching (group_context): frame the entire left column + right column + connecting lines of the whole group.
   - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
