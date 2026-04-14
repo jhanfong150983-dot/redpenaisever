@@ -710,21 +710,28 @@ function applySelectionDisplayNormalization(readResult, answerKey) {
   }
 }
 
-// diagram_draw 專用比對：提取「標籤:數值」對，排序後比對，忽略描述語句差異
-// 例：「香蕉 23%」「西瓜 25%」→ "西瓜:25|香蕉:23|..."
-// 需要單位（% ° 份 票 人 度）以避免誤匹配分數分子（如「1/6 90份」中的「1」）
+// diagram_draw 專用比對：提取所有數值（整數、分數、帶單位）排序後比對
+// 設計：只比較數值集合，忽略描述語序與措辭差異
+// 例：AI1「80° tomato juice, 60° Carrot」vs AI2「60° Carrot, 80° tomato」→ 同樣 "60|80" → stable
+// 分數轉 permille（×1000）避免浮點問題：1/6 → 167, 2/9 → 222
 function normalizeDiagramDrawForComparison(raw) {
   const s = ensureString(raw, '')
-  const pairs = []
-  // 中文標籤 1-8 字 或 拉丁字母 2-20 字，後接空白+整數+單位
-  const re = /([\u4e00-\u9fff\u3400-\u4dbf\uF900-\uFAFF]{1,8}|[A-Za-z]{2,20})\s+(\d+)[°%份票人度]/gu
+  const nums = new Set()
+  // Step 1: 分數（如 1/6、2/9）→ permille 整數，同時從字串中移除避免後續重複擷取
+  const noFrac = s.replace(/(\d+)\/(\d+)/g, (_, n, d) => {
+    const dInt = parseInt(d, 10)
+    if (dInt > 0) nums.add(Math.round(parseInt(n, 10) / dInt * 1000))
+    return ''
+  })
+  // Step 2: 帶單位整數（° % 份 票 人 度）
+  const reUnit = /(\d+)\s*[°%份票人度]/gu
   let m
-  while ((m = re.exec(s)) !== null) {
-    const val = parseInt(m[2], 10)
-    if (val > 0) pairs.push(`${m[1]}:${val}`)
-  }
-  if (pairs.length < 2) return null
-  return [...new Set(pairs)].sort().join('|')
+  while ((m = reUnit.exec(noFrac)) !== null) nums.add(parseInt(m[1], 10))
+  // Step 3: 2 位以上獨立整數（涵蓋 mL、km 等未列舉單位）
+  const reInt = /(?<!\d)(\d{2,})(?!\d)/gu
+  while ((m = reInt.exec(noFrac)) !== null) nums.add(parseInt(m[1], 10))
+  if (nums.size < 2) return null
+  return [...nums].sort((a, b) => a - b).join('|')
 }
 
 // A5 輔助：字元集 Jaccard 相似度（0..1）
