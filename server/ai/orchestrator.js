@@ -144,7 +144,10 @@ async function locateAnswerKeyBboxes(questions, inlineImages, apiKey, model) {
 
   const byPage = new Map()
   for (const q of locatableQ) {
-    const pageIdx = typeof q.pageIndex === 'number' ? q.pageIndex : 0
+    // pageIndex 未設時，從 ID 首段（1-based）推算（例：2-2-1 → pageIdx=1）
+    const pageIdx = typeof q.pageIndex === 'number'
+      ? q.pageIndex
+      : Math.max(0, (parseInt(String(q.id ?? '').split('-')[0], 10) || 1) - 1)
     if (!byPage.has(pageIdx)) byPage.set(pageIdx, [])
     byPage.get(pageIdx).push(q)
   }
@@ -197,7 +200,10 @@ async function postProcessAnswerKeyWithCrops(pipelineResult, contents, apiKey, m
     // Prefer locate bbox (more accurate), fall back to extract bbox
     const bbox = locatedBboxMap.get(q.id) ?? q.answerBbox ?? null
     if (!bbox) return q
-    const pageIdx = typeof q.pageIndex === 'number' ? q.pageIndex : 0
+    // pageIndex 未設時，從 ID 首段（1-based）推算（例：2-2-1 → pageIdx=1）
+    const pageIdx = typeof q.pageIndex === 'number'
+      ? q.pageIndex
+      : Math.max(0, (parseInt(String(q.id ?? '').split('-')[0], 10) || 1) - 1)
     const img = inlineImages[Math.min(pageIdx, inlineImages.length - 1)]
     if (!img) return q
     const cropUrl = await cropAnswerKeyBbox(img.data, img.mimeType, bbox)
