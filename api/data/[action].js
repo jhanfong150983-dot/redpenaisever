@@ -2582,6 +2582,8 @@ async function handleSync(req, res) {
         assignmentsResult,
         submissionsResult,
         foldersResult,
+        gradebookCustomColumnsResult,
+        gradebookCustomScoresResult,
         deletedResult
       ] = await Promise.all([
         supabaseDb.from('classrooms').select('*').eq('owner_id', ownerId),
@@ -2592,6 +2594,8 @@ async function handleSync(req, res) {
           .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result')
           .eq('owner_id', ownerId),
         supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
+        supabaseDb.from('gradebook_custom_columns').select('*').eq('owner_id', ownerId),
+        supabaseDb.from('gradebook_custom_scores').select('*').eq('owner_id', ownerId),
         supabaseDb
           .from('deleted_records')
           .select('table_name, record_id, deleted_at')
@@ -2612,6 +2616,12 @@ async function handleSync(req, res) {
       }
       if (foldersResult.error) {
         throw new Error(foldersResult.error.message)
+      }
+      if (gradebookCustomColumnsResult.error) {
+        throw new Error(gradebookCustomColumnsResult.error.message)
+      }
+      if (gradebookCustomScoresResult.error) {
+        throw new Error(gradebookCustomScoresResult.error.message)
       }
       if (deletedResult.error) {
         throw new Error(deletedResult.error.message)
@@ -2688,14 +2698,18 @@ async function handleSync(req, res) {
         students: [],
         assignments: [],
         submissions: [],
-        folders: []
+        folders: [],
+        gradebook_custom_columns: [],
+        gradebook_custom_scores: []
       }
       const deletedSets = {
         classrooms: new Set(),
         students: new Set(),
         assignments: new Set(),
         submissions: new Set(),
-        folders: new Set()
+        folders: new Set(),
+        gradebook_custom_columns: new Set(),
+        gradebook_custom_scores: new Set()
       }
 
       for (const row of deletedResult.data || []) {
@@ -2762,6 +2776,7 @@ async function handleSync(req, res) {
             domain: row.domain ?? undefined,
             folder: row.folder ?? undefined,
             scoringMode: normalizeScoringMode(row.scoring_mode) ?? undefined,
+            gradeWeightPercent: toNumber(row.grade_weight_percent) ?? undefined,
             priorWeightTypes: row.prior_weight_types ?? undefined,
             answerKey: row.answer_key ?? undefined,
             conceptTags: row.concept_tags ?? undefined,
@@ -2772,6 +2787,11 @@ async function handleSync(req, res) {
       const validAssignmentIds = new Set((assignmentsResult.data || [])
         .filter((r) => validClassroomIds.has(r.classroom_id))
         .map((r) => r.id)
+      )
+      const validStudentIds = new Set(
+        (studentsResult.data || [])
+          .filter((r) => validClassroomIds.has(r.classroom_id))
+          .map((r) => r.id)
       )
 
       // 孤立 submissions（assignment 不存在）：從回應中移除並清理 Supabase
@@ -2853,12 +2873,99 @@ async function handleSync(req, res) {
           })
         )
 
+      const orphanedGradebookCustomColumnIds = (gradebookCustomColumnsResult.data || [])
+        .filter((row) => !validClassroomIds.has(row.classroom_id))
+        .map((row) => row.id)
+
+      if (orphanedGradebookCustomColumnIds.length > 0) {
+        await supabaseDb
+          .from('gradebook_custom_columns')
+          .delete()
+          .in('id', orphanedGradebookCustomColumnIds)
+          .eq('owner_id', ownerId)
+        for (const id of orphanedGradebookCustomColumnIds) {
+          if (!deletedSets.gradebook_custom_columns.has(id)) {
+            deleted.gradebook_custom_columns.push({ id, deletedAt: Date.now() })
+            deletedSets.gradebook_custom_columns.add(id)
+          }
+        }
+      }
+
+      const gradebookCustomColumns = (gradebookCustomColumnsResult.data || [])
+        .filter(
+          (row) =>
+            validClassroomIds.has(row.classroom_id) &&
+            !orphanedGradebookCustomColumnIds.includes(row.id)
+        )
+        .map((row) =>
+          compactObject({
+            id: row.id,
+            classroomId: row.classroom_id,
+            name: row.name,
+            weightPercent: toNumber(row.weight_percent) ?? 0,
+            sortOrder: clampInteger(row.sort_order, -999999, 999999, 0),
+            updatedAt: toMillis(row.updated_at) ?? undefined
+          })
+        )
+
+      const validGradebookCustomColumnIds = new Set(
+        gradebookCustomColumns.map((row) => row.id)
+      )
+
+      const orphanedGradebookCustomScoreIds = (gradebookCustomScoresResult.data || [])
+        .filter(
+          (row) =>
+            !validClassroomIds.has(row.classroom_id) ||
+            !validStudentIds.has(row.student_id) ||
+            !validGradebookCustomColumnIds.has(row.column_id)
+        )
+        .map((row) => row.id)
+
+      if (orphanedGradebookCustomScoreIds.length > 0) {
+        await supabaseDb
+          .from('gradebook_custom_scores')
+          .delete()
+          .in('id', orphanedGradebookCustomScoreIds)
+          .eq('owner_id', ownerId)
+        for (const id of orphanedGradebookCustomScoreIds) {
+          if (!deletedSets.gradebook_custom_scores.has(id)) {
+            deleted.gradebook_custom_scores.push({ id, deletedAt: Date.now() })
+            deletedSets.gradebook_custom_scores.add(id)
+          }
+        }
+      }
+
+      const gradebookCustomScores = (gradebookCustomScoresResult.data || [])
+        .filter(
+          (row) =>
+            validClassroomIds.has(row.classroom_id) &&
+            validStudentIds.has(row.student_id) &&
+            validGradebookCustomColumnIds.has(row.column_id) &&
+            !orphanedGradebookCustomScoreIds.includes(row.id)
+        )
+        .map((row) =>
+          compactObject({
+            id: row.id,
+            classroomId: row.classroom_id,
+            columnId: row.column_id,
+            studentId: row.student_id,
+            score: row.score === null ? null : toNumber(row.score) ?? null,
+            updatedAt: toMillis(row.updated_at) ?? undefined
+          })
+        )
+
       res.status(200).json({
         classrooms: classrooms.filter((row) => !deletedSets.classrooms.has(row.id)),
         students: students.filter((row) => !deletedSets.students.has(row.id)),
         assignments: assignments.filter((row) => !deletedSets.assignments.has(row.id)),
         submissions: submissions.filter((row) => !deletedSets.submissions.has(row.id)),
         folders: folders.filter((row) => !deletedSets.folders.has(row.id)),
+        gradebookCustomColumns: gradebookCustomColumns.filter(
+          (row) => !deletedSets.gradebook_custom_columns.has(row.id)
+        ),
+        gradebookCustomScores: gradebookCustomScores.filter(
+          (row) => !deletedSets.gradebook_custom_scores.has(row.id)
+        ),
         deleted,
         ...(assignmentTags ? { assignmentTags } : {})
       })
@@ -2882,10 +2989,18 @@ async function handleSync(req, res) {
     const assignments = Array.isArray(body.assignments) ? body.assignments : []
     const submissions = Array.isArray(body.submissions) ? body.submissions : []
     const folders = Array.isArray(body.folders) ? body.folders : []
+    const gradebookCustomColumns = Array.isArray(body.gradebookCustomColumns)
+      ? body.gradebookCustomColumns
+      : []
+    const gradebookCustomScores = Array.isArray(body.gradebookCustomScores)
+      ? body.gradebookCustomScores
+      : []
     const deletedPayload =
       body.deleted && typeof body.deleted === 'object' ? body.deleted : {}
     
-    console.log(`📥 [API] sync classrooms=${classrooms.length} students=${students.length} assignments=${assignments.length} submissions=${submissions.length} folders=${folders.length}`)
+    console.log(
+      `📥 [API] sync classrooms=${classrooms.length} students=${students.length} assignments=${assignments.length} submissions=${submissions.length} folders=${folders.length} customColumns=${gradebookCustomColumns.length} customScores=${gradebookCustomScores.length}`
+    )
 
     const nowIso = new Date().toISOString()
 
@@ -3050,6 +3165,8 @@ async function handleSync(req, res) {
 
       // 先刪子資料，避免 assignment/student 已刪後仍回寫 assignment_student_state 觸發 FK
       await applyDeletes('submissions', deletedPayload.submissions)
+      await applyDeletes('gradebook_custom_scores', deletedPayload.gradebook_custom_scores)
+      await applyDeletes('gradebook_custom_columns', deletedPayload.gradebook_custom_columns)
       await applyDeletes('assignments', deletedPayload.assignments)
       await applyDeletes('students', deletedPayload.students)
       await applyDeletes('classrooms', deletedPayload.classrooms)
@@ -3149,6 +3266,9 @@ async function handleSync(req, res) {
             domain: a.domain ?? undefined,
             folder: a.folder,
             scoring_mode: scoringMode,
+            grade_weight_percent: toNumber(
+              a.gradeWeightPercent ?? a.grade_weight_percent
+            ) ?? undefined,
             prior_weight_types: a.priorWeightTypes ?? undefined,
             answer_key: a.answerKey ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
@@ -3168,6 +3288,62 @@ async function handleSync(req, res) {
           throw new Error(result.error.message)
         }
         console.log(`✅ [後端 Sync] 成功寫入 ${assignmentRows.length} 個作業`)
+      }
+
+      const gradebookCustomColumnRows = await buildUpsertRows(
+        'gradebook_custom_columns',
+        gradebookCustomColumns.filter((c) => c?.id && (c?.classroomId || c?.classroom_id)),
+        (c) =>
+          compactObject({
+            id: c.id,
+            classroom_id: c.classroomId ?? c.classroom_id,
+            name:
+              typeof c.name === 'string' && c.name.trim() ? c.name.trim() : '自訂欄位',
+            weight_percent: toNumber(c.weightPercent ?? c.weight_percent) ?? 0,
+            sort_order: clampInteger(c.sortOrder ?? c.sort_order, -999999, 999999, 0),
+            owner_id: user.id,
+            updated_at: toIsoTimestamp(c.updatedAt ?? c.updated_at) ?? nowIso
+          })
+      )
+
+      if (gradebookCustomColumnRows.length > 0) {
+        const result = await supabaseDb
+          .from('gradebook_custom_columns')
+          .upsert(gradebookCustomColumnRows, { onConflict: 'id' })
+        if (result.error) throw new Error(result.error.message)
+      }
+
+      const gradebookCustomScoreRows = await buildUpsertRows(
+        'gradebook_custom_scores',
+        gradebookCustomScores.filter(
+          (s) =>
+            s?.id &&
+            (s?.classroomId || s?.classroom_id) &&
+            (s?.columnId || s?.column_id) &&
+            (s?.studentId || s?.student_id)
+        ),
+        (s) => {
+          const parsedScore =
+            s.score === null || s.score === undefined
+              ? null
+              : toNumber(s.score) ?? null
+          return compactObject({
+            id: s.id,
+            classroom_id: s.classroomId ?? s.classroom_id,
+            column_id: s.columnId ?? s.column_id,
+            student_id: s.studentId ?? s.student_id,
+            score: parsedScore,
+            owner_id: user.id,
+            updated_at: toIsoTimestamp(s.updatedAt ?? s.updated_at) ?? nowIso
+          })
+        }
+      )
+
+      if (gradebookCustomScoreRows.length > 0) {
+        const result = await supabaseDb
+          .from('gradebook_custom_scores')
+          .upsert(gradebookCustomScoreRows, { onConflict: 'id' })
+        if (result.error) throw new Error(result.error.message)
       }
 
       const incomingSubmissions = submissions.filter(
