@@ -2591,7 +2591,7 @@ async function handleSync(req, res) {
         supabaseDb.from('assignments').select('*').eq('owner_id', ownerId),
         supabaseDb
           .from('submissions')
-          .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result')
+          .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result')
           .eq('owner_id', ownerId),
         supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
         supabaseDb.from('gradebook_custom_columns').select('*').eq('owner_id', ownerId),
@@ -2830,6 +2830,8 @@ async function handleSync(req, res) {
           thumbUrl: row.thumb_url ?? row.thumbnail_url ?? undefined,
           createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
           score: row.score ?? undefined,
+          aiScore: row.ai_score ?? undefined,
+          scoreSource: row.score_source ?? undefined,
           feedback: row.feedback ?? undefined,
           mistakesCount: Array.isArray(row.grading_result?.mistakes) && row.grading_result.mistakes.length > 0
             ? row.grading_result.mistakes.length
@@ -3484,6 +3486,8 @@ async function handleSync(req, res) {
             actor_user_id: s.actorUserId ?? s.actor_user_id ?? undefined,
             created_at: createdAt ?? undefined,
             score: toNumber(s.score) ?? undefined,
+            ai_score: toNumber(s.aiScore ?? s.ai_score) ?? undefined,
+            score_source: (s.scoreSource ?? s.score_source) || undefined,
             feedback: s.feedback ?? undefined,
             grading_result: s.gradingResult ?? undefined,
             graded_at: Number.isFinite(incomingGradedAt) ? incomingGradedAt : undefined,
