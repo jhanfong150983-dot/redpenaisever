@@ -3228,7 +3228,14 @@ function buildFinalGradingResult({
         const norm = (s) => s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-').toLowerCase()
         const normRef = norm(refAnswer)
         const normStu = norm(studentAns)
-        const programMatch = normRef === normStu || isNumericEqual(normRef, normStu)
+        // 1. 直接比對 → 2. 數值等值 → 3. 從學生答案提取最終答案再比（處理 bbox 多讀計算草稿的情況）
+        let programMatch = normRef === normStu || isNumericEqual(normRef, normStu)
+        if (!programMatch) {
+          const extracted = extractFinalAnswerFromCalc(studentAns)
+          if (extracted) {
+            programMatch = norm(extracted) === normRef || isNumericEqual(norm(extracted), normRef)
+          }
+        }
         if (programMatch !== row.isCorrect) {
           const prevCorrect = row.isCorrect
           row.isCorrect = programMatch
