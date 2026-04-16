@@ -4034,16 +4034,28 @@ export async function runStagedGradingPhaseA({
       if (s1 === 'unreadable' && s2 === 'unreadable') return false
       return true
     })
-    .map((qr) => ({
-      questionId: qr.questionId,
-      questionType: qr.questionType,
-      ai1Answer: qr.readAnswer1.studentAnswer,
-      ai1Status: qr.readAnswer1.status,
-      ai2Answer: qr.readAnswer2.studentAnswer,
-      ai2Status: qr.readAnswer2.status,
-      agreementStatus: qr.consistencyStatus === 'stable' ? 'agree' : 'disagree',
-      disagreementReason: qr.consistencyReason === 'uncertain_chars' ? 'uncertain_chars' : undefined
-    }))
+    .map((qr) => {
+      const isCalcType = qr.questionType === 'calculation' || qr.questionType === 'word_problem'
+      const useFinalAnswerOnly = isCalcType && qr.consistencyStatus === 'stable'
+      // calculation/word_problem stable：傳提取後的最終答案給 AI3，避免步驟格式差異
+      // 導致 AI3 看到兩段不同文字卻被標為 agree 而混淆；完整文字仍保留給 accessor
+      const ai1Answer = useFinalAnswerOnly
+        ? (extractFinalAnswerFromCalc(qr.readAnswer1.studentAnswer) ?? qr.readAnswer1.studentAnswer)
+        : qr.readAnswer1.studentAnswer
+      const ai2Answer = useFinalAnswerOnly
+        ? (extractFinalAnswerFromCalc(qr.readAnswer2.studentAnswer) ?? qr.readAnswer2.studentAnswer)
+        : qr.readAnswer2.studentAnswer
+      return {
+        questionId: qr.questionId,
+        questionType: qr.questionType,
+        ai1Answer,
+        ai1Status: qr.readAnswer1.status,
+        ai2Answer,
+        ai2Status: qr.readAnswer2.status,
+        agreementStatus: qr.consistencyStatus === 'stable' ? 'agree' : 'disagree',
+        disagreementReason: qr.consistencyReason === 'uncertain_chars' ? 'uncertain_chars' : undefined
+      }
+    })
 
   const arbiterByQuestionId = new Map()
   if (arbiterItems.length > 0) {
