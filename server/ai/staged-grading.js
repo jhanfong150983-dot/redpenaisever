@@ -3206,21 +3206,28 @@ function buildFinalGradingResult({
     }
 
     // ── 程式化覆核：word_problem / calculation 最終答案數值比對 ──
-    // 標準答案和學生答案都提取最終數值，若都提取成功且不相等 → 強制 isCorrect=false
-    if (
-      (qCategory === 'word_problem' || qCategory === 'calculation') &&
-      row.isCorrect === true
-    ) {
+    if (qCategory === 'word_problem' || qCategory === 'calculation') {
       const refText = ensureString(question?.referenceAnswer || question?.answer, '')
       const refFinal = extractFinalAnswerFromCalc(refText)
       const stuFinal = extractFinalAnswerFromCalc(studentAns)
-      if (refFinal && stuFinal && refFinal !== stuFinal) {
-        row.isCorrect = false
-        row.score = 0
-        row.needExplain = true
-        row.reason = `最終答案不符（程式比對覆核：學生 "${stuFinal}" ≠ 標準 "${refFinal}"）`
-        row.confidence = 100
-        console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" true→false`)
+      if (refFinal && stuFinal) {
+        if (refFinal === stuFinal && row.isCorrect === false) {
+          // 反向覆核：accessor 說錯但最終答案相等 → 給滿分（AI 很可能漏讀計算過程）
+          row.isCorrect = true
+          row.score = toFiniteNumber(question?.maxScore) ?? row.maxScore
+          row.needExplain = false
+          row.reason = `答案正確（程式比對覆核）`
+          row.confidence = 100
+          console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" false→true (full marks)`)
+        } else if (refFinal !== stuFinal && row.isCorrect === true) {
+          // 正向覆核：accessor 說對但最終答案不相等 → 強制錯誤
+          row.isCorrect = false
+          row.score = 0
+          row.needExplain = true
+          row.reason = `最終答案不符（程式比對覆核：學生 "${stuFinal}" ≠ 標準 "${refFinal}"）`
+          row.confidence = 100
+          console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" true→false`)
+        }
       }
     }
 
