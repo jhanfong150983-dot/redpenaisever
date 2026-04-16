@@ -795,6 +795,43 @@ function extractFinalAnswerFromCalc(raw) {
 }
 
 /**
+ * 數值等值比對：支援分數（3/10 vs 108/360）、小數（0.5 vs 1/2）、百分比（50% vs 0.5）。
+ * 去除尾部非數字單位（cm², cc, min 等）後比較數值。
+ * 只在兩邊都能解析為數值時回傳 true/false，否則 false。
+ */
+function isNumericEqual(a, b) {
+  if (!a || !b) return false
+  // 去除尾部單位文字（保留數字、分數、小數、百分比、負號）
+  const stripUnit = (s) => s.replace(/[a-zA-Z²³°]+$/u, '').replace(/[^\d./%\-]/g, '')
+  const sa = stripUnit(a)
+  const sb = stripUnit(b)
+  if (!sa || !sb) return false
+
+  const toNumber = (s) => {
+    // 百分比：50% → 0.5
+    if (s.endsWith('%')) {
+      const v = parseFloat(s)
+      return isFinite(v) ? v / 100 : null
+    }
+    // 分數：3/10, 108/360
+    const fracMatch = s.match(/^(-?\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/)
+    if (fracMatch) {
+      const d = parseFloat(fracMatch[2])
+      return d !== 0 ? parseFloat(fracMatch[1]) / d : null
+    }
+    // 純數字 / 小數
+    const v = parseFloat(s)
+    return isFinite(v) ? v : null
+  }
+
+  const na = toNumber(sa)
+  const nb = toNumber(sb)
+  if (na === null || nb === null) return false
+  // 容差比對（避免浮點精度問題）
+  return Math.abs(na - nb) < 1e-9
+}
+
+/**
  * 最終答案正規化（消除排版差異，僅用於比對）：
  * - 統一減號/破折號變體
  * - 去除空白、括號包裝、結尾標點
@@ -3191,7 +3228,7 @@ function buildFinalGradingResult({
         const norm = (s) => s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-').toLowerCase()
         const normRef = norm(refAnswer)
         const normStu = norm(studentAns)
-        const programMatch = normRef === normStu
+        const programMatch = normRef === normStu || isNumericEqual(normRef, normStu)
         if (programMatch !== row.isCorrect) {
           const prevCorrect = row.isCorrect
           row.isCorrect = programMatch
@@ -3211,7 +3248,8 @@ function buildFinalGradingResult({
       const refFinal = extractFinalAnswerFromCalc(refText)
       const stuFinal = extractFinalAnswerFromCalc(studentAns)
       if (refFinal && stuFinal) {
-        if (refFinal === stuFinal && row.isCorrect === false) {
+        const finalMatch = refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)
+        if (finalMatch && row.isCorrect === false) {
           // 反向覆核：accessor 說錯但最終答案相等 → 給滿分（AI 很可能漏讀計算過程）
           row.isCorrect = true
           row.score = toFiniteNumber(question?.maxScore) ?? row.maxScore
@@ -3219,7 +3257,7 @@ function buildFinalGradingResult({
           row.reason = `答案正確（程式比對覆核）`
           row.confidence = 100
           console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" false→true (full marks)`)
-        } else if (refFinal !== stuFinal && row.isCorrect === true) {
+        } else if (!finalMatch && row.isCorrect === true) {
           // 正向覆核：accessor 說對但最終答案不相等 → 強制錯誤
           row.isCorrect = false
           row.score = 0
