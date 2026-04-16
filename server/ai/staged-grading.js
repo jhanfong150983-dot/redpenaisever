@@ -744,6 +744,57 @@ function computeStringSimilarity(a, b) {
   return union === 0 ? 1 : intersection / union
 }
 
+/**
+ * 從計算題/應用題文字中提取最終答案（僅用於一致性比對）。
+ * 優先順序：
+ *   1. 「答：xxx」/「答:xxx」/「A:xxx」前綴（跨行）
+ *   2. 第一段（逗號或換行前）的 「=(xxx)」括號內答案
+ *   3. 整段文字中最後一個「=」之後的值
+ */
+function extractFinalAnswerFromCalc(raw) {
+  const s = String(raw ?? '').trim()
+  if (!s) return null
+
+  // 1. 答：xxx / 答:xxx / A:xxx（允許答案本身外面有括號，如「答：(1/4 m)」）
+  const answerPrefixMatch = s.match(/(?:答[：:：]|[Aa][：:])\s*[（(]?\s*(.+?)\s*[）)]?[\s。，,]*$/u)
+  if (answerPrefixMatch) {
+    const val = normalizeMathAnswer(answerPrefixMatch[1])
+    if (val) return val
+  }
+
+  // 2. 第一段含括號答案：「equation=(answer), 步驟...」或「equation=(answer)\n步驟...」
+  const firstSegment = s.split(/[,，\n]/)[0]
+  const bracketMatch = firstSegment.match(/=\s*[（(]\s*([^）)，,\n]+?)\s*[）)]/u)
+  if (bracketMatch) {
+    const val = normalizeMathAnswer(bracketMatch[1])
+    if (val) return val
+  }
+
+  // 3. 整段文字最後一個「=」之後的值（最後一步計算結果）
+  const lastEqIdx = s.lastIndexOf('=')
+  if (lastEqIdx >= 0) {
+    const val = normalizeMathAnswer(s.slice(lastEqIdx + 1))
+    if (val) return val
+  }
+
+  return null
+}
+
+/**
+ * 最終答案正規化（消除排版差異，僅用於比對）：
+ * - 統一減號/破折號變體
+ * - 去除空白、括號包裝、結尾標點
+ */
+function normalizeMathAnswer(s) {
+  if (!s) return ''
+  return s
+    .replace(/[−–—]/gu, '-')         // 減號異體字統一
+    .replace(/\s+/gu, '')             // 去除空白
+    .replace(/^[（(](.*)[）)]$/u, '$1') // 剝除外層括號：(3/4) → 3/4
+    .replace(/[。.，,]+$/u, '')        // 去除結尾標點
+    .toLowerCase()
+}
+
 // A5: 純邏輯一致性比對（不耗 token）
 // read1/read2: { status: 'read'|'blank'|'unreadable', studentAnswerRaw: string }
 function computeConsistencyStatus(read1, read2, questionType = 'other') {
@@ -752,6 +803,16 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   // 兩者皆空白 → 一致（都沒作答）
   if (s1 === 'blank' && s2 === 'blank') return 'stable'
   if (s1 !== 'read' || s2 !== 'read') return 'unstable'
+
+  // calculation / word_problem：只比最終答案，忽略步驟排版差異
+  if (questionType === 'calculation' || questionType === 'word_problem') {
+    const fa1 = extractFinalAnswerFromCalc(read1?.studentAnswerRaw)
+    const fa2 = extractFinalAnswerFromCalc(read2?.studentAnswerRaw)
+    if (fa1 && fa2) {
+      return fa1 === fa2 ? 'stable' : 'diff'
+    }
+    // 若提取失敗（fa1 或 fa2 為 null），繼續走既有邏輯
+  }
 
   if (CHECKBOX_EQUIVALENT_TYPES.has(questionType)) {
     const c1 = normalizeSelectionAnswerForComparison(read1?.studentAnswerRaw, questionType)
