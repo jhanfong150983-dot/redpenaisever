@@ -65,6 +65,7 @@ const CATEGORY_TO_TYPE = {
   multi_fill: 1,
   map_draw: 3,
   diagram_draw: 3,
+  diagram_color: 3,
   matching: 1,
 }
 
@@ -829,7 +830,7 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
     if (t1 && t2) return t1 === t2 ? 'stable' : 'diff'
   }
 
-  // diagram_draw（圓形圖/塗色題）：提取標籤-數值對比對，忽略描述用字差異
+  // diagram_draw（圖表題：長條圖/圓餅圖）：提取標籤-數值對比對，忽略描述用字差異
   // 例：AI1「分為四個區域，標記為香蕉23%...」vs AI2「分為四個區塊，標註香蕉23%...」→ stable
   if (questionType === 'diagram_draw') {
     const p1 = normalizeDiagramDrawForComparison(read1?.studentAnswerRaw)
@@ -838,6 +839,8 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
       return p1 === p2 ? 'stable' : 'diff'
     }
   }
+  // diagram_color（塗色題）：位置與比例都重要，不做特殊提取
+  // 直接走後段 generic 文字比對 + Jaccard 相似度，讓 AI3 看圖最終裁決
 
   const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
   const a2 = normalizeAnswerForComparison(ensureString(read2?.studentAnswerRaw, ''))
@@ -950,6 +953,7 @@ const CLASSIFY_ALLOWED_TYPES = new Set([
   'multi_fill',
   'map_draw',
   'diagram_draw',
+  'diagram_color',
   'multi_check',
   'multi_check_other',
   'fill_blank',
@@ -1285,7 +1289,7 @@ function normalizeClassifyResult(parsed, questionIds) {
     const qt = row?.questionType
     const VALID_QUESTION_TYPES = new Set([
       'word_problem', 'calculation', 'single_choice', 'map_fill', 'multi_fill', 'map_draw',
-      'diagram_draw', 'multi_check', 'multi_check_other', 'fill_blank', 'true_false', 'matching',
+      'diagram_draw', 'diagram_color', 'multi_check', 'multi_check_other', 'fill_blank', 'true_false', 'matching',
       'multi_choice', 'single_check'
     ])
     const questionType = VALID_QUESTION_TYPES.has(qt) ? qt : 'other'
@@ -1883,7 +1887,7 @@ Rules:
   - question_context: minimum bbox must include question number + stem + student answer area.
 - For visible=true questions with question_context/group_context, output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
   - Include the question number, question stem text, AND the student's answer area all within the bbox.
-  - For map_draw and diagram_draw: frame the entire diagram/map/grid area plus any visible question stem above it.
+  - For map_draw, diagram_draw, and diagram_color: frame the entire diagram/map/grid area plus any visible question stem above it.
   - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer. If the calculation question has a table cell (student fills a value in a table) AND a work/formula area elsewhere on the page, the answerBbox must cover BOTH the table cell AND the work area — do NOT crop just the table cell alone.
   - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must be a TIGHT crop of ONLY that single blank box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box. ANCHOR RULE (takes priority): if the spec includes anchorHint, use it as the PRIMARY locator — find the blank cell described by that anchorHint text (e.g. "欄標題為「22」的格子" means look for the cell whose column header reads "22"). Only fall back to ORDERING RULE when no anchorHint is provided. ORDERING RULE (fallback only): assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). Do NOT re-order based on content — position is the only criterion. readBbox is NOT needed for sub-question fill_blank (answerBbox is already tight).
   - For fill_blank with a single blank (questionId has 1–2 segments, e.g. "3", "1-2"): frame the blank and surrounding question text for answerBbox. Additionally output readBbox: a TIGHT crop of ONLY the blank writing area, excluding the question stem text.
@@ -1935,7 +1939,7 @@ Rules:
   - For fill_blank with multiple blanks: include all blanks and the question text together.
   - For single_choice / multi_choice: include the option rows and the parentheses where the student wrote.
   - For single_check / multi_check / multi_check_other: include all checkbox options and the student's marks (including any text written next to the last 其他 option).
-  - For map_draw / diagram_draw: include the entire drawn/colored area plus the question stem.
+  - For map_draw / diagram_draw / diagram_color: include the entire drawn/colored area plus the question stem.
 - Also output answerBbox for the precise region where the student actually wrote their answer (tighter than questionBbox). This helps highlight the specific wrong content.
 - All bboxes normalized to [0,1]: { "x": top-left x, "y": top-left y, "w": width, "h": height }.
 - Be ACCURATE and output actual dimensions — do not use placeholder sizes.
@@ -2184,6 +2188,9 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
   const diagramDrawIds = visibleQuestions
     .filter((q) => q.questionType === 'diagram_draw')
     .map((q) => q.questionId)
+  const diagramColorIds = visibleQuestions
+    .filter((q) => q.questionType === 'diagram_color')
+    .map((q) => q.questionId)
   const matchingIds = visibleQuestions
     .filter((q) => q.questionType === 'matching')
     .map((q) => q.questionId)
@@ -2244,7 +2251,10 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     ? `\nWORD-PROBLEM questions (應用題, read entire work area including proportion tables): ${JSON.stringify(wordProblemIds)}`
     : ''
   const diagramDrawNote = diagramDrawIds.length > 0
-    ? `\nDIAGRAM-DRAW questions (塗色題, describe coloring): ${JSON.stringify(diagramDrawIds)}`
+    ? `\nDIAGRAM-DRAW questions (圖表繪製題, describe drawn chart with label-value pairs): ${JSON.stringify(diagramDrawIds)}`
+    : ''
+  const diagramColorNote = diagramColorIds.length > 0
+    ? `\nDIAGRAM-COLOR questions (塗色題, describe coloring regions and proportions): ${JSON.stringify(diagramColorIds)}`
     : ''
   const matchingNote = matchingIds.length > 0
     ? `\nMATCHING questions (連連看, read ALL pairs as a group): ${JSON.stringify(matchingIds)}`
@@ -2261,7 +2271,7 @@ You are an answer reader. Your only job is to report what the student physically
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}
+${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
@@ -2487,15 +2497,26 @@ If no student connection marks found → status="blank"
 ` : ''}
 ` : ''}
 ${diagramDrawNote ? `
-DIAGRAM-DRAW RULE (塗色題):
-For question IDs in DIAGRAM-DRAW list, describe ONLY fresh student coloring/shading marks on pre-printed figures.
+DIAGRAM-DRAW RULE (圖表繪製題):
+For question IDs in DIAGRAM-DRAW list, the student drew a chart (bar chart, pie chart, etc.) with labels and values.
+- Read ALL label-value pairs the student drew or wrote on the chart.
+- For pie charts: output each sector as "標籤 角度/百分比" (e.g. "番茄汁 80°, 紅蘿蔔汁 60°, 蘋果汁 40°").
+- For bar charts: output each bar as "標籤 高度/數值" (e.g. "一月 50, 二月 30, 三月 45").
+- List ALL sectors/bars the student drew, in reading order.
+- If no fresh drawn marks → status="blank", studentAnswerRaw="未作答".
+- FORBIDDEN: inferring labels or values not physically written by the student.
+` : ''}
+${diagramColorNote ? `
+DIAGRAM-COLOR RULE (塗色題):
+For question IDs in DIAGRAM-COLOR list, describe ONLY fresh student coloring/shading marks on pre-printed figures.
 - Report only what the student colored — do NOT describe uncolored regions unless needed for context.
 - FIXED TEMPLATE: "塗色：[描述塗色範圍]"
-  - For circles/fraction diagrams: describe which circles are fully/partially colored and what fraction.
+  - For circles/fraction diagrams: describe which circles are fully/partially colored, what fraction, AND which side/region.
     Example: "塗色：第1個圓完整，第2個圓左側2/3，第3個圓未塗"
-  - For fraction bars/grids: describe how many cells are colored.
+  - For fraction bars/grids: describe how many cells are colored AND their position (left/right/which cells).
     Example: "塗色：10格中的7格（左側連續7格）"
-  - For other shapes: describe the colored region using spatial words.
+  - For other shapes: describe the colored region using spatial words (左側/右側/上方/下方/中間).
+- Position matters: always describe WHICH region was colored, not just how much.
 - If no fresh coloring marks → status="blank", studentAnswerRaw="未作答".
 - FORBIDDEN: describing pre-printed outlines, grid lines, or labels as student marks.
 ` : ''}
@@ -2679,7 +2700,7 @@ function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
   const strictness = answerKey?.strictness || 'standard'
   const strictnessRule =
     strictness === 'strict'
-      ? 'GRADING STRICTNESS: STRICT — For objective categories (single_choice, true_false, fill_blank, fill_variants, single_check, multi_check, multi_choice), enforce exact correctness per category rules. For rubric categories (calculation, word_problem, short_answer, map_draw, diagram_draw), judge by rubric dimensions and mathematical/concept correctness; do NOT require literal format matching unless the category rule explicitly requires it.'
+      ? 'GRADING STRICTNESS: STRICT — For objective categories (single_choice, true_false, fill_blank, fill_variants, single_check, multi_check, multi_choice), enforce exact correctness per category rules. For rubric categories (calculation, word_problem, short_answer, map_draw, diagram_draw, diagram_color), judge by rubric dimensions and mathematical/concept correctness; do NOT require literal format matching unless the category rule explicitly requires it.'
       : strictness === 'lenient'
         ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, or minor formatting differ. However, unit substitution (e.g. 公尺 for 公分) is still wrong even in lenient mode for fill_blank and word_problem questions. Exception: unit pairs listed in the UNIT EQUIVALENCE TABLE below are always treated as identical.'
         : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, equivalent units per the UNIT EQUIVALENCE TABLE below) but reject wrong meaning, wrong numbers, wrong key terms, or different units.'
@@ -2791,10 +2812,15 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
       - Contains a verb context, connector, or subject that shows understanding
       - e.g. "為了增進感情" ✓, "讓人增進感情" ✓, "可以加強彼此感情" ✓, "增進彼此的感情" ✓ (>4字 with 的)
     This rule does NOT apply to fill_blank, multi_fill, or calculation questions.
-- diagram_draw: studentAnswerRaw is a description of the student's coloring/drawing (e.g. "塗色：第1個圓完整，第2個圓的2/3（左側2格），第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
+- diagram_color: studentAnswerRaw is a description of the student's coloring (e.g. "塗色：第1個圓完整，第2個圓左側2/3，第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
+  - 塗色位置: check if the colored region is the correct side/area (e.g. left vs right, which cells). Position must match referenceAnswer.
   - 塗色完整性: check if coloring is continuous and covers the correct regions without major gaps.
-  - errorType: 'concept' if wrong proportion; 'blank' if no fresh marks described.
+  - errorType: 'concept' if wrong proportion or wrong region; 'blank' if no fresh marks described.
+- diagram_draw: studentAnswerRaw is a description of label-value pairs the student drew on a chart (e.g. "番茄汁 80°, 紅蘿蔔汁 60°, 蘋果汁 40°"). referenceAnswer describes the correct data. Grade using rubricsDimensions:
+  - 數值正確性: compare each label's value against the correct value. Allow ±2 units tolerance for bar heights; ±3° for pie chart angles.
+  - 標籤完整性: check if all required labels are present and correctly placed.
+  - errorType: 'concept' if wrong values or missing labels; 'blank' if no chart drawn.
 - matching: studentAnswerRaw is the right-side text the student connected to this left-side item (e.g. "2公尺/秒"). The AnswerKey answer field is the correct right-side text.
   - Compare case-insensitively, ignoring leading/trailing whitespace.
   - Allow equivalent unit representations (e.g. "km/h" = "公里/小時").
