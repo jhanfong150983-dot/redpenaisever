@@ -3249,32 +3249,63 @@ function buildFinalGradingResult({
       }
     }
 
-    // ── 程式化覆核：word_problem / calculation 最終答案數值比對 ──
+    // ── 程式化覆核：word_problem / calculation 最終答案決定制 ──
+    // 規則：
+    //   最終答案對 + 有步驟 → 滿分（不看 accessor 怎麼評計算過程）
+    //   最終答案對 + 空白步驟 → 0分（疑似抄答案）
+    //   最終答案錯 + 有步驟 → 保留 accessor 分數（讓 accessor 判部分分）
+    //   最終答案錯 + 空白步驟 → 0分
     if (qCategory === 'word_problem' || qCategory === 'calculation') {
       const refText = ensureString(question?.referenceAnswer || question?.answer, '')
       const refFinal = extractFinalAnswerFromCalc(refText)
       const stuFinal = extractFinalAnswerFromCalc(studentAns)
+      const qMaxScore = toFiniteNumber(question?.maxScore) ?? row.maxScore
+
+      // 判斷計算過程是否空白：去掉最終答案行後，剩餘內容 < 3 字 → 空白
+      const stepsText = studentAns
+        .replace(/(?:答[：:：]|[Aa](?:ns)?[：:\s]).+$/u, '')  // 去掉「答：xxx」行
+        .replace(/\s+/g, '')
+        .trim()
+      const hasSteps = stepsText.length >= 3
+
       if (refFinal && stuFinal) {
         const finalMatch = refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)
-        const qMaxScore = toFiniteNumber(question?.maxScore) ?? row.maxScore
-        if (finalMatch && (row.isCorrect === false || row.score < qMaxScore)) {
-          // 反向覆核：最終答案相等但未給滿分 → 給滿分（AI 很可能漏讀計算過程）
+
+        if (finalMatch && hasSteps && row.score < qMaxScore) {
+          // 最終答案對 + 有步驟 → 滿分
           const prevScore = row.score
           row.isCorrect = true
           row.score = qMaxScore
           row.needExplain = false
           row.reason = `答案正確（程式比對覆核）`
           row.confidence = 100
-          console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" score ${prevScore}→${qMaxScore}`)
+          console.log(`[programmatic-override] ${questionId} final-answer-match + has-steps → full marks (${prevScore}→${qMaxScore})`)
+        } else if (finalMatch && !hasSteps) {
+          // 最終答案對 + 空白步驟 → 0分（疑似抄答案）
+          row.isCorrect = false
+          row.score = 0
+          row.needExplain = true
+          row.reason = `最終答案正確但未列出計算過程（程式比對覆核）`
+          row.confidence = 100
+          console.log(`[programmatic-override] ${questionId} final-answer-match + blank-steps → 0`)
         } else if (!finalMatch && row.isCorrect === true) {
-          // 正向覆核：accessor 說對但最終答案不相等 → 強制錯誤
+          // 最終答案錯但 accessor 說對 → 強制錯誤
           row.isCorrect = false
           row.score = 0
           row.needExplain = true
           row.reason = `最終答案不符（程式比對覆核：學生 "${stuFinal}" ≠ 標準 "${refFinal}"）`
           row.confidence = 100
-          console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" true→false`)
+          console.log(`[programmatic-override] ${questionId} final-answer-mismatch + accessor-correct → force wrong`)
+        } else if (!finalMatch && !hasSteps) {
+          // 最終答案錯 + 空白步驟 → 0分
+          row.isCorrect = false
+          row.score = 0
+          row.needExplain = true
+          row.reason = `答案錯誤且未列出計算過程`
+          row.confidence = 100
+          console.log(`[programmatic-override] ${questionId} final-answer-mismatch + blank-steps → 0`)
         }
+        // 最終答案錯 + 有步驟 → 不動，保留 accessor 的部分分數
       }
     }
 
