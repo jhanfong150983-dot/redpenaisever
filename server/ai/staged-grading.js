@@ -1880,7 +1880,7 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
-function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answerKeyPageCount = 0) {
+function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answerKeyPageCount = 0, classifyCorrections = []) {
   const specs = Array.isArray(questionSpecs) ? questionSpecs : []
 
   // Page boundary section: injected when the submission image is composed of multiple merged photos
@@ -1951,7 +1951,10 @@ Rules:
   If the question region cannot be determined, omit answerBbox.
 - For single_choice questions ONLY: also output bracketBbox that frames ONLY the printed bracket row "（option1，option2）" and the student's mark inside it — do NOT include the question stem text. This should be a very tight crop of just that one bracket line. Omit bracketBbox if this is FORMAT A (empty parentheses where student writes a symbol) or if the bracket row cannot be located precisely.
 - Return strict JSON only.
-
+${Array.isArray(classifyCorrections) && classifyCorrections.length > 0 ? `
+⚠️ CORRECTION HINTS (from previous attempt — bbox was likely shifted to an adjacent cell):
+${classifyCorrections.map((c) => `- 題目 ${c.questionId}：前次定位讀到「${c.previousAnswer}」，但這是題目 ${c.neighborId} 的標準答案（${c.neighborRef}）。你的 answerBbox 很可能偏移到了相鄰格子。請特別注意此題的定位，確保框選正確的空格。`).join('\n')}
+` : ''}
 Output:
 {
   "alignedQuestions": [
@@ -3451,6 +3454,10 @@ export async function runStagedGradingPhaseA({
       logStaged(pipelineRunId, stagedLogLevel, 'pageBreaks auto-estimated (equal split)', { maxPage, pageBreaks })
     }
   }
+  const classifyCorrections = Array.isArray(payload?.classifyCorrections) ? payload.classifyCorrections : []
+  if (classifyCorrections.length > 0) {
+    logStaged(pipelineRunId, stagedLogLevel, 'classify corrections received', classifyCorrections)
+  }
   const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
   // Log anchorHint specs so we can verify hints are correct before trusting them
   const specsWithAnchor = classifyQuestionSpecs.filter((s) => s.anchorHint)
@@ -3497,7 +3504,7 @@ export async function runStagedGradingPhaseA({
     // Single page (or all questions share one page) — one call
     const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
     const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0)
+    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)))
     const classifyResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
@@ -3537,7 +3544,7 @@ export async function runStagedGradingPhaseA({
       const classifyResponses = await Promise.all(
         pageEntries.map(([, ids]) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0)
+          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)))
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
@@ -3577,7 +3584,7 @@ export async function runStagedGradingPhaseA({
         pageEntries.map(([, ids], i) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
           // No pageBreaks — single-page image, AI outputs bbox in 0~1 relative to this page
-          const prompt = buildClassifyPrompt(ids, specs, [], 0)
+          const prompt = buildClassifyPrompt(ids, specs, [], 0, classifyCorrections.filter((c) => ids.includes(c.questionId)))
           const pageImagePart = { inlineData: splitPages[i].inlineData }
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
