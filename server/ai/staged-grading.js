@@ -1900,12 +1900,13 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
 
   const imageReferenceSection = answerKeyPageCount > 0
     ? (() => {
+        if (answerKeyPageCount === 1) {
+          return `\nIMAGE ORDER:\n- Image 1: ANSWER_KEY_REFERENCE — the teacher's correct answers are marked in red ink. Use ONLY as spatial reference to find answer area positions (do NOT read answers from this image).\n- Image 2: STUDENT_SUBMISSION — the student's paper. Locate the same answer areas as shown in the reference.\n`
+        }
         const refLines = Array.from({ length: answerKeyPageCount }, (_, i) =>
           `- Image ${i + 1}: ANSWER_KEY_REFERENCE page ${i + 1} — question IDs with prefix "${i + 1}-" are located on this page. Use ONLY as spatial reference to find answer area positions (do NOT read answers from this image).`
         ).join('\n')
-        const submissionNote = answerKeyPageCount > 1
-          ? `- Image ${answerKeyPageCount + 1}: STUDENT_SUBMISSION — all student pages merged into one image vertically. Use PAGE BOUNDARIES below to determine which part of this image corresponds to each page prefix.`
-          : `- Image ${answerKeyPageCount + 1}: STUDENT_SUBMISSION — the student's paper.`
+        const submissionNote = `- Image ${answerKeyPageCount + 1}: STUDENT_SUBMISSION — all student pages merged into one image vertically. Use PAGE BOUNDARIES below to determine which part of this image corresponds to each page prefix.`
         return `\nIMAGE ORDER:\n${refLines}\n${submissionNote}\n`
       })()
     : ''
@@ -3505,6 +3506,7 @@ export async function runStagedGradingPhaseA({
   logStageStart(pipelineRunId, 'classify')
   logStaged(pipelineRunId, stagedLogLevel, 'classify per-page plan', {
     numPages: pageEntries.length,
+    answerKeyPages: answerKeyImageParts.length,
     pages: pageEntries.map(([p, ids]) => ({ page: p, count: ids.length }))
   })
 
@@ -3514,11 +3516,12 @@ export async function runStagedGradingPhaseA({
     // Single page (or all questions share one page) — one call
     const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
     const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+    const akPageCount = answerKeyImageParts.length > 0 ? answerKeyImageParts.length : 0
+    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, akPageCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
     const classifyResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-      stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...submissionImageParts] }]
+      stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...answerKeyImageParts, ...submissionImageParts] }]
     })
     logStageEnd(pipelineRunId, 'classify-p1', classifyResponse)
     stageResponses.push(classifyResponse)
@@ -3552,13 +3555,17 @@ export async function runStagedGradingPhaseA({
         splitPages: splitPages?.length, pageEntries: pageEntries.length, pageBreaksLength: pageBreaks.length
       })
       const classifyResponses = await Promise.all(
-        pageEntries.map(([, ids]) => {
+        pageEntries.map(([pageNum, ids]) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+          // Per-page: pass matching answer key page image (pageNum is 1-indexed, array is 0-indexed)
+          const akPage = answerKeyImageParts[pageNum - 1]
+          const akParts = akPage ? [akPage] : []
+          const akCount = akPage ? 1 : 0
+          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...submissionImageParts] }]
+            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...akParts, ...submissionImageParts] }]
           })
         })
       )
@@ -3591,15 +3598,19 @@ export async function runStagedGradingPhaseA({
         pages: splitPages.map((p, i) => ({ page: pageEntries[i][0], startY: +p.pageStartY.toFixed(3), endY: +p.pageEndY.toFixed(3) }))
       })
       const classifyResponses = await Promise.all(
-        pageEntries.map(([, ids], i) => {
+        pageEntries.map(([pageNum, ids], i) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
+          // Per-page: pass matching answer key page image (1 answer key page + 1 student page)
+          const akPage = answerKeyImageParts[pageNum - 1]
+          const akParts = akPage ? [akPage] : []
+          const akCount = akPage ? 1 : 0
           // No pageBreaks — single-page image, AI outputs bbox in 0~1 relative to this page
-          const prompt = buildClassifyPrompt(ids, specs, [], 0, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+          const prompt = buildClassifyPrompt(ids, specs, [], akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
           const pageImagePart = { inlineData: splitPages[i].inlineData }
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-            stageContents: [{ role: 'user', parts: [{ text: prompt }, pageImagePart] }]
+            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...akParts, pageImagePart] }]
           })
         })
       )
