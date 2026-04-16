@@ -3290,9 +3290,23 @@ async function handleSync(req, res) {
         console.log(`✅ [後端 Sync] 成功寫入 ${assignmentRows.length} 個作業`)
       }
 
+      // ── gradebook_custom_columns ──────────────────────────────
+      const incomingColumns = gradebookCustomColumns.filter(
+        (c) => c?.id && (c?.classroomId || c?.classroom_id)
+      )
+      console.log(`[SYNC] gradebook_custom_columns incoming=${incomingColumns.length}`, {
+        owner: user.id,
+        items: incomingColumns.map((c) => ({
+          id: c.id,
+          name: c.name,
+          classroomId: c.classroomId ?? c.classroom_id,
+          updatedAt: c.updatedAt ?? c.updated_at ?? null
+        }))
+      })
+
       const gradebookCustomColumnRows = await buildUpsertRows(
         'gradebook_custom_columns',
-        gradebookCustomColumns.filter((c) => c?.id && (c?.classroomId || c?.classroom_id)),
+        incomingColumns,
         (c) =>
           compactObject({
             id: c.id,
@@ -3306,22 +3320,46 @@ async function handleSync(req, res) {
           })
       )
 
+      console.log(`[SYNC] gradebook_custom_columns to_upsert=${gradebookCustomColumnRows.length} skipped=${incomingColumns.length - gradebookCustomColumnRows.length}`)
+
       if (gradebookCustomColumnRows.length > 0) {
         const result = await supabaseDb
           .from('gradebook_custom_columns')
           .upsert(gradebookCustomColumnRows, { onConflict: 'id' })
-        if (result.error) throw new Error(result.error.message)
+        if (result.error) {
+          console.error('[SYNC] gradebook_custom_columns upsert ERROR', {
+            message: result.error.message,
+            code: result.error.code,
+            details: result.error.details,
+            hint: result.error.hint
+          })
+          throw new Error(result.error.message)
+        }
+        console.log(`[SYNC] gradebook_custom_columns upsert OK count=${gradebookCustomColumnRows.length}`)
       }
+
+      // ── gradebook_custom_scores ───────────────────────────────
+      const incomingScores = gradebookCustomScores.filter(
+        (s) =>
+          s?.id &&
+          (s?.classroomId || s?.classroom_id) &&
+          (s?.columnId || s?.column_id) &&
+          (s?.studentId || s?.student_id)
+      )
+      console.log(`[SYNC] gradebook_custom_scores incoming=${incomingScores.length}`, {
+        owner: user.id,
+        items: incomingScores.map((s) => ({
+          id: s.id,
+          columnId: s.columnId ?? s.column_id,
+          studentId: s.studentId ?? s.student_id,
+          score: s.score,
+          updatedAt: s.updatedAt ?? s.updated_at ?? null
+        }))
+      })
 
       const gradebookCustomScoreRows = await buildUpsertRows(
         'gradebook_custom_scores',
-        gradebookCustomScores.filter(
-          (s) =>
-            s?.id &&
-            (s?.classroomId || s?.classroom_id) &&
-            (s?.columnId || s?.column_id) &&
-            (s?.studentId || s?.student_id)
-        ),
+        incomingScores,
         (s) => {
           const parsedScore =
             s.score === null || s.score === undefined
@@ -3339,11 +3377,22 @@ async function handleSync(req, res) {
         }
       )
 
+      console.log(`[SYNC] gradebook_custom_scores to_upsert=${gradebookCustomScoreRows.length} skipped=${incomingScores.length - gradebookCustomScoreRows.length}`)
+
       if (gradebookCustomScoreRows.length > 0) {
         const result = await supabaseDb
           .from('gradebook_custom_scores')
           .upsert(gradebookCustomScoreRows, { onConflict: 'id' })
-        if (result.error) throw new Error(result.error.message)
+        if (result.error) {
+          console.error('[SYNC] gradebook_custom_scores upsert ERROR', {
+            message: result.error.message,
+            code: result.error.code,
+            details: result.error.details,
+            hint: result.error.hint
+          })
+          throw new Error(result.error.message)
+        }
+        console.log(`[SYNC] gradebook_custom_scores upsert OK count=${gradebookCustomScoreRows.length}`)
       }
 
       const incomingSubmissions = submissions.filter(
@@ -3537,8 +3586,22 @@ async function handleSync(req, res) {
         if (deleteError) throw new Error(deleteError.message)
       }
 
+      console.log('[SYNC] POST complete OK', {
+        owner: user.id,
+        classrooms: classrooms.length,
+        students: students.length,
+        assignments: assignments.length,
+        submissions: submissions.length,
+        folders: folders.length,
+        customColumns: gradebookCustomColumns.length,
+        customScores: gradebookCustomScores.length
+      })
       res.status(200).json({ success: true })
     } catch (err) {
+      console.error('[SYNC] POST error', {
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined
+      })
       res.status(500).json({
         error: err instanceof Error ? err.message : '同步失敗'
       })
