@@ -4190,10 +4190,34 @@ export async function runStagedGradingPhaseB({
     }
     if (accessorResp1.warnings.length > 0) stageWarnings.push(...accessorResp1.warnings.map((w) => `[Accessor-p1] ${w}`))
     if (accessorResp2.warnings.length > 0) stageWarnings.push(...accessorResp2.warnings.map((w) => `[Accessor-p2] ${w}`))
-    const parsed1 = parseCandidateJson(accessorResp1.data)
-    const parsed2 = parseCandidateJson(accessorResp2.data)
-    if (!parsed1 || typeof parsed1 !== 'object' || !parsed2 || typeof parsed2 !== 'object') {
-      throw new Error('PhaseB accessor parse failed (per-page)')
+    let parsed1 = parseCandidateJson(accessorResp1.data)
+    let parsed2 = parseCandidateJson(accessorResp2.data)
+    // Retry pages that failed to parse (model returned malformed JSON)
+    if (!parsed1 || typeof parsed1 !== 'object') {
+      console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 JSON parse failed, retrying...`)
+      logStageStart(pipelineRunId, 'Accessor-p1-retry')
+      const retryResp1 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak1, rar1, internalContext?.domainHint) }, ...submissionImageParts] }] })
+      logStageEnd(pipelineRunId, 'Accessor-p1-retry', retryResp1)
+      stageResponses.push(retryResp1)
+      parsed1 = retryResp1.ok ? parseCandidateJson(retryResp1.data) : null
+      if (!parsed1 || typeof parsed1 !== 'object') {
+        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 retry also failed, using empty fallback`)
+        stageWarnings.push('GRADING_ACCESSOR_P1_PARSE_FAILED_FALLBACK')
+        parsed1 = { scores: [] }
+      }
+    }
+    if (!parsed2 || typeof parsed2 !== 'object') {
+      console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 JSON parse failed, retrying...`)
+      logStageStart(pipelineRunId, 'Accessor-p2-retry')
+      const retryResp2 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak2, rar2, internalContext?.domainHint) }, ...submissionImageParts] }] })
+      logStageEnd(pipelineRunId, 'Accessor-p2-retry', retryResp2)
+      stageResponses.push(retryResp2)
+      parsed2 = retryResp2.ok ? parseCandidateJson(retryResp2.data) : null
+      if (!parsed2 || typeof parsed2 !== 'object') {
+        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 retry also failed, using empty fallback`)
+        stageWarnings.push('GRADING_ACCESSOR_P2_PARSE_FAILED_FALLBACK')
+        parsed2 = { scores: [] }
+      }
     }
     const result1 = normalizeAccessorResult(parsed1, ak1, rar1.answers, internalContext?.domainHint)
     const result2 = normalizeAccessorResult(parsed2, ak2, rar2.answers, internalContext?.domainHint)
@@ -4222,8 +4246,20 @@ export async function runStagedGradingPhaseB({
       }
     }
     if (accessorResponse.warnings.length > 0) stageWarnings.push(...accessorResponse.warnings.map((w) => `[Accessor] ${w}`))
-    const accessorParsed = parseCandidateJson(accessorResponse.data)
-    if (!accessorParsed || typeof accessorParsed !== 'object') throw new Error('PhaseB accessor parse failed')
+    let accessorParsed = parseCandidateJson(accessorResponse.data)
+    if (!accessorParsed || typeof accessorParsed !== 'object') {
+      console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor JSON parse failed, retrying...`)
+      logStageStart(pipelineRunId, 'Accessor-retry')
+      const retryResp = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }, ...submissionImageParts] }] })
+      logStageEnd(pipelineRunId, 'Accessor-retry', retryResp)
+      stageResponses.push(retryResp)
+      accessorParsed = retryResp.ok ? parseCandidateJson(retryResp.data) : null
+      if (!accessorParsed || typeof accessorParsed !== 'object') {
+        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor retry also failed, using empty fallback`)
+        stageWarnings.push('GRADING_ACCESSOR_PARSE_FAILED_FALLBACK')
+        accessorParsed = { scores: [] }
+      }
+    }
     accessorResult = normalizeAccessorResult(accessorParsed, answerKey, finalReadAnswerResult.answers, internalContext?.domainHint)
   }
   const accessorScores = Array.isArray(accessorResult.scores) ? accessorResult.scores : []
