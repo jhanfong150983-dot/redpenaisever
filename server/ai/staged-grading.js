@@ -2647,6 +2647,9 @@ function buildArbiterPrompt(arbiterItems) {
   → 評估這個共識是否有圖像支持
   → 輸出：{ "mode": "agree_review", "agreementSupport": "strong | weak | unsupported" }
   → ⚠️ 不得因「兩者相同」就草率給 strong，必須確實觀察到筆跡依據
+  → ⚠️ 特例：若兩者讀出的答案為【單一字元】（如 ×、−、○、C、A 等英文字母或符號），
+       只要圖片中能見到任何手寫痕跡，必須給 weak 或以上，不得給 unsupported。
+       單字元筆跡面積本就小，難以找到「明確筆跡依據」是正常現象，不應因此降為 unsupported。
 
 情境 B — disagree_review（AI1 與 AI2 讀取不同）：
   → 分別獨立評估 AI1 和 AI2 各自的圖像支持程度，兩者互不影響
@@ -2679,7 +2682,11 @@ function applyForensicDecision(forensic, ai1Answer, ai2Answer) {
       // weak: AI3 認為圖片稍微模糊，但兩個獨立 AI 讀出相同答案本身就是強證據，放行
       return { arbiterStatus: 'arbitrated_agree', finalAnswer: ai1Answer }
     }
-    // unsupported: AI3 認為圖片不支持此讀取 → 保留人工審查
+    // unsupported: AI3 認為圖片不支持此讀取
+    // 豁免：單字元答案（×、−、C、A 等）→ 兩個獨立 AI 讀出相同本身就是強證據，不送審
+    if (ai1Answer.trim().length <= 1) {
+      return { arbiterStatus: 'arbitrated_agree', finalAnswer: ai1Answer }
+    }
     return { arbiterStatus: 'needs_review' }
   }
   if (mode === 'disagree_review') {
