@@ -1952,8 +1952,18 @@ Rules:
 - For single_choice questions ONLY: also output bracketBbox that frames ONLY the printed bracket row "（option1，option2）" and the student's mark inside it — do NOT include the question stem text. This should be a very tight crop of just that one bracket line. Omit bracketBbox if this is FORMAT A (empty parentheses where student writes a symbol) or if the bracket row cannot be located precisely.
 - Return strict JSON only.
 ${Array.isArray(classifyCorrections) && classifyCorrections.length > 0 ? `
-⚠️ CORRECTION HINTS (from previous attempt — bbox was likely shifted to an adjacent cell):
-${classifyCorrections.map((c) => `- 題目 ${c.questionId}：前次定位讀到「${c.previousAnswer}」，但這是題目 ${c.neighborId} 的標準答案（${c.neighborRef}）。你的 answerBbox 很可能偏移到了相鄰格子。請特別注意此題的定位，確保框選正確的空格。`).join('\n')}
+⚠️ BBOX POSITIONING REMINDER:
+The following questions need extra attention on answerBbox positioning:
+${classifyCorrections.map((c) => {
+  if (c.type === 'neighbor_match') {
+    return `- 題目 ${c.questionId}：此題的 answerBbox 可能偏移到了相鄰題目 ${c.neighborId} 的空格。請仔細區分這兩題的空格位置，確保各題框選到各自正確的空格。`
+  } else if (c.type === 'consecutive_blank') {
+    return `- 題目 ${c.questionId}：此題需特別注意 answerBbox 定位，請確保框選到學生的書寫區域，不要遺漏細小或淺色的筆跡。`
+  } else if (c.type === 'type_mismatch') {
+    return `- 題目 ${c.questionId}：此題需特別注意 answerBbox 定位，確保框選的是正確的空格位置，不要框到相鄰的空格或題目區域。`
+  }
+  return `- 題目 ${c.questionId}：請特別注意此題的 answerBbox 定位準確性。`
+}).join('\n')}
 ` : ''}
 Output:
 {
