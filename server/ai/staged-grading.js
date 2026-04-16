@@ -3205,6 +3205,25 @@ function buildFinalGradingResult({
       }
     }
 
+    // ── 程式化覆核：word_problem / calculation 最終答案數值比對 ──
+    // 標準答案和學生答案都提取最終數值，若都提取成功且不相等 → 強制 isCorrect=false
+    if (
+      (qCategory === 'word_problem' || qCategory === 'calculation') &&
+      row.isCorrect === true
+    ) {
+      const refText = ensureString(question?.referenceAnswer || question?.answer, '')
+      const refFinal = extractFinalAnswerFromCalc(refText)
+      const stuFinal = extractFinalAnswerFromCalc(studentAns)
+      if (refFinal && stuFinal && refFinal !== stuFinal) {
+        row.isCorrect = false
+        row.score = 0
+        row.needExplain = true
+        row.reason = `最終答案不符（程式比對覆核：學生 "${stuFinal}" ≠ 標準 "${refFinal}"）`
+        row.confidence = 100
+        console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" true→false`)
+      }
+    }
+
     // Phase A 一致性欄位（若有）
     if (consistency) {
       row.consistencyStatus = consistency.consistencyStatus
