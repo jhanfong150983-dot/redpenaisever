@@ -803,6 +803,8 @@ function normalizeMathAnswer(s) {
   if (!s) return ''
   return s
     .replace(/[−–—]/gu, '-')         // 減號異體字統一
+    .replace(/，/gu, ',')             // 全形逗號→半形
+    .replace(/：/gu, ':')             // 全形冒號→半形
     .replace(/\s+/gu, '')             // 去除空白
     .replace(/^[（(](.*)[）)]$/u, '$1') // 剝除外層括號：(3/4) → 3/4
     .replace(/[。.，,]+$/u, '')        // 去除結尾標點
