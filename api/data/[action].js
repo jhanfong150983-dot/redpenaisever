@@ -5959,6 +5959,10 @@ export default async function handler(req, res) {
     await handleUpdateAi3ForensicLog(req, res)
     return
   }
+  if (action === 'quality-check-log') {
+    await handleQualityCheckLog(req, res)
+    return
+  }
   res.status(404).json({ error: 'Not Found' })
 }
 
@@ -6341,6 +6345,59 @@ async function handleAssignmentStateSummary(req, res) {
 // ─────────────────────────────────────────────────────────
 // handleUpsertAi3ForensicLog
 // POST /api/data/upsert-ai3-forensic-log
+// ─────────────────────────────────────────────────────────
+// handleQualityCheckLog
+// POST /api/data/quality-check-log
+// Frontend posts quality-check results after batch Phase A so they appear in Vercel logs.
+// ─────────────────────────────────────────────────────────
+async function handleQualityCheckLog(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const body = parseJsonBody(req)
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Invalid JSON body' })
+    return
+  }
+
+  const assignmentId = typeof body.assignmentId === 'string' ? body.assignmentId.trim() : '(unknown)'
+  const totalSubmissions = Number(body.totalSubmissions) || 0
+  const flaggedCount = Number(body.flaggedCount) || 0
+  const flags = Array.isArray(body.flags) ? body.flags : []
+  const numericDominantQuestions = Array.isArray(body.numericDominantQuestions) ? body.numericDominantQuestions : []
+
+  console.log(`[QualityCheck] assignmentId=${assignmentId} total=${totalSubmissions} flagged=${flaggedCount}`)
+
+  if (numericDominantQuestions.length > 0) {
+    console.log(`[QualityCheck] numericDominantQuestions=${JSON.stringify(numericDominantQuestions)}`)
+  }
+
+  for (const flag of flags) {
+    const sid = flag.submissionId ?? '?'
+    const studentId = flag.studentId ?? '?'
+    const conditions = Array.isArray(flag.conditions) ? flag.conditions.join(',') : '?'
+    const detail = flag.detail ?? {}
+    const parts = []
+    if (detail.bboxDeviatingCount != null) parts.push(`bboxDeviating=${detail.bboxDeviatingCount}`)
+    if (detail.consecutiveBlankMax != null) parts.push(`consecutiveBlanks=${detail.consecutiveBlankMax}`)
+    if (detail.typeMismatchCount != null) parts.push(`typeMismatch=${detail.typeMismatchCount}`)
+    if (Array.isArray(detail.typeMismatchQuestionIds) && detail.typeMismatchQuestionIds.length > 0) {
+      parts.push(`mismatchQids=${JSON.stringify(detail.typeMismatchQuestionIds)}`)
+    }
+    console.log(`[QualityCheck] FLAGGED submission=${sid} student=${studentId} conditions=[${conditions}] ${parts.join(' ')}`)
+  }
+
+  res.status(200).json({ ok: true, flaggedCount })
+}
+
 // Called after Phase A completes; inserts one row per question per submission.
 // ─────────────────────────────────────────────────────────
 async function handleUpsertAi3ForensicLog(req, res) {
