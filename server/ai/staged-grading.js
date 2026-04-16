@@ -3370,12 +3370,19 @@ export async function runStagedGradingPhaseA({
     // Each call gets ONLY its page's image → AI outputs bbox in single-page coords (0~1)
     // → remap back to full-image coords after parsing.
     const submissionImg = inlineImages[0].inlineData
+    logStaged(pipelineRunId, stagedLogLevel, 'classify split attempt', {
+      hasImageData: !!submissionImg.data,
+      imageDataLength: submissionImg.data?.length ?? 0,
+      mimeType: submissionImg.mimeType,
+      pageBreaks,
+      pageBreaksLength: pageBreaks.length
+    })
     const splitPages = await splitSubmissionImageByPageBreaks(submissionImg.data, submissionImg.mimeType, pageBreaks)
 
     if (!splitPages || splitPages.length !== pageEntries.length) {
       // Fallback: split failed or page count mismatch → send full image with pageBreaks (old behavior)
       logStaged(pipelineRunId, stagedLogLevel, 'classify split failed, fallback to full image', {
-        splitPages: splitPages?.length, pageEntries: pageEntries.length
+        splitPages: splitPages?.length, pageEntries: pageEntries.length, pageBreaksLength: pageBreaks.length
       })
       const classifyResponses = await Promise.all(
         pageEntries.map(([, ids]) => {
