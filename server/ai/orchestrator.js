@@ -22,6 +22,35 @@ function extractInlineImagesFromContents(contents) {
   return images
 }
 
+/**
+ * 解析 contents parts 中 "--- 第 N 張照片 ---" 標籤，建立：
+ *   globalPageNum (1-based) → batchLocalImageIndex (0-based)
+ *
+ * 當 4 張照片被拆成多批送出時，第 2 批的 inlineImages[0] 不一定對應全域第 1 頁，
+ * 這個對應表讓裁切函式能正確選到批次內的圖片，而不是用 pageIdx-1 直接當索引。
+ */
+function buildPageLabelToImageIndexMap(contents) {
+  const map = new Map()
+  let imageIndex = 0
+  let pendingPageNum = null
+  for (const content of (contents || [])) {
+    if (!Array.isArray(content?.parts)) continue
+    for (const part of content.parts) {
+      if (typeof part?.text === 'string') {
+        const m = part.text.match(/第\s*(\d+)\s*張/)
+        if (m) pendingPageNum = parseInt(m[1], 10)
+      } else if (part?.inlineData?.data && part?.inlineData?.mimeType) {
+        if (pendingPageNum !== null) {
+          map.set(pendingPageNum, imageIndex)
+          pendingPageNum = null
+        }
+        imageIndex++
+      }
+    }
+  }
+  return map
+}
+
 async function cropAnswerKeyBbox(imageBase64, mimeType, bbox, pad = 0.02) {
   if (!bbox || !imageBase64) return null
   try {
@@ -136,7 +165,7 @@ Output:
 }`.trim()
 }
 
-async function locateAnswerKeyBboxes(questions, inlineImages, apiKey, model) {
+async function locateAnswerKeyBboxes(questions, inlineImages, apiKey, model, pageToImageIndex = new Map()) {
   // Group questions by page; only locate questions that have a text answer to search for
   const locatableQ = questions.filter((q) => {
     const text = (typeof q.answer === 'string' && q.answer) || (typeof q.referenceAnswer === 'string' && q.referenceAnswer)
@@ -156,7 +185,11 @@ async function locateAnswerKeyBboxes(questions, inlineImages, apiKey, model) {
 
   const bboxMap = new Map()
   for (const [pageIdx, pageQuestions] of byPage) {
-    const img = inlineImages[Math.min(pageIdx, inlineImages.length - 1)]
+    const globalPageNum = pageIdx + 1
+    const batchLocalIdx = pageToImageIndex.has(globalPageNum)
+      ? pageToImageIndex.get(globalPageNum)
+      : Math.min(pageIdx, inlineImages.length - 1)
+    const img = inlineImages[batchLocalIdx]
     if (!img) continue
     const prompt = buildAnswerKeyLocatePrompt(pageQuestions)
     try {
@@ -194,8 +227,12 @@ async function postProcessAnswerKeyWithCrops(pipelineResult, contents, apiKey, m
   const inlineImages = extractInlineImagesFromContents(contents)
   if (inlineImages.length === 0) return pipelineResult
 
+  // 建立全域頁碼 → 批次內圖片索引的對應表（修正多批次時索引錯位的問題）
+  const pageToImageIndex = buildPageLabelToImageIndexMap(contents)
+  console.log(`[orchestrator] pageToImageIndex: ${JSON.stringify(Object.fromEntries(pageToImageIndex))}`)
+
   // Step 2: dedicated locate AI for accurate bboxes
-  const locatedBboxMap = await locateAnswerKeyBboxes(questions, inlineImages, apiKey, model)
+  const locatedBboxMap = await locateAnswerKeyBboxes(questions, inlineImages, apiKey, model, pageToImageIndex)
   console.log(`[orchestrator] answer_key.locate: ${locatedBboxMap.size}/${questions.length} questions located`)
 
   const croppedQuestions = await Promise.all(questions.map(async (q) => {
@@ -206,7 +243,11 @@ async function postProcessAnswerKeyWithCrops(pipelineResult, contents, apiKey, m
     const pageIdx = typeof q.pageIndex === 'number'
       ? q.pageIndex
       : Math.max(0, (parseInt(String(q.id ?? '').split('-')[0], 10) || 1) - 1)
-    const img = inlineImages[Math.min(pageIdx, inlineImages.length - 1)]
+    const globalPageNum = pageIdx + 1
+    const batchLocalIdx = pageToImageIndex.has(globalPageNum)
+      ? pageToImageIndex.get(globalPageNum)
+      : Math.min(pageIdx, inlineImages.length - 1)
+    const img = inlineImages[batchLocalIdx]
     if (!img) return q
     const cropUrl = await cropAnswerKeyBbox(img.data, img.mimeType, bbox)
     const updatedQ = { ...q, answerBbox: bbox }  // update answerBbox with more accurate locate result
