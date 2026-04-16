@@ -769,8 +769,8 @@ function extractFinalAnswerFromCalc(raw) {
   const s = String(raw ?? '').trim()
   if (!s) return null
 
-  // 1. 答：xxx / 答:xxx / A:xxx（允許答案本身外面有括號，如「答：(1/4 m)」）
-  const answerPrefixMatch = s.match(/(?:答[：:：]|[Aa][：:])\s*[（(]?\s*(.+?)\s*[）)]?[\s。，,]*$/u)
+  // 1. 答：xxx / 答:xxx / A:xxx / Ans:xxx（允許答案本身外面有括號，如「答：(1/4 m)」）
+  const answerPrefixMatch = s.match(/(?:答[：:：]|[Aa](?:ns)?[：:])\s*[（(]?\s*(.+?)\s*[）)]?[\s。，,]*$/u)
   if (answerPrefixMatch) {
     const val = normalizeMathAnswer(answerPrefixMatch[1])
     if (val) return val
