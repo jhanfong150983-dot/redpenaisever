@@ -4201,9 +4201,18 @@ export async function runStagedGradingPhaseB({
       stageResponses.push(retryResp1)
       parsed1 = retryResp1.ok ? parseCandidateJson(retryResp1.data) : null
       if (!parsed1 || typeof parsed1 !== 'object') {
-        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 retry also failed, using empty fallback`)
-        stageWarnings.push('GRADING_ACCESSOR_P1_PARSE_FAILED_FALLBACK')
-        parsed1 = { scores: [] }
+        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 retry also failed, returning error`)
+        return {
+          status: 503,
+          data: JSON.stringify({ error: 'PhaseB accessor parse failed after retry (p1)', code: 'ACCESSOR_PARSE_FAILED' }),
+          pipelineMeta: {
+            pipeline: STAGED_PIPELINE_NAME,
+            prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
+            modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
+            warnings: [...stageWarnings, 'GRADING_ACCESSOR_P1_PARSE_FAILED'],
+            metrics: { stage: 'accessor-p1-retry' }
+          }
+        }
       }
     }
     if (!parsed2 || typeof parsed2 !== 'object') {
@@ -4214,9 +4223,18 @@ export async function runStagedGradingPhaseB({
       stageResponses.push(retryResp2)
       parsed2 = retryResp2.ok ? parseCandidateJson(retryResp2.data) : null
       if (!parsed2 || typeof parsed2 !== 'object') {
-        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 retry also failed, using empty fallback`)
-        stageWarnings.push('GRADING_ACCESSOR_P2_PARSE_FAILED_FALLBACK')
-        parsed2 = { scores: [] }
+        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 retry also failed, returning error`)
+        return {
+          status: 503,
+          data: JSON.stringify({ error: 'PhaseB accessor parse failed after retry (p2)', code: 'ACCESSOR_PARSE_FAILED' }),
+          pipelineMeta: {
+            pipeline: STAGED_PIPELINE_NAME,
+            prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
+            modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
+            warnings: [...stageWarnings, 'GRADING_ACCESSOR_P2_PARSE_FAILED'],
+            metrics: { stage: 'accessor-p2-retry' }
+          }
+        }
       }
     }
     const result1 = normalizeAccessorResult(parsed1, ak1, rar1.answers, internalContext?.domainHint)
@@ -4255,9 +4273,18 @@ export async function runStagedGradingPhaseB({
       stageResponses.push(retryResp)
       accessorParsed = retryResp.ok ? parseCandidateJson(retryResp.data) : null
       if (!accessorParsed || typeof accessorParsed !== 'object') {
-        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor retry also failed, using empty fallback`)
-        stageWarnings.push('GRADING_ACCESSOR_PARSE_FAILED_FALLBACK')
-        accessorParsed = { scores: [] }
+        console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor retry also failed, returning error`)
+        return {
+          status: 503,
+          data: JSON.stringify({ error: 'PhaseB accessor parse failed after retry', code: 'ACCESSOR_PARSE_FAILED' }),
+          pipelineMeta: {
+            pipeline: STAGED_PIPELINE_NAME,
+            prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
+            modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
+            warnings: [...stageWarnings, 'GRADING_ACCESSOR_PARSE_FAILED'],
+            metrics: { stage: 'accessor-retry' }
+          }
+        }
       }
     }
     accessorResult = normalizeAccessorResult(accessorParsed, answerKey, finalReadAnswerResult.answers, internalContext?.domainHint)
