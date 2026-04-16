@@ -4168,8 +4168,8 @@ export async function runStagedGradingPhaseB({
     logStageStart(pipelineRunId, 'Accessor-p1')
     logStageStart(pipelineRunId, 'Accessor-p2')
     const [accessorResp1, accessorResp2] = await Promise.all([
-      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak1, rar1, internalContext?.domainHint) }, ...submissionImageParts] }] }),
-      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak2, rar2, internalContext?.domainHint) }, ...submissionImageParts] }] })
+      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak1, rar1, internalContext?.domainHint) }] }] }),
+      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak2, rar2, internalContext?.domainHint) }] }] })
     ])
     logStageEnd(pipelineRunId, 'Accessor-p1', accessorResp1)
     logStageEnd(pipelineRunId, 'Accessor-p2', accessorResp2)
@@ -4196,7 +4196,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed1 || typeof parsed1 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p1-retry')
-      const retryResp1 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak1, rar1, internalContext?.domainHint) }, ...submissionImageParts] }] })
+      const retryResp1 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak1, rar1, internalContext?.domainHint) }] }] })
       logStageEnd(pipelineRunId, 'Accessor-p1-retry', retryResp1)
       stageResponses.push(retryResp1)
       parsed1 = retryResp1.ok ? parseCandidateJson(retryResp1.data) : null
@@ -4218,7 +4218,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed2 || typeof parsed2 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p2-retry')
-      const retryResp2 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak2, rar2, internalContext?.domainHint) }, ...submissionImageParts] }] })
+      const retryResp2 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak2, rar2, internalContext?.domainHint) }] }] })
       logStageEnd(pipelineRunId, 'Accessor-p2-retry', retryResp2)
       stageResponses.push(retryResp2)
       parsed2 = retryResp2.ok ? parseCandidateJson(retryResp2.data) : null
@@ -4246,7 +4246,7 @@ export async function runStagedGradingPhaseB({
     const accessorResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
-      stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }, ...submissionImageParts] }]
+      stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }] }]
     })
     logStageEnd(pipelineRunId, 'Accessor', accessorResponse)
     stageResponses.push(accessorResponse)
@@ -4268,7 +4268,7 @@ export async function runStagedGradingPhaseB({
     if (!accessorParsed || typeof accessorParsed !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-retry')
-      const retryResp = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }, ...submissionImageParts] }] })
+      const retryResp = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }] }] })
       logStageEnd(pipelineRunId, 'Accessor-retry', retryResp)
       stageResponses.push(retryResp)
       accessorParsed = retryResp.ok ? parseCandidateJson(retryResp.data) : null
