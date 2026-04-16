@@ -2257,11 +2257,12 @@ async function handleCorrectionDispatchToggle(req, res) {
         }))
       }
 
-      // Only recall students who are NOT currently in recheck
+      // Only recall students who are NOT currently in recheck (and optionally scoped to requestedStudentIds)
       const recallableStates = (states || [])
         .filter((row) =>
           ['correction_required', 'correction_in_progress'].includes(String(row.status || '')) &&
-          !recheckingStudentIds.has(row.student_id)
+          !recheckingStudentIds.has(row.student_id) &&
+          (requestedStudentIds.length === 0 || requestedStudentIds.includes(row.student_id))
         )
         .map((row) => row.student_id)
 
