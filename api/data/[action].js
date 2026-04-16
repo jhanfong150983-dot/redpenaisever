@@ -6389,6 +6389,12 @@ async function handleQualityCheckLog(req, res) {
         .join(' ')
       parts.push(`mismatchDetails=[${summary}]`)
     }
+    if (Array.isArray(detail.abcdMismatchDetails) && detail.abcdMismatchDetails.length > 0) {
+      const summary = detail.abcdMismatchDetails
+        .map((d) => `${d.questionId}(got=${d.got})`)
+        .join(' ')
+      parts.push(`abcdMismatch=[${summary}]`)
+    }
     console.log(`[QualityCheck] FLAGGED submission=${sid} student=${studentId} conditions=[${conditions}] ${parts.join(' ')}`)
   }
 
