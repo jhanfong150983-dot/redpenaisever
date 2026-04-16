@@ -430,11 +430,11 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox 
   }
 }
 
-// Split a merged submission image into two vertical halves for per-page classify.
-// splitYHint: normalized y ratio (0-1) for the split, e.g. 0.5 for equal halves.
-// Returns { page1InlineData, page2InlineData, actualSplitY } or null on failure.
-async function splitSubmissionImageForClassify(imageBase64, mimeType, splitYHint) {
-  if (!imageBase64) return null
+// Split a merged submission image into N pages using pageBreaks.
+// pageBreaks: normalized y ratios (e.g. [0.25, 0.5, 0.75] → 4 pages).
+// Returns array of { inlineData: { data, mimeType }, pageStartY, pageEndY } or null on failure.
+async function splitSubmissionImageByPageBreaks(imageBase64, mimeType, pageBreaks) {
+  if (!imageBase64 || !Array.isArray(pageBreaks) || pageBreaks.length === 0) return null
   try {
     const { default: sharp } = await import('sharp')
     const imageBuffer = Buffer.from(imageBase64, 'base64')
@@ -442,35 +442,48 @@ async function splitSubmissionImageForClassify(imageBase64, mimeType, splitYHint
     const { width, height } = metadata
     if (!width || !height) return null
 
-    const splitPx = Math.round(Math.min(Math.max(splitYHint, 0.1), 0.9) * height)
-    const actualSplitY = splitPx / height
-
-    const [buf1, buf2] = await Promise.all([
-      sharp(imageBuffer).extract({ left: 0, top: 0, width, height: splitPx }).jpeg({ quality: 90 }).toBuffer(),
-      sharp(imageBuffer).extract({ left: 0, top: splitPx, width, height: height - splitPx }).jpeg({ quality: 90 }).toBuffer()
-    ])
-
-    return {
-      page1InlineData: { data: buf1.toString('base64'), mimeType: 'image/jpeg' },
-      page2InlineData: { data: buf2.toString('base64'), mimeType: 'image/jpeg' },
-      actualSplitY
+    // Build page boundaries: [0, pb1, pb2, ..., 1]
+    const boundaries = [0, ...pageBreaks, 1]
+    const pages = []
+    const extractPromises = []
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      const startY = boundaries[i]
+      const endY = boundaries[i + 1]
+      const topPx = Math.round(startY * height)
+      const bottomPx = Math.round(endY * height)
+      const pagePxHeight = bottomPx - topPx
+      if (pagePxHeight <= 0) continue
+      pages.push({ pageStartY: startY, pageEndY: endY })
+      extractPromises.push(
+        sharp(imageBuffer)
+          .extract({ left: 0, top: topPx, width, height: pagePxHeight })
+          .jpeg({ quality: 90 })
+          .toBuffer()
+      )
     }
+    const buffers = await Promise.all(extractPromises)
+    return buffers.map((buf, i) => ({
+      inlineData: { data: buf.toString('base64'), mimeType: 'image/jpeg' },
+      pageStartY: pages[i].pageStartY,
+      pageEndY: pages[i].pageEndY
+    }))
   } catch (err) {
-    console.warn('[staged-grading] splitSubmissionImageForClassify failed:', err?.message)
+    console.warn('[staged-grading] splitSubmissionImageByPageBreaks failed:', err?.message)
     return null
   }
 }
 
-// Remap a bbox from per-page normalized coordinates to full-image normalized coordinates.
-// pageIndex: 0 = page 1 (top half), 1 = page 2 (bottom half)
-// splitY: the normalized y position where page 1 ends in the full image
-function remapBboxToFullImage(bbox, pageIndex, splitY) {
+// Remap a bbox from per-page normalized coordinates (0~1) to full-image normalized coordinates.
+// pageStartY/pageEndY: the page's vertical range within the full image (0~1).
+function remapBboxToFullImage(bbox, pageStartY, pageEndY) {
   if (!bbox) return bbox
-  if (pageIndex === 0) {
-    return { x: bbox.x, y: bbox.y * splitY, w: bbox.w, h: bbox.h * splitY }
+  const pageHeight = pageEndY - pageStartY
+  return {
+    x: bbox.x,
+    y: pageStartY + bbox.y * pageHeight,
+    w: bbox.w,
+    h: bbox.h * pageHeight
   }
-  const pageHeight = 1 - splitY
-  return { x: bbox.x, y: splitY + bbox.y * pageHeight, w: bbox.w, h: bbox.h * pageHeight }
 }
 
 const CHECKBOX_EQUIVALENT_TYPES = new Set(['single_check', 'multi_check', 'multi_choice', 'multi_check_other'])
@@ -3353,56 +3366,116 @@ export async function runStagedGradingPhaseA({
     if (!classifyParsed || typeof classifyParsed !== 'object') throw new Error('PhaseA classify parse failed')
     classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs)
   } else {
-    // Multi-page: one parallel call per page, all with the full merged image + full pageBreaks
-    const classifyResponses = await Promise.all(
-      pageEntries.map(([, ids]) => {
-        const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-        const prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0)
-        return executeStage({
-          apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
-          routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-          stageContents: [{ role: 'user', parts: [{ text: prompt }, ...submissionImageParts] }]
-        })
+    // Multi-page: split merged image into individual pages, one classify call per page (parallel).
+    // Each call gets ONLY its page's image → AI outputs bbox in single-page coords (0~1)
+    // → remap back to full-image coords after parsing.
+    const submissionImg = inlineImages[0].inlineData
+    const splitPages = await splitSubmissionImageByPageBreaks(submissionImg.data, submissionImg.mimeType, pageBreaks)
+
+    if (!splitPages || splitPages.length !== pageEntries.length) {
+      // Fallback: split failed or page count mismatch → send full image with pageBreaks (old behavior)
+      logStaged(pipelineRunId, stagedLogLevel, 'classify split failed, fallback to full image', {
+        splitPages: splitPages?.length, pageEntries: pageEntries.length
       })
-    )
-
-    classifyResponses.forEach((resp, i) => {
-      const pageNum = pageEntries[i][0]
-      logStageEnd(pipelineRunId, `classify-p${pageNum}`, resp)
-      stageResponses.push(resp)
-      if (resp.warnings.length > 0) stageWarnings.push(...resp.warnings.map((w) => `[classify-p${pageNum}] ${w}`))
-    })
-
-    const failedResp = classifyResponses.find((r) => !r.ok)
-    if (failedResp) {
-      return {
-        status: failedResp.status, data: failedResp.data,
-        pipelineMeta: { pipeline: STAGED_PIPELINE_NAME, prepareLatencyMs: failedResp.prepareLatencyMs, modelLatencyMs: failedResp.modelLatencyMs, warnings: failedResp.warnings, metrics: { stage: 'classify' } }
+      const classifyResponses = await Promise.all(
+        pageEntries.map(([, ids]) => {
+          const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
+          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0)
+          return executeStage({
+            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...submissionImageParts] }]
+          })
+        })
+      )
+      classifyResponses.forEach((resp, i) => {
+        logStageEnd(pipelineRunId, `classify-p${pageEntries[i][0]}`, resp)
+        stageResponses.push(resp)
+        if (resp.warnings.length > 0) stageWarnings.push(...resp.warnings.map((w) => `[classify-p${pageEntries[i][0]}] ${w}`))
+      })
+      const failedResp = classifyResponses.find((r) => !r.ok)
+      if (failedResp) {
+        return {
+          status: failedResp.status, data: failedResp.data,
+          pipelineMeta: { pipeline: STAGED_PIPELINE_NAME, prepareLatencyMs: failedResp.prepareLatencyMs, modelLatencyMs: failedResp.modelLatencyMs, warnings: failedResp.warnings, metrics: { stage: 'classify' } }
+        }
       }
-    }
+      const parsedResults = classifyResponses.map((r) => parseCandidateJson(r.data))
+      if (parsedResults.some((p) => !p || typeof p !== 'object')) throw new Error('PhaseA classify parse failed (per-page fallback)')
+      const normalizedResults = pageEntries.map(([, ids], i) => normalizeClassifyResult(parsedResults[i], ids))
+      const byId = new Map(normalizedResults.flatMap((n) => n.alignedQuestions).map((q) => [q.questionId, q]))
+      const mergedAligned = questionIds.map((id) => byId.get(id) ?? { questionId: id, visible: false, questionType: 'fill_blank' })
+      classifyResult = applyClassifyQuestionSpecs({
+        alignedQuestions: mergedAligned,
+        coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
+        unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
+        pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
+      }, classifyQuestionSpecs)
+    } else {
+      // Success: each page gets its own cropped image — no pageBreaks needed in prompt
+      logStaged(pipelineRunId, stagedLogLevel, 'classify split success', {
+        pages: splitPages.map((p, i) => ({ page: pageEntries[i][0], startY: +p.pageStartY.toFixed(3), endY: +p.pageEndY.toFixed(3) }))
+      })
+      const classifyResponses = await Promise.all(
+        pageEntries.map(([, ids], i) => {
+          const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
+          // No pageBreaks — single-page image, AI outputs bbox in 0~1 relative to this page
+          const prompt = buildClassifyPrompt(ids, specs, [], 0)
+          const pageImagePart = { inlineData: splitPages[i].inlineData }
+          return executeStage({
+            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+            stageContents: [{ role: 'user', parts: [{ text: prompt }, pageImagePart] }]
+          })
+        })
+      )
 
-    const parsedResults = classifyResponses.map((r) => parseCandidateJson(r.data))
-    if (parsedResults.some((p) => !p || typeof p !== 'object')) {
-      throw new Error('PhaseA classify parse failed (per-page)')
-    }
+      classifyResponses.forEach((resp, i) => {
+        const pageNum = pageEntries[i][0]
+        logStageEnd(pipelineRunId, `classify-p${pageNum}`, resp)
+        stageResponses.push(resp)
+        if (resp.warnings.length > 0) stageWarnings.push(...resp.warnings.map((w) => `[classify-p${pageNum}] ${w}`))
+      })
 
-    const normalizedResults = pageEntries.map(([, ids], i) =>
-      normalizeClassifyResult(parsedResults[i], ids)
-    )
+      const failedResp = classifyResponses.find((r) => !r.ok)
+      if (failedResp) {
+        return {
+          status: failedResp.status, data: failedResp.data,
+          pipelineMeta: { pipeline: STAGED_PIPELINE_NAME, prepareLatencyMs: failedResp.prepareLatencyMs, modelLatencyMs: failedResp.modelLatencyMs, warnings: failedResp.warnings, metrics: { stage: 'classify' } }
+        }
+      }
 
-    const byId = new Map(
-      normalizedResults.flatMap((n) => n.alignedQuestions).map((q) => [q.questionId, q])
-    )
-    const mergedAligned = questionIds.map(
-      (id) => byId.get(id) ?? { questionId: id, visible: false, questionType: 'fill_blank' }
-    )
-    const mergedNormResult = {
-      alignedQuestions: mergedAligned,
-      coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
-      unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
-      pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
+      const parsedResults = classifyResponses.map((r) => parseCandidateJson(r.data))
+      if (parsedResults.some((p) => !p || typeof p !== 'object')) {
+        throw new Error('PhaseA classify parse failed (per-page split)')
+      }
+
+      // Normalize then remap bboxes from per-page coords → full-image coords
+      const normalizedResults = pageEntries.map(([, ids], i) => {
+        const norm = normalizeClassifyResult(parsedResults[i], ids)
+        const { pageStartY, pageEndY } = splitPages[i]
+        for (const q of norm.alignedQuestions) {
+          if (q.answerBbox) q.answerBbox = remapBboxToFullImage(q.answerBbox, pageStartY, pageEndY)
+          if (q.questionBbox) q.questionBbox = remapBboxToFullImage(q.questionBbox, pageStartY, pageEndY)
+          if (q.readBbox) q.readBbox = remapBboxToFullImage(q.readBbox, pageStartY, pageEndY)
+          if (q.bracketBbox) q.bracketBbox = remapBboxToFullImage(q.bracketBbox, pageStartY, pageEndY)
+        }
+        return norm
+      })
+
+      const byId = new Map(
+        normalizedResults.flatMap((n) => n.alignedQuestions).map((q) => [q.questionId, q])
+      )
+      const mergedAligned = questionIds.map(
+        (id) => byId.get(id) ?? { questionId: id, visible: false, questionType: 'fill_blank' }
+      )
+      classifyResult = applyClassifyQuestionSpecs({
+        alignedQuestions: mergedAligned,
+        coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
+        unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
+        pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
+      }, classifyQuestionSpecs)
     }
-    classifyResult = applyClassifyQuestionSpecs(mergedNormResult, classifyQuestionSpecs)
   }
 
   const classifyAligned = classifyResult.alignedQuestions
