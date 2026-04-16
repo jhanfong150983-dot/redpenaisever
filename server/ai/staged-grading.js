@@ -3256,14 +3256,16 @@ function buildFinalGradingResult({
       const stuFinal = extractFinalAnswerFromCalc(studentAns)
       if (refFinal && stuFinal) {
         const finalMatch = refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)
-        if (finalMatch && row.isCorrect === false) {
-          // 反向覆核：accessor 說錯但最終答案相等 → 給滿分（AI 很可能漏讀計算過程）
+        const qMaxScore = toFiniteNumber(question?.maxScore) ?? row.maxScore
+        if (finalMatch && (row.isCorrect === false || row.score < qMaxScore)) {
+          // 反向覆核：最終答案相等但未給滿分 → 給滿分（AI 很可能漏讀計算過程）
+          const prevScore = row.score
           row.isCorrect = true
-          row.score = toFiniteNumber(question?.maxScore) ?? row.maxScore
+          row.score = qMaxScore
           row.needExplain = false
           row.reason = `答案正確（程式比對覆核）`
           row.confidence = 100
-          console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" false→true (full marks)`)
+          console.log(`[programmatic-override] ${questionId} category=${qCategory} refFinal="${refFinal}" stuFinal="${stuFinal}" score ${prevScore}→${qMaxScore}`)
         } else if (!finalMatch && row.isCorrect === true) {
           // 正向覆核：accessor 說對但最終答案不相等 → 強制錯誤
           row.isCorrect = false
