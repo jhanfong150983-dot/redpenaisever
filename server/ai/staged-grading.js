@@ -3300,7 +3300,21 @@ export async function runStagedGradingPhaseA({
 
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
-  const pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
+  let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
+  // Fallback: if pageBreaks is empty but questionIds have multi-page prefixes (1-*, 2-*, 3-*, ...),
+  // estimate equal-split pageBreaks so per-page classify can still work.
+  if (pageBreaks.length === 0) {
+    const pageNums = new Set()
+    for (const id of questionIds) {
+      const m = id.match(/^(\d+)-/)
+      if (m) pageNums.add(parseInt(m[1], 10))
+    }
+    const maxPage = pageNums.size > 0 ? Math.max(...pageNums) : 1
+    if (maxPage >= 2) {
+      pageBreaks = Array.from({ length: maxPage - 1 }, (_, i) => +((i + 1) / maxPage).toFixed(4))
+      logStaged(pipelineRunId, stagedLogLevel, 'pageBreaks auto-estimated (equal split)', { maxPage, pageBreaks })
+    }
+  }
   const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
   // Log anchorHint specs so we can verify hints are correct before trusting them
   const specsWithAnchor = classifyQuestionSpecs.filter((s) => s.anchorHint)
