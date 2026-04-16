@@ -3173,6 +3173,38 @@ function buildFinalGradingResult({
       studentFinalAnswer: ensureString(score?.studentFinalAnswer, '').trim() || undefined
     }
 
+    // ── 程式化覆核：數字/符號答案的 fill_blank 不信任 accessor ──
+    // 只覆核有明確標準答案且答案是數字或簡單符號的題目
+    const qCategory = ensureString(question?.questionCategory, '')
+    const refAnswer = ensureString(question?.answer, '').trim()
+    const studentAns = row.studentAnswer
+    if (
+      (qCategory === 'fill_blank' || qCategory === 'true_false' || qCategory === 'single_choice') &&
+      refAnswer &&
+      studentAns &&
+      studentAns !== '未作答' &&
+      studentAns !== '無法辨識'
+    ) {
+      // 判斷標準答案是否為「簡單答案」（數字、分數、百分比、單一字母/符號）
+      const isSimpleAnswer = /^[\d./×÷+\-−%°○✗✓A-Za-z\s，,]+$/u.test(refAnswer) && refAnswer.length <= 20
+      if (isSimpleAnswer) {
+        const norm = (s) => s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-').toLowerCase()
+        const normRef = norm(refAnswer)
+        const normStu = norm(studentAns)
+        const programMatch = normRef === normStu
+        if (programMatch !== row.isCorrect) {
+          const prevCorrect = row.isCorrect
+          row.isCorrect = programMatch
+          row.score = programMatch ? (toFiniteNumber(question?.maxScore) ?? row.maxScore) : 0
+          row.reason = programMatch
+            ? `答案正確（程式比對覆核）`
+            : `答案錯誤（程式比對覆核：學生 "${studentAns}" ≠ 標準 "${refAnswer}"）`
+          row.confidence = 100
+          console.log(`[programmatic-override] ${questionId} category=${qCategory} ref="${refAnswer}" student="${studentAns}" ${prevCorrect}→${programMatch}`)
+        }
+      }
+    }
+
     // Phase A 一致性欄位（若有）
     if (consistency) {
       row.consistencyStatus = consistency.consistencyStatus
