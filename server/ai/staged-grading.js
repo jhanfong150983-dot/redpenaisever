@@ -824,10 +824,8 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   if (questionType === 'calculation' || questionType === 'word_problem') {
     const fa1 = extractFinalAnswerFromCalc(read1?.studentAnswerRaw)
     const fa2 = extractFinalAnswerFromCalc(read2?.studentAnswerRaw)
-    if (fa1 && fa2) {
-      return fa1 === fa2 ? 'stable' : 'diff'
-    }
-    // 若提取失敗（fa1 或 fa2 為 null），繼續走既有邏輯
+    if (fa1 && fa2 && fa1 === fa2) return 'stable'
+    // 提取失敗或答案不完全相等 → 繼續走既有邏輯（Jaccard 相似度等）
   }
 
   if (CHECKBOX_EQUIVALENT_TYPES.has(questionType)) {
