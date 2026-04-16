@@ -6372,13 +6372,8 @@ async function handleQualityCheckLog(req, res) {
   const totalSubmissions = Number(body.totalSubmissions) || 0
   const flaggedCount = Number(body.flaggedCount) || 0
   const flags = Array.isArray(body.flags) ? body.flags : []
-  const numericDominantQuestions = Array.isArray(body.numericDominantQuestions) ? body.numericDominantQuestions : []
 
   console.log(`[QualityCheck] assignmentId=${assignmentId} total=${totalSubmissions} flagged=${flaggedCount}`)
-
-  if (numericDominantQuestions.length > 0) {
-    console.log(`[QualityCheck] numericDominantQuestions=${JSON.stringify(numericDominantQuestions)}`)
-  }
 
   for (const flag of flags) {
     const sid = flag.submissionId ?? '?'
@@ -6386,11 +6381,13 @@ async function handleQualityCheckLog(req, res) {
     const conditions = Array.isArray(flag.conditions) ? flag.conditions.join(',') : '?'
     const detail = flag.detail ?? {}
     const parts = []
-    if (detail.bboxDeviatingCount != null) parts.push(`bboxDeviating=${detail.bboxDeviatingCount}`)
     if (detail.consecutiveBlankMax != null) parts.push(`consecutiveBlanks=${detail.consecutiveBlankMax}`)
     if (detail.typeMismatchCount != null) parts.push(`typeMismatch=${detail.typeMismatchCount}`)
-    if (Array.isArray(detail.typeMismatchQuestionIds) && detail.typeMismatchQuestionIds.length > 0) {
-      parts.push(`mismatchQids=${JSON.stringify(detail.typeMismatchQuestionIds)}`)
+    if (Array.isArray(detail.typeMismatchDetails) && detail.typeMismatchDetails.length > 0) {
+      const summary = detail.typeMismatchDetails
+        .map((d) => `${d.questionId}(expected=${d.expected},got=${d.got})`)
+        .join(' ')
+      parts.push(`mismatchDetails=[${summary}]`)
     }
     console.log(`[QualityCheck] FLAGGED submission=${sid} student=${studentId} conditions=[${conditions}] ${parts.join(' ')}`)
   }
