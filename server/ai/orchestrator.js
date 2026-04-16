@@ -357,7 +357,15 @@ export async function runAiPipeline({
       })
     } catch (error) {
       console.warn(`${logPrefix} phase-b crashed`, error)
-      pipelineResult = null
+      // Phase B cannot fall back to single-shot — the generic pipeline has no Phase B
+      // prompt or schema, so single-shot always returns 400. Return a structured error
+      // instead so the client can surface a meaningful "timeout, please retry" message.
+      const errStatus = Number(error?.status) || 503
+      pipelineResult = {
+        status: errStatus,
+        data: { error: error?.message || 'Phase B failed', code: 'PHASE_B_FAILED' },
+        pipelineMeta: { pipeline: 'grading-phase-b', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+      }
     }
   } else if (shouldRunStagedGrading) {
     console.log(`${logPrefix} staged-enabled route=${resolvedRouteKey} model=${model}`)

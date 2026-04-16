@@ -2961,14 +2961,31 @@ async function executeStage({
   const prepareLatencyMs = Date.now() - prepareStartedAt
 
   const modelStartedAt = Date.now()
-  const modelResponse = await callGeminiGenerateContent({
-    apiKey,
-    model: preparedRequest.model,
-    contents: preparedRequest.contents,
-    payload: filterPayloadForGemini(preparedRequest.payload),
-    timeoutMs,
-    fallbackModels: ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
-  })
+  let modelResponse
+  try {
+    modelResponse = await callGeminiGenerateContent({
+      apiKey,
+      model: preparedRequest.model,
+      contents: preparedRequest.contents,
+      payload: filterPayloadForGemini(preparedRequest.payload),
+      timeoutMs,
+      fallbackModels: ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+    })
+  } catch (err) {
+    const modelLatencyMs = Date.now() - modelStartedAt
+    const errStatus = Number(err?.status) || 504
+    return {
+      routeKey,
+      pipelineName: pipeline.name,
+      status: errStatus,
+      ok: false,
+      data: { error: err?.message || 'model call failed', code: 'STAGE_CALL_FAILED' },
+      prepareLatencyMs,
+      modelLatencyMs,
+      warnings: [],
+      metrics: {}
+    }
+  }
   const modelLatencyMs = Date.now() - modelStartedAt
 
   let validation = { warnings: [], metrics: {} }
