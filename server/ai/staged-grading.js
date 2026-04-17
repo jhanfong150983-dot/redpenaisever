@@ -831,6 +831,30 @@ function isNumericEqual(a, b) {
   return Math.abs(na - nb) < 1e-9
 }
 
+function gcd(a, b) {
+  a = Math.abs(a); b = Math.abs(b)
+  while (b) { [a, b] = [b, a % b] }
+  return a
+}
+
+/**
+ * 判斷字串是否為「未化簡分數」。
+ * 規則：分數必須最簡，但結果為整數時例外（如 2/2=1、6/3=2 可接受）。
+ * 分數與小數間的等值轉換仍然接受（由 isNumericEqual 處理）。
+ */
+function isUnsimplifiedFraction(s) {
+  if (!s) return false
+  const fracMatch = s.match(/^-?(\d+)\/(\d+)$/)
+  if (!fracMatch) return false
+  const num = parseInt(fracMatch[1], 10)
+  const den = parseInt(fracMatch[2], 10)
+  if (den === 0) return false
+  // 結果為整數（如 2/2, 6/3）→ 不強制化簡
+  if (num % den === 0) return false
+  // GCD > 1 → 未化簡
+  return gcd(num, den) > 1
+}
+
 /**
  * 最終答案正規化（消除排版差異，僅用於比對）：
  * - 統一減號/破折號變體
@@ -3244,10 +3268,14 @@ function buildFinalGradingResult({
         const normStu = norm(studentAns)
         // 1. 直接比對 → 2. 數值等值 → 3. 從學生答案提取最終答案再比（處理 bbox 多讀計算草稿的情況）
         let programMatch = normRef === normStu || isNumericEqual(normRef, normStu)
+        // 分數必須最簡（整數除外，如 2/2=1 可接受）
+        if (programMatch && isUnsimplifiedFraction(normStu)) programMatch = false
         if (!programMatch) {
           const extracted = extractFinalAnswerFromCalc(studentAns)
           if (extracted) {
-            programMatch = norm(extracted) === normRef || isNumericEqual(norm(extracted), normRef)
+            const extractedNorm = norm(extracted)
+            programMatch = extractedNorm === normRef || isNumericEqual(extractedNorm, normRef)
+            if (programMatch && isUnsimplifiedFraction(extractedNorm)) programMatch = false
           }
         }
         if (programMatch !== row.isCorrect) {
@@ -3283,7 +3311,8 @@ function buildFinalGradingResult({
       const hasSteps = stepsText.length >= 3
 
       if (refFinal && stuFinal) {
-        const finalMatch = refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)
+        // 分數必須最簡（整數除外，如 2/2=1 可接受）；分數⇔小數等值仍接受
+        const finalMatch = (refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)) && !isUnsimplifiedFraction(stuFinal)
 
         if (finalMatch && hasSteps && row.score < qMaxScore) {
           // 最終答案對 + 有步驟 → 滿分
