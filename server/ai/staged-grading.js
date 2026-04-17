@@ -1134,6 +1134,17 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     if (akAnchorHint && anchorHintUsefulTypes.has(expectedType) && (expectedType !== 'fill_blank' || isSubQuestion)) {
       spec.anchorHint = akAnchorHint
     }
+    // 表格座標定位（優先於 anchorHint）
+    if (question?.tablePosition && typeof question.tablePosition.col === 'number' && typeof question.tablePosition.row === 'number') {
+      spec.tablePosition = {
+        col: question.tablePosition.col,
+        row: question.tablePosition.row,
+        totalCols: question.tablePosition.totalCols,
+        totalRows: question.tablePosition.totalRows
+      }
+      if (question.tablePosition.colspan > 1) spec.tablePosition.colspan = question.tablePosition.colspan
+      if (question.tablePosition.rowspan > 1) spec.tablePosition.rowspan = question.tablePosition.rowspan
+    }
     return spec
   })
 }
@@ -1971,6 +1982,15 @@ Rules:
     ANCHOR RULE (MANDATORY — takes priority): if the spec includes anchorHint, it is the AUTHORITATIVE locator for this question's cell. You MUST locate the exact cell described by the anchorHint and place the bbox precisely on that cell. Do NOT place the bbox ON the landmark text itself; the landmark is a reference point to navigate to the correct answer cell. TABLE COLUMN RULE: when the anchorHint references a column header (e.g. "標題『建功國中』正下方"), find that column header's horizontal position, then trace STRAIGHT DOWN to the target row. The answerBbox left and right edges MUST NOT extend beyond that column's boundaries — content from adjacent columns is FORBIDDEN. Each anchorHint uniquely identifies one cell; if your bbox could plausibly contain content from a neighboring column, it is WRONG — shrink it. Only fall back to ORDERING RULE when no anchorHint is provided.
     ORDERING RULE (fallback only): When multi_fill boxes have no printed question numbers, assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). The sub-question with the smallest id suffix (e.g. "2-1-1") MUST map to the topmost box; the next id ("2-1-2") to the next box below; and so on. Do NOT re-order based on visual importance or content — position is the only criterion.
   - For matching(group_context): include the entire left column + right column + connecting lines of the whole group.
+  - TABLE POSITION RULE (HIGHEST PRIORITY — overrides ANCHOR RULE and ORDERING RULE):
+    When a question spec includes tablePosition (e.g. {"col": 4, "row": 3, "totalCols": 8, "totalRows": 3}), the answer is in a TABLE GRID. You MUST:
+    1. Find the table in the image and verify it has the expected dimensions (totalCols × totalRows).
+    2. Count columns LEFT-TO-RIGHT starting from 1, count rows TOP-TO-BOTTOM starting from 1. Column 1 is the leftmost column; row 1 is the topmost row. Include header columns/rows in the count.
+    3. Locate the cell at the intersection of column=col and row=row.
+    4. Place answerBbox as a TIGHT crop of ONLY that single cell. The bbox MUST NOT extend into adjacent cells.
+    5. If the spec includes colspan or rowspan, the cell spans multiple columns/rows — expand the bbox accordingly.
+    Example: tablePosition={"col":4,"row":3,"totalCols":8,"totalRows":3} means "4th column from left, 3rd row from top, in an 8×3 table". Count to column 4 and row 3, crop that cell.
+    This rule is deterministic — do NOT rely on reading column/row header text. Just count grid lines.
   - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
   If the question region cannot be determined, omit answerBbox.
