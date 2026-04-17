@@ -447,7 +447,7 @@ export default async function handler(req, res) {
     supabaseAdmin = getSupabaseAdmin()
     const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
-      .select('ink_balance')
+      .select('ink_balance, role')
       .eq('id', user.id)
       .maybeSingle()
 
@@ -457,6 +457,7 @@ export default async function handler(req, res) {
       return
     }
 
+    const isAdmin = profile?.role === 'admin'
     currentBalance =
       typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
 
@@ -488,7 +489,7 @@ export default async function handler(req, res) {
       }
     }
 
-    if (!hasValidInkSession && currentBalance <= 0) {
+    if (!isAdmin && !hasValidInkSession && currentBalance <= 0) {
       const message = inkSessionId
         ? '批改會話已結束或點數不足，請重新進入或補充墨水'
         : '墨水不足，請先補充墨水'
@@ -548,7 +549,11 @@ export default async function handler(req, res) {
       try {
         const cost = computeInkPoints(data.usageMetadata)
         let inkSummary = null
-        if (hasValidInkSession && inkSessionId) {
+
+        // Admin 不扣墨水
+        if (isAdmin) {
+          inkSummary = { chargedPoints: 0, balanceBefore: currentBalance, balanceAfter: currentBalance, applied: true, adminBypass: true }
+        } else if (hasValidInkSession && inkSessionId) {
           const { error: usageError } = await supabaseAdmin
             .from('ink_session_usage')
             .insert({

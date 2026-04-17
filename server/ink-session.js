@@ -67,26 +67,29 @@ export async function settleInkSession({
         : totals.inputTokens + totals.outputTokens
   })
 
+  // 查詢使用者角色，admin 不扣墨水
+  const { data: profile, error: profileError } = await supabaseAdmin
+    .from('profiles')
+    .select('ink_balance, role')
+    .eq('id', userId)
+    .maybeSingle()
+
+  if (profileError) {
+    throw new Error('讀取使用者點數失敗')
+  }
+
+  const isAdmin = profile?.role === 'admin'
+  const currentBalance =
+    typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
+
   let inkSummary = {
     chargedPoints: 0,
-    balanceBefore: null,
-    balanceAfter: null,
+    balanceBefore: currentBalance,
+    balanceAfter: currentBalance,
     applied: true
   }
 
-  if (cost.points > 0) {
-    const { data: profile, error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .select('ink_balance')
-      .eq('id', userId)
-      .maybeSingle()
-
-    if (profileError) {
-      throw new Error('讀取使用者點數失敗')
-    }
-
-    const currentBalance =
-      typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
+  if (cost.points > 0 && !isAdmin) {
     const nextBalance = currentBalance - cost.points
 
     const { error: updateError } = await supabaseAdmin
