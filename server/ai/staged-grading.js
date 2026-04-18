@@ -2936,11 +2936,24 @@ function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
       const d = englishRules.wordOrderCheck.deductionPerError || 1
       rules.push(`WORD ORDER CHECK (enabled): For fill_blank and short_answer, if the student's words are in the wrong order or a word is missing compared to the correctAnswer, each word-order error or missing word = deduct ${d} point(s). Deduct until score reaches 0. Example: "Where your brother?" (missing "is") = -${d}; "Where your brother is?" (wrong order) = -${d}. errorType='concept'.`)
     }
-    // 拼寫評分規則（強制）
-    rules.push(`SPELLING SCORING (mandatory): For fill_blank, distinguish between two types of errors:
-1. SPACING ERROR: The student wrote the correct letters in the correct order, but with extra/missing spaces (e.g. "bath room" instead of "bathroom", "diningroom" instead of "dining room"). This is a MINOR error → deduct 1 point only. The student knows the word.
-2. MISSPELLING: The student wrote wrong letters, extra letters, or missing letters (e.g. "writeing" instead of "writing", "dinng" instead of "dining", "kitchan" instead of "kitchen"). This means the student does NOT know the correct spelling → score = 0 for this question.
-Apply this distinction BEFORE other deduction rules.`)
+    // 拼寫評分規則（強制）— 依正確答案字數區分短單詞 vs 句子
+    rules.push(`SPELLING SCORING (mandatory): For fill_blank, first count the number of words in correctAnswer to determine the scoring mode:
+
+【SHORT WORD MODE】(correctAnswer has 1-2 words, e.g. "kitchen", "dining room"):
+Focus: does the student know the word?
+- SPACING ERROR (correct letters, wrong spacing, e.g. "bath room" → "bathroom"): minor → deduct 1 point.
+- MISSPELLING (wrong/extra/missing letters, e.g. "writeing" → "writing", "kitchan" → "kitchen"): student cannot spell → score = 0.
+
+【SENTENCE MODE】(correctAnswer has 3+ words, e.g. "Dad is cooking in the kitchen."):
+Focus: can the student construct the sentence?
+- SPELLING ERROR (e.g. "cookking" → "cooking"): deduct 1 point per misspelled word.
+- WORD ORDER ERROR (e.g. "Dad cooking is" → "Dad is cooking"): deduct 1 point per word out of place.
+- MISSING/EXTRA WORD (e.g. "Dad is cooking the kitchen" missing "in"): deduct 1 point per word.
+- PUNCTUATION ERROR (missing period, question mark, etc.): deduct per punctuation check rule.
+- SPACING ERROR within a word: deduct 1 point (same as short word mode).
+All deductions are cumulative. Score cannot go below 0.
+
+Determine the mode by counting words in correctAnswer, then apply the corresponding rules.`)
     englishRulesSection = `\nENGLISH DOMAIN RULES:\n${rules.join('\n')}\nThese deductions are cumulative and stack with each other. The final score cannot go below 0.`
   }
 
