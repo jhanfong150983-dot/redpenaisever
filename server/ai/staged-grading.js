@@ -2889,6 +2889,27 @@ function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
 - This policy must NOT be applied when strictness is strict/standard.`
       : ''
 
+  // 英語領域專屬規則
+  const englishRules = answerKey?.englishRules
+  const isEnglishDomain = (domainHint || '').includes('英語')
+  let englishRulesSection = ''
+  if (isEnglishDomain) {
+    const rules = []
+    // 大小寫一致（強制）
+    rules.push('CASE SENSITIVITY (mandatory): For fill_blank and short_answer, the student\'s answer must match the correctAnswer\'s capitalization exactly. Each word with wrong capitalization (e.g. "apple" instead of "Apple") = deduct 1 point. errorType=\'spelling\'.')
+    // 標點符號檢查（老師選擇）
+    if (englishRules?.punctuationCheck?.enabled) {
+      const d = englishRules.punctuationCheck.deductionPerError || 1
+      rules.push(`PUNCTUATION CHECK (enabled): For fill_blank and short_answer, check sentence-ending punctuation (? . !) and apostrophes in contractions (e.g. don't, it's). Each missing or wrong punctuation = deduct ${d} point(s). Deduct until score reaches 0. errorType='spelling'.`)
+    }
+    // 單字順序/缺漏檢查（老師選擇）
+    if (englishRules?.wordOrderCheck?.enabled) {
+      const d = englishRules.wordOrderCheck.deductionPerError || 1
+      rules.push(`WORD ORDER CHECK (enabled): For fill_blank and short_answer, if the student's words are in the wrong order or a word is missing compared to the correctAnswer, each word-order error or missing word = deduct ${d} point(s). Deduct until score reaches 0. Example: "Where your brother?" (missing "is") = -${d}; "Where your brother is?" (wrong order) = -${d}. errorType='concept'.`)
+    }
+    englishRulesSection = `\nENGLISH DOMAIN RULES:\n${rules.join('\n')}\nThese deductions are cumulative and stack with each other. The final score cannot go below 0.`
+  }
+
   const compactAnswerKey = {
     questions: Array.isArray(answerKey?.questions) ? answerKey.questions : [],
     totalScore: toFiniteNumber(answerKey?.totalScore) ?? null
@@ -2906,6 +2927,7 @@ You are stage Assessor. Score each question by comparing student answers to the 
 
 ${strictnessRule}
 ${lenientFocusPolicy}
+${englishRulesSection}
 
 Domain: ${JSON.stringify(domainHint || null)}
 
