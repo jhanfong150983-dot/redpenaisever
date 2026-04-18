@@ -3451,6 +3451,7 @@ async function handleSync(req, res) {
               (Number.isFinite(existingGradedAt) && incomingGradedAt <= existingGradedAt)
             ) {
               skippedSubmissionStaleCount += 1
+              console.log(`[sync-stale] skipped submission ${s.id} (bothGraded) incoming=${incomingGradedAt} existing=${existingGradedAt}`)
               continue
             }
           } else if (
@@ -3458,6 +3459,7 @@ async function handleSync(req, res) {
             (existingUpdatedAt && incomingUpdatedAt <= existingUpdatedAt)
           ) {
             skippedSubmissionStaleCount += 1
+            console.log(`[sync-stale] skipped submission ${s.id} (updatedAt) incoming=${incomingUpdatedAt} existing=${existingUpdatedAt}`)
             continue
           }
         }
