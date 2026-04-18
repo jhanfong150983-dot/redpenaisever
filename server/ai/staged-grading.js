@@ -1985,10 +1985,7 @@ Rules:
     6. 目標格 bbox: x = V(col) 的 x 座標, y = H(row) 的 y 座標, w = V(col+1) - V(col), h = H(row+1) - H(row)
     7. answerBbox 必須精確對齊格線，不可偏移到相鄰格
 
-    ⚠️ 自我驗證：數完後，讀取第 1 列各欄的標題文字，確認 col 編號與標題對應正確。若不符（例如 col=3 應該是「建功國中」但你讀到的是「光武國中」），代表你數錯了，必須重新計數。
-    範例：表格有 8 條垂直線 → 7 欄。
-    V1|就讀國中|V2|光武國中|V3|建功國中|V4|實驗中學|V5|新竹康乃薾|V6|新科國中|V7|合計|V8
-    → col=3 = V3 與 V4 之間 = 建功國中
+    ⚠️ 自我驗證：數完後，讀取第 1 列各欄的標題文字，列出 col1=「X」, col2=「Y」, ... 的對應表。用 anchorHint 提供的欄標題交叉比對目標 col 是否正確。若不符，代表數錯了，必須重新計數。
 
     8. Output tablePositionReasoning (MANDATORY): format: "vertical lines: V1=x1, V2=x2, ..., V(N+1)=xN. col1(V1-V2)=[header], col2(V2-V3)=[header], ..., colN(VN-V(N+1))=[header]. Target col=X → [header]. bbox=[x,y,w,h]"
 - For visible=true questions with question_context/group_context, output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
