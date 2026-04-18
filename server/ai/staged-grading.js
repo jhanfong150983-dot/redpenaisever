@@ -1985,6 +1985,13 @@ Rules:
     6. 目標格 bbox: x = V(col) 的 x 座標, y = H(row) 的 y 座標, w = V(col+1) - V(col), h = H(row+1) - H(row)
     7. answerBbox 必須精確對齊格線，不可偏移到相鄰格
 
+    🚨 空白格防漂移規則（最高優先）：
+    當目標格內沒有任何學生手寫內容（空白格）時，你仍然必須將 answerBbox 放在該空白格的正確位置上。
+    嚴禁因為目標格是空白的，就把 bbox 漂移到相鄰的有內容的格子。
+    bbox 的位置由格線座標決定（V(col) 到 V(col+1)），與格內是否有內容完全無關。
+    空白格 = 學生未作答，這是正常的批改情境，必須如實回報該格的位置。
+    違反此規則會導致所有相鄰題目的答案全部串位，造成連鎖錯誤。
+
     ⚠️ 自我驗證：數完後，讀取第 1 列各欄的標題文字，列出 col1=「X」, col2=「Y」, ... 的對應表。用 anchorHint 提供的欄標題交叉比對目標 col 是否正確。若不符，代表數錯了，必須重新計數。
 
     8. Output tablePositionReasoning (MANDATORY): format: "vertical lines: V1=x1, V2=x2, ..., V(N+1)=xN. col1(V1-V2)=[header], col2(V2-V3)=[header], ..., colN(VN-V(N+1))=[header]. Target col=X → [header]. bbox=[x,y,w,h]"
