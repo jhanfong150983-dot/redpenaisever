@@ -533,7 +533,8 @@ export default async function handler(req, res) {
         enableStagedGrading,
         gradingMode,
         readAnswerSplitMode,
-        answerKeyImages
+        answerKeyImages,
+        domainHint: payload?.domain || undefined
       }
     })
 
