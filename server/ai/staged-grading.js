@@ -2430,6 +2430,12 @@ Before reading each question, ask yourself: "Is there fresh handwriting in this 
 - Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count.
 - Only FRESH student pen/pencil marks count.
 
+🚨 TABLE CELL EDGE RULE (applies to fill_blank questions in tables):
+When reading a tightly-cropped table cell, content visible at the LEFT or RIGHT EDGE of the crop may belong to an ADJACENT cell, not this question's cell.
+- Focus ONLY on content in the CENTER of the cropped image.
+- If the center area is empty but you can see numbers/text at the extreme left or right edge → that is a neighboring cell's content leaking into the crop. Ignore it and report status="blank".
+- Do NOT read edge content as the student's answer. Edge content = adjacent cell = wrong question.
+
 == COPY RULES (only when non-blank) ==
 You are an OCR scanner. Your ONLY job is to copy exactly what the student wrote. You have NO language ability, NO grammar knowledge, and NO understanding of meaning.
 
