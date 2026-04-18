@@ -1978,6 +1978,7 @@ Rules:
     3. Locate the cell at the intersection of column=col and row=row. Do NOT read header text to decide which column — just count from left edge.
     4. Place answerBbox as a TIGHT crop of ONLY that single cell. The bbox MUST NOT extend into adjacent cells.
     5. If the spec includes colspan or rowspan, the cell spans multiple columns/rows — expand the bbox accordingly.
+    6. Output tablePositionReasoning: a short string explaining your counting process. Format: "table found at [x range]. col1=[header text], col2=[header text], ..., colN=[header text]. Target col=X → [header text at that column]. bbox=[x,y,w,h]". This is MANDATORY for every question with tablePosition.
     Example: tablePosition={"col":3,"row":3,"totalCols":7,"totalRows":3} → find the table, count to the 3rd column from left and 3rd row from top, crop that cell.
     ⚠️ Common error: off-by-one. If the table has a row-label column on the left, that IS column 1. The 2nd column is the first data column, the 3rd column is the second data column, etc. Count carefully.
     This rule is purely positional — do NOT rely on reading column/row header text. Just count grid lines.
@@ -2024,7 +2025,8 @@ Output:
       "questionBbox": { "x": 0.08, "y": 0.16, "w": 0.62, "h": 0.18 },
       "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 },
       "readBbox": { "x": 0.35, "y": 0.22, "w": 0.25, "h": 0.05 },
-      "bracketBbox": { "x": 0.1, "y": 0.26, "w": 0.25, "h": 0.025 }
+      "bracketBbox": { "x": 0.1, "y": 0.26, "w": 0.25, "h": 0.025 },
+      "tablePositionReasoning": "table found at x=0.04-0.49. col1=比率(row label), col2=光武國中, col3=建功國中, col4=實驗中學... Target col=3 → 建功國中. bbox=[0.18,0.07,0.06,0.01]"
     }
   ]
 }
@@ -3738,6 +3740,13 @@ export async function runStagedGradingPhaseA({
       h: q.answerBbox ? +q.answerBbox.h.toFixed(3) : null,
     }))
   )
+  // Log tablePosition reasoning for debugging table cell targeting
+  const tableReasoningDebug = classifyAligned
+    .filter((q) => q.tablePositionReasoning)
+    .map((q) => ({ id: q.questionId, reasoning: q.tablePositionReasoning }))
+  if (tableReasoningDebug.length > 0) {
+    logStaged(pipelineRunId, 'basic', 'classify tablePosition reasoning', tableReasoningDebug)
+  }
   const multiFillBboxDebug = classifyAligned
     .filter((q) => q.visible && q.questionType === 'multi_fill')
     .map((q) => ({ questionId: q.questionId, answerBbox: q.answerBbox }))
