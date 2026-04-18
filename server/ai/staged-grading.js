@@ -342,13 +342,32 @@ function toReadAnswerSchemaPreview(parsed) {
   return {
     answerCount: answers.length,
     answers: answers.map((item) => {
+      let studentAnswerRaw = ensureString(item?.studentAnswerRaw, '')
+      const rawSpelling = ensureString(item?.rawSpelling, '').trim()
+
+      // rawSpelling 覆蓋：如果有逐字母拼寫，還原為正常文字並比對
+      // rawSpelling="d-i-n-n-g r-o-o-m" → reconstructed="dinng room"
+      if (rawSpelling && studentAnswerRaw) {
+        const reconstructed = rawSpelling
+          .split(' ')
+          .map((word) => word.split('-').join(''))
+          .join(' ')
+        if (reconstructed && reconstructed.toLowerCase() !== studentAnswerRaw.toLowerCase()) {
+          console.log(`[rawSpelling-override] questionId=${item?.questionId} original="${studentAnswerRaw}" rawSpelling="${rawSpelling}" reconstructed="${reconstructed}"`)
+          studentAnswerRaw = reconstructed
+        }
+      }
+
       const entry = {
         questionId: ensureString(item?.questionId, ''),
         status: ensureString(item?.status, ''),
-        studentAnswerRaw: ensureString(item?.studentAnswerRaw, '')
+        studentAnswerRaw
       }
       if (item?.formatBReasoning) {
         entry.formatBReasoning = ensureString(item.formatBReasoning, '')
+      }
+      if (rawSpelling) {
+        entry.rawSpelling = rawSpelling
       }
       return entry
     })
@@ -2552,6 +2571,13 @@ FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
 - Empty blank → "_". Unreadable blank → "?". All blanks empty → status="blank".
 - FORBIDDEN: surrounding printed text ("答", underline markers).
+- 🚨 ENGLISH SPELLING RULE (for English domain fill_blank):
+  DO NOT auto-correct spelling. Copy each letter EXACTLY as the student wrote it.
+  "dinng" stays "dinng" (NOT "dining"). "kitchan" stays "kitchan" (NOT "kitchen").
+  You are an OCR scanner with ZERO language knowledge — you cannot recognize English words.
+  Additionally, output a "rawSpelling" field: spell out every letter separated by dashes.
+  Example: student wrote "dinng room" → studentAnswerRaw="dinng room", rawSpelling="d-i-n-n-g r-o-o-m".
+  This forces you to examine each letter individually. If rawSpelling disagrees with studentAnswerRaw, rawSpelling is authoritative.
 
 CALCULATION (questions in CALCULATION list):
 - Read the ENTIRE answer work area: formula steps (橫式/直式) AND the final result.
@@ -2711,7 +2737,8 @@ Return:
       "questionId": "string",
       "studentAnswerRaw": "exact text as written",
       "status": "read|blank|unreadable",
-      "formatBReasoning": "only for FORMAT B questions: step-by-step spatial reasoning (omit for all other question types)"
+      "formatBReasoning": "only for FORMAT B questions: step-by-step spatial reasoning (omit for all other question types)",
+      "rawSpelling": "d-i-n-n-g r-o-o-m (English fill_blank only: spell out every letter with dashes, spaces between words)"
     }
   ]
 }
