@@ -3489,8 +3489,15 @@ async function handleSync(req, res) {
             parent_submission_id: s.parentSubmissionId ?? s.parent_submission_id ?? undefined,
             actor_user_id: s.actorUserId ?? s.actor_user_id ?? undefined,
             created_at: createdAt ?? undefined,
-            score: toNumber(s.score) ?? undefined,
-            ai_score: toNumber(s.aiScore ?? s.ai_score) ?? undefined,
+            // score 和 grading_result.totalScore 連動：有 totalScore 時強制同步
+            score: (() => {
+              const grTotal = toNumber(s.gradingResult?.totalScore)
+              return grTotal ?? toNumber(s.score) ?? undefined
+            })(),
+            ai_score: (() => {
+              const grTotal = toNumber(s.gradingResult?.totalScore)
+              return grTotal ?? toNumber(s.aiScore ?? s.ai_score) ?? undefined
+            })(),
             score_source: (s.scoreSource ?? s.score_source) || undefined,
             feedback: s.feedback ?? undefined,
             grading_result: s.gradingResult ?? undefined,
