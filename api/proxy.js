@@ -442,6 +442,7 @@ export default async function handler(req, res) {
 
   let supabaseAdmin = null
   let currentBalance = 0
+  let isAdmin = false
   let hasValidInkSession = false
   try {
     supabaseAdmin = getSupabaseAdmin()
@@ -457,7 +458,7 @@ export default async function handler(req, res) {
       return
     }
 
-    const isAdmin = profile?.role === 'admin'
+    isAdmin = profile?.role === 'admin'
     currentBalance =
       typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
 
