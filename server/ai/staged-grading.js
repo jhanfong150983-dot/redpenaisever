@@ -2889,11 +2889,11 @@ function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
 - This policy must NOT be applied when strictness is strict/standard.`
       : ''
 
-  // 英語領域專屬規則
+  // 英語領域專屬規則（直接從 answerKey 讀，不依賴 domainHint）
   const englishRules = answerKey?.englishRules
-  const isEnglishDomain = (domainHint || '').includes('英語')
+  const hasEnglishRules = englishRules?.punctuationCheck?.enabled || englishRules?.wordOrderCheck?.enabled
   let englishRulesSection = ''
-  if (isEnglishDomain) {
+  if (hasEnglishRules || (domainHint || '').includes('英語')) {
     const rules = []
     // 大小寫一致（強制）
     rules.push('CASE SENSITIVITY (mandatory): For fill_blank and short_answer, the student\'s answer must match the correctAnswer\'s capitalization exactly. Each word with wrong capitalization (e.g. "apple" instead of "Apple") = deduct 1 point. errorType=\'spelling\'.')
