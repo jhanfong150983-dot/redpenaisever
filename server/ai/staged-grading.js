@@ -3395,7 +3395,12 @@ function buildFinalGradingResult({
       // 判斷標準答案是否為「簡單答案」（數字、分數、百分比、單一字母/符號）
       const isSimpleAnswer = /^[\d./×÷+\-−%°○✗✓A-Za-z\s，,]+$/u.test(refAnswer) && refAnswer.length <= 20
       if (isSimpleAnswer) {
-        const norm = (s) => s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-').toLowerCase()
+        const norm = (s) => {
+          let t = s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-')
+          // 剝除外層括號：(C) → C、（甲）→ 甲、(2) → 2
+          t = t.replace(/^[（(]\s*(.+?)\s*[）)]$/, '$1')
+          return t.toLowerCase()
+        }
         // 是非題：用 normalizeTrueFalseAnswer 正規化（O→○、X→✗ 等），處理完直接跳過通用比對
         if (qCategory === 'true_false') {
           const tfRef = normalizeTrueFalseAnswer(refAnswer)
