@@ -530,9 +530,9 @@ const STEM_LABEL_NUMBER_MAP = {
 function normalizeTrueFalseAnswer(raw) {
   const s = String(raw ?? '').trim()
   // 各種「正確」形式 → ○
-  if (/^[○〇Oo]$/.test(s) || /^(?:對|是|正確|ｏ|O|yes|Yes)$/u.test(s)) return '○'
+  if (/^[○〇OoTt]$/.test(s) || /^(?:對|是|正確|ｏ|O|yes|Yes|true|True|TRUE)$/u.test(s)) return '○'
   // 各種「錯誤」形式 → ✗
-  if (/^[✗✘×Xx叉]$/.test(s) || /^(?:錯|否|不對|不是|no|No)$/u.test(s)) return '✗'
+  if (/^[✗✘×XxFf叉]$/.test(s) || /^(?:錯|否|不對|不是|no|No|false|False|FALSE)$/u.test(s)) return '✗'
   return null  // 無法正規化
 }
 
