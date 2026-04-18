@@ -1389,7 +1389,8 @@ function normalizeClassifyResult(parsed, questionIds) {
       drawType,
       questionBbox: normalizeBboxRef(row?.questionBbox ?? row?.question_bbox),
       answerBbox: normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox),
-      bracketBbox: (questionType === 'single_choice') ? normalizeBboxRef(row?.bracketBbox) : undefined
+      bracketBbox: (questionType === 'single_choice') ? normalizeBboxRef(row?.bracketBbox) : undefined,
+      tablePositionReasoning: typeof row?.tablePositionReasoning === 'string' ? row.tablePositionReasoning : undefined
     })
     if (!visible) unmappedQuestionIds.push(questionId)
   }
