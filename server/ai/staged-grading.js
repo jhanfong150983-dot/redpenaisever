@@ -2406,12 +2406,29 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     ? `\n\n== ANSWER AREA LOCATION HINTS ==\nFor the following questions, the answer area is approximately at these normalized coordinates (x/y=top-left, w/h=width/height, all 0-1):\n${questionsWithBbox.map((q) => `- "${q.questionId}": x=${q.answerBbox.x.toFixed(3)}, y=${q.answerBbox.y.toFixed(3)}, w=${q.answerBbox.w.toFixed(3)}, h=${q.answerBbox.h.toFixed(3)}`).join('\n')}\nUse these as a guide to locate the student's answer space, but always verify by looking at the image.`
     : ''
 
+  // Table cell column hints: tell ReadAnswer which column header each table question belongs to
+  const akQuestionMap = options?.answerKeyQuestions
+    ? mapByQuestionId(options.answerKeyQuestions, (item) => item?.id)
+    : new Map()
+  const tableCellHints = visibleQuestions
+    .filter((q) => {
+      const akQ = akQuestionMap.get(q.questionId)
+      return akQ?.tablePosition && akQ?.anchorHint
+    })
+    .map((q) => {
+      const akQ = akQuestionMap.get(q.questionId)
+      return `- "${q.questionId}": 此格位於表格 col=${akQ.tablePosition.col}。${akQ.anchorHint}。若裁切圖頂部可見欄標題文字，請確認標題與此描述一致。若看到的標題是其他欄位名稱，代表裁切圖偏移，格線內側若無手寫內容則回報 blank。`
+    })
+  const tableCellHintNote = tableCellHints.length > 0
+    ? `\n\n== TABLE CELL COLUMN HINTS ==\n以下題目是表格中的格子，裁切圖可能包含欄標題和格線。請用欄標題確認你讀的是正確的格子：\n${tableCellHints.join('\n')}`
+    : ''
+
   return `
 You are an answer reader. Your only job is to report what the student physically wrote or drew in each question's designated answer space. You have NO mathematical knowledge and must NOT solve, infer, or guess.
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}
+${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}${tableCellHintNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
@@ -3868,7 +3885,8 @@ export async function runStagedGradingPhaseA({
   // Build AI1 parts: text prompt + interleaved (label + crop) per question
   const ai1IncludeIds = Array.from(allQuestionCropMap.keys())
   const ai1TextPrompt = buildDetailReadPrompt(classifyResult, {
-    includeQuestionIds: ai1IncludeIds.length > 0 ? ai1IncludeIds : undefined
+    includeQuestionIds: ai1IncludeIds.length > 0 ? ai1IncludeIds : undefined,
+    answerKeyQuestions: answerKeyQuestions
   })
   const ai1Parts = [{ text: ai1TextPrompt }]
   for (const q of classifyAligned) {
@@ -3886,7 +3904,7 @@ export async function runStagedGradingPhaseA({
   // caused single_check to output option text characters instead of symbol labels.
   // Per-question crops anchor AI2 to the correct answer cell; using buildDetailReadPrompt
   // ensures the prompt correctly describes the crop-based format.
-  const globalReadPrompt = buildDetailReadPrompt(classifyResult)
+  const globalReadPrompt = buildDetailReadPrompt(classifyResult, { answerKeyQuestions })
   const ai2Parts = [{ text: globalReadPrompt }]
   for (const q of classifyAligned) {
     if (!q.visible) continue
