@@ -4511,6 +4511,115 @@ export async function runStagedGradingPhaseA({
     ? `data:${inlineImages[0].inlineData.mimeType};base64,${inlineImages[0].inlineData.data}`
     : undefined
 
+  // ── English spelling verification: override AI2 for English fill_blank/short_answer ──
+  // AI's language model auto-corrects spelling (e.g. "dinng" → "dining").
+  // This step uses a comparison-based approach: give the correct answer as reference
+  // and ask AI to find character-level differences in the student's handwriting.
+  const isEnglishDomainForSpelling = (internalContext?.domainHint || '').includes('英語') ||
+    answerKey?.englishRules?.punctuationCheck?.enabled || answerKey?.englishRules?.wordOrderCheck?.enabled
+  const englishSpellingCandidates = isEnglishDomainForSpelling
+    ? questionResultsRaw.filter((qr) => {
+        const qt = qr.questionType
+        return (qt === 'fill_blank' || qt === 'short_answer') &&
+          qr.readAnswer1.status === 'read' &&
+          qr.readAnswer1.studentAnswer &&
+          qr.readAnswer1.studentAnswer !== '未作答'
+      })
+    : []
+
+  if (englishSpellingCandidates.length > 0) {
+    const akByQid = mapByQuestionId(answerKeyQuestions, (q) => q?.id)
+    const spellingItems = englishSpellingCandidates
+      .map((qr) => {
+        const akQ = akByQid.get(qr.questionId)
+        const correctAnswer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
+        if (!correctAnswer) return null
+        return { questionId: qr.questionId, correctAnswer }
+      })
+      .filter(Boolean)
+
+    if (spellingItems.length > 0) {
+      const spellingPrompt = `You are a SPELLING CHECKER for English handwriting. You are given cropped images of student handwriting and the correct answer for each question.
+
+Your job: compare what the student ACTUALLY WROTE (letter by letter) to the correct answer. Find ANY spelling differences.
+
+CRITICAL: DO NOT auto-correct. If the student wrote "dinng", report "dinng" NOT "dining". If the student wrote "kitchan", report "kitchan" NOT "kitchen".
+
+For each question:
+1. Spell out each letter the student wrote, separated by dashes (e.g. "d-i-n-n-g")
+2. Compare to the correct answer letter by letter
+3. Report the student's ACTUAL text (with any misspellings preserved)
+
+Questions to verify:
+${spellingItems.map((item) => `- "${item.questionId}": correct answer = "${item.correctAnswer}"`).join('\n')}
+
+Return JSON:
+{
+  "spellingResults": [
+    {
+      "questionId": "string",
+      "studentSpelling": "d-i-n-n-g r-o-o-m",
+      "studentText": "dinng room",
+      "matchesCorrect": false,
+      "differences": "letter 4: student wrote 'n', expected 'i'"
+    }
+  ]
+}
+`
+      const spellingParts = [{ text: spellingPrompt }]
+      for (const item of spellingItems) {
+        const qr = questionResultsRaw.find((q) => q.questionId === item.questionId)
+        const crop = allQuestionCropMap.get(item.questionId)
+        if (crop && qr) {
+          spellingParts.push({ text: `--- 題目 ${item.questionId}（正確答案：${item.correctAnswer}）---` })
+          spellingParts.push({ inlineData: crop })
+        }
+      }
+
+      try {
+        logStaged(pipelineRunId, 'basic', 'english-spelling-verify begin', { count: spellingItems.length })
+        const spellingResponse = await executeStage({
+          apiKey, model,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(),
+          routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
+          stageContents: [{ role: 'user', parts: spellingParts }]
+        })
+        if (spellingResponse.ok) {
+          const spellingParsed = parseCandidateJson(spellingResponse.data)
+          const results = Array.isArray(spellingParsed?.spellingResults) ? spellingParsed.spellingResults : []
+          const overrideCount = { applied: 0, skipped: 0 }
+          for (const result of results) {
+            const qId = ensureString(result?.questionId, '')
+            const studentText = ensureString(result?.studentText, '').trim()
+            if (!qId || !studentText) continue
+            const qr = questionResultsRaw.find((q) => q.questionId === qId)
+            if (!qr) continue
+            // Override AI2 with spelling verification result
+            const prevAi2 = qr.readAnswer2.studentAnswer
+            if (studentText.toLowerCase() !== prevAi2.toLowerCase()) {
+              qr.readAnswer2 = { status: 'read', studentAnswer: studentText }
+              // Recompute consistency
+              qr.consistencyStatus = computeConsistencyStatus(
+                { status: qr.readAnswer1.status, studentAnswerRaw: qr.readAnswer1.studentAnswer },
+                { status: 'read', studentAnswerRaw: studentText },
+                qr.questionType
+              )
+              overrideCount.applied++
+              console.log(`[english-spelling-override] ${qId} AI2 "${prevAi2}" → "${studentText}"`)
+            } else {
+              overrideCount.skipped++
+            }
+          }
+          logStaged(pipelineRunId, 'basic', 'english-spelling-verify result', overrideCount)
+        }
+      } catch (err) {
+        console.warn('[english-spelling-verify] failed, continuing without override:', err?.message)
+      }
+    }
+  }
+
   // ── AI3 Arbiter (serial): compare AI1/AI2 results and make evidence-based decision ──
   // Filter: skip questions where both AI1 and AI2 are blank (auto agree) or both unreadable (auto needs_review)
   const arbiterItems = questionResultsRaw
