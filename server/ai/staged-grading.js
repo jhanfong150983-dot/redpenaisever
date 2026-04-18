@@ -3369,7 +3369,7 @@ function buildFinalGradingResult({
       const isSimpleAnswer = /^[\d./×÷+\-−%°○✗✓A-Za-z\s，,]+$/u.test(refAnswer) && refAnswer.length <= 20
       if (isSimpleAnswer) {
         const norm = (s) => s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-').toLowerCase()
-        // 是非題：先用 normalizeTrueFalseAnswer 正規化（O→○、X→✗ 等）
+        // 是非題：用 normalizeTrueFalseAnswer 正規化（O→○、X→✗ 等），處理完直接跳過通用比對
         if (qCategory === 'true_false') {
           const tfRef = normalizeTrueFalseAnswer(refAnswer)
           const tfStu = normalizeTrueFalseAnswer(studentAns)
@@ -3380,9 +3380,11 @@ function buildFinalGradingResult({
               row.score = tfMatch ? (toFiniteNumber(question?.maxScore) ?? row.maxScore) : 0
               row.reason = tfMatch ? '答案正確（程式比對覆核）' : `答案錯誤（程式比對覆核：學生 "${studentAns}" ≠ 標準 "${refAnswer}"）`
               row.confidence = 100
+              console.log(`[programmatic-override] ${questionId} true_false tf="${tfRef}" stu="${tfStu}" ${!tfMatch}→${tfMatch}`)
             }
           }
-        }
+          // 是非題不走通用比對，避免 norm() 把 ○/O 轉成不同的 lowercase 又覆蓋回去
+        } else {
         const normRef = norm(refAnswer)
         const normStu = norm(studentAns)
         // 1. 直接比對 → 2. 數值等值 → 3. 從學生答案提取最終答案再比（處理 bbox 多讀計算草稿的情況）
@@ -3407,6 +3409,7 @@ function buildFinalGradingResult({
           row.confidence = 100
           console.log(`[programmatic-override] ${questionId} category=${qCategory} ref="${refAnswer}" student="${studentAns}" ${prevCorrect}→${programMatch}`)
         }
+      } // end else (non-true_false generic comparison)
       }
     }
 
