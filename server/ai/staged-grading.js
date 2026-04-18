@@ -590,6 +590,8 @@ function normalizeAnswerForComparison(raw) {
   // AI 有時會誤讀答案旁的欄位標題，將其作為答案的一部分
   // 僅當冒號後接數字時才移除，避免誤刪答案本體
   s = s.replace(/^[\p{Unified_Ideograph}]+[：:](?=\d)/u, '')
+  // 選項字母大小寫統一（A/a、B/b、C/c 等視為相同）
+  s = s.toLowerCase()
   return s
 }
 
