@@ -3267,6 +3267,7 @@ async function handleSync(req, res) {
             title: a.title,
             total_pages: a.totalPages,
             domain: a.domain ?? undefined,
+            doc_type: a.docType ?? a.doc_type ?? undefined,
             folder: a.folder,
             scoring_mode: scoringMode,
             grade_weight_percent: toNumber(
