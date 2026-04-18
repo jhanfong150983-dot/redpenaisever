@@ -557,6 +557,10 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/^\([A-Za-z]\)\s+/u, '').trim()
   // 整個字串是「(D)」→「D」
   s = s.replace(/^\(([A-Za-z])\)$/u, '$1').trim()
+  // 減號/破折號異體字統一（− – — → -）
+  s = s.replace(/[−–—]/gu, '-')
+  // 乘號異體字統一（× ✕ ✖ → ×）— 保留 × 作為標準形式
+  s = s.replace(/[✕✖]/gu, '×')
   // 全形數字 → 半形
   s = s.replace(/[０-９]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
   // 全形逗號 → 半形（比對用，不分語言領域）
