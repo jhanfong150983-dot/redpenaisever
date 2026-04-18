@@ -3524,6 +3524,11 @@ export async function runStagedGradingPhaseA({
   if (specsWithAnchor.length > 0) {
     logStaged(pipelineRunId, 'basic', 'classify anchorHint specs', specsWithAnchor.map((s) => ({ id: s.questionId, anchorHint: s.anchorHint })))
   }
+  // Log tablePosition specs for debugging table cell targeting
+  const specsWithTable = classifyQuestionSpecs.filter((s) => s.tablePosition)
+  if (specsWithTable.length > 0) {
+    logStaged(pipelineRunId, 'basic', 'classify tablePosition specs', specsWithTable.map((s) => ({ id: s.questionId, tablePosition: s.tablePosition })))
+  }
 
   // Per-page classify: one call per page, all dispatched in parallel.
   // Each call receives the FULL merged student image but only its own page's questions,
