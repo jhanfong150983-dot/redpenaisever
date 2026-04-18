@@ -4561,6 +4561,57 @@ export async function runStagedGradingPhaseA({
     return { ...qr, arbiterResult, answerCropImageUrl, hasCropImage: !!cropData }
   })
 
+  // ── Table edge leak detection: flag suspicious table cell readings for teacher review ──
+  // If a table cell's final answer matches the adjacent left cell's known value,
+  // it's likely reading leaked content from the neighbor. Flag as needs_review.
+  const akQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+  const akByQuestionId = mapByQuestionId(akQuestions, (item) => item?.id)
+  const tableLeakFlagged = []
+  for (const qr of questionResults) {
+    const akQ = akByQuestionId.get(qr.questionId)
+    if (!akQ?.tablePosition || !qr.arbiterResult?.finalAnswer) continue
+    if (qr.arbiterResult.arbiterStatus === 'needs_review') continue // already flagged
+
+    const col = akQ.tablePosition.col
+    if (col <= 1) continue // no left neighbor
+
+    // Find the answer key question at col-1 in the same table (same row, same totalCols)
+    const leftNeighborAk = akQuestions.find((q) =>
+      q.tablePosition &&
+      q.tablePosition.col === col - 1 &&
+      q.tablePosition.row === akQ.tablePosition.row &&
+      q.tablePosition.totalCols === akQ.tablePosition.totalCols
+    )
+    // Check against left neighbor's answer key value OR left neighbor's read value
+    const leftAkAnswer = leftNeighborAk?.answer ?? ''
+    const leftReadQr = leftNeighborAk ? questionResults.find((r) => r.questionId === leftNeighborAk.id) : null
+    const leftReadAnswer = leftReadQr?.arbiterResult?.finalAnswer ?? ''
+
+    const finalAnswer = ensureString(qr.arbiterResult.finalAnswer, '').trim()
+    const normFinal = finalAnswer.replace(/\s+/g, '')
+    const normLeftAk = leftAkAnswer.replace(/\s+/g, '')
+    const normLeftRead = leftReadAnswer.replace(/\s+/g, '')
+
+    if (normFinal && (normFinal === normLeftAk || normFinal === normLeftRead)) {
+      // Suspicious: this cell's reading matches its left neighbor → likely edge leak
+      qr.arbiterResult = {
+        ...qr.arbiterResult,
+        arbiterStatus: 'needs_review',
+        tableLeakSuspected: true,
+        tableLeakReason: `讀到的「${finalAnswer}」與左方相鄰格（col=${col - 1}）的值相同，可能是裁切邊緣洩漏`
+      }
+      // Ensure crop image is attached for teacher review
+      const cropData = allQuestionCropMap.get(qr.questionId)
+      if (cropData) {
+        qr.answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+      }
+      tableLeakFlagged.push(qr.questionId)
+    }
+  }
+  if (tableLeakFlagged.length > 0) {
+    logStaged(pipelineRunId, 'basic', 'table edge leak flagged for review', tableLeakFlagged)
+  }
+
   const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
   const diffCount = 0  // no longer used (legacy compat: kept at 0)
   const unstableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus === 'needs_review').length
