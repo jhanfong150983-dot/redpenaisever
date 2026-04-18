@@ -4643,6 +4643,33 @@ Return JSON:
     }
   }
 
+  // ── English spacing review: flag questions where any AI reads extra/missing spaces ──
+  if (isEnglishDomainForSpelling) {
+    const akByQid2 = mapByQuestionId(answerKeyQuestions, (q) => q?.id)
+    for (const qr of questionResultsRaw) {
+      if (qr.questionType !== 'fill_blank') continue
+      const akQ = akByQid2.get(qr.questionId)
+      const correctAnswer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
+      if (!correctAnswer) continue
+
+      const ai1 = ensureString(qr.readAnswer1?.studentAnswer, '').trim()
+      const ai2 = ensureString(qr.readAnswer2?.studentAnswer, '').trim()
+      if (!ai1 && !ai2) continue
+
+      // 去掉空格後比較：如果字母相同但空格不同，代表可能有空格問題
+      const stripSpaces = (s) => s.replace(/\s+/g, '').toLowerCase()
+      const correctStripped = stripSpaces(correctAnswer)
+      const ai1HasSpacingDiff = ai1 && stripSpaces(ai1) === correctStripped && ai1.toLowerCase() !== correctAnswer.toLowerCase()
+      const ai2HasSpacingDiff = ai2 && stripSpaces(ai2) === correctStripped && ai2.toLowerCase() !== correctAnswer.toLowerCase()
+
+      if (ai1HasSpacingDiff || ai2HasSpacingDiff) {
+        qr.consistencyStatus = 'diff'
+        qr.spacingReviewFlag = true
+        console.log(`[english-spacing-review] ${qr.questionId} flagged: ai1="${ai1}" ai2="${ai2}" correct="${correctAnswer}"`)
+      }
+    }
+  }
+
   // ── AI3 Arbiter (serial): compare AI1/AI2 results and make evidence-based decision ──
   // Filter: skip questions where both AI1 and AI2 are blank (auto agree) or both unreadable (auto needs_review)
   const arbiterItems = questionResultsRaw
@@ -4839,6 +4866,28 @@ Return JSON:
   }
   if (tableLeakFlagged.length > 0) {
     logStaged(pipelineRunId, 'basic', 'table edge leak flagged for review', tableLeakFlagged)
+  }
+
+  // ── English spacing review: force needs_review for questions flagged with spacing differences ──
+  const spacingReviewFlagged = []
+  for (const qr of questionResults) {
+    const rawQr = questionResultsRaw.find((r) => r.questionId === qr.questionId)
+    if (rawQr?.spacingReviewFlag && qr.arbiterResult?.arbiterStatus !== 'needs_review') {
+      qr.arbiterResult = {
+        ...qr.arbiterResult,
+        arbiterStatus: 'needs_review',
+        spacingReviewFlag: true,
+        spacingReviewReason: '學生書寫可能有多餘空格，請老師確認'
+      }
+      const cropData = allQuestionCropMap.get(qr.questionId)
+      if (cropData) {
+        qr.answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+      }
+      spacingReviewFlagged.push(qr.questionId)
+    }
+  }
+  if (spacingReviewFlagged.length > 0) {
+    logStaged(pipelineRunId, 'basic', 'english spacing flagged for review', spacingReviewFlagged)
   }
 
   const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
