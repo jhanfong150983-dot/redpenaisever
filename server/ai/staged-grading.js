@@ -1973,16 +1973,24 @@ Rules:
   - group_context: questions in the same bboxGroupId MUST share the same questionBbox/answerBbox.
   - question_context: minimum bbox must include question number + stem + student answer area.
 - TABLE POSITION RULE (HIGHEST PRIORITY — when tablePosition is present in the spec, this rule OVERRIDES ALL other bbox rules including ANCHOR RULE, TABLE COLUMN RULE, and ORDERING RULE. Skip them entirely.):
-    When a question spec includes tablePosition (e.g. {"col": 3, "row": 3, "totalCols": 7, "totalRows": 3}), the answer is in a TABLE GRID. You MUST:
-    1. Find the table in the student submission image.
-    2. Count columns LEFT-TO-RIGHT starting from 1, count rows TOP-TO-BOTTOM starting from 1. Column 1 is the leftmost column; row 1 is the topmost row. Include ALL columns/rows in the count (header columns, given-value columns, answer columns — count everything).
-    3. Locate the cell at the intersection of column=col and row=row. Do NOT read header text to decide which column — just count from left edge.
-    4. Place answerBbox as a TIGHT crop of ONLY that single cell. The bbox MUST NOT extend into adjacent cells.
-    5. If the spec includes colspan or rowspan, the cell spans multiple columns/rows — expand the bbox accordingly.
-    6. Output tablePositionReasoning: a short string explaining your counting process. Format: "table found at [x range]. col1=[header text], col2=[header text], ..., colN=[header text]. Target col=X → [header text at that column]. bbox=[x,y,w,h]". This is MANDATORY for every question with tablePosition.
-    Example: tablePosition={"col":3,"row":3,"totalCols":7,"totalRows":3} → find the table, count to the 3rd column from left and 3rd row from top, crop that cell.
-    ⚠️ Common error: off-by-one. If the table has a row-label column on the left, that IS column 1. The 2nd column is the first data column, the 3rd column is the second data column, etc. Count carefully.
-    This rule is purely positional — do NOT rely on reading column/row header text. Just count grid lines.
+    When a question spec includes tablePosition (e.g. {"col": 3, "row": 3, "totalCols": 7, "totalRows": 3}), the answer is in a TABLE GRID.
+
+    【格線計數法】（與 answer_key.extract 共用規則，必須完全一致）
+    步驟：
+    1. 找到表格的外框邊界（最外圍的格線）
+    2. 數垂直格線（含左右外框）：從左到右依序編號 V1, V2, V3, ..., V(N+1)。N+1 條垂直線 = N 欄
+    3. 數水平格線（含上下外框）：從上到下依序編號 H1, H2, H3, ..., H(M+1)。M+1 條水平線 = M 列
+    4. 第 C 欄 = V(C) 與 V(C+1) 之間的空間。第 R 列 = H(R) 與 H(R+1) 之間的空間
+    5. 驗證：totalCols（spec 給的）應等於你數的垂直線數 - 1。若不符，重新計數
+    6. 目標格 bbox: x = V(col) 的 x 座標, y = H(row) 的 y 座標, w = V(col+1) - V(col), h = H(row+1) - H(row)
+    7. answerBbox 必須精確對齊格線，不可偏移到相鄰格
+
+    ⚠️ 自我驗證：數完後，讀取第 1 列各欄的標題文字，確認 col 編號與標題對應正確。若不符（例如 col=3 應該是「建功國中」但你讀到的是「光武國中」），代表你數錯了，必須重新計數。
+    範例：表格有 8 條垂直線 → 7 欄。
+    V1|就讀國中|V2|光武國中|V3|建功國中|V4|實驗中學|V5|新竹康乃薾|V6|新科國中|V7|合計|V8
+    → col=3 = V3 與 V4 之間 = 建功國中
+
+    8. Output tablePositionReasoning (MANDATORY): format: "vertical lines: V1=x1, V2=x2, ..., V(N+1)=xN. col1(V1-V2)=[header], col2(V2-V3)=[header], ..., colN(VN-V(N+1))=[header]. Target col=X → [header]. bbox=[x,y,w,h]"
 - For visible=true questions with question_context/group_context, output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
   - Include the question number, question stem text, AND the student's answer area all within the bbox.
   - For map_draw, diagram_draw, and diagram_color: frame the entire diagram/map/grid area plus any visible question stem above it.
