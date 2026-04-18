@@ -4600,14 +4600,12 @@ Return JSON:
             const prevAi2 = qr.readAnswer2.studentAnswer
             if (studentText.toLowerCase() !== prevAi2.toLowerCase()) {
               qr.readAnswer2 = { status: 'read', studentAnswer: studentText }
-              // Recompute consistency
-              qr.consistencyStatus = computeConsistencyStatus(
-                { status: qr.readAnswer1.status, studentAnswerRaw: qr.readAnswer1.studentAnswer },
-                { status: 'read', studentAnswerRaw: studentText },
-                qr.questionType
-              )
+              // 拼寫驗證覆蓋後，強制 diff — 不讓 Jaccard 相似度判回 stable
+              // （Jaccard 只看字元集，"dining" 和 "dinng" 有相同字元集但拼寫不同）
+              qr.consistencyStatus = 'diff'
+              qr.spellingOverride = true
               overrideCount.applied++
-              console.log(`[english-spelling-override] ${qId} AI2 "${prevAi2}" → "${studentText}"`)
+              console.log(`[english-spelling-override] ${qId} AI2 "${prevAi2}" → "${studentText}" (forced diff)`)
             } else {
               overrideCount.skipped++
             }
