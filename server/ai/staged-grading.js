@@ -3332,6 +3332,7 @@ function buildFinalGradingResult({
 
     // ── 程式化覆核：數字/符號答案的 fill_blank 不信任 accessor ──
     // 只覆核有明確標準答案且答案是數字或簡單符號的題目
+    const requireSimplifiedFraction = answerKey?.fractionRule === 'require_simplified'
     const qCategory = ensureString(question?.questionCategory, '')
     const refAnswer = ensureString(question?.answer, '').trim()
     const studentAns = row.studentAnswer
@@ -3350,14 +3351,14 @@ function buildFinalGradingResult({
         const normStu = norm(studentAns)
         // 1. 直接比對 → 2. 數值等值 → 3. 從學生答案提取最終答案再比（處理 bbox 多讀計算草稿的情況）
         let programMatch = normRef === normStu || isNumericEqual(normRef, normStu)
-        // 分數必須最簡（整數除外，如 2/2=1 可接受）
-        if (programMatch && isUnsimplifiedFraction(normStu)) programMatch = false
+        // 分數必須最簡（整數除外，如 2/2=1 可接受）— 僅當 fractionRule=require_simplified
+        if (requireSimplifiedFraction && programMatch && isUnsimplifiedFraction(normStu)) programMatch = false
         if (!programMatch) {
           const extracted = extractFinalAnswerFromCalc(studentAns)
           if (extracted) {
             const extractedNorm = norm(extracted)
             programMatch = extractedNorm === normRef || isNumericEqual(extractedNorm, normRef)
-            if (programMatch && isUnsimplifiedFraction(extractedNorm)) programMatch = false
+            if (requireSimplifiedFraction && programMatch && isUnsimplifiedFraction(extractedNorm)) programMatch = false
           }
         }
         if (programMatch !== row.isCorrect) {
@@ -3393,8 +3394,8 @@ function buildFinalGradingResult({
       const hasSteps = stepsText.length >= 3
 
       if (refFinal && stuFinal) {
-        // 分數必須最簡（整數除外，如 2/2=1 可接受）；分數⇔小數等值仍接受
-        const finalMatch = (refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)) && !isUnsimplifiedFraction(stuFinal)
+        // 分數必須最簡（整數除外，如 2/2=1 可接受）— 僅當 fractionRule=require_simplified；分數⇔小數等值仍接受
+        const finalMatch = (refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)) && (!requireSimplifiedFraction || !isUnsimplifiedFraction(stuFinal))
 
         if (finalMatch && hasSteps && row.score < qMaxScore) {
           // 最終答案對 + 有步驟 → 滿分
