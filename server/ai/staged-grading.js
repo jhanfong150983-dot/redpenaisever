@@ -3385,7 +3385,12 @@ function buildFinalGradingResult({
     const qCategory = ensureString(question?.questionCategory, '')
     const refAnswer = ensureString(question?.answer, '').trim()
     const studentAns = row.studentAnswer
+    // 英語規則啟用時，fill_blank 和 short_answer 不走程式化覆核
+    // 讓 accessor 判斷標點、大小寫、拼寫等細節扣分
+    const hasEnglishRules = answerKey?.englishRules?.punctuationCheck?.enabled || answerKey?.englishRules?.wordOrderCheck?.enabled
+    const skipProgrammaticForEnglish = hasEnglishRules && (qCategory === 'fill_blank' || qCategory === 'short_answer')
     if (
+      !skipProgrammaticForEnglish &&
       (qCategory === 'fill_blank' || qCategory === 'true_false' || qCategory === 'single_choice') &&
       refAnswer &&
       studentAns &&
