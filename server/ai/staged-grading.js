@@ -3369,6 +3369,20 @@ function buildFinalGradingResult({
       const isSimpleAnswer = /^[\d./×÷+\-−%°○✗✓A-Za-z\s，,]+$/u.test(refAnswer) && refAnswer.length <= 20
       if (isSimpleAnswer) {
         const norm = (s) => s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-').toLowerCase()
+        // 是非題：先用 normalizeTrueFalseAnswer 正規化（O→○、X→✗ 等）
+        if (qCategory === 'true_false') {
+          const tfRef = normalizeTrueFalseAnswer(refAnswer)
+          const tfStu = normalizeTrueFalseAnswer(studentAns)
+          if (tfRef && tfStu) {
+            const tfMatch = tfRef === tfStu
+            if (tfMatch !== row.isCorrect) {
+              row.isCorrect = tfMatch
+              row.score = tfMatch ? (toFiniteNumber(question?.maxScore) ?? row.maxScore) : 0
+              row.reason = tfMatch ? '答案正確（程式比對覆核）' : `答案錯誤（程式比對覆核：學生 "${studentAns}" ≠ 標準 "${refAnswer}"）`
+              row.confidence = 100
+            }
+          }
+        }
         const normRef = norm(refAnswer)
         const normStu = norm(studentAns)
         // 1. 直接比對 → 2. 數值等值 → 3. 從學生答案提取最終答案再比（處理 bbox 多讀計算草稿的情況）
