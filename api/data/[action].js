@@ -6021,7 +6021,7 @@ async function handleGetAssignmentSummary(req, res) {
   const supabaseDb = getSupabaseAdmin()
   const { data, error } = await supabaseDb
     .from('assignment_summaries')
-    .select('status, class_summary, class_suggestion, minority_summary, minority_suggestion, student_summaries, sample_count, updated_at, error_message')
+    .select('status, class_summary, class_suggestion, minority_summary, minority_suggestion, student_summaries, error_groups, sample_count, updated_at, error_message')
     .eq('owner_id', user.id)
     .eq('assignment_id', assignmentId)
     .maybeSingle()
@@ -6204,6 +6204,14 @@ ${studentLines || '（無錯誤）'}
 {
   "class_summary": "大多數學生（超過半數）的共同錯誤描述，說明主要錯在哪個概念或步驟（2-4句話）。若無共同錯誤則說明全班表現。",
   "class_suggestion": "針對 class_summary 的問題，給老師具體的教學建議（1-3點，例如：建議複習某概念、加強某題型練習等）。若無錯誤則填 null。",
+  "error_groups": [
+    {
+      "error_pattern": "用一句話描述這個錯誤模式（如：圓面積公式搞混半徑和直徑）",
+      "student_names": ["學生A", "學生B", "學生C"],
+      "count": 3,
+      "suggestion": "針對此錯誤的具體教學建議（1句話）"
+    }
+  ],
   "minority_summary": "少數學生（少於半數）特有的問題描述，若無則填 null（1-2句話）",
   "minority_suggestion": "針對 minority_summary 的問題，給老師處理這些學生的建議（1-2點）。若無則填 null。",
   "student_summaries": [
@@ -6213,6 +6221,7 @@ ${studentLines || '（無錯誤）'}
 
 注意：
 - class_summary 聚焦在超過半數學生都有的問題
+- error_groups 列出最多 3 個最多人犯的錯誤群組，依人數由多到少排序。每個群組標明哪些學生犯了這個錯誤。至少 2 人以上的錯誤才列入群組。若無共同錯誤則 error_groups 為空陣列。
 - minority_summary 說明少數人特有的問題模式
 - student_summaries 只列出有錯誤的學生
 - 若有課綱概念代碼（如 N-4-12），請在摘要中引用讓老師知道是哪個單元
@@ -6264,6 +6273,7 @@ ${studentLines || '（無錯誤）'}
           minority_summary: parsed.minority_summary || null,
           minority_suggestion: parsed.minority_suggestion || null,
           student_summaries: Array.isArray(parsed.student_summaries) ? parsed.student_summaries : [],
+          error_groups: Array.isArray(parsed.error_groups) ? parsed.error_groups : [],
           sample_count: sampleCount,
           error_message: null,
           generated_at: new Date().toISOString(),
