@@ -2947,7 +2947,7 @@ Focus: does the student know the word?
 【SENTENCE MODE】(correctAnswer has 3+ words, e.g. "Dad is cooking in the kitchen."):
 Focus: can the student construct the sentence?
 - SPELLING ERROR (e.g. "cookking" → "cooking"): deduct 1 point per misspelled word.
-- WORD ORDER ERROR (e.g. "Dad cooking is" → "Dad is cooking"): deduct 1 point per word out of place.
+- WORD ORDER ERROR: count the number of STRUCTURAL SWAPS, not individual displaced words. Each swap/reordering is 1 error = deduct 1 point. Example: "Dad is cooking in the kitchen" → "Dad is in the kitchen cooking" = ONE swap (cooking moved to end) = deduct 1 point, NOT 4 points. "Where is your brother" → "Where your brother is" = ONE swap (is moved to end) = deduct 1 point.
 - MISSING/EXTRA WORD (e.g. "Dad is cooking the kitchen" missing "in"): deduct 1 point per word.
 - PUNCTUATION ERROR (missing period, question mark, etc.): deduct per punctuation check rule.
 - SPACING ERROR within a word: deduct 1 point (same as short word mode).
