@@ -3409,8 +3409,13 @@ function buildFinalGradingResult({
     // 讓 accessor 判斷標點、大小寫、拼寫等細節扣分
     const hasEnglishRules = answerKey?.englishRules?.punctuationCheck?.enabled || answerKey?.englishRules?.wordOrderCheck?.enabled
     const skipProgrammaticForEnglish = hasEnglishRules && (qCategory === 'fill_blank' || qCategory === 'short_answer')
+    // fill_blank 學生答案包含計算步驟（比標準答案長 3 倍以上或含換行）時，信任 accessor
+    // 避免程式化覆核拿整段計算文字跟簡單答案比對導致誤判
+    const studentHasCalcSteps = qCategory === 'fill_blank' && refAnswer && studentAns &&
+      (studentAns.length > refAnswer.length * 3 || studentAns.includes('\n') || /[=÷×+\-]/.test(studentAns))
     if (
       !skipProgrammaticForEnglish &&
+      !studentHasCalcSteps &&
       (qCategory === 'fill_blank' || qCategory === 'true_false' || qCategory === 'single_choice') &&
       refAnswer &&
       studentAns &&
