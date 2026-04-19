@@ -1721,6 +1721,13 @@ function applyAnswerOverrides(parsed, overrideMap) {
 
     if (indexByQuestionId.has(questionId)) {
       const index = indexByQuestionId.get(questionId)
+      // 保護：如果原始 AI 有讀到答案（status=read），但 bracket-read 回報 blank，不覆蓋
+      // bracket-read 可能切到錯誤位置導致讀不到，保留原始的有效答案
+      const originalStatus = ensureString(answers[index]?.status, '').toLowerCase()
+      if (originalStatus === 'read' && normalizedStatus === 'blank') {
+        console.log(`[bracket-read-skip] ${questionId}: original=read, bracket=blank → keeping original`)
+        continue
+      }
       answers[index] = { ...answers[index], ...nextRow }
     } else {
       indexByQuestionId.set(questionId, answers.length)
