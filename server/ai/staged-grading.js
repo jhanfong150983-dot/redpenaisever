@@ -2946,9 +2946,17 @@ Focus: does the student know the word?
 
 【SENTENCE MODE】(correctAnswer has 3+ words, e.g. "Dad is cooking in the kitchen."):
 Focus: can the student construct the sentence?
+
+STEP 1 — CHECK WORDS FIRST: Compare the SET of words (ignoring order and punctuation) between student and correctAnswer.
+  - If the student used ALL the same words, just in different order → this is PURELY a word order issue. Do NOT report missing/extra words.
+  - Only report MISSING WORD if a word in correctAnswer does not appear anywhere in the student's answer.
+  - Only report EXTRA WORD if a word in the student's answer does not appear anywhere in correctAnswer.
+
+STEP 2 — APPLY DEDUCTIONS:
 - SPELLING ERROR (e.g. "cookking" → "cooking"): deduct 1 point per misspelled word.
 - WORD ORDER ERROR: count the number of STRUCTURAL SWAPS, not individual displaced words. Each swap/reordering is 1 error = deduct 1 point. Example: "Dad is cooking in the kitchen" → "Dad is in the kitchen cooking" = ONE swap (cooking moved to end) = deduct 1 point, NOT 4 points. "Where is your brother" → "Where your brother is" = ONE swap (is moved to end) = deduct 1 point.
-- MISSING/EXTRA WORD (e.g. "Dad is cooking the kitchen" missing "in"): deduct 1 point per word.
+- MISSING WORD (only if Step 1 confirms a word is truly absent): deduct 1 point per missing word.
+- EXTRA WORD (only if Step 1 confirms a word is truly added): deduct 1 point per extra word.
 - PUNCTUATION ERROR (missing period, question mark, etc.): deduct per punctuation check rule.
 - SPACING ERROR within a word: deduct 1 point (same as short word mode).
 All deductions are cumulative. Score cannot go below 0.
