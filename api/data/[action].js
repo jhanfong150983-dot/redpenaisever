@@ -6154,6 +6154,24 @@ async function handleRefreshAssignmentSummary(req, res) {
       }
     }
 
+    // 3b. 嘗試從 Supabase Storage 取得答案卷圖片（給 AI 看題目內容）
+    const answerSheetImages = []
+    try {
+      for (let i = 0; i < 10; i++) {
+        const path = `answer-sheets/${assignmentId}/page-${i}.webp`
+        const { data: imgData, error: imgErr } = await supabaseDb.storage
+          .from('homework-images').download(path)
+        if (imgErr || !imgData) break
+        const buffer = Buffer.from(await imgData.arrayBuffer())
+        answerSheetImages.push({ mimeType: 'image/webp', data: buffer.toString('base64') })
+      }
+      if (answerSheetImages.length > 0) {
+        console.log(`${logPrefix} fetched ${answerSheetImages.length} answer sheet image(s) for multimodal summary`)
+      }
+    } catch (imgFetchErr) {
+      console.warn(`${logPrefix} answer sheet image fetch failed (non-fatal):`, imgFetchErr?.message || imgFetchErr)
+    }
+
     // 3. 整理每位學生的錯誤清單
     const studentErrors = []
     for (const sub of submissions) {
@@ -6223,8 +6241,36 @@ async function handleRefreshAssignmentSummary(req, res) {
       return `${s.studentName}：\n${errLines}`
     }).join('\n\n')
 
+    // 建立題號 → 頁碼對照表（讓 AI 知道哪些題目在哪張圖上）
+    const questionIds = Object.keys(questionInfoById)
+    let imageGuide = ''
+    if (answerSheetImages.length > 0) {
+      if (answerSheetImages.length === 1) {
+        imageGuide = `\n📷 附圖說明：附上 1 張作業原卷圖片，所有題目都在這張圖上。請參考圖片中的題目內容（題幹、選項等）來撰寫更具體的錯誤描述。\n`
+      } else {
+        // 多頁：依題號前綴分組
+        const pageGroups = new Map()
+        for (const qId of questionIds) {
+          const dashIdx = qId.indexOf('-')
+          const pagePrefix = dashIdx > 0 ? qId.substring(0, dashIdx) : '1'
+          const pageNum = parseInt(pagePrefix, 10) || 1
+          if (!pageGroups.has(pageNum)) pageGroups.set(pageNum, [])
+          pageGroups.get(pageNum).push(qId)
+        }
+        const pageLines = Array.from(pageGroups.entries())
+          .sort(([a], [b]) => a - b)
+          .map(([page, ids]) => `  - 圖片 ${page}（第 ${page} 頁）：包含題目 ${ids.slice(0, 8).join('、')}${ids.length > 8 ? ` 等共 ${ids.length} 題` : ''}`)
+          .join('\n')
+        imageGuide = `\n📷 附圖說明：附上 ${answerSheetImages.length} 張作業原卷圖片。題號前綴對應頁碼：
+  - 題號格式為「頁碼-大題-小題」，例如「1-E-5」= 第 1 頁、大題 E、第 5 小題
+  - 前綴「1-」的題目在第 1 張圖上，「2-」在第 2 張圖上，依此類推
+${pageLines}
+請參考圖片中的題目內容（題幹、選項等）來撰寫更具體的錯誤描述。\n`
+      }
+    }
+
     const prompt = `你是台灣國小/國中老師的教學助理。以下是一份作業的批改結果，共 ${sampleCount} 位學生，其中 ${errorCount} 位有錯誤。
-${conceptContext}
+${imageGuide}${conceptContext}
 學生錯誤明細：
 ${studentLines || '（無錯誤）'}
 
@@ -6254,7 +6300,8 @@ ${studentLines || '（無錯誤）'}
 - minority_summary 說明少數人特有的問題模式
 - student_summaries 只列出有錯誤的學生
 - 若有課綱概念代碼（如 N-4-12），請在摘要中引用讓老師知道是哪個單元
-- class_suggestion 和 minority_suggestion 要具體可執行，不要太籠統`
+- class_suggestion 和 minority_suggestion 要具體可執行，不要太籠統
+- ⚠️ 若附有作業原卷圖片，務必查看圖片中的題目內容。特別是選擇題和是非題，請從圖片中找到該題的題幹和選項，在 error_pattern 中寫出具體的題目內容（如「第3題問『下列何者為直角三角形？』，多數學生誤選 B（等腰三角形）」）。題號前綴對應圖片頁碼（1-開頭的題目看第1張圖）。`
 
     // 5. 呼叫 Gemini（加 120s 超時，保留足夠空間給 DB 查詢 + catch 寫入，確保在 Vercel 300s kill 前完成）
     const apiKey = getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY')
@@ -6262,11 +6309,19 @@ ${studentLines || '（無錯誤）'}
 
     const summaryModel = getEnvValue('SYSTEM_GEMINI_MODEL') || 'gemini-3-flash-preview'
     const SUMMARY_TIMEOUT_MS = 120_000
+    // 組合 multimodal parts：圖片（若有）+ 文字 prompt
+    const summaryParts = []
+    for (let i = 0; i < answerSheetImages.length; i++) {
+      summaryParts.push({ text: `--- 作業原卷第 ${i + 1} 頁 ---` })
+      summaryParts.push({ inlineData: answerSheetImages[i] })
+    }
+    summaryParts.push({ text: prompt })
+
     const pipelineResult = await Promise.race([
       runAiPipeline({
         apiKey,
         model: summaryModel,
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts: summaryParts }],
         requestedRouteKey: 'report.teacher_summary',
         routeHint: { source: 'data' }
       }),
