@@ -6138,6 +6138,7 @@ async function handleRefreshAssignmentSummary(req, res) {
     }
 
     const conceptByQuestion = {}
+    const questionInfoById = {}
     if (assignment?.answer_key) {
       const answerKey = typeof assignment.answer_key === 'string'
         ? JSON.parse(assignment.answer_key)
@@ -6145,6 +6146,10 @@ async function handleRefreshAssignmentSummary(req, res) {
       for (const q of (answerKey?.questions || [])) {
         if (q.concept_code) {
           conceptByQuestion[q.id] = { code: q.concept_code, label: q.concept_label || q.concept_code }
+        }
+        questionInfoById[q.id] = {
+          type: q.type || null,
+          correctAnswer: q.answer || q.referenceAnswer || null
         }
       }
     }
@@ -6168,10 +6173,19 @@ async function handleRefreshAssignmentSummary(req, res) {
         if (detail.score > 0 && detail.score >= (detail.maxScore || 1)) continue // 答對跳過
         const concept = conceptByQuestion[detail.questionId]
         const reason = mistakes.find(m => m.question?.includes(detail.questionId))?.reason || detail.explanation || ''
+        const qInfo = questionInfoById[detail.questionId]
+        const qType = qInfo?.type || detail.questionType || null
+        // For choice/true_false, include correct & student answer so AI can describe the error meaningfully
+        const isChoiceType = qType === 'single_choice' || qType === 'multi_choice' || qType === 'true_false'
+        const studentAnswer = detail.studentAnswer || null
+        const correctAnswer = isChoiceType ? (qInfo?.correctAnswer || null) : null
         errorItems.push({
           questionId: detail.questionId,
+          questionType: qType,
           concept: concept ? `${concept.code}（${concept.label}）` : null,
-          reason: reason.slice(0, 100)
+          reason: reason.slice(0, 100),
+          ...(studentAnswer ? { studentAnswer: String(studentAnswer).slice(0, 30) } : {}),
+          ...(correctAnswer ? { correctAnswer: String(correctAnswer).slice(0, 30) } : {})
         })
       }
 
@@ -6200,7 +6214,11 @@ async function handleRefreshAssignmentSummary(req, res) {
     const studentLines = cappedStudentErrors.map(s => {
       const errLines = s.errors.map(e => {
         const conceptStr = e.concept ? `（${e.concept}）` : ''
-        return `  第${e.questionId}題${conceptStr}：${e.reason || '答錯'}`
+        const typeStr = e.questionType ? `[${e.questionType}]` : ''
+        const answerStr = e.correctAnswer
+          ? `，正確答案=${e.correctAnswer}，學生答=${e.studentAnswer || '?'}`
+          : (e.studentAnswer ? `，學生答=${e.studentAnswer}` : '')
+        return `  第${e.questionId}題${typeStr}${conceptStr}：${e.reason || '答錯'}${answerStr}`
       }).join('\n')
       return `${s.studentName}：\n${errLines}`
     }).join('\n\n')
@@ -6216,7 +6234,8 @@ ${studentLines || '（無錯誤）'}
   "class_suggestion": "針對 class_summary 的問題，給老師具體的教學建議（1-3點，例如：建議複習某概念、加強某題型練習等）。若無錯誤則填 null。",
   "error_groups": [
     {
-      "error_pattern": "用一句話描述這個錯誤模式（如：圓面積公式搞混半徑和直徑）",
+      "question_id": "題號（如 1-E-5）",
+      "error_pattern": "用一句話描述這個錯誤模式，必須包含具體內容（如：圓面積公式搞混半徑和直徑）。對於選擇題/是非題，要寫出考察的概念或正確答案是什麼（如：第5題判斷題誤選×，正確答案為○（平行四邊形是四邊形的一種））。不能只寫『選擇題錯誤』或『是非題錯誤』這種沒有具體內容的描述。",
       "student_names": ["學生A", "學生B", "學生C"],
       "count": 3,
       "suggestion": "針對此錯誤的具體教學建議（1句話）"
