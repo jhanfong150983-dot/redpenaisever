@@ -2834,6 +2834,7 @@ async function handleSync(req, res) {
           aiScore: row.ai_score ?? undefined,
           scoreSource: row.score_source ?? undefined,
           feedback: row.feedback ?? undefined,
+          gradingResult: row.grading_result ?? undefined,
           mistakesCount: Array.isArray(row.grading_result?.mistakes) && row.grading_result.mistakes.length > 0
             ? row.grading_result.mistakes.length
             : undefined,
