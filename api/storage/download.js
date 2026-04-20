@@ -143,6 +143,59 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
   res.status(200).json({ paths })
 }
 
+// ── answer-crop helpers ──────────────────────────────────────────────────────
+
+const MAX_CROP_SIZE = 500 * 1024 // 500KB per crop
+const MAX_CROPS_PER_UPLOAD = 50
+const HOMEWORK_IMAGES_BUCKET = 'homework-images'
+
+function answerCropPath(assignmentId, questionId) {
+  // Sanitize questionId for safe storage path (replace / with _)
+  const safeQid = String(questionId).replace(/[/\\]/g, '_')
+  return `answer-crops/${assignmentId}/${safeQid}.jpg`
+}
+
+async function handleAnswerCropUpload(req, res, user, supabaseDb) {
+  const { assignmentId, crops } = req.body || {}
+  if (!assignmentId || typeof assignmentId !== 'string') {
+    res.status(400).json({ error: 'Missing assignmentId' }); return
+  }
+  if (!Array.isArray(crops) || crops.length === 0) {
+    res.status(400).json({ error: 'Missing crops array' }); return
+  }
+  if (crops.length > MAX_CROPS_PER_UPLOAD) {
+    res.status(400).json({ error: `Too many crops (max ${MAX_CROPS_PER_UPLOAD})` }); return
+  }
+
+  const own = await verifyAssignmentOwnership(supabaseDb, assignmentId, user.id)
+  if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+
+  const paths = {}
+  let uploaded = 0
+  for (const crop of crops) {
+    const qId = crop?.questionId
+    const base64 = crop?.imageBase64
+    if (!qId || typeof base64 !== 'string') continue
+    const buffer = Buffer.from(base64.replace(/^data:[^;]+;base64,/, ''), 'base64')
+    if (buffer.length > MAX_CROP_SIZE) {
+      console.warn(`[answer-crop] skip ${qId}: ${buffer.length} bytes exceeds ${MAX_CROP_SIZE}`)
+      continue
+    }
+    const storagePath = answerCropPath(assignmentId, qId)
+    const { error: uploadError } = await supabaseDb.storage
+      .from(HOMEWORK_IMAGES_BUCKET)
+      .upload(storagePath, buffer, { contentType: 'image/jpeg', upsert: true })
+    if (uploadError) {
+      console.warn(`[answer-crop] upload failed for ${qId}:`, uploadError.message)
+      continue
+    }
+    paths[qId] = storagePath
+    uploaded++
+  }
+  console.log(`[answer-crop] uploaded ${uploaded}/${crops.length} crops for assignment=${assignmentId}`)
+  res.status(200).json({ paths })
+}
+
 // ── main handler ─────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
@@ -150,12 +203,18 @@ export default async function handler(req, res) {
     return
   }
 
-  // POST → answer sheet upload
+  // POST → answer sheet upload or crop upload
   if (req.method === 'POST') {
     try {
       const { user } = await getAuthUser(req, res)
       if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
-      await handleAnswerSheetUpload(req, res, user, getSupabaseAdmin())
+      const supabaseDb = getSupabaseAdmin()
+      // Dispatch by action field or default to answer sheet upload
+      if (req.body?.action === 'upload_crops') {
+        await handleAnswerCropUpload(req, res, user, supabaseDb)
+      } else {
+        await handleAnswerSheetUpload(req, res, user, supabaseDb)
+      }
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' })
     }
@@ -176,9 +235,25 @@ export default async function handler(req, res) {
 
     const supabaseDb = getSupabaseAdmin()
 
-    // GET with assignmentId → answer sheet download
+    // GET with assignmentId → answer sheet or crop download
     const assignmentIdParam = req.query?.assignmentId
     if (assignmentIdParam) {
+      const cropPath = normalizePathParam(req.query?.cropPath)
+      if (cropPath && cropPath.startsWith('answer-crops/')) {
+        // Verify ownership then serve the crop image
+        const assignmentId = Array.isArray(assignmentIdParam) ? assignmentIdParam[0] : assignmentIdParam
+        const own = await verifyAssignmentOwnership(supabaseDb, assignmentId, user.id)
+        if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+        const { data, error: dlErr } = await supabaseDb.storage
+          .from(HOMEWORK_IMAGES_BUCKET).download(cropPath)
+        if (dlErr || !data) { res.status(404).json({ error: 'Crop not found' }); return }
+        const buffer = Buffer.from(await data.arrayBuffer())
+        res.setHeader('Content-Type', 'image/jpeg')
+        res.setHeader('Content-Length', buffer.length)
+        res.setHeader('Cache-Control', 'private, max-age=86400')
+        res.status(200).send(buffer)
+        return
+      }
       await handleAnswerSheetDownload(req, res, user, supabaseDb)
       return
     }
