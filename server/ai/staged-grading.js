@@ -2816,8 +2816,9 @@ const BOPOMOFO_ARBITER_GUIDE = `
 `.trim()
 
 function buildArbiterPrompt(arbiterItems) {
-  // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status, agreementStatus, disagreementReason }]
+  // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status, agreementStatus, disagreementReason, correctAnswer? }]
   const hasMultiFill = arbiterItems.some((item) => item.questionType === 'multi_fill')
+  const hasEnglishSpelling = arbiterItems.some((item) => item.correctAnswer)
   const questionBlocks = arbiterItems.map((item) => {
     const ai1Str = item.ai1Status === 'blank' ? '（空白）' : item.ai1Status === 'unreadable' ? '（無法辨識）' : `「${item.ai1Answer}」`
     const ai2Str = item.ai2Status === 'blank' ? '（空白）' : item.ai2Status === 'unreadable' ? '（無法辨識）' : `「${item.ai2Answer}」`
@@ -2828,10 +2829,13 @@ function buildArbiterPrompt(arbiterItems) {
     const uncertainNote = item.disagreementReason === 'uncertain_chars'
       ? '\n  ⚠️ 注意：AI2 對部分字符信心不足（uncertain_chars），即使表面相同也請仔細確認筆跡'
       : ''
+    const spellingNote = item.correctAnswer
+      ? `\n  📝 英語拼寫舉證：正確答案＝「${item.correctAnswer}」→ 請執行逐字母比對（見下方英語拼寫鑑識規則）`
+      : ''
     return `題目 ${item.questionId}（類型：${item.questionType}）
   AI1（細節）讀到：${ai1Str}（status: ${item.ai1Status}）
   AI2（全局派）讀到：${ai2Str}（status: ${item.ai2Status}）
-  ${modeNote}${uncertainNote}
+  ${modeNote}${uncertainNote}${spellingNote}
   [此題裁切圖緊接在下方]`
   }).join('\n\n---\n\n')
 
@@ -2865,8 +2869,25 @@ function buildArbiterPrompt(arbiterItems) {
 ⚠️ 若圖像不清晰、筆跡無法確認 → 降評為 weak 或 unsupported，不得勉強給 strong。
 ⚠️ 你不需要也不應該自行產生答案或做最終選擇。
 
-${hasMultiFill ? BOPOMOFO_ARBITER_GUIDE + '\n' : ''}
-需鑑識的題目如下（全圖在最前，各題裁切圖依序附在題目說明之後）：
+${hasMultiFill ? BOPOMOFO_ARBITER_GUIDE + '\n' : ''}${hasEnglishSpelling ? `英語拼寫鑑識規則（適用於標有「📝 英語拼寫舉證」的題目）：
+當題目附有正確答案時，你必須額外執行以下逐字母比對程序：
+
+1. 逐字母拆解：觀察裁切圖中學生的手寫，從左到右逐一辨識每個字母，記為 studentLetters（用 dash 分隔，如 d-i-n-n-g）。
+   ⚠️ 嚴禁自動修正：看到什麼寫什麼。學生寫 "dinng" 就記 "d-i-n-n-g"，不可記成 "d-i-n-i-n-g"。
+2. 正確答案拆解：將正確答案同樣逐字母拆解，記為 correctLetters（如 d-i-n-i-n-g）。
+3. 差異比對：逐位置比較 studentLetters 與 correctLetters，找出：
+   - 多餘字母（student 有但 correct 沒有）
+   - 缺少字母（correct 有但 student 沒有）
+   - 替換字母（同位置但不同字母）
+   - 順序錯誤（字母相同但位置不對）
+4. 判定：
+   - 若發現任何拼寫差異 → 在 spellingEvidence 中列出差異，並將 support 降為 "weak"（agree 模式下降 agreementSupport，disagree 模式下降對應方的 support）。
+   - 若 AI1 和 AI2 讀出的拼寫與圖片不符（例如都讀成正確拼寫但圖片明顯拼錯）→ support 降為 "unsupported"。
+   - 若逐字母比對確認無差異 → 正常評估 support。
+
+⚠️ 常見陷阱：AI 語言模型傾向自動修正拼字（如把 "dinng" 讀成 "dining"）。你必須抵抗這個傾向，仔細看每一個字母的實際筆跡。
+⚠️ 大小寫也要注意：如正確答案首字母大寫 "Kitchen"，但學生寫 "kitchen"（小寫 k），視為差異。
+` : ''}需鑑識的題目如下（全圖在最前，各題裁切圖依序附在題目說明之後）：
 
 ${questionBlocks}
 
@@ -2876,7 +2897,11 @@ ${questionBlocks}
     { "questionId": "...", "mode": "agree_review", "agreementSupport": "strong | weak | unsupported" },
     { "questionId": "...", "mode": "disagree_review", "ai1Support": "strong | weak | unsupported", "ai2Support": "strong | weak | unsupported" }
   ]
-}`.trim()
+}
+${hasEnglishSpelling ? `若題目有英語拼寫舉證，請在該題的 forensic 物件中額外加入 spellingEvidence：
+{ "questionId": "...", "mode": "agree_review", "agreementSupport": "weak",
+  "spellingEvidence": { "studentLetters": "d-i-n-n-g", "correctLetters": "d-i-n-i-n-g", "differences": ["position 4: student='n', correct='i'", "student has 5 letters, correct has 6"] } }
+spellingEvidence 僅在發現差異時必填，無差異時可省略。` : ''}`.trim()
 }
 
 // Apply forensic decision table to produce arbiterStatus + finalAnswer
@@ -4692,6 +4717,7 @@ Return JSON:
 
   // ── AI3 Arbiter (serial): compare AI1/AI2 results and make evidence-based decision ──
   // Filter: skip questions where both AI1 and AI2 are blank (auto agree) or both unreadable (auto needs_review)
+  const akByQidForArbiter = isEnglishDomainForSpelling ? mapByQuestionId(answerKeyQuestions, (q) => q?.id) : null
   const arbiterItems = questionResultsRaw
     .filter((qr) => {
       const s1 = qr.readAnswer1.status
@@ -4711,6 +4737,12 @@ Return JSON:
       const ai2Answer = useFinalAnswerOnly
         ? (extractFinalAnswerFromCalc(qr.readAnswer2.studentAnswer) ?? qr.readAnswer2.studentAnswer)
         : qr.readAnswer2.studentAnswer
+      // English fill_blank/short_answer: attach correctAnswer for spelling evidence
+      const isEnglishSpellingType = isEnglishDomainForSpelling &&
+        (qr.questionType === 'fill_blank' || qr.questionType === 'short_answer')
+      const correctAnswer = isEnglishSpellingType && akByQidForArbiter
+        ? ensureString(akByQidForArbiter.get(qr.questionId)?.answer || akByQidForArbiter.get(qr.questionId)?.referenceAnswer, '').trim()
+        : undefined
       return {
         questionId: qr.questionId,
         questionType: qr.questionType,
@@ -4719,7 +4751,8 @@ Return JSON:
         ai2Answer,
         ai2Status: qr.readAnswer2.status,
         agreementStatus: qr.consistencyStatus === 'stable' ? 'agree' : 'disagree',
-        disagreementReason: qr.consistencyReason === 'uncertain_chars' ? 'uncertain_chars' : undefined
+        disagreementReason: qr.consistencyReason === 'uncertain_chars' ? 'uncertain_chars' : undefined,
+        correctAnswer: correctAnswer || undefined
       }
     })
 
@@ -4768,13 +4801,19 @@ Return JSON:
             continue
           }
           const decision = applyForensicDecision(f, item.ai1Answer, item.ai2Answer)
+          // English spelling evidence: if AI3 found spelling differences, force needs_review
+          const hasSpellingDiff = f.spellingEvidence?.differences?.length > 0
+          if (hasSpellingDiff && item.correctAnswer) {
+            console.log(`[english-spelling-arbiter] ${qId} AI3 found spelling differences:`, JSON.stringify(f.spellingEvidence))
+          }
           arbiterByQuestionId.set(qId, {
-            arbiterStatus: decision.arbiterStatus,
-            finalAnswer: decision.finalAnswer,
+            arbiterStatus: hasSpellingDiff && item.correctAnswer ? 'needs_review' : decision.arbiterStatus,
+            finalAnswer: hasSpellingDiff && item.correctAnswer ? undefined : decision.finalAnswer,
             forensicMode: ensureString(f.mode, ''),
             agreementSupport: f.agreementSupport,
             ai1Support: f.ai1Support,
-            ai2Support: f.ai2Support
+            ai2Support: f.ai2Support,
+            spellingEvidence: f.spellingEvidence || undefined
           })
         }
         logStaged(pipelineRunId, stagedLogLevel, 'AI3 forensic summary', {
@@ -4791,7 +4830,8 @@ Return JSON:
           forensicMode: r.forensicMode,
           agreementSupport: r.agreementSupport,
           ai1Support: r.ai1Support,
-          ai2Support: r.ai2Support
+          ai2Support: r.ai2Support,
+          spellingEvidence: r.spellingEvidence || undefined
         })))
       }
     } catch (arbiterErr) {
