@@ -2167,22 +2167,54 @@ Return strict JSON:
 }`.trim()
 }
 
-function buildFocusedMultiFillReadPrompt(questionId) {
-  return `You are reading a CROPPED IMAGE of ONE MULTI-FILL question. The crop belongs to questionId "${questionId}" only.
+// 判斷 multi_fill 的符號集類型
+function detectMultiFillCodeSet(correctAnswer) {
+  const answer = ensureString(correctAnswer, '').trim()
+  if (!answer) return 'bopomofo' // 預設注音
+  // 英文字母（A、B、C 或 A,B,C）
+  if (/^[A-Za-z]([、，,\s]+[A-Za-z])*$/.test(answer)) return 'letter'
+  // 數字（1、2、3 或 ①②③）
+  if (/^[\d①②③④⑤⑥⑦⑧⑨⑩]([、，,\s]+[\d①②③④⑤⑥⑦⑧⑨⑩])*$/.test(answer)) return 'number'
+  // 注音符號
+  if (/[ㄅ-ㄩ]/.test(answer)) return 'bopomofo'
+  return 'general'
+}
 
-Your task: read ALL codes/symbols the student wrote inside this box.
-You do NOT know the correct answer and must NOT guess.
+function buildFocusedMultiFillReadPrompt(questionId, codeSet = 'bopomofo') {
+  let codeSetSection = ''
+  let exampleAnswer = ''
 
-IMPORTANT — expected code set: codes in this type of question are almost always Bopomofo symbols from ㄅ to ㄎ only:
+  if (codeSet === 'bopomofo') {
+    codeSetSection = `IMPORTANT — expected code set: codes in this type of question are almost always Bopomofo symbols from ㄅ to ㄎ only:
 ㄅ ㄆ ㄇ ㄈ ㄉ ㄊ ㄋ ㄌ ㄍ ㄎ
 If you see a symbol that resembles something outside this set, match it to the closest symbol within this set.
 
 ⚠️ CRITICAL LOOK-ALIKE PAIRS (check these before finalizing):
 - ㄉ vs ㄌ: look at the TOP first — ㄉ has NOTHING at the top (completely clean); ㄌ has a small protrusion/bump sticking out at the top-left. This is the primary test; hook direction is secondary.
-- ㄅ vs ㄋ: ㄅ is TWO SEPARATE strokes (short upper stroke + lower stroke hooking LEFT); ㄋ is ONE CONTINUOUS flow (horizontal top → straight down → curves RIGHT). If you see a clear break between upper and lower → ㄅ.
+- ㄅ vs ㄋ: ㄅ is TWO SEPARATE strokes (short upper stroke + lower stroke hooking LEFT); ㄋ is ONE CONTINUOUS flow (horizontal top → straight down → curves RIGHT). If you see a clear break between upper and lower → ㄅ.`
+    exampleAnswer = 'ㄅ、ㄇ、ㄉ'
+  } else if (codeSet === 'letter') {
+    codeSetSection = `IMPORTANT — expected code set: the student writes uppercase or lowercase English letters (A, B, C, D, E, F, G, H, ...).
+Read each letter exactly as written. Do NOT interpret English letters as Bopomofo symbols (e.g. do NOT read "A" as "ㄅ").`
+    exampleAnswer = 'A、C、E'
+  } else if (codeSet === 'number') {
+    codeSetSection = `IMPORTANT — expected code set: the student writes numbers (1, 2, 3, ...) or circled numbers (①, ②, ③, ...).
+Read each number exactly as written. Output as regular digits (1, 2, 3), not circled numbers.`
+    exampleAnswer = '1、3、5'
+  } else {
+    codeSetSection = `Read exactly what the student wrote — letters, numbers, or symbols.`
+    exampleAnswer = 'A、3、ㄅ'
+  }
+
+  return `You are reading a CROPPED IMAGE of ONE MULTI-FILL question. The crop belongs to questionId "${questionId}" only.
+
+Your task: read ALL codes/symbols the student wrote inside this box.
+You do NOT know the correct answer and must NOT guess.
+
+${codeSetSection}
 
 Rules:
-1) Transcribe EVERY code/symbol you see (e.g. "ㄅ、ㄇ、ㄉ").
+1) Transcribe EVERY code/symbol you see (e.g. "${exampleAnswer}").
 2) Preserve the student's separators (、or ，). If codes are written with no separator, join them with 、.
 3) Read ONLY what is inside this specific box. Do NOT read from neighboring boxes.
 4) status="read" if any codes/text found inside the box.
@@ -2194,14 +2226,49 @@ Return strict JSON only. No markdown.
   "answers": [
     {
       "questionId": "${questionId}",
-      "studentAnswerRaw": "ㄅ、ㄇ、ㄉ",
+      "studentAnswerRaw": "${exampleAnswer}",
       "status": "read|blank|unreadable"
     }
   ]
 }`.trim()
 }
 
-function buildFocusedMultiFillReReadPrompt(questionId) {
+function buildFocusedMultiFillReReadPrompt(questionId, codeSet = 'bopomofo') {
+  // 非注音模式用簡化版 prompt（不需要筆劃分析）
+  if (codeSet !== 'bopomofo') {
+    const codeDesc = codeSet === 'letter'
+      ? 'English letters (A, B, C, D, ...).\nRead each letter exactly. Do NOT interpret as Bopomofo.'
+      : codeSet === 'number'
+        ? 'numbers (1, 2, 3, ...) or circled numbers (①②③...). Output as regular digits.'
+        : 'letters, numbers, or symbols. Read exactly what you see.'
+    const example = codeSet === 'letter' ? 'A、C、E' : codeSet === 'number' ? '1、3、5' : 'A、3'
+    return `You are reading a WIDE CROPPED IMAGE centered on ONE MULTI-FILL answer box. The crop belongs to questionId "${questionId}" only.
+
+⚠️ WIDE CROP NOTICE: This image is intentionally wider than the answer box to provide context.
+The target answer box is located in the CENTER of this image. Focus ONLY on the central region.
+
+This box contains handwritten codes — ${codeDesc}
+
+STEP 1 — Count how many distinct symbols you see in this box.
+STEP 2 — For each symbol, read it exactly as written.
+
+Rules:
+- Transcribe EVERY code you see, joined by 、.
+- Read ONLY what is inside the center box. Ignore neighboring boxes.
+- status="read" if any codes found, "blank" if empty, "unreadable" if unclear.
+
+Return strict JSON only. No markdown.
+{
+  "answers": [
+    {
+      "questionId": "${questionId}",
+      "studentAnswerRaw": "${example}",
+      "status": "read|blank|unreadable"
+    }
+  ]
+}`.trim()
+  }
+
   return `You are reading a WIDE CROPPED IMAGE centered on ONE MULTI-FILL answer box. The crop belongs to questionId "${questionId}" only.
 
 ⚠️ WIDE CROP NOTICE: This image is intentionally wider than the answer box to provide context.
@@ -4350,13 +4417,26 @@ export async function runStagedGradingPhaseA({
   const multiFillCropCandidates = classifyAligned.filter(
     (q) => q.visible && q.questionType === 'multi_fill' && allQuestionCropMap.has(q.questionId)
   )
+  // 建立 multi_fill 題目的符號集對照表（根據答案卷的正確答案判斷）
+  const multiFillCodeSetMap = new Map()
+  const akByQidForMultiFill = mapByQuestionId(answerKeyQuestions, (q) => q?.id)
+  for (const q of multiFillCropCandidates) {
+    const akQ = akByQidForMultiFill.get(q.questionId)
+    const correctAnswer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
+    const codeSet = detectMultiFillCodeSet(correctAnswer)
+    multiFillCodeSetMap.set(q.questionId, codeSet)
+  }
   if (multiFillCropCandidates.length > 0) {
+    const codeSetSummary = {}
+    multiFillCodeSetMap.forEach((v) => { codeSetSummary[v] = (codeSetSummary[v] || 0) + 1 })
     logStaged(pipelineRunId, 'basic', 'focused-multifill-read begin (dual: direct + analytic)', {
-      count: multiFillCropCandidates.length
+      count: multiFillCropCandidates.length,
+      codeSetSummary
     })
     const inlineImage = inlineImages[0]
     const multiFillDualResults = await Promise.all(
       multiFillCropCandidates.map(async (q) => {
+        const codeSet = multiFillCodeSetMap.get(q.questionId) || 'bopomofo'
         // read1: tight crop (pad=0.03) — same as allQuestionCropMap
         const cropTight = allQuestionCropMap.get(q.questionId)
         // read2: wide crop (pad=0.08) — more context, different view to catch bbox misalignment
@@ -4371,7 +4451,7 @@ export async function runStagedGradingPhaseA({
             timeoutMs: getRemainingBudget(),
             routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReadPrompt(q.questionId) }, { inlineData: cropTight }] }]
+            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReadPrompt(q.questionId, codeSet) }, { inlineData: cropTight }] }]
           }),
           executeStage({
             apiKey,
@@ -4380,7 +4460,7 @@ export async function runStagedGradingPhaseA({
             timeoutMs: getRemainingBudget(),
             routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER,
-            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReReadPrompt(q.questionId) }, { inlineData: cropWide ?? cropTight }] }]
+            stageContents: [{ role: 'user', parts: [{ text: buildFocusedMultiFillReReadPrompt(q.questionId, codeSet) }, { inlineData: cropWide ?? cropTight }] }]
           })
         ])
         const answer1 = res1.ok ? (Array.isArray(parseCandidateJson(res1.data)?.answers) ? parseCandidateJson(res1.data).answers[0] : null) : null
