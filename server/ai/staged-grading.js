@@ -589,12 +589,13 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/[０-９]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
   // 全形逗號 → 半形（比對用，不分語言領域）
   s = s.replace(/，/gu, ',')
+  // 去除 AI 加的欄位標籤前綴（每行開頭的「人物：」「具體事件：」「你的理由：」等）
+  // AI2 常會加這類結構化標籤，AI1 不加，導致同內容被判為不同
+  s = s.replace(/(?:^|(?<=[\n,、]))[\p{Unified_Ideograph}\p{Letter}]+[：:]\s*/gmu, '')
+  // 去除分隔符號（逗號、頓號、換行）— 比對內容本身，不比對格式
+  s = s.replace(/[,、\n\r]/gu, '')
   // 去除所有空白（避免有無空白造成誤判）
   s = s.replace(/\s+/gu, '')
-  // 去除題目標籤前綴（如「西遊記：360×45/180=90°」→「360×45/180=90°」）
-  // AI 有時會誤讀答案旁的欄位標題，將其作為答案的一部分
-  // 僅當冒號後接數字時才移除，避免誤刪答案本體
-  s = s.replace(/^[\p{Unified_Ideograph}]+[：:](?=\d)/u, '')
   // 選項字母大小寫統一（A/a、B/b、C/c 等視為相同）
   s = s.toLowerCase()
   return s
