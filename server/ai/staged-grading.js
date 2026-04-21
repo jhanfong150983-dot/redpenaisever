@@ -3542,6 +3542,13 @@ function buildFinalGradingResult({
       if (isSimpleAnswer) {
         const norm = (s) => {
           let t = s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-')
+          // 圈圈數字 → 半形數字（①②③...⑳ → 1~20）
+          t = t.replace(/[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/gu, (ch) => {
+            const idx = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'.indexOf(ch)
+            return idx >= 0 ? String(idx + 1) : ch
+          })
+          // 全形數字 → 半形
+          t = t.replace(/[０-９]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
           // 剝除外層括號：(C) → C、（甲）→ 甲、(2) → 2
           t = t.replace(/^[（(]\s*(.+?)\s*[）)]$/, '$1')
           return t.toLowerCase()
