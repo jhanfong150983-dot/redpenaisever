@@ -3067,7 +3067,9 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - isCorrect = (score === maxScore).
   - errorType: same as multi_check (based on non-其他 tokens only).
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
+  - VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached for this question (labelled "學生作答圖"), use the IMAGE as the primary source for judging 列式計算. The text transcription may be inaccurate for fractions, subscripts, and multi-line calculations. Look at the image to verify the student's actual written work.
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 算式過程: check if the formula/steps are mathematically valid. For 最終答案: check if the final numeric value matches referenceAnswer.
+  - VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached for this question (labelled "學生作答圖"), use the IMAGE as the primary source for judging 算式過程. The text transcription (studentAnswerRaw) may be inaccurate for fractions, subscripts, and multi-line calculations. Look at the image to verify: fraction notation (分子/分母), reduction/simplification marks, decimal alignment, and step-by-step flow.
   - LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score even if 算式過程 is weak/incomplete.
 - short_answer: Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback. No unit checking required.
   - ⚠️ OPEN-CHOICE DIMENSION RULE: When a dimension's criteria says "完成選擇即可，無對錯" (or similar), award full marks for that dimension as long as the student made any choice — regardless of WHICH option they chose. This applies to "承上題" follow-up questions where students choose one aspect from the previous question and explain it. Do NOT deduct points for choosing 休閒娛樂 vs 文化傳承 vs 教育 etc. — all valid options from the preceding question are equally acceptable.
@@ -5022,6 +5024,51 @@ export async function runStagedGradingPhaseB({
   // 將老師確認的 finalAnswers 轉為 readAnswerResult 格式
   const finalReadAnswerResult = finalAnswersToReadAnswerResult(finalAnswers)
 
+  // ── Crop calculation/word_problem questions for Accessor visual grading ──
+  // Accessor needs to see the student's handwritten work (not just AI-transcribed text)
+  // to accurately judge calculation process, fraction notation, etc.
+  const calcCropMap = new Map() // questionId → { data, mimeType }
+  const calcTypes = new Set(['calculation', 'word_problem'])
+  if (inlineImages.length > 0 && classifyResult) {
+    const calcQuestions = (Array.isArray(classifyResult) ? classifyResult : classifyResult?.questions || [])
+      .filter((q) => q.visible && q.answerBbox && calcTypes.has(q.questionType))
+    if (calcQuestions.length > 0) {
+      const img = inlineImages[0]?.inlineData
+      if (img?.data && img?.mimeType) {
+        const MAX_CALC_CROPS = 16 // 安全上限，避免 payload 過大
+        const cropTargets = calcQuestions.slice(0, MAX_CALC_CROPS)
+        const cropResults = await Promise.all(
+          cropTargets.map(async (q) => {
+            const cropData = await cropInlineImageByBbox(img.data, img.mimeType, q.answerBbox, true, 0.01)
+            return { questionId: q.questionId, cropData }
+          })
+        )
+        for (const { questionId, cropData } of cropResults) {
+          if (cropData) calcCropMap.set(questionId, cropData)
+        }
+        logStaged(pipelineRunId, stagedLogLevel, 'PhaseB calc crop for Accessor', {
+          candidates: cropTargets.length,
+          succeeded: calcCropMap.size
+        })
+      }
+    }
+  }
+
+  // Helper: build accessor parts with optional calc/word_problem crop images
+  function buildAccessorParts(promptText, questionIds, cropMap) {
+    const parts = [{ text: promptText }]
+    if (cropMap.size > 0) {
+      for (const qId of questionIds) {
+        const crop = cropMap.get(qId)
+        if (crop) {
+          parts.push({ text: `--- 題目 ${qId} 學生作答圖 ---` })
+          parts.push({ inlineData: crop })
+        }
+      }
+    }
+    return parts
+  }
+
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   const allAnswerIds = finalReadAnswerResult.answers.map((a) => ensureString(a?.questionId).trim())
   const page1AnswerIds = allAnswerIds.filter((id) => id.startsWith('1-'))
@@ -5041,8 +5088,8 @@ export async function runStagedGradingPhaseB({
     logStageStart(pipelineRunId, 'Accessor-p1')
     logStageStart(pipelineRunId, 'Accessor-p2')
     const [accessorResp1, accessorResp2] = await Promise.all([
-      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak1, rar1, internalContext?.domainHint) }] }] }),
-      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak2, rar2, internalContext?.domainHint) }] }] })
+      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint), [...p1Ids], calcCropMap) }] }),
+      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint), [...p2Ids], calcCropMap) }] })
     ])
     logStageEnd(pipelineRunId, 'Accessor-p1', accessorResp1)
     logStageEnd(pipelineRunId, 'Accessor-p2', accessorResp2)
@@ -5069,7 +5116,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed1 || typeof parsed1 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p1-retry')
-      const retryResp1 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak1, rar1, internalContext?.domainHint) }] }] })
+      const retryResp1 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint), [...p1Ids], calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-p1-retry', retryResp1)
       stageResponses.push(retryResp1)
       parsed1 = retryResp1.ok ? parseCandidateJson(retryResp1.data) : null
@@ -5091,7 +5138,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed2 || typeof parsed2 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p2-retry')
-      const retryResp2 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: buildAccessorPrompt(ak2, rar2, internalContext?.domainHint) }] }] })
+      const retryResp2 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint), [...p2Ids], calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-p2-retry', retryResp2)
       stageResponses.push(retryResp2)
       parsed2 = retryResp2.ok ? parseCandidateJson(retryResp2.data) : null
@@ -5119,7 +5166,7 @@ export async function runStagedGradingPhaseB({
     const accessorResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
-      stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }] }]
+      stageContents: [{ role: 'user', parts: buildAccessorParts(accessorPrompt, allAnswerIds, calcCropMap) }]
     })
     logStageEnd(pipelineRunId, 'Accessor', accessorResponse)
     stageResponses.push(accessorResponse)
@@ -5141,7 +5188,7 @@ export async function runStagedGradingPhaseB({
     if (!accessorParsed || typeof accessorParsed !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-retry')
-      const retryResp = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: [{ text: accessorPrompt }] }] })
+      const retryResp = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(accessorPrompt, allAnswerIds, calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-retry', retryResp)
       stageResponses.push(retryResp)
       accessorParsed = retryResp.ok ? parseCandidateJson(retryResp.data) : null
