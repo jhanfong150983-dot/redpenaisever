@@ -4994,6 +4994,8 @@ Return JSON:
     const akQ = akByQuestionId.get(qr.questionId)
     if (!akQ?.tablePosition || !qr.arbiterResult?.finalAnswer) continue
     if (qr.arbiterResult.arbiterStatus === 'needs_review') continue // already flagged
+    // true_false 跳過：○/✗ 答案天然重複率高，相鄰格相同不代表讀錯
+    if (qr.questionType === 'true_false') continue
 
     const col = akQ.tablePosition.col
     if (col <= 1) continue // no left neighbor
