@@ -2456,6 +2456,18 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
   const singleChoiceNote = singleChoiceIds.length > 0
     ? `\nSINGLE-CHOICE questions (output ONE option only): ${JSON.stringify(singleChoiceIds)}`
     : ''
+  // 數字選項提示：正確答案是數字的選擇題，提示 AI 不要把數字讀成注音
+  const akMap = options?.answerKeyQuestions
+    ? mapByQuestionId(options.answerKeyQuestions, (item) => item?.id)
+    : new Map()
+  const numericChoiceIds = singleChoiceIds.filter((qId) => {
+    const akQ = akMap.get(qId)
+    const answer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
+    return /^\d+$/.test(answer)
+  })
+  const numericChoiceNote = numericChoiceIds.length > 0
+    ? `\n⚠️ NUMERIC OPTION HINT: The following single-choice questions use NUMERIC options (1, 2, 3, 4...), NOT Bopomofo symbols. If you see handwriting that could be either a digit or a Bopomofo symbol (e.g. "3" vs "ㄋ", "1" vs "ㄌ"), always interpret it as a DIGIT: ${JSON.stringify(numericChoiceIds)}`
+    : ''
   const trueFalseNote = trueFalseIds.length > 0
     ? `\nTRUE-FALSE questions (output ○ or ✗ only): ${JSON.stringify(trueFalseIds)}`
     : ''
@@ -2533,7 +2545,7 @@ You are an answer reader. Your only job is to report what the student physically
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
-${singleChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}${tableCellHintNote}
+${singleChoiceNote}${numericChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}${tableCellHintNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You do NOT know what the correct answer is. You do NOT know what the student intended to write.
