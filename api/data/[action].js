@@ -3615,13 +3615,25 @@ async function handleSync(req, res) {
         syncTimerEnd('submissions-upsert')
 
         syncTimer('submissions-transitions')
+        // 只對「server 上還沒有 grading_result 但 incoming 有」的 submissions 跑 state transitions
+        // 這代表是本地新批改的，需要更新 assignment_student_state
+        // 排除：server 上已經有 grading_result 的（只是重複 push 同樣的資料）
+        const existingGradedIds = new Set()
+        try {
+          const submissionIds = submissionRows.map(r => r.id).filter(Boolean)
+          if (submissionIds.length > 0) {
+            const { data: existingRows } = await supabaseDb
+              .from('submissions')
+              .select('id')
+              .in('id', submissionIds)
+              .not('grading_result', 'is', null)
+            if (existingRows) existingRows.forEach(r => existingGradedIds.add(r.id))
+          }
+        } catch { /* non-fatal */ }
         const stateTransitionRows = submissionRows.filter(
-          (row) => row.grading_result || row.source === 'student_correction'
+          (row) => (row.grading_result && !existingGradedIds.has(row.id)) || row.source === 'student_correction'
         )
-        const srSources = {}
-        submissionRows.forEach(r => { srSources[r.source || 'none'] = (srSources[r.source || 'none'] || 0) + 1 })
-        const hasGR = submissionRows.filter(r => r.grading_result).length
-        console.log(`⏱️ [sync] stateTransitionRows: ${stateTransitionRows.length}/${submissionRows.length} hasGR=${hasGR} sources=${JSON.stringify(srSources)}`)
+        console.log(`⏱️ [sync] stateTransitionRows: ${stateTransitionRows.length}/${submissionRows.length} (existingGraded=${existingGradedIds.size})`)
         if (stateTransitionRows.length > 0) {
           await applySubmissionStateTransitions(supabaseDb, user.id, stateTransitionRows).catch(
             (err) => console.warn('[sync] applySubmissionStateTransitions failed (non-fatal):', err?.message)
