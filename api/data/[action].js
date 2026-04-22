@@ -3601,26 +3601,30 @@ async function handleSync(req, res) {
 
       syncTimer('submissions')
       if (submissionRows.length > 0) {
-        // Batch upsert — limit to 30 per batch to stay within Vercel timeout
+        syncTimer('submissions-upsert')
         const SUBMISSION_BATCH = 30
         for (let i = 0; i < submissionRows.length; i += SUBMISSION_BATCH) {
           const batch = submissionRows.slice(i, i + SUBMISSION_BATCH)
+          syncTimer(`sub-batch-${i}`)
           const result = await supabaseDb
             .from('submissions')
             .upsert(batch, { onConflict: 'id' })
+          syncTimerEnd(`sub-batch-${i}`)
           if (result.error) throw new Error(result.error.message)
         }
-        // applySubmissionStateTransitions: 只對有批改結果的 submissions 跑（避免 100+ 筆全跑導致超時）
-        // grading_result 存在 = 本地新批改需要更新 state；student_correction = 訂正提交
-        // 不含 status==='graded'（大部分已批改的都是 graded，但沒帶 grading_result 代表只是 metadata sync）
+        syncTimerEnd('submissions-upsert')
+
+        syncTimer('submissions-transitions')
         const stateTransitionRows = submissionRows.filter(
           (row) => row.grading_result || row.source === 'student_correction'
         )
+        console.log(`⏱️ [sync] stateTransitionRows: ${stateTransitionRows.length}/${submissionRows.length}`)
         if (stateTransitionRows.length > 0) {
           await applySubmissionStateTransitions(supabaseDb, user.id, stateTransitionRows).catch(
             (err) => console.warn('[sync] applySubmissionStateTransitions failed (non-fatal):', err?.message)
           )
         }
+        syncTimerEnd('submissions-transitions')
       }
 
       syncTimerEnd('submissions')
