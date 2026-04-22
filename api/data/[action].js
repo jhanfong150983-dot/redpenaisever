@@ -3618,7 +3618,10 @@ async function handleSync(req, res) {
         const stateTransitionRows = submissionRows.filter(
           (row) => row.grading_result || row.source === 'student_correction'
         )
-        console.log(`⏱️ [sync] stateTransitionRows: ${stateTransitionRows.length}/${submissionRows.length}`)
+        const srSources = {}
+        submissionRows.forEach(r => { srSources[r.source || 'none'] = (srSources[r.source || 'none'] || 0) + 1 })
+        const hasGR = submissionRows.filter(r => r.grading_result).length
+        console.log(`⏱️ [sync] stateTransitionRows: ${stateTransitionRows.length}/${submissionRows.length} hasGR=${hasGR} sources=${JSON.stringify(srSources)}`)
         if (stateTransitionRows.length > 0) {
           await applySubmissionStateTransitions(supabaseDb, user.id, stateTransitionRows).catch(
             (err) => console.warn('[sync] applySubmissionStateTransitions failed (non-fatal):', err?.message)
