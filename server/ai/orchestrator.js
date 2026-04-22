@@ -229,11 +229,21 @@ async function postProcessAnswerKeyWithCrops(pipelineResult, contents, apiKey, m
 
   // 建立全域頁碼 → 批次內圖片索引的對應表（修正多批次時索引錯位的問題）
   const pageToImageIndex = buildPageLabelToImageIndexMap(contents)
-  console.log(`[orchestrator] pageToImageIndex: ${JSON.stringify(Object.fromEntries(pageToImageIndex))}`)
+  if (pageToImageIndex.size > 0) {
+    console.log(`[orchestrator] pageToImageIndex: ${JSON.stringify(Object.fromEntries(pageToImageIndex))}`)
+  }
 
   // Step 2: dedicated locate AI for accurate bboxes
   const locatedBboxMap = await locateAnswerKeyBboxes(questions, inlineImages, apiKey, model, pageToImageIndex)
-  console.log(`[orchestrator] answer_key.locate: ${locatedBboxMap.size}/${questions.length} questions located`)
+  const locateMissing = questions.filter((q) => !locatedBboxMap.has(q.id))
+  const locateMissingWithFallback = locateMissing.map((q) => ({
+    id: q.id,
+    category: q.questionCategory ?? '',
+    hasExtractBbox: !!(q.answerBbox),
+    fallback: q.answerBbox ? 'extract_bbox' : 'none'
+  }))
+  console.log(`[orchestrator] answer_key.locate: ${locatedBboxMap.size}/${questions.length} questions located` +
+    (locateMissing.length > 0 ? ` | missing: ${JSON.stringify(locateMissingWithFallback)}` : ''))
 
   const croppedQuestions = await Promise.all(questions.map(async (q) => {
     // Prefer locate bbox (more accurate), fall back to extract bbox
@@ -432,12 +442,10 @@ export async function runAiPipeline({
     }
     console.log(`${logPrefix} single-shot route=${resolvedRouteKey}`)
 
-    // Debug log for answer_key.extract / answer_key.tag_concepts
-    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT || resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS) {
-      const promptText = contents?.[0]?.parts?.[0]?.text ?? contents?.[0]?.parts?.find?.(p => typeof p?.text === 'string')?.text ?? null
-      if (promptText) {
-        console.log(`${logPrefix} [DEBUG] ${resolvedRouteKey} prompt:\n${promptText}`)
-      }
+    // Concise log for answer_key.extract / answer_key.tag_concepts (no full prompt/response dump)
+    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
+      const imageCount = contents?.flatMap(c => c?.parts ?? []).filter(p => p?.inlineData).length ?? 0
+      console.log(`${logPrefix} [answer_key.extract] sending ${imageCount} image(s) to AI`)
     }
 
     pipelineResult = await executeSinglePipelineCall({
@@ -450,9 +458,43 @@ export async function runAiPipeline({
       routeKey: resolvedRouteKey
     })
 
-    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT || resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS) {
+    // Structured summary for answer_key.extract (replaces raw JSON dump)
+    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
       const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
-      console.log(`${logPrefix} [DEBUG] ${resolvedRouteKey} response:\n${rawText}`)
+      let parsed = null
+      try { parsed = JSON.parse((rawText || '').replace(/```json|```/g, '').trim()) } catch { /* ignore */ }
+      if (parsed && Array.isArray(parsed.questions)) {
+        const questions = parsed.questions
+        const catCounts = {}
+        for (const q of questions) {
+          const cat = q.questionCategory || 'unknown'
+          catCounts[cat] = (catCounts[cat] || 0) + 1
+        }
+        const hasBboxCount = questions.filter(q => q.answerBbox).length
+        const hasAnswerCount = questions.filter(q => (q.answer || q.referenceAnswer || '').trim()).length
+        const dimMismatch = questions.filter(q => {
+          if (!Array.isArray(q.rubricsDimensions) || q.rubricsDimensions.length === 0) return false
+          const dimSum = q.rubricsDimensions.reduce((s, d) => s + (d?.maxScore || 0), 0)
+          return typeof q.maxScore === 'number' && Math.abs(dimSum - q.maxScore) > 0.5
+        }).length
+        console.log(`${logPrefix} [answer_key.extract] result: ${questions.length} questions, totalScore=${parsed.totalScore}, categories=${JSON.stringify(catCounts)}, withBbox=${hasBboxCount}, withAnswer=${hasAnswerCount}${dimMismatch > 0 ? `, dimScoreMismatch=${dimMismatch}` : ''}`)
+        // Log questions with potential issues
+        const issues = questions.filter(q => !(q.id || '').trim() || (q.maxScore == null) || q.maxScore <= 0)
+        if (issues.length > 0) {
+          console.warn(`${logPrefix} [answer_key.extract] issues: ${issues.map(q => `${q.id || '(no-id)'}:maxScore=${q.maxScore}`).join(', ')}`)
+        }
+      } else {
+        console.warn(`${logPrefix} [answer_key.extract] response parse failed`)
+      }
+    }
+    if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS) {
+      const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
+      let parsed = null
+      try { parsed = JSON.parse((rawText || '').replace(/```json|```/g, '').trim()) } catch { /* ignore */ }
+      if (parsed && Array.isArray(parsed.tags)) {
+        const tagged = parsed.tags.filter(t => t?.concept_code).length
+        console.log(`${logPrefix} [answer_key.tag_concepts] result: ${parsed.tags.length} tags, ${tagged} with concept_code`)
+      }
     }
 
     // Post-process: dedicated locate AI + Sharp crops

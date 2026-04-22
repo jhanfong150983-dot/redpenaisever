@@ -1,6 +1,16 @@
 import { getPipeline } from './pipelines.js'
 import { callGeminiGenerateContent } from './model-adapter.js'
 import { AI_ROUTE_KEYS } from './routes.js'
+import {
+  QG_SEVERITY,
+  validateClassifyQuality,
+  validateReadAnswerQuality,
+  validateArbiterQuality,
+  validateAccessorQuality,
+  validateExplainQuality,
+  validateClassifyReadConsistency,
+  validateReadAccessorConsistency
+} from './quality-gates.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -3086,11 +3096,19 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
     questions: Array.isArray(answerKey?.questions) ? answerKey.questions : [],
     totalScore: toFiniteNumber(answerKey?.totalScore) ?? null
   }
+  // Build a set of questionIds that are multi-choice/multi-check types for separator normalization
+  const multiSelectIds = new Set(
+    (compactAnswerKey.questions || [])
+      .filter((q) => ['multi_check', 'multi_choice', 'multi_check_other'].includes(q.questionCategory))
+      .map((q) => q.questionId)
+  )
   const trimmedAnswers = Array.isArray(readAnswerResult?.answers)
     ? readAnswerResult.answers.map((a) => ({
         questionId: a.questionId,
         status: a.status,
-        studentAnswerRaw: a.studentAnswerRaw
+        studentAnswerRaw: multiSelectIds.has(a.questionId) && typeof a.studentAnswerRaw === 'string'
+          ? a.studentAnswerRaw.replace(/[，、；;｜|]/g, ',')
+          : a.studentAnswerRaw
       }))
     : []
 
@@ -3132,7 +3150,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "15 km" = "15 公里" ✓). Units NOT in the same equivalence pair are WRONG (errorType='unit'): 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm. Do NOT accept other unit substitutions regardless of strictness setting.
   DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
 - fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
-- multi_check / multi_choice: The answer field contains comma-separated correct tokens (e.g. "①,③" or "A,C"). Parse BOTH student answer and correct answer as comma-separated token sets (order-insensitive).
+- multi_check / multi_choice: The answer field contains comma-separated correct tokens (e.g. "①,③" or "A,C"). SEPARATOR NORMALIZATION: before splitting, replace ALL of these separators in BOTH student answer and correct answer with a regular comma: Chinese comma（，）, Chinese pause mark（、）, semicolon（；）, fullwidth semicolon, vertical bar（｜ or |）, whitespace-only gaps between tokens. Then parse as comma-separated token sets (order-insensitive).
   - OPEN-ENDED OTHER RULE: If referenceAnswer contains "其他選項：#N" (e.g. "其他選項：#4" or "其他選項：#4；參考：XXX"), token #N is an open-ended free-write option. Before computing correct/wrong sets, REMOVE #N from student_tokens. Student selecting or not selecting 其他 does NOT affect score in any way.
   - correct = tokens in student_tokens ∩ answer_tokens
   - wrong = tokens in student_tokens − answer_tokens
@@ -4015,7 +4033,7 @@ export async function runStagedGradingPhaseA({
     }
   }
 
-  const classifyAligned = classifyResult.alignedQuestions
+  let classifyAligned = classifyResult.alignedQuestions
   logStaged(pipelineRunId, stagedLogLevel, 'classify normalized-summary', {
     coverage: classifyResult.coverage,
     visibleCount: classifyAligned.filter((q) => q.visible).length,
@@ -4048,6 +4066,95 @@ export async function runStagedGradingPhaseA({
   if (multiFillBboxDebug.length > 0) {
     logStaged(pipelineRunId, 'basic', 'multi_fill answerBbox coords', multiFillBboxDebug)
   }
+
+  // ── Classify Quality Gate + Auto-Retry (max 1) ────────────────────────────
+  const classifyQG = validateClassifyQuality(classifyResult, questionIds)
+  logStaged(pipelineRunId, 'basic', 'classify quality-gate', {
+    severity: classifyQG.severity, warnings: classifyQG.warnings, metrics: classifyQG.metrics
+  })
+  if (classifyQG.severity === QG_SEVERITY.FAIL) {
+    logStaged(pipelineRunId, stagedLogLevel, 'classify quality FAIL → retry (1/1)')
+    // Re-run classify: single-page path (simple retry with same prompt)
+    if (pageEntries.length <= 1) {
+      const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
+      const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
+      const akPageCount = answerKeyImageParts.length > 0 ? answerKeyImageParts.length : 0
+      const retryPrompt = buildClassifyPrompt(ids, specs, pageBreaks, akPageCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+      const retryResp = await executeStage({
+        apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+        stageContents: [{ role: 'user', parts: [{ text: retryPrompt }, ...answerKeyImageParts, ...submissionImageParts] }]
+      })
+      logStageEnd(pipelineRunId, 'classify-retry', retryResp)
+      stageResponses.push(retryResp)
+      if (retryResp.ok) {
+        const retryParsed = parseCandidateJson(retryResp.data)
+        if (retryParsed && typeof retryParsed === 'object') {
+          classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs)
+          const retryQG = validateClassifyQuality(classifyResult, questionIds)
+          logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
+            severity: retryQG.severity, warnings: retryQG.warnings
+          })
+        }
+      }
+    } else {
+      // Multi-page retry: re-dispatch all pages in parallel
+      const submissionImg = inlineImages[0].inlineData
+      const splitPages = await splitSubmissionImageByPageBreaks(submissionImg.data, submissionImg.mimeType, pageBreaks)
+      const useSplit = splitPages && splitPages.length === pageEntries.length
+      const retryResponses = await Promise.all(
+        pageEntries.map(([pageNum, ids], i) => {
+          const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
+          const akPage = answerKeyImageParts[pageNum - 1]
+          const akParts = akPage ? [akPage] : []
+          const akCount = akPage ? 1 : 0
+          const prompt = buildClassifyPrompt(ids, specs, useSplit ? [] : pageBreaks, akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+          const imgPart = useSplit ? { inlineData: splitPages[i].inlineData } : submissionImageParts[0]
+          return executeStage({
+            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...akParts, imgPart] }]
+          })
+        })
+      )
+      retryResponses.forEach((resp, i) => {
+        logStageEnd(pipelineRunId, `classify-retry-p${pageEntries[i][0]}`, resp)
+        stageResponses.push(resp)
+      })
+      if (retryResponses.every((r) => r.ok)) {
+        const parsedResults = retryResponses.map((r) => parseCandidateJson(r.data))
+        if (parsedResults.every((p) => p && typeof p === 'object')) {
+          const normalizedResults = pageEntries.map(([, ids], i) => {
+            const norm = normalizeClassifyResult(parsedResults[i], ids)
+            if (useSplit) {
+              const { pageStartY, pageEndY } = splitPages[i]
+              for (const q of norm.alignedQuestions) {
+                if (q.answerBbox) q.answerBbox = remapBboxToFullImage(q.answerBbox, pageStartY, pageEndY)
+                if (q.questionBbox) q.questionBbox = remapBboxToFullImage(q.questionBbox, pageStartY, pageEndY)
+                if (q.readBbox) q.readBbox = remapBboxToFullImage(q.readBbox, pageStartY, pageEndY)
+                if (q.bracketBbox) q.bracketBbox = remapBboxToFullImage(q.bracketBbox, pageStartY, pageEndY)
+              }
+            }
+            return norm
+          })
+          const byId = new Map(normalizedResults.flatMap((n) => n.alignedQuestions).map((q) => [q.questionId, q]))
+          const mergedAligned = questionIds.map((id) => byId.get(id) ?? { questionId: id, visible: false, questionType: 'fill_blank' })
+          classifyResult = applyClassifyQuestionSpecs({
+            alignedQuestions: mergedAligned,
+            coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
+            unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
+            pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
+          }, classifyQuestionSpecs)
+          const retryQG = validateClassifyQuality(classifyResult, questionIds)
+          logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
+            severity: retryQG.severity, warnings: retryQG.warnings
+          })
+        }
+      }
+    }
+    classifyAligned = classifyResult.alignedQuestions
+  }
+  // ── End Classify Quality Gate ─────────────────────────────────────────────
 
   const wordProblemIds = classifyAligned
     .filter((q) => q.visible && q.questionType === 'word_problem')
@@ -4645,6 +4752,28 @@ export async function runStagedGradingPhaseA({
       )
     : { answers: [] }
 
+  // ── Read Answer Quality Gate ────────────────────────────────────────────
+  const visibleQuestionIds = classifyAligned.filter((q) => q.visible).map((q) => q.questionId)
+  const readQG = validateReadAnswerQuality(readAnswerResult, reReadAnswerResult, visibleQuestionIds, classifyAligned)
+  logStaged(pipelineRunId, 'basic', 'read-answer quality-gate', {
+    severity: readQG.severity, warnings: readQG.warnings, metrics: readQG.metrics
+  })
+
+  // ── Cross-stage: Classify → Read consistency ──────────────────────────────
+  const classifyReadQG = validateClassifyReadConsistency(classifyResult, readAnswerResult)
+  logStaged(pipelineRunId, 'basic', 'cross-stage classify→read quality-gate', {
+    severity: classifyReadQG.severity, warnings: classifyReadQG.warnings, metrics: classifyReadQG.metrics
+  })
+
+  // If both read quality AND cross-stage fail → likely a systematic bbox issue.
+  // Re-run classify once, then re-crop and re-read (costly but necessary).
+  if (readQG.severity === QG_SEVERITY.FAIL && classifyReadQG.severity === QG_SEVERITY.FAIL) {
+    logStaged(pipelineRunId, stagedLogLevel, 'read+classify cross-stage FAIL → flagging for batch-level retry')
+    stageWarnings.push('[QualityGate] read+classify cross-stage FAIL (bbox systematic issue likely)')
+  } else if (readQG.severity === QG_SEVERITY.FAIL) {
+    stageWarnings.push(`[QualityGate] read quality FAIL: ${readQG.warnings.join(', ')}`)
+  }
+
   // ── A5: CONSISTENCY CHECK (pure logic, no crops yet) ─────────────────────
   const read1ById = mapByQuestionId(readAnswerResult.answers, (item) => item?.questionId)
   const read2ById = mapByQuestionId(reReadAnswerResult.answers, (item) => item?.questionId)
@@ -4945,6 +5074,19 @@ Return JSON:
       logStaged(pipelineRunId, stagedLogLevel, 'AI3 arbiter failed (fallback to consistency status)', {
         error: arbiterErr?.message
       })
+    }
+  }
+
+  // ── Arbiter Quality Gate ──────────────────────────────────────────────────
+  if (arbiterByQuestionId.size > 0) {
+    const arbiterResults = Array.from(arbiterByQuestionId.values())
+    const arbiterExpectedIds = arbiterItems.map((item) => item.questionId)
+    const arbiterQG = validateArbiterQuality(arbiterResults, arbiterExpectedIds)
+    logStaged(pipelineRunId, 'basic', 'arbiter quality-gate', {
+      severity: arbiterQG.severity, warnings: arbiterQG.warnings, metrics: arbiterQG.metrics
+    })
+    if (arbiterQG.severity === QG_SEVERITY.FAIL) {
+      stageWarnings.push(`[QualityGate] arbiter FAIL: ${arbiterQG.warnings.join(', ')}`)
     }
   }
 
@@ -5316,6 +5458,53 @@ export async function runStagedGradingPhaseB({
     }
     accessorResult = normalizeAccessorResult(accessorParsed, answerKey, finalReadAnswerResult.answers, internalContext?.domainHint)
   }
+  // ── Accessor Quality Gate ─────────────────────────────────────────────────
+  const accessorExpectedIds = Array.isArray(finalReadAnswerResult?.answers)
+    ? finalReadAnswerResult.answers.filter((a) => a.status === 'read').map((a) => a.questionId)
+    : questionIds
+  const accessorQG = validateAccessorQuality(accessorResult, accessorExpectedIds)
+  logStaged(pipelineRunId, 'basic', 'accessor quality-gate', {
+    severity: accessorQG.severity, warnings: accessorQG.warnings, metrics: accessorQG.metrics
+  })
+  if (accessorQG.severity === QG_SEVERITY.FAIL && !accessorResult._retried) {
+    logStaged(pipelineRunId, stagedLogLevel, 'accessor quality FAIL → retry (1/1)')
+    // Re-run accessor using single-page prompt (full question set)
+    const retryPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint)
+    const retryContents = [{ role: 'user', parts: buildAccessorParts(retryPrompt, allAnswerIds, calcCropMap) }]
+    logStageStart(pipelineRunId, 'Accessor-qg-retry')
+    const retryAccessorResp = await executeStage({
+      apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+      routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+      stageContents: retryContents
+    })
+    logStageEnd(pipelineRunId, 'Accessor-qg-retry', retryAccessorResp)
+    stageResponses.push(retryAccessorResp)
+    if (retryAccessorResp.ok) {
+      const retryParsed = parseCandidateJson(retryAccessorResp.data)
+      if (retryParsed && typeof retryParsed === 'object') {
+        const retryResult = normalizeAccessorResult(retryParsed, answerKey, finalReadAnswerResult.answers, internalContext?.domainHint)
+        const retryQG = validateAccessorQuality(retryResult, accessorExpectedIds)
+        logStaged(pipelineRunId, 'basic', 'accessor retry quality-gate', {
+          severity: retryQG.severity, warnings: retryQG.warnings
+        })
+        // Use retry result if it's better (fewer FAIL warnings)
+        if (retryQG.severity !== QG_SEVERITY.FAIL || retryQG.warnings.length < accessorQG.warnings.length) {
+          accessorResult = retryResult
+          accessorResult._retried = true
+        }
+      }
+    }
+  }
+
+  // ── Cross-stage: Read → Accessor consistency ────────────────────────────
+  const readAccessorQG = validateReadAccessorConsistency(finalReadAnswerResult, accessorResult)
+  logStaged(pipelineRunId, 'basic', 'cross-stage read→accessor quality-gate', {
+    severity: readAccessorQG.severity, warnings: readAccessorQG.warnings, metrics: readAccessorQG.metrics
+  })
+  if (readAccessorQG.severity !== QG_SEVERITY.PASS) {
+    stageWarnings.push(`[QualityGate] read→accessor: ${readAccessorQG.warnings.join(', ')}`)
+  }
+
   const accessorScores = Array.isArray(accessorResult.scores) ? accessorResult.scores : []
   const explainQuestionIds = accessorScores
     .filter((s) => s?.isCorrect !== true || s?.needExplain === true)
@@ -5354,6 +5543,35 @@ export async function runStagedGradingPhaseB({
       }
     } else {
       stageWarnings.push(`[explain] status=${explainResponse.status}`)
+    }
+    // ── Explain Quality Gate + Retry ──────────────────────────────────────
+    const explainQG = validateExplainQuality(explainResult, explainQuestionIds)
+    logStaged(pipelineRunId, 'basic', 'explain quality-gate', {
+      severity: explainQG.severity, warnings: explainQG.warnings, metrics: explainQG.metrics
+    })
+    if (explainQG.severity === QG_SEVERITY.FAIL) {
+      logStaged(pipelineRunId, stagedLogLevel, 'explain quality FAIL → retry (1/1)')
+      logStageStart(pipelineRunId, 'explain-qg-retry')
+      const retryExplainResp = await executeStage({
+        apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_EXPLAIN,
+        stageContents: [{ role: 'user', parts: [{ text: explainPrompt }, ...submissionImageParts] }]
+      })
+      logStageEnd(pipelineRunId, 'explain-qg-retry', retryExplainResp)
+      stageResponses.push(retryExplainResp)
+      if (retryExplainResp.ok) {
+        const retryParsed = parseCandidateJson(retryExplainResp.data)
+        if (retryParsed && typeof retryParsed === 'object') {
+          const retryResult = normalizeExplainResult(retryParsed, explainQuestionIds)
+          const retryQG = validateExplainQuality(retryResult, explainQuestionIds)
+          logStaged(pipelineRunId, 'basic', 'explain retry quality-gate', {
+            severity: retryQG.severity, warnings: retryQG.warnings
+          })
+          if (retryQG.severity !== QG_SEVERITY.FAIL || retryQG.warnings.length < explainQG.warnings.length) {
+            explainResult = retryResult
+          }
+        }
+      }
     }
   } else {
     logStaged(pipelineRunId, stagedLogLevel, 'skip stage=explain reason=no_wrong_questions')
