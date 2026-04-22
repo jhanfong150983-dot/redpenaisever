@@ -4641,7 +4641,7 @@ async function handleStudentSubmission(req, res) {
           .select('id', { count: 'exact', head: true })
           .eq('owner_id', ownerId)
           .eq('assignment_id', assignmentId)
-          .eq('student_id', studentId)
+          .eq('student_id', studentContext.id)
           .eq('status', 'open')
         if ((openCount ?? 0) === 0) {
           res.status(409).json({
