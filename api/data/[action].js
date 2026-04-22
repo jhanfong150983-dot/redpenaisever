@@ -4047,6 +4047,7 @@ async function handleSubmission(req, res) {
 
     res.status(200).json({ success: true, imageUrl: filePath })
   } catch (err) {
+    console.error('❌ [submission] 上傳失敗:', err instanceof Error ? err.message : String(err), err instanceof Error ? err.stack : '')
     res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' })
   }
 }
