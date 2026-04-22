@@ -1360,6 +1360,9 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     assignmentIds
   )
 
+  // Track processed correction submission IDs within this sync cycle to prevent double-counting
+  const processedCorrectionSubIds = new Set()
+
   for (const row of submissionRows) {
     const assignmentId = row.assignment_id
     const studentId = row.student_id
@@ -1447,15 +1450,36 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     let lastStatusReason = undefined
 
     if (source === 'student_correction') {
-      // Guard: skip if this correction submission was already processed
-      // (e.g. sync re-sends the same graded submission — would double-count)
-      const alreadyProcessedCurrentCorrection =
-        isGraded &&
+      // Guard: skip if this correction submission was already processed or is being processed
+      // Prevents double-counting when sync re-sends the same submission during grading
+      const alreadyProcessedOrInProgress =
         existingState?.current_submission_id === row.id &&
-        existingStatus !== 'correction_in_progress'
-      if (alreadyProcessedCurrentCorrection) {
+        existingStatus !== 'correction_in_progress' &&
+        (isGraded || existingStatus === 'pending_grading' || existingStatus === 'grading_in_progress')
+      if (alreadyProcessedOrInProgress) {
         continue
       }
+
+      // Additional guard: check correction_attempt_logs to see if this submission was already counted
+      const { count: existingLogCount } = await supabaseDb
+        .from('correction_attempt_logs')
+        .select('id', { count: 'exact', head: true })
+        .eq('owner_id', ownerId)
+        .eq('assignment_id', assignmentId)
+        .eq('student_id', studentId)
+        .eq('submission_id', row.id)
+      if ((existingLogCount ?? 0) > 0) {
+        // This submission was already logged — skip to prevent double-counting
+        console.log(`[correction-dedup] skip ${row.id}: already logged in correction_attempt_logs`)
+        continue
+      }
+
+      // Same-cycle dedup: prevent counting the same submission twice within one sync batch
+      if (processedCorrectionSubIds.has(row.id)) {
+        console.log(`[correction-dedup] skip ${row.id}: already processed in this sync cycle`)
+        continue
+      }
+      processedCorrectionSubIds.add(row.id)
 
       correctionAttemptCount += 1
 
