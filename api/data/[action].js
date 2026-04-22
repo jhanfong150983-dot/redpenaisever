@@ -4815,16 +4815,136 @@ async function handleStudentSubmission(req, res) {
 
     let correctionResult = null
     if (mode === 'correction') {
-      // Calculate queue position (count all pending/in_progress for this teacher, including myself)
-      const { count: queueTotal } = await supabaseDb
-        .from('submissions')
-        .select('id', { count: 'exact', head: true })
-        .in('status', ['pending_grading', 'grading_in_progress'])
-        .eq('owner_id', ownerId)
-        .eq('source', 'student_correction')
-      correctionResult = {
-        gradingPending: true,
-        queuePosition: queueTotal || 1
+      // ── 同步批改：直接呼叫 AI recheck，不再透過 cron ──
+      try {
+        // 取得作業資料
+        const { data: assignmentData } = await supabaseDb
+          .from('assignments')
+          .select('id, owner_id, classroom_id, total_pages, answer_key, title')
+          .eq('id', assignmentId)
+          .maybeSingle()
+
+        if (!assignmentData) {
+          throw new Error('找不到作業資料')
+        }
+
+        // 取得待訂正的題目
+        const { data: openItems } = await supabaseDb
+          .from('correction_question_items')
+          .select('question_id, question_text, mistake_reason, hint_text')
+          .eq('owner_id', ownerId)
+          .eq('assignment_id', assignmentId)
+          .eq('student_id', studentContext.id)
+          .eq('status', 'open')
+
+        if (!openItems?.length) {
+          // 全部都是申訴題，沒有 open items → 跳過 AI，直接設為待老師審閱
+          await supabaseDb
+            .from('submissions')
+            .update({ status: 'graded', score: 0, updated_at: new Date().toISOString() })
+            .eq('id', submissionId)
+          await upsertAssignmentStudentState(
+            supabaseDb, ownerId, assignmentId, studentContext.id,
+            { status: 'correction_pending_review', last_status_reason: '所有題目已申訴，等待老師審閱' }
+          )
+          correctionResult = { gradingPending: false, allDisputed: true }
+        } else {
+          // 確認訂正照片已上傳
+          const recheckFolder = await supabaseDb.storage.from(HOMEWORK_IMAGES_BUCKET)
+            .list(`corrections/${submissionId}`)
+          if (!recheckFolder.data?.length) {
+            throw Object.assign(
+              new Error('訂正照片未正確上傳，請重新拍攝每題作答後再送出。'),
+              { code: 'NO_RECHECK_IMAGES' }
+            )
+          }
+
+          // 呼叫 AI 批改
+          const submissionForRecheck = {
+            id: submissionId,
+            owner_id: ownerId,
+            assignment_id: assignmentId,
+            student_id: studentContext.id,
+            image_url: filePath,
+            source,
+            round
+          }
+          const gradingResult = await runRecheckGrading({
+            supabaseDb,
+            submission: submissionForRecheck,
+            assignment: assignmentData,
+            correctionItems: openItems
+          })
+
+          const gradedAt = Date.now()
+          const totalScore = toNumber(gradingResult?.totalScore) ?? 0
+          const feedback =
+            Array.isArray(gradingResult?.suggestions) && gradingResult.suggestions.length > 0
+              ? String(gradingResult.suggestions[0] || '')
+              : undefined
+
+          // 寫入批改結果
+          await supabaseDb
+            .from('submissions')
+            .update(
+              compactObject({
+                status: 'graded',
+                score: totalScore,
+                feedback,
+                grading_result: gradingResult,
+                graded_at: gradedAt,
+                updated_at: new Date().toISOString()
+              })
+            )
+            .eq('id', submissionId)
+            .eq('owner_id', ownerId)
+
+          // 更新訂正狀態（correction_attempt_count, question_items, logs 等）
+          await applySubmissionStateTransitions(supabaseDb, ownerId, [
+            {
+              id: submissionId,
+              assignment_id: assignmentId,
+              student_id: studentContext.id,
+              status: 'graded',
+              source,
+              graded_at: gradedAt,
+              grading_result: gradingResult,
+              image_url: filePath,
+              updated_at: new Date().toISOString()
+            }
+          ])
+
+          const stillWrong = Array.isArray(gradingResult?.mistakes) ? gradingResult.mistakes : []
+          correctionResult = {
+            gradingPending: false,
+            passed: stillWrong.length === 0,
+            totalScore,
+            wrongCount: stillWrong.length,
+            feedback
+          }
+        }
+      } catch (recheckErr) {
+        console.error('[STUDENT-CORRECTION] inline recheck failed:', recheckErr?.message)
+        // 批改失敗：設為 grading_failed，讓學生可以重試
+        await supabaseDb
+          .from('submissions')
+          .update({ status: 'grading_failed', updated_at: new Date().toISOString() })
+          .eq('id', submissionId)
+        try {
+          await upsertAssignmentStudentState(supabaseDb, ownerId, assignmentId, studentContext.id, {
+            status: 'correction_required',
+            last_status_reason: recheckErr?.code === 'NO_RECHECK_IMAGES'
+              ? recheckErr.message
+              : 'AI 批改失敗，請重新送出訂正'
+          })
+        } catch { /* state update failure is non-fatal */ }
+        correctionResult = {
+          gradingPending: false,
+          gradingFailed: true,
+          errorMessage: recheckErr?.code === 'NO_RECHECK_IMAGES'
+            ? recheckErr.message
+            : '批改失敗，請重新送出訂正'
+        }
       }
     }
 
