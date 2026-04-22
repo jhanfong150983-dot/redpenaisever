@@ -3598,10 +3598,15 @@ async function handleSync(req, res) {
             .upsert(batch, { onConflict: 'id' })
           if (result.error) throw new Error(result.error.message)
         }
-        // applySubmissionStateTransitions may download/crop images — make it non-fatal during bulk sync
-        await applySubmissionStateTransitions(supabaseDb, user.id, submissionRows).catch(
-          (err) => console.warn('[sync] applySubmissionStateTransitions failed (non-fatal):', err?.message)
+        // applySubmissionStateTransitions: 只對有批改結果或狀態變更的 submissions 跑（避免 100+ 筆全跑導致超時）
+        const stateTransitionRows = submissionRows.filter(
+          (row) => row.grading_result || row.source === 'student_correction' || row.status === 'graded'
         )
+        if (stateTransitionRows.length > 0) {
+          await applySubmissionStateTransitions(supabaseDb, user.id, stateTransitionRows).catch(
+            (err) => console.warn('[sync] applySubmissionStateTransitions failed (non-fatal):', err?.message)
+          )
+        }
       }
 
       const touchedAssignments = new Set(
