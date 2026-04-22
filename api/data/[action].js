@@ -3253,6 +3253,11 @@ async function handleSync(req, res) {
         return rows
       }
 
+      const syncTimers = {}
+      const syncTimer = (label) => { syncTimers[label] = Date.now() }
+      const syncTimerEnd = (label) => { console.log(`⏱️ [sync] ${label}: ${Date.now() - syncTimers[label]}ms`) }
+
+      syncTimer('classrooms')
       const classroomRows = await buildUpsertRows(
         'classrooms',
         classrooms.filter((c) => c?.id),
@@ -3273,7 +3278,9 @@ async function handleSync(req, res) {
           .upsert(classroomRows, { onConflict: 'id' })
         if (result.error) throw new Error(result.error.message)
       }
+      syncTimerEnd('classrooms')
 
+      syncTimer('students')
       const studentRows = await buildUpsertRows(
         'students',
         students.filter((s) => s?.id && s?.classroomId),
@@ -3298,7 +3305,9 @@ async function handleSync(req, res) {
           .upsert(studentRows, { onConflict: 'id' })
         if (result.error) throw new Error(result.error.message)
       }
+      syncTimerEnd('students')
 
+      syncTimer('assignments')
       const assignmentRows = await buildUpsertRows(
         'assignments',
         assignments.filter((a) => a?.id && a?.classroomId),
@@ -3338,6 +3347,8 @@ async function handleSync(req, res) {
         }
         console.log(`✅ [後端 Sync] 成功寫入 ${assignmentRows.length} 個作業`)
       }
+
+      syncTimerEnd('assignments')
 
       // ── answer_key_templates ──────────────────────────────────
       const incomingTemplates = Array.isArray(body.answerKeyTemplates)
@@ -3588,6 +3599,7 @@ async function handleSync(req, res) {
         )
       }
 
+      syncTimer('submissions')
       if (submissionRows.length > 0) {
         // Batch upsert — limit to 30 per batch to stay within Vercel timeout
         const SUBMISSION_BATCH = 30
@@ -3610,6 +3622,8 @@ async function handleSync(req, res) {
           )
         }
       }
+
+      syncTimerEnd('submissions')
 
       const touchedAssignments = new Set(
         submissionRows
