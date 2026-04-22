@@ -2128,6 +2128,7 @@ async function handleManualGrade(req, res) {
     await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
       status: 'graded',
       graded_once: true,
+      upload_locked: true,
       last_status_reason: 'teacher_manual_grade'
     })
     res.status(200).json({ success: true, newStatus: 'graded' })
