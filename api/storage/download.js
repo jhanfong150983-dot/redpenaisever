@@ -386,6 +386,7 @@ export default async function handler(req, res) {
 
     res.setHeader('Content-Type', data.type || 'image/webp')
     res.setHeader('Content-Length', buffer.length)
+    res.setHeader('Cache-Control', 'private, max-age=3600')
     res.status(200).send(buffer)
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' })
