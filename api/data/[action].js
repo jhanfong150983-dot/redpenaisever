@@ -2075,6 +2075,70 @@ async function handleDisputeResolve(req, res) {
   }
 }
 
+// ── 用短碼匯入答案卷 ────────────────────────────────────────────────────
+async function handleImportTemplate(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+  const body = parseJsonBody(req)
+  const shareCode = typeof body?.shareCode === 'string' ? body.shareCode.trim().toUpperCase() : ''
+  if (!shareCode) { res.status(400).json({ error: '請輸入分享碼' }); return }
+
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    // 查找分享碼對應的答案卷（不限 owner，任何人的都可以匯入）
+    const { data: source, error: findErr } = await supabaseDb
+      .from('answer_key_templates')
+      .select('id, name, domain, doc_type, folder, answer_key, question_count, total_score')
+      .eq('share_code', shareCode)
+      .maybeSingle()
+
+    if (findErr) throw new Error(findErr.message)
+    if (!source) { res.status(404).json({ error: '找不到此分享碼的答案卷' }); return }
+
+    // 產生新的短碼給複製品
+    const newShareCode = 'AK-' + Math.random().toString(36).substring(2, 8).toUpperCase()
+    const newId = `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`
+    const nowIso = new Date().toISOString()
+
+    const { error: insertErr } = await supabaseDb
+      .from('answer_key_templates')
+      .insert({
+        id: newId,
+        owner_id: user.id,
+        name: source.name,
+        domain: source.domain,
+        doc_type: source.doc_type,
+        answer_key: source.answer_key,
+        question_count: source.question_count,
+        total_score: source.total_score,
+        share_code: newShareCode,
+        created_at: nowIso,
+        updated_at: nowIso
+      })
+
+    if (insertErr) throw new Error(insertErr.message)
+
+    res.status(200).json({
+      success: true,
+      template: {
+        id: newId,
+        name: source.name,
+        domain: source.domain,
+        shareCode: newShareCode,
+        questionCount: source.question_count,
+        totalScore: source.total_score
+      }
+    })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '匯入失敗' })
+  }
+}
+
 async function handleManualGrade(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -2997,6 +3061,7 @@ async function handleSync(req, res) {
           answerKey: row.answer_key ?? undefined,
           questionCount: row.question_count ?? undefined,
           totalScore: row.total_score ?? undefined,
+          shareCode: row.share_code ?? undefined,
           updatedAt: toMillis(row.updated_at) ?? undefined
         }))
 
@@ -3365,6 +3430,7 @@ async function handleSync(req, res) {
           answer_key: t.answerKey ?? t.answer_key,
           question_count: t.questionCount ?? t.question_count ?? undefined,
           total_score: t.totalScore ?? t.total_score ?? undefined,
+          share_code: t.shareCode ?? t.share_code ?? ('AK-' + Math.random().toString(36).substring(2, 8).toUpperCase()),
           updated_at: toIsoTimestamp(t.updatedAt ?? t.updated_at) ?? nowIso
         }))
         const tplResult = await supabaseDb
@@ -6151,6 +6217,10 @@ export default async function handler(req, res) {
   }
   if (action === 'dispute-resolve') {
     await handleDisputeResolve(req, res)
+    return
+  }
+  if (action === 'import-template') {
+    await handleImportTemplate(req, res)
     return
   }
   if (action === 'manual-grade') {
