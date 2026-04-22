@@ -574,6 +574,9 @@ function normalizeAnswerForComparison(raw) {
   // "(A)有打勾符號" / "(A)已選" / "(A)勾" → "A"
   const suffixCheckMatch = s.match(/^\(([A-D甲乙丙丁])\)\s*(?:有打勾符號|已選|有勾|勾選|打勾|勾)/u)
   if (suffixCheckMatch) return suffixCheckMatch[1]
+  // 去除 unchecked checkbox option text: "☐生活品質" "□城市發展" (整個未勾選選項名稱移除)
+  // Must run BEFORE stripping checkbox symbols, otherwise option names remain orphaned
+  s = s.replace(/[☐□][^\s☐□☑✓✔✗✘\n,，、]+/gu, '').trim()
   // 去除勾選/打叉符號（☑ ✓ ✔ ☒ ✗ ✘ □ ☐ 等）
   s = s.replace(/[☑✓✔☒✗✘□☐☎✅❎]/gu, '').trim()
   // 去除 Unicode Emoji（Presentation 形式）
@@ -601,7 +604,10 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/，/gu, ',')
   // 去除 AI 加的欄位標籤前綴（每行開頭的「人物：」「具體事件：」「你的理由：」等）
   // AI2 常會加這類結構化標籤，AI1 不加，導致同內容被判為不同
-  s = s.replace(/(?:^|(?<=[\n,、]))[\p{Unified_Ideograph}\p{Letter}]+[：:]\s*/gmu, '')
+  // 也處理含括號的標籤如「你的理由(需包含因果關係)：」
+  s = s.replace(/(?:^|(?<=[\n,、]))[\p{Unified_Ideograph}\p{Letter}]+(?:\([^)]*\))?[：:]\s*/gmu, '')
+  // 去除「第N項：」「第一項：」等序號前綴
+  s = s.replace(/(?:^|(?<=[\n,、]))第[一二三四五六七八九十\d]+項[：:]\s*/gmu, '')
   // 去除分隔符號（逗號、頓號、換行）— 比對內容本身，不比對格式
   s = s.replace(/[,、\n\r]/gu, '')
   // 去除所有空白（避免有無空白造成誤判）
