@@ -1812,16 +1812,19 @@ function applyLenientFocusOverride(normalized, question, answerKey, domainHint) 
   }
 
   if (category === 'short_answer' && (domain === '社會' || domain === '自然')) {
+    // Find the "core content" dimension — covers both traditional 核心結論 and newer 理由說明 patterns
     const coreConclusionDimension = findRubricDimension(rubricScores, [
       (name) => name.includes('核心'),
       (name) => name.includes('結論'),
       (name) => name.includes('主旨'),
       (name) => name.includes('重點'),
       (name) => name.includes('觀點'),
-      (name) => name.includes('判斷')
+      (name) => name.includes('判斷'),
+      (name) => name.includes('理由'),
+      (name) => name.includes('說明')
     ])
     if (isRubricDimensionFullyCorrect(coreConclusionDimension)) {
-      return toFullScore('寬鬆模式：核心結論正確，整題判定通過。')
+      return toFullScore('寬鬆模式：核心結論/理由說明正確，整題判定通過。')
     }
     return normalized
   }

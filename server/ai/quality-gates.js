@@ -882,13 +882,15 @@ export function validateAnswerKeyQuality(answerKey, expectedPageCount) {
   }
 
   // ── Missing answer for answer-required categories ──
+  // "?" is a common AI placeholder when it can't read the answer — treat as missing
+  const PLACEHOLDER_ANSWERS = new Set(['?', '？', '未知', 'unknown', 'N/A', 'n/a'])
   let missingAnswerCount = 0
   for (const q of questions) {
     const cat = typeof q?.questionCategory === 'string' ? q.questionCategory.trim() : ''
     if (!ANSWER_REQUIRED_CATEGORIES.has(cat)) continue
     const answer = typeof q?.answer === 'string' ? q.answer.trim() : ''
     const ref = typeof q?.referenceAnswer === 'string' ? q.referenceAnswer.trim() : ''
-    if (!answer && !ref) missingAnswerCount++
+    if ((!answer || PLACEHOLDER_ANSWERS.has(answer)) && (!ref || PLACEHOLDER_ANSWERS.has(ref))) missingAnswerCount++
   }
   metrics.missingAnswerCount = missingAnswerCount
   if (missingAnswerCount > 0) {
