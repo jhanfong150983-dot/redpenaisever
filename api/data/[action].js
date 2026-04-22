@@ -2610,6 +2610,7 @@ async function handleSync(req, res) {
         foldersResult,
         gradebookCustomColumnsResult,
         gradebookCustomScoresResult,
+        answerKeyTemplatesResult,
         deletedResult
       ] = await Promise.all([
         supabaseDb.from('classrooms').select('*').eq('owner_id', ownerId),
@@ -2622,6 +2623,7 @@ async function handleSync(req, res) {
         supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
         supabaseDb.from('gradebook_custom_columns').select('*').eq('owner_id', ownerId),
         supabaseDb.from('gradebook_custom_scores').select('*').eq('owner_id', ownerId),
+        supabaseDb.from('answer_key_templates').select('*').eq('owner_id', ownerId),
         supabaseDb
           .from('deleted_records')
           .select('table_name, record_id, deleted_at')
@@ -2805,6 +2807,7 @@ async function handleSync(req, res) {
             gradeWeightPercent: toNumber(row.grade_weight_percent) ?? undefined,
             priorWeightTypes: row.prior_weight_types ?? undefined,
             answerKey: row.answer_key ?? undefined,
+            answerKeyTemplateId: row.answer_key_template_id ?? undefined,
             conceptTags: row.concept_tags ?? undefined,
             updatedAt: toMillis(row.updated_at) ?? undefined
           })
@@ -2983,6 +2986,20 @@ async function handleSync(req, res) {
           })
         )
 
+      // Normalize answer_key_templates
+      const answerKeyTemplates = (answerKeyTemplatesResult?.data || [])
+        .map((row) => compactObject({
+          id: row.id,
+          name: row.name,
+          domain: row.domain ?? undefined,
+          docType: row.doc_type ?? undefined,
+          folder: row.folder ?? undefined,
+          answerKey: row.answer_key ?? undefined,
+          questionCount: row.question_count ?? undefined,
+          totalScore: row.total_score ?? undefined,
+          updatedAt: toMillis(row.updated_at) ?? undefined
+        }))
+
       res.status(200).json({
         classrooms: classrooms.filter((row) => !deletedSets.classrooms.has(row.id)),
         students: students.filter((row) => !deletedSets.students.has(row.id)),
@@ -2995,6 +3012,7 @@ async function handleSync(req, res) {
         gradebookCustomScores: gradebookCustomScores.filter(
           (row) => !deletedSets.gradebook_custom_scores.has(row.id)
         ),
+        answerKeyTemplates,
         deleted,
         ...(assignmentTags ? { assignmentTags } : {})
       })
@@ -3301,6 +3319,7 @@ async function handleSync(req, res) {
             ) ?? undefined,
             prior_weight_types: a.priorWeightTypes ?? undefined,
             answer_key: a.answerKey ?? undefined,
+            answer_key_template_id: a.answerKeyTemplateId ?? a.answer_key_template_id ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(a.updatedAt ?? a.updated_at) ?? nowIso
@@ -3318,6 +3337,33 @@ async function handleSync(req, res) {
           throw new Error(result.error.message)
         }
         console.log(`✅ [後端 Sync] 成功寫入 ${assignmentRows.length} 個作業`)
+      }
+
+      // ── answer_key_templates ──────────────────────────────────
+      const incomingTemplates = Array.isArray(body.answerKeyTemplates)
+        ? body.answerKeyTemplates.filter((t) => t?.id && t?.answerKey)
+        : []
+      if (incomingTemplates.length > 0) {
+        const templateRows = incomingTemplates.map((t) => compactObject({
+          id: t.id,
+          owner_id: user.id,
+          name: t.name ?? '',
+          domain: t.domain ?? undefined,
+          doc_type: t.docType ?? t.doc_type ?? undefined,
+          folder: t.folder ?? undefined,
+          answer_key: t.answerKey ?? t.answer_key,
+          question_count: t.questionCount ?? t.question_count ?? undefined,
+          total_score: t.totalScore ?? t.total_score ?? undefined,
+          updated_at: toIsoTimestamp(t.updatedAt ?? t.updated_at) ?? nowIso
+        }))
+        const tplResult = await supabaseDb
+          .from('answer_key_templates')
+          .upsert(templateRows, { onConflict: 'id' })
+        if (tplResult.error) {
+          console.error('[SYNC] answer_key_templates upsert failed:', tplResult.error.message)
+        } else {
+          console.log(`✅ [SYNC] 同步了 ${templateRows.length} 個答案卷模板`)
+        }
       }
 
       // ── gradebook_custom_columns ──────────────────────────────
