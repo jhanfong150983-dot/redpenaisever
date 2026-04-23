@@ -4306,17 +4306,15 @@ export async function runStagedGradingPhaseA({
         // Classify's x is the question line start, but the bracket may be indented.
         const isSingleChoiceNarrow = q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse
         if (isSingleChoiceNarrow) {
-          const akQ = akByIdForLog.get(q.questionId)
-          const akBbox = akQ?.answerBbox
-          // Use answer key's x to locate the bracket position precisely.
-          // X coordinate doesn't change with vertical page merging, so akBbox.x can be used directly.
-          const bracketX = (akBbox && typeof akBbox.x === 'number') ? akBbox.x : bboxToUse.x
           const cy = bboxToUse.y + bboxToUse.h / 2
           const minH = Math.max(bboxToUse.h, 0.02)
+          // w=0.30: wide enough to reliably capture the bracket + handwritten number,
+          // narrow enough to exclude most option text (full line is typically 0.8-0.9).
+          // The bracket is at the left edge, so crop starts at classify x.
           bboxToUse = {
-            x: Math.max(0, bracketX - 0.01),  // small left margin before bracket
+            x: bboxToUse.x,
             y: Math.max(0, cy - minH / 2),
-            w: 0.18,
+            w: Math.min(bboxToUse.w, 0.30),
             h: minH
           }
         }
