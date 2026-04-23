@@ -2140,6 +2140,40 @@ async function handleImportTemplate(req, res) {
 }
 
 // ── 清除作業的批改結果 ────────────────────────────────────────────────────
+// ── 直接儲存批改結果到 Supabase（不依賴 sync push）────────────────────
+async function handleSaveGrading(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const submissions = Array.isArray(body?.submissions) ? body.submissions : []
+  if (submissions.length === 0) { res.status(400).json({ error: 'Missing submissions' }); return }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    let updated = 0
+    for (const sub of submissions) {
+      if (!sub?.id) continue
+      const { error } = await supabaseDb
+        .from('submissions')
+        .update(compactObject({
+          status: 'graded',
+          score: toNumber(sub.score) ?? undefined,
+          ai_score: toNumber(sub.aiScore) ?? undefined,
+          score_source: sub.scoreSource ?? 'ai',
+          grading_result: sub.gradingResult ?? undefined,
+          graded_at: sub.gradedAt ?? Date.now(),
+          updated_at: new Date().toISOString()
+        }))
+        .eq('id', sub.id)
+        .eq('owner_id', user.id)
+      if (!error) updated++
+    }
+    res.status(200).json({ success: true, updated })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '儲存失敗' })
+  }
+}
+
 async function handleClearGrading(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
   const { user } = await getAuthUser(req, res)
@@ -6251,6 +6285,10 @@ export default async function handler(req, res) {
   }
   if (action === 'dispute-resolve') {
     await handleDisputeResolve(req, res)
+    return
+  }
+  if (action === 'save-grading') {
+    await handleSaveGrading(req, res)
     return
   }
   if (action === 'clear-grading') {
