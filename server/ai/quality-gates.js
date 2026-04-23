@@ -186,10 +186,21 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds) {
   }
 
   // ── Bbox overlap detection (IoU > 0.5 between any two) ──
+  // Skip overlap between questions in the same group (they share bbox by design).
+  // Same group = same bboxGroupId, or same ID prefix up to last segment (e.g., 6-7-8-1 and 6-7-8-2).
+  const questionGroupOf = (q) => {
+    const aq = aligned.find((a) => a.questionId === q.id)
+    if (aq?.bboxGroupId) return aq.bboxGroupId
+    // Fallback: ID prefix (strip last segment after last dash)
+    const lastDash = q.id.lastIndexOf('-')
+    return lastDash > 0 ? q.id.slice(0, lastDash) : q.id
+  }
   let overlapCount = 0
   const overlapPairs = []
   for (let i = 0; i < bboxes.length; i++) {
     for (let j = i + 1; j < bboxes.length; j++) {
+      // Skip same-group overlaps (題組題本來就會重疊)
+      if (questionGroupOf(bboxes[i]) === questionGroupOf(bboxes[j])) continue
       const iou = computeBboxIoU(bboxes[i], bboxes[j])
       if (iou > 0.5) {
         overlapCount++

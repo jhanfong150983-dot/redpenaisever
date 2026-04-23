@@ -2576,12 +2576,20 @@ NEVER output an answer based on:
 You may ONLY output what is physically, visibly written by the student's own hand.
 If the answer space is empty → blank. There are NO exceptions.
 
+== INK COLOR RULE (critical) ==
+The student writes in BLUE or BLACK ink (pencil). The teacher corrects in RED ink.
+- ONLY read the student's BLUE/BLACK ink marks. This is the student's original answer.
+- IGNORE all RED ink marks — these are the teacher's corrections/marks added AFTER the student submitted.
+- If you see both red and blue/black writing in the same area, ONLY report the blue/black writing.
+- Common red ink marks to ignore: circled correct answers, check marks (✓/✗), score numbers, correction notes.
+- If the student's blue/black answer is crossed out by the student (self-correction with blue/black ink), read the final version the student intended.
+
 == BLANK FIRST RULE ==
 Before reading each question, ask yourself: "Is there fresh handwriting in this question's answer space?"
 - Answer space = the designated writing area: ( ), ___, □, or the answer line after "答:" "A:" "Ans:", or the entire work area for calculation/drawing questions.
 - If no fresh handwriting is present → status="blank", studentAnswerRaw="未作答". STOP. Do not read further.
 - Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count.
-- Only FRESH student pen/pencil marks count.
+- Only FRESH student BLUE/BLACK pen/pencil marks count. RED ink is the teacher's, not the student's.
 
 🚨 TABLE CELL EDGE RULE (applies to fill_blank questions in tables):
 When reading a tightly-cropped table cell, look for VERTICAL GRID LINES (直線) inside the crop image.
