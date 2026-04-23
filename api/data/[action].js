@@ -3725,36 +3725,31 @@ async function handleSync(req, res) {
           s.thumbnail_url ||
           `submissions/thumbs/${s.id}.webp`
 
+        // sync push 只更新結構性欄位，不碰批改欄位
+        // 批改欄位（score, ai_score, score_source, feedback, grading_result, graded_at）
+        // 由 save-grading API 專責寫入，避免 sync 覆蓋
         submissionRows.push(
           compactObject({
             id: s.id,
             assignment_id: s.assignmentId,
             student_id: s.studentId,
-            status: s.status ?? undefined,
+            // status: 只允許結構性狀態變更，不允許 sync 把 graded 改成 synced
+            status: (() => {
+              const incoming = s.status ?? undefined
+              // 如果 server 上已是 graded，sync 不應降級為 synced
+              if (existing && existingStatus === 'graded' && incoming !== 'graded') return undefined
+              return incoming
+            })(),
             image_url: imageUrl,
             thumb_url: thumbUrl,
             source: s.source ?? undefined,
-            // submissions.round 為 NOT NULL，任何缺值都回補 0
             round: normalizedRound,
             parent_submission_id: s.parentSubmissionId ?? s.parent_submission_id ?? undefined,
             actor_user_id: s.actorUserId ?? s.actor_user_id ?? undefined,
             created_at: createdAt ?? undefined,
-            // score 和 grading_result.totalScore 連動：有 totalScore 時強制同步
-            score: (() => {
-              const grTotal = toNumber(s.gradingResult?.totalScore)
-              return grTotal ?? toNumber(s.score) ?? undefined
-            })(),
-            ai_score: (() => {
-              const grTotal = toNumber(s.gradingResult?.totalScore)
-              return grTotal ?? toNumber(s.aiScore ?? s.ai_score) ?? undefined
-            })(),
-            score_source: (s.scoreSource ?? s.score_source) || undefined,
-            feedback: s.feedback ?? undefined,
-            grading_result: s.gradingResult ?? undefined,
-            graded_at: Number.isFinite(incomingGradedAt) ? incomingGradedAt : undefined,
+            // 不寫入: score, ai_score, score_source, feedback, grading_result, graded_at
             correction_count: toNumber(s.correctionCount) ?? undefined,
             owner_id: user.id,
-            // authoritative timestamp: always generated on server side
             updated_at: nowIso
           })
         )
