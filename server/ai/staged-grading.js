@@ -2493,7 +2493,15 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     return /^\d+$/.test(answer)
   })
   const numericChoiceNote = numericChoiceIds.length > 0
-    ? `\n⚠️ NUMERIC OPTION HINT: The following single-choice questions use NUMERIC options (1, 2, 3, 4...), NOT Bopomofo symbols. If you see handwriting that could be either a digit or a Bopomofo symbol (e.g. "3" vs "ㄋ", "1" vs "ㄌ"), always interpret it as a DIGIT: ${JSON.stringify(numericChoiceIds)}`
+    ? `\n⚠️ NUMERIC OPTION HINT: The following single-choice questions use NUMERIC options (1, 2, 3, 4...), NOT Bopomofo symbols. If you see handwriting that could be either a digit or a Bopomofo symbol (e.g. "3" vs "ㄋ", "1" vs "ㄌ"), always interpret it as a DIGIT: ${JSON.stringify(numericChoiceIds)}
+⚠️ DIGIT STROKE VERIFICATION (for numeric single-choice ONLY):
+When reading a handwritten digit inside parentheses ( ), FIRST describe the stroke features you see, THEN decide which digit it is. Do NOT guess based on what answer would be "correct".
+Commonly confused digit pairs:
+- 1: single vertical stroke | 7: horizontal top stroke + diagonal down-stroke
+- 2: top curve bending RIGHT, flat horizontal bottom stroke | 3: TWO right-facing bumps (upper + lower), NO flat bottom stroke
+- 5: top horizontal + vertical drop + bottom curve | 6: top curve descending left, closed loop at bottom
+- 9: closed loop at top + descending stroke | 0: closed oval
+Report your stroke observation in the "digitStrokeNote" field (1 sentence). Example: { "studentAnswerRaw": "3", "digitStrokeNote": "I see two right-facing curves stacked vertically, consistent with digit 3" }`
     : ''
   const trueFalseNote = trueFalseIds.length > 0
     ? `\nTRUE-FALSE questions (output ○ or ✗ only): ${JSON.stringify(trueFalseIds)}`
