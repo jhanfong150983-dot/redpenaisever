@@ -4283,10 +4283,14 @@ export async function runStagedGradingPhaseA({
         if (q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse) {
           const cy = bboxToUse.y + bboxToUse.h / 2
           const minH = Math.max(bboxToUse.h, 0.03)
+          // Narrow to bracket area (~18% page width) — wide enough to capture
+          // the parentheses + student's handwritten number even if slightly offset,
+          // but narrow enough to exclude question stem text and option content.
+          // cropInlineImageByBbox adds 0.03 padding on each side, so actual crop ≈ 24%.
           bboxToUse = {
             x: bboxToUse.x,          // keep left edge (bracket is at left)
             y: Math.max(0, cy - minH / 2),
-            w: Math.min(bboxToUse.w, 0.12),  // narrow to bracket only (~12% of page width)
+            w: Math.min(bboxToUse.w, 0.18),
             h: minH
           }
         }
