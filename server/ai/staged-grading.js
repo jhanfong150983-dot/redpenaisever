@@ -4066,17 +4066,24 @@ export async function runStagedGradingPhaseA({
     perPage: pageEntries.length > 1,
     ...(classifyResult.pixelBboxRejected?.length > 0 && { pixelBboxRejected: classifyResult.pixelBboxRejected })
   })
-  // Detailed bbox log for every visible question (helps debug wrong positioning)
+  // Detailed bbox log: classify bbox vs answer key bbox comparison
+  const akByIdForLog = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
   logStaged(pipelineRunId, 'basic', 'classify bbox detail', classifyAligned
     .filter((q) => q.visible)
-    .map((q) => ({
-      id: q.questionId,
-      type: q.questionType,
-      x: q.answerBbox ? +q.answerBbox.x.toFixed(3) : null,
-      y: q.answerBbox ? +q.answerBbox.y.toFixed(3) : null,
-      w: q.answerBbox ? +q.answerBbox.w.toFixed(3) : null,
-      h: q.answerBbox ? +q.answerBbox.h.toFixed(3) : null,
-    }))
+    .map((q) => {
+      const akQ = akByIdForLog.get(q.questionId)
+      const akBbox = akQ?.answerBbox
+      const cBbox = q.answerBbox
+      const yDiff = (cBbox && akBbox) ? +(cBbox.y - akBbox.y).toFixed(4) : null
+      return {
+        id: q.questionId,
+        type: q.questionType,
+        classify: cBbox ? { y: +cBbox.y.toFixed(3), h: +cBbox.h.toFixed(3), x: +cBbox.x.toFixed(3), w: +cBbox.w.toFixed(3) } : null,
+        akHint: akBbox ? { y: +akBbox.y.toFixed(3), h: +akBbox.h.toFixed(3) } : null,
+        yDiff,
+        ...(yDiff !== null && Math.abs(yDiff) > 0.02 ? { warn: 'Y_DRIFT' } : {})
+      }
+    })
   )
   // Log tablePosition reasoning for debugging table cell targeting
   const tableReasoningDebug = classifyAligned
