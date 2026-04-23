@@ -2236,15 +2236,7 @@ If you see a symbol that resembles something outside this set, match it to the c
     exampleAnswer = 'ㄅ、ㄇ、ㄉ'
   } else if (codeSet === 'letter') {
     codeSetSection = `IMPORTANT — expected code set: the student writes uppercase or lowercase English letters (A, B, C, D, E, F, G, H, ...).
-Read each letter exactly as written. Do NOT interpret English letters as Bopomofo symbols (e.g. do NOT read "A" as "ㄅ").
-
-⚠️ E vs F UNDERLINE AMBIGUITY (only when bottom stroke MERGES with underline):
-- If the letter is clearly written ABOVE the underline with visible gap → read normally, no uncertainty.
-- ONLY if the letter's bottom stroke physically OVERLAPS or MERGES with the fill-in underline (底線), making it impossible to tell whether the bottom horizontal line is the letter's stroke or the underline → mark "uncertain": true.
-- E has a bottom horizontal stroke; F does not. When F sits ON the underline, the underline itself looks like E's bottom stroke.
-- Key test: Is there a visible gap between the letter's lowest stroke and the underline?
-  YES (gap visible) → read as-is, no uncertainty.
-  NO (merged/touching) → "uncertain": true.`
+Read each letter exactly as written. Do NOT interpret English letters as Bopomofo symbols (e.g. do NOT read "A" as "ㄅ").`
     exampleAnswer = 'A、C、E'
   } else if (codeSet === 'number') {
     codeSetSection = `IMPORTANT — expected code set: the student writes numbers (1, 2, 3, ...) or circled numbers (①, ②, ③, ...).
@@ -4911,6 +4903,43 @@ export async function runStagedGradingPhaseA({
     }
   })
 
+
+  // ── E↔F underline ambiguity detection ─────────────────────────────────────
+  // When student answer differs from correct answer ONLY by E↔F substitution,
+  // force needs_review because F on an underline looks identical to E.
+  // This check runs after consistency (both AIs may agree on the wrong letter).
+  const efFlaggedIds = new Set()
+  for (const qr of questionResultsRaw) {
+    if (qr.questionType !== 'multi_fill') continue
+    const akQ = akByIdForLog.get(qr.questionId)
+    const correctAnswer = ensureString(akQ?.answer, '').toUpperCase().trim()
+    if (!correctAnswer) continue
+    const studentAnswer = ensureString(qr.readAnswer1.studentAnswer, '').toUpperCase().trim()
+    if (!studentAnswer || studentAnswer === correctAnswer) continue
+    // Check if the ONLY difference is E↔F substitution
+    const correctTokens = correctAnswer.split(/[,、，\s]+/).map((t) => t.trim()).filter(Boolean)
+    const studentTokens = studentAnswer.split(/[,、，\s]+/).map((t) => t.trim()).filter(Boolean)
+    if (correctTokens.length !== studentTokens.length) continue
+    let hasEFSwap = false
+    let hasOtherDiff = false
+    for (let i = 0; i < correctTokens.length; i++) {
+      if (correctTokens[i] === studentTokens[i]) continue
+      const pair = [correctTokens[i], studentTokens[i]].sort().join('')
+      if (pair === 'EF') {
+        hasEFSwap = true
+      } else {
+        hasOtherDiff = true
+      }
+    }
+    if (hasEFSwap && !hasOtherDiff) {
+      qr.consistencyStatus = 'unstable'
+      qr.consistencyReason = 'E/F 底線模糊：學生答案與正確答案僅差 E↔F，可能是底線導致辨識錯誤'
+      efFlaggedIds.add(qr.questionId)
+    }
+  }
+  if (efFlaggedIds.size > 0) {
+    logStaged(pipelineRunId, 'basic', 'E↔F underline ambiguity flagged', Array.from(efFlaggedIds))
+  }
 
   // ── Attach crop image URLs for teacher review (uses allQuestionCropMap from pre-AI1 step) ──
   // Priority: per-question crop (allQuestionCropMap) → full image fallback (map_fill, no bbox, etc.)
