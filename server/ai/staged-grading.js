@@ -2225,12 +2225,13 @@ If you see a symbol that resembles something outside this set, match it to the c
     codeSetSection = `IMPORTANT — expected code set: the student writes uppercase or lowercase English letters (A, B, C, D, E, F, G, H, ...).
 Read each letter exactly as written. Do NOT interpret English letters as Bopomofo symbols (e.g. do NOT read "A" as "ㄅ").
 
-⚠️ E vs F UNDERLINE AMBIGUITY:
-When the answer is written on a fill-in-the-blank underline (底線), the letter F's bottom can merge with the underline, making it look like E (which has a bottom horizontal stroke).
-- F = vertical stroke + top horizontal stroke + middle horizontal stroke + NO bottom stroke (just the underline)
-- E = vertical stroke + top horizontal stroke + middle horizontal stroke + bottom horizontal stroke
-If you see what could be E or F and it's sitting ON an underline, mark the answer as UNCERTAIN by adding "uncertain": true to your response.
-This tells the system to flag it for teacher review instead of guessing.`
+⚠️ E vs F UNDERLINE AMBIGUITY (only when bottom stroke MERGES with underline):
+- If the letter is clearly written ABOVE the underline with visible gap → read normally, no uncertainty.
+- ONLY if the letter's bottom stroke physically OVERLAPS or MERGES with the fill-in underline (底線), making it impossible to tell whether the bottom horizontal line is the letter's stroke or the underline → mark "uncertain": true.
+- E has a bottom horizontal stroke; F does not. When F sits ON the underline, the underline itself looks like E's bottom stroke.
+- Key test: Is there a visible gap between the letter's lowest stroke and the underline?
+  YES (gap visible) → read as-is, no uncertainty.
+  NO (merged/touching) → "uncertain": true.`
     exampleAnswer = 'A、C、E'
   } else if (codeSet === 'number') {
     codeSetSection = `IMPORTANT — expected code set: the student writes numbers (1, 2, 3, ...) or circled numbers (①, ②, ③, ...).
