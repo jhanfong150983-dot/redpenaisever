@@ -1187,7 +1187,9 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
     if (akAnswerBbox) {
       spec.answerBboxHint = {
+        x: +akAnswerBbox.x.toFixed(4),
         y: +akAnswerBbox.y.toFixed(4),
+        w: +akAnswerBbox.w.toFixed(4),
         h: +akAnswerBbox.h.toFixed(4)
       }
     }
@@ -4300,14 +4302,21 @@ export async function runStagedGradingPhaseA({
         // reading the question stem/options and "solving" instead of reading.
         // Also enforce minimum height to ensure the number inside is fully visible.
         // FORMAT A single_choice (no bracketBbox): tight crop on bracket area only.
+        // Use answer key's x coordinate (akHint) to locate the bracket position precisely.
+        // Classify's x is the question line start, but the bracket may be indented.
         const isSingleChoiceNarrow = q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse
         if (isSingleChoiceNarrow) {
+          const akQ = akByIdForLog.get(q.questionId)
+          const akBbox = akQ?.answerBbox
+          // Use answer key's x to locate the bracket position precisely.
+          // X coordinate doesn't change with vertical page merging, so akBbox.x can be used directly.
+          const bracketX = (akBbox && typeof akBbox.x === 'number') ? akBbox.x : bboxToUse.x
           const cy = bboxToUse.y + bboxToUse.h / 2
           const minH = Math.max(bboxToUse.h, 0.02)
           bboxToUse = {
-            x: bboxToUse.x,
+            x: Math.max(0, bracketX - 0.01),  // small left margin before bracket
             y: Math.max(0, cy - minH / 2),
-            w: Math.min(bboxToUse.w, 0.18),
+            w: 0.18,
             h: minH
           }
         }
