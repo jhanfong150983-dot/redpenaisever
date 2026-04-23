@@ -3798,6 +3798,14 @@ function buildFinalGradingResult({
     const missing = keyQuestions.length - Math.round(stageMeta.classify.coverage * keyQuestions.length)
     reviewReasons.push(`有 ${missing} 題未被辨識到，可能漏批`)
   }
+  const unansweredIds = details.filter((d) => d.studentAnswer === '未作答').map((d) => d.questionId)
+  if (unansweredIds.length > 0) {
+    reviewReasons.push(`${unansweredIds.join(', ')} 辨識為未作答，請確認`)
+  }
+  const unreadableIds = details.filter((d) => d.studentAnswer === '無法辨識').map((d) => d.questionId)
+  if (unreadableIds.length > 0) {
+    reviewReasons.push(`${unreadableIds.join(', ')} 無法辨識，請確認`)
+  }
   // stageWarnings 僅記錄於 log，不推送給老師
 
   return {
