@@ -4275,13 +4275,20 @@ export async function runStagedGradingPhaseA({
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
         let bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
-        // FORMAT A single_choice (no bracketBbox): enforce minimum crop height
-        // to ensure the parentheses row is captured even if bbox y is slightly off.
-        // Minimum height = 0.03 (in full-image coords), expand upward from bbox center.
-        if (q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse && bboxToUse.h < 0.03) {
+        // FORMAT A single_choice (no bracketBbox): tight crop on bracket area only.
+        // The bracket ( ) is at the LEFT edge of the question line.
+        // Narrow the width to ~12% to only show the parentheses, preventing AI from
+        // reading the question stem/options and "solving" instead of reading.
+        // Also enforce minimum height to ensure the number inside is fully visible.
+        if (q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse) {
           const cy = bboxToUse.y + bboxToUse.h / 2
-          const minH = 0.03
-          bboxToUse = { ...bboxToUse, y: Math.max(0, cy - minH / 2), h: minH }
+          const minH = Math.max(bboxToUse.h, 0.03)
+          bboxToUse = {
+            x: bboxToUse.x,          // keep left edge (bracket is at left)
+            y: Math.max(0, cy - minH / 2),
+            w: Math.min(bboxToUse.w, 0.12),  // narrow to bracket only (~12% of page width)
+            h: minH
+          }
         }
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
