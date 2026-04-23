@@ -4223,7 +4223,15 @@ export async function runStagedGradingPhaseA({
     const inlineImage = inlineImages[0]
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
-        const bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
+        let bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
+        // FORMAT A single_choice (no bracketBbox): enforce minimum crop height
+        // to ensure the parentheses row is captured even if bbox y is slightly off.
+        // Minimum height = 0.03 (in full-image coords), expand upward from bbox center.
+        if (q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse && bboxToUse.h < 0.03) {
+          const cy = bboxToUse.y + bboxToUse.h / 2
+          const minH = 0.03
+          bboxToUse = { ...bboxToUse, y: Math.max(0, cy - minH / 2), h: minH }
+        }
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
