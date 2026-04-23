@@ -1168,10 +1168,17 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       const groupId = resolveMatchingGroupId(question)
       if (groupId) spec.bboxGroupId = groupId
     }
-    // answerBboxHint disabled — hint coordinates are from answer key image space,
-    // not student submission space; causes misalignment. Classify uses answer key reference image directly.
-    // const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
-    // if (akAnswerBbox) spec.answerBboxHint = akAnswerBbox
+    // answerBboxHint: pass answer key's bbox as a Y-coordinate reference for classify.
+    // Only the Y position is reliable (same exam layout), X may differ due to scan alignment.
+    // For single_choice: helps classify locate the bracket row (prevents reading option row instead).
+    // For other types: provides a spatial anchor to improve bbox accuracy.
+    const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
+    if (akAnswerBbox) {
+      spec.answerBboxHint = {
+        y: +akAnswerBbox.y.toFixed(4),
+        h: +akAnswerBbox.h.toFixed(4)
+      }
+    }
     // anchorHint only helps for multi_fill and fill_blank sub-questions (3+ ID segments, e.g. "1-2-1").
     // For single_choice / single_check / etc., the hint describes the answer key's circled option, which
     // causes classify to narrow the bbox onto just that option text — shifting it upward.
@@ -2082,6 +2089,7 @@ Rules:
   - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
   If the question region cannot be determined, omit answerBbox.
+- answerBboxHint (Y-coordinate reference from answer key): When a question spec includes answerBboxHint { y, h }, it tells you the approximate Y position and height of this question's answer area on the answer key (same exam layout). Use this as a vertical anchor: your answerBbox.y should be CLOSE to the hint's y value. If your bbox is more than 0.02 away from the hint's y, double-check your positioning. This is especially important for single_choice FORMAT A (empty parentheses) — the hint's y points to the bracket row, not the option rows below it.
 - For single_choice questions ONLY: also output bracketBbox that frames ONLY the printed bracket row "（option1，option2）" and the student's mark inside it — do NOT include the question stem text. This should be a very tight crop of just that one bracket line. Omit bracketBbox if this is FORMAT A (empty parentheses where student writes a symbol) or if the bracket row cannot be located precisely.
 - Return strict JSON only.
 ${Array.isArray(classifyCorrections) && classifyCorrections.length > 0 ? `
