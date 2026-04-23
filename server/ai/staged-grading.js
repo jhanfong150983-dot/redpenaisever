@@ -4067,19 +4067,36 @@ export async function runStagedGradingPhaseA({
     ...(classifyResult.pixelBboxRejected?.length > 0 && { pixelBboxRejected: classifyResult.pixelBboxRejected })
   })
   // Detailed bbox log: classify bbox vs answer key bbox comparison
+  // Answer key bbox is in per-page coordinates (0~1 within that page).
+  // Classify bbox is in full-image coordinates (0~1 across all merged pages).
+  // Convert akHint.y to full-image space for meaningful comparison.
   const akByIdForLog = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
+  const totalPages = pageEntries.length || 1
   logStaged(pipelineRunId, 'basic', 'classify bbox detail', classifyAligned
     .filter((q) => q.visible)
     .map((q) => {
       const akQ = akByIdForLog.get(q.questionId)
       const akBbox = akQ?.answerBbox
       const cBbox = q.answerBbox
-      const yDiff = (cBbox && akBbox) ? +(cBbox.y - akBbox.y).toFixed(4) : null
+      // Convert akHint y from per-page to full-image coordinates
+      let akHintFullImage = null
+      if (akBbox && totalPages > 1) {
+        const pageNum = parseInt(String(q.questionId).split('-')[0], 10) || 1
+        const pageStartY = (pageNum - 1) / totalPages
+        const pageHeight = 1 / totalPages
+        akHintFullImage = {
+          y: +(pageStartY + akBbox.y * pageHeight).toFixed(4),
+          h: +(akBbox.h * pageHeight).toFixed(4)
+        }
+      } else if (akBbox) {
+        akHintFullImage = { y: +akBbox.y.toFixed(4), h: +akBbox.h.toFixed(4) }
+      }
+      const yDiff = (cBbox && akHintFullImage) ? +(cBbox.y - akHintFullImage.y).toFixed(4) : null
       return {
         id: q.questionId,
         type: q.questionType,
         classify: cBbox ? { y: +cBbox.y.toFixed(3), h: +cBbox.h.toFixed(3), x: +cBbox.x.toFixed(3), w: +cBbox.w.toFixed(3) } : null,
-        akHint: akBbox ? { y: +akBbox.y.toFixed(3), h: +akBbox.h.toFixed(3) } : null,
+        akHint: akHintFullImage,
         yDiff,
         ...(yDiff !== null && Math.abs(yDiff) > 0.02 ? { warn: 'Y_DRIFT' } : {})
       }
@@ -5032,13 +5049,38 @@ Return JSON:
       }
     })
 
+  // ── Pre-arbiter: single_choice/true_false with different numeric answers → directly needs_review ──
+  // AI3 can't reliably resolve "2 vs 3" — both are clear readings, it's a coin flip.
+  // Skip AI3 and let the teacher decide.
+  const SIMPLE_ANSWER_TYPES = new Set(['single_choice', 'true_false'])
+  const directReviewIds = new Set()
+  for (const item of arbiterItems) {
+    if (!SIMPLE_ANSWER_TYPES.has(item.questionType)) continue
+    if (item.agreementStatus === 'agree') continue
+    // Both are read status with different short answers → genuine ambiguity
+    const a1 = ensureString(item.ai1Answer, '').trim()
+    const a2 = ensureString(item.ai2Answer, '').trim()
+    if (a1 && a2 && a1 !== a2 && item.ai1Status === 'read' && item.ai2Status === 'read') {
+      directReviewIds.add(item.questionId)
+    }
+  }
+  if (directReviewIds.size > 0) {
+    logStaged(pipelineRunId, 'basic', 'single_choice direct needs_review (skip AI3)', Array.from(directReviewIds))
+  }
+
   const arbiterByQuestionId = new Map()
-  if (arbiterItems.length > 0) {
+  // Pre-populate direct review decisions (bypass AI3)
+  for (const qId of directReviewIds) {
+    arbiterByQuestionId.set(qId, { arbiterStatus: 'needs_review', directReview: true })
+  }
+  // Filter out direct-review items from AI3 input
+  const arbiterItemsForAI3 = arbiterItems.filter((item) => !directReviewIds.has(item.questionId))
+  if (arbiterItemsForAI3.length > 0) {
     try {
       // Build AI3 parts: text prompt + full image + interleaved (label + crop) per question
-      const arbiterPromptText = buildArbiterPrompt(arbiterItems)
+      const arbiterPromptText = buildArbiterPrompt(arbiterItemsForAI3)
       const arbiterParts = [{ text: arbiterPromptText }, ...submissionImageParts]
-      for (const item of arbiterItems) {
+      for (const item of arbiterItemsForAI3) {
         const crop = allQuestionCropMap.get(item.questionId)
         if (crop) {
           arbiterParts.push({ text: `--- 題目 ${item.questionId} 裁切圖 ---` })
@@ -5117,10 +5159,13 @@ Return JSON:
     }
   }
 
-  // ── Arbiter Quality Gate ──────────────────────────────────────────────────
-  if (arbiterByQuestionId.size > 0) {
-    const arbiterResults = Array.from(arbiterByQuestionId.values())
-    const arbiterExpectedIds = arbiterItems.map((item) => item.questionId)
+  // ── Arbiter Quality Gate (only check AI3 results, not direct-review items) ──
+  const ai3ResultCount = arbiterByQuestionId.size - directReviewIds.size
+  if (ai3ResultCount > 0) {
+    const arbiterResults = Array.from(arbiterByQuestionId.entries())
+      .filter(([qId]) => !directReviewIds.has(qId))
+      .map(([, v]) => v)
+    const arbiterExpectedIds = arbiterItemsForAI3.map((item) => item.questionId)
     const arbiterQG = validateArbiterQuality(arbiterResults, arbiterExpectedIds)
     logStaged(pipelineRunId, 'basic', 'arbiter quality-gate', {
       severity: arbiterQG.severity, warnings: arbiterQG.warnings, metrics: arbiterQG.metrics
