@@ -2222,7 +2222,14 @@ If you see a symbol that resembles something outside this set, match it to the c
     exampleAnswer = 'ㄅ、ㄇ、ㄉ'
   } else if (codeSet === 'letter') {
     codeSetSection = `IMPORTANT — expected code set: the student writes uppercase or lowercase English letters (A, B, C, D, E, F, G, H, ...).
-Read each letter exactly as written. Do NOT interpret English letters as Bopomofo symbols (e.g. do NOT read "A" as "ㄅ").`
+Read each letter exactly as written. Do NOT interpret English letters as Bopomofo symbols (e.g. do NOT read "A" as "ㄅ").
+
+⚠️ E vs F UNDERLINE AMBIGUITY:
+When the answer is written on a fill-in-the-blank underline (底線), the letter F's bottom can merge with the underline, making it look like E (which has a bottom horizontal stroke).
+- F = vertical stroke + top horizontal stroke + middle horizontal stroke + NO bottom stroke (just the underline)
+- E = vertical stroke + top horizontal stroke + middle horizontal stroke + bottom horizontal stroke
+If you see what could be E or F and it's sitting ON an underline, mark the answer as UNCERTAIN by adding "uncertain": true to your response.
+This tells the system to flag it for teacher review instead of guessing.`
     exampleAnswer = 'A、C、E'
   } else if (codeSet === 'number') {
     codeSetSection = `IMPORTANT — expected code set: the student writes numbers (1, 2, 3, ...) or circled numbers (①, ②, ③, ...).
@@ -4607,6 +4614,7 @@ export async function runStagedGradingPhaseA({
   // Instead: run two focused crop reads with different prompt strategies, then let AI3 arbitrate.
   //   read-1 (direct): "transcribe what you see" → overrides AI1 (readAnswerParsed)
   //   read-2 (analytic): "stroke-by-stroke bopomofo analysis" → overrides AI2 (reReadAnswerParsed)
+  const multiFillUncertainIds = new Set()  // hoisted: tracks questions with uncertain letter recognition (E/F etc.)
   const multiFillCropCandidates = classifyAligned.filter(
     (q) => q.visible && q.questionType === 'multi_fill' && allQuestionCropMap.has(q.questionId)
   )
@@ -4667,11 +4675,16 @@ export async function runStagedGradingPhaseA({
     )
     const multiFillRead1Map = new Map()
     const multiFillRead2Map = new Map()
-    const multiFillUncertainIds = new Set()  // read2 reported uncertainChars → force needs_review
+    // Populate multiFillUncertainIds (hoisted above) with questions flagged uncertain
     for (const { questionId, answer1, answer2 } of multiFillDualResults) {
       if (answer1) multiFillRead1Map.set(questionId, answer1)
       if (answer2) multiFillRead2Map.set(questionId, answer2)
+      // read-2 uncertainChars (analytic mode)
       if (answer2 && Array.isArray(answer2.uncertainChars) && answer2.uncertainChars.length > 0) {
+        multiFillUncertainIds.add(questionId)
+      }
+      // read-1 uncertain flag (e.g. E/F underline ambiguity)
+      if (answer1?.uncertain === true) {
         multiFillUncertainIds.add(questionId)
       }
     }
@@ -4849,8 +4862,11 @@ export async function runStagedGradingPhaseA({
     const read1 = read1ById.get(questionId)
     const read2 = read2ById.get(questionId)
     const classifyRow = classifyAligned.find((q) => q.questionId === questionId)
-    const consistencyStatus =
-      read1 && read2
+    // Force unstable for multi_fill questions flagged as uncertain (E/F underline ambiguity, etc.)
+    const isUncertain = multiFillUncertainIds?.has(questionId)
+    const consistencyStatus = isUncertain
+      ? 'unstable'
+      : read1 && read2
         ? computeConsistencyStatus(read1, read2, classifyRow?.questionType ?? 'other')
         : 'unstable'
     // 包含關係時，若 AI2 較短，記錄應覆寫的答案（在最終結果建構時套用）
