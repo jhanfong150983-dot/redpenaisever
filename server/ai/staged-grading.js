@@ -5052,7 +5052,11 @@ Return JSON:
   // ── Pre-arbiter: single_choice/true_false with different numeric answers → directly needs_review ──
   // AI3 can't reliably resolve "2 vs 3" — both are clear readings, it's a coin flip.
   // Skip AI3 and let the teacher decide.
-  const SIMPLE_ANSWER_TYPES = new Set(['single_choice', 'true_false'])
+  const SIMPLE_ANSWER_TYPES = new Set([
+    'single_choice', 'true_false', 'single_check',
+    'multi_choice', 'multi_check', 'multi_check_other',
+    'fill_blank', 'fill_variants'
+  ])
   const directReviewIds = new Set()
   for (const item of arbiterItems) {
     if (!SIMPLE_ANSWER_TYPES.has(item.questionType)) continue
