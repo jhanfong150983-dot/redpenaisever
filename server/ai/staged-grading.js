@@ -611,8 +611,6 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/(?:^|(?<=[\n,、\s]))第[一二三四五六七八九十\d]+項[：:]\s*/gmu, '')
   // 去除分隔符號（逗號、頓號、換行）— 比對內容本身，不比對格式
   s = s.replace(/[,、\n\r]/gu, '')
-  // 台/臺 統一（AI OCR 常交替使用）
-  s = s.replace(/台/gu, '臺')
   // 去除所有空白（避免有無空白造成誤判）
   s = s.replace(/\s+/gu, '')
   // 選項字母大小寫統一（A/a、B/b、C/c 等視為相同）
