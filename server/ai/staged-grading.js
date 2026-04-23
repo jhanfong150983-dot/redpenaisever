@@ -4295,29 +4295,9 @@ export async function runStagedGradingPhaseA({
     const inlineImage = inlineImages[0]
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
-        let bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
-        // FORMAT A single_choice (no bracketBbox): tight crop on bracket area only.
-        // The bracket ( ) is at the LEFT edge of the question line.
-        // Narrow the width to ~12% to only show the parentheses, preventing AI from
-        // reading the question stem/options and "solving" instead of reading.
-        // Also enforce minimum height to ensure the number inside is fully visible.
-        // FORMAT A single_choice (no bracketBbox): tight crop on bracket area only.
-        // Use answer key's x coordinate (akHint) to locate the bracket position precisely.
-        // Classify's x is the question line start, but the bracket may be indented.
-        const isSingleChoiceNarrow = q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse
-        if (isSingleChoiceNarrow) {
-          const cy = bboxToUse.y + bboxToUse.h / 2
-          const minH = Math.max(bboxToUse.h, 0.02)
-          // w=0.30: wide enough to reliably capture the bracket + handwritten number,
-          // narrow enough to exclude most option text (full line is typically 0.8-0.9).
-          // The bracket is at the left edge, so crop starts at classify x.
-          bboxToUse = {
-            x: bboxToUse.x,
-            y: Math.max(0, cy - minH / 2),
-            w: Math.min(bboxToUse.w, 0.30),
-            h: minH
-          }
-        }
+        const bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
+        // No width narrowing — dynamic padding (adjusted by page count) ensures
+        // crops don't include too many adjacent questions.
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
