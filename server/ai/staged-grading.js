@@ -2237,18 +2237,7 @@ If you see a symbol that resembles something outside this set, match it to the c
     exampleAnswer = 'ㄅ、ㄇ、ㄉ'
   } else if (codeSet === 'letter') {
     codeSetSection = `IMPORTANT — expected code set: the student writes uppercase or lowercase English letters (A, B, C, D, E, F, G, H, ...).
-Read each letter exactly as written. Do NOT interpret English letters as Bopomofo symbols (e.g. do NOT read "A" as "ㄅ").
-
-⚠️ E vs F UNDERLINE CHECK (mandatory for every E or F you read):
-When you read an E or F, check whether the letter's bottom stroke MERGES with the fill-in underline (底線):
-- E has 3 horizontal strokes (top, middle, bottom). F has only 2 (top, middle).
-- If the letter is written ON a printed underline, the underline may look like E's bottom stroke even when the student wrote F.
-- For EACH E or F you output, also report "bottomStrokeMerged": true or false in the response.
-  true = the bottom of the letter physically touches/overlaps/merges with a printed underline (no visible gap)
-  false = there is a clear gap between the letter's lowest point and the underline, OR there is no underline
-
-Response format when E or F is present:
-{ "studentAnswerRaw": "C、F、G", "status": "read", "efCheck": [{ "letter": "F", "position": 2, "bottomStrokeMerged": true }] }`
+Read each letter exactly as written. Do NOT interpret English letters as Bopomofo symbols (e.g. do NOT read "A" as "ㄅ").`
     exampleAnswer = 'A、C、E'
   } else if (codeSet === 'number') {
     codeSetSection = `IMPORTANT — expected code set: the student writes numbers (1, 2, 3, ...) or circled numbers (①, ②, ③, ...).
@@ -2290,7 +2279,7 @@ function buildFocusedMultiFillReReadPrompt(questionId, codeSet = 'bopomofo') {
   // 非注音模式用簡化版 prompt（不需要筆劃分析）
   if (codeSet !== 'bopomofo') {
     const codeDesc = codeSet === 'letter'
-      ? 'English letters (A, B, C, D, ...).\nRead each letter exactly. Do NOT interpret as Bopomofo.\n⚠️ E vs F UNDERLINE CHECK: For each E or F, report "bottomStrokeMerged": true if the letter bottom touches/merges with a printed underline (no gap), false if there is a clear gap or no underline. Include in response as "efCheck": [{"letter":"F","position":2,"bottomStrokeMerged":true}]'
+      ? 'English letters (A, B, C, D, ...).\nRead each letter exactly. Do NOT interpret as Bopomofo.'
       : codeSet === 'number'
         ? 'numbers (1, 2, 3, ...) or circled numbers (①②③...). Output as regular digits.'
         : 'letters, numbers, or symbols. Read exactly what you see.'
@@ -4706,18 +4695,8 @@ export async function runStagedGradingPhaseA({
       if (answer2 && Array.isArray(answer2.uncertainChars) && answer2.uncertainChars.length > 0) {
         multiFillUncertainIds.add(questionId)
       }
-      // E/F bottomStrokeMerged check — either read reporting merged bottom stroke
-      const hasEFMerge = (answer) => {
-        if (!answer?.efCheck || !Array.isArray(answer.efCheck)) return false
-        return answer.efCheck.some((c) => c.bottomStrokeMerged === true)
-      }
-      if (hasEFMerge(answer1) || hasEFMerge(answer2)) {
-        multiFillUncertainIds.add(questionId)
-        logStaged(pipelineRunId, 'basic', `E/F bottomStrokeMerged detected qid=${questionId}`, {
-          read1: answer1?.efCheck,
-          read2: answer2?.efCheck
-        })
-      }
+      // E/F detection is handled post-consistency by comparing student answer vs correct answer
+      // (efFlaggedIds logic below). No AI-side detection needed — it was too aggressive.
     }
     if (multiFillUncertainIds.size > 0) {
       logStaged(pipelineRunId, 'basic', 'focused-multifill uncertain chars detected', {
