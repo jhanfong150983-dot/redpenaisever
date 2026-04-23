@@ -4280,25 +4280,27 @@ export async function runStagedGradingPhaseA({
         // Narrow the width to ~12% to only show the parentheses, preventing AI from
         // reading the question stem/options and "solving" instead of reading.
         // Also enforce minimum height to ensure the number inside is fully visible.
-        if (q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse) {
+        // FORMAT A single_choice (no bracketBbox): tight crop on bracket area only.
+        const isSingleChoiceNarrow = q.questionType === 'single_choice' && !q.bracketBbox && bboxToUse
+        if (isSingleChoiceNarrow) {
           const cy = bboxToUse.y + bboxToUse.h / 2
-          const minH = Math.max(bboxToUse.h, 0.03)
-          // Narrow to bracket area (~18% page width) — wide enough to capture
-          // the parentheses + student's handwritten number even if slightly offset,
-          // but narrow enough to exclude question stem text and option content.
-          // cropInlineImageByBbox adds 0.03 padding on each side, so actual crop ≈ 24%.
+          const minH = Math.max(bboxToUse.h, 0.02)
           bboxToUse = {
-            x: bboxToUse.x,          // keep left edge (bracket is at left)
+            x: bboxToUse.x,
             y: Math.max(0, cy - minH / 2),
             w: Math.min(bboxToUse.w, 0.18),
             h: minH
           }
         }
+        // single_choice uses smaller padding (0.008) to prevent capturing
+        // adjacent questions in multi-page merged images (default 0.03 = 18% of one page in 6-page image)
+        const customPad = isSingleChoiceNarrow ? 0.008 : null
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
           bboxToUse,
-          true
+          true,
+          customPad
         )
         return { questionId: q.questionId, cropData }
       })
