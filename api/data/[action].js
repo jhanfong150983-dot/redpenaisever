@@ -2139,6 +2139,40 @@ async function handleImportTemplate(req, res) {
   }
 }
 
+// ── 成績統計：直接從 Supabase 取分數 ────────────────────────────────────
+async function handleGetGradebookScores(req, res) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const classroomId = req.query?.classroomId
+  if (!classroomId) { res.status(400).json({ error: 'Missing classroomId' }); return }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    // 取該班級的所有 assignment IDs
+    const { data: assignments, error: aErr } = await supabaseDb
+      .from('assignments')
+      .select('id')
+      .eq('owner_id', user.id)
+      .eq('classroom_id', classroomId)
+    if (aErr) throw aErr
+    const assignmentIds = (assignments || []).map(a => a.id)
+    if (assignmentIds.length === 0) {
+      res.status(200).json({ scores: [] })
+      return
+    }
+    // 取所有 submissions 的分數
+    const { data: subs, error: sErr } = await supabaseDb
+      .from('submissions')
+      .select('id, assignment_id, student_id, score, ai_score, score_source, graded_at, status')
+      .eq('owner_id', user.id)
+      .in('assignment_id', assignmentIds)
+    if (sErr) throw sErr
+    res.status(200).json({ scores: subs || [] })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '取得分數失敗' })
+  }
+}
+
 // ── 清除作業的批改結果 ────────────────────────────────────────────────────
 // ── 直接儲存批改結果到 Supabase（不依賴 sync push）────────────────────
 async function handleSaveGrading(req, res) {
@@ -6285,6 +6319,29 @@ export default async function handler(req, res) {
   }
   if (action === 'dispute-resolve') {
     await handleDisputeResolve(req, res)
+    return
+  }
+  if (action === 'clear-sw') {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8')
+    res.status(200).send(`<!DOCTYPE html><html><head><title>清除快取</title></head><body>
+<h2>正在清除 Service Worker 和快取...</h2><pre id="log"></pre>
+<script>
+const log = document.getElementById('log');
+(async () => {
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const r of regs) { await r.unregister(); log.textContent += '已移除 SW: ' + r.scope + '\\n'; }
+    const keys = await caches.keys();
+    for (const k of keys) { await caches.delete(k); log.textContent += '已刪除快取: ' + k + '\\n'; }
+    log.textContent += '\\n✅ 完成！3 秒後自動跳轉...';
+    setTimeout(() => { window.location.href = '/'; }, 3000);
+  } catch(e) { log.textContent += '❌ 錯誤: ' + e.message; }
+})();
+</script></body></html>`)
+    return
+  }
+  if (action === 'get-gradebook-scores') {
+    await handleGetGradebookScores(req, res)
     return
   }
   if (action === 'save-grading') {
