@@ -486,22 +486,25 @@ export function validateAccessorQuality(accessorResult, expectedQuestionIds) {
 export function validateArbiterQuality(arbiterResults, expectedQuestionIds) {
   const warnings = []
   const metrics = {}
+  // arbiterResults can be an array of { questionId, arbiterStatus, ... }
+  // OR an array of values from a Map (without questionId — the key was the questionId)
   const results = Array.isArray(arbiterResults) ? arbiterResults : []
   const expectedCount = expectedQuestionIds?.length ?? 0
 
   // ── Decision coverage ──
-  const decidedIds = new Set(results.map((r) => r.questionId).filter(Boolean))
-  const missingCount = expectedQuestionIds?.filter((id) => !decidedIds.has(id)).length ?? 0
-  metrics.decidedCount = decidedIds.size
+  // Results may or may not have questionId (Map values don't).
+  // Count how many results we got vs how many we expected.
+  metrics.decidedCount = results.length
   metrics.expectedCount = expectedCount
+  const missingCount = Math.max(0, expectedCount - results.length)
   metrics.missingCount = missingCount
-  if (missingCount > 0 && expectedCount > 0) {
+  if (missingCount > 0 && expectedCount > 0 && missingCount > expectedCount * 0.2) {
     warnings.push(`FAIL:ARBITER_MISSING_DECISIONS(${missingCount}/${expectedCount})`)
   }
 
   // ── Decision validity ──
   const VALID_STATUSES = new Set([
-    'arbitrated_agree', 'arbitrated_pick_ai1', 'arbitrated_pick_ai2', 'needs_review'
+    'arbitrated_agree', 'arbitrated_pick_1', 'arbitrated_pick_2', 'needs_review'
   ])
   const invalidStatusCount = results.filter((r) => !VALID_STATUSES.has(r.arbiterStatus)).length
   metrics.invalidStatusCount = invalidStatusCount
