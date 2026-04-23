@@ -4232,6 +4232,13 @@ export async function runStagedGradingPhaseA({
     .filter((q) => q.visible && q.questionType === 'calculation')
     .map((q) => q.questionId)
 
+  // Dynamic padding: adjust for multi-page merged images.
+  // basePad 0.03 was designed for single-page images (3% of page height).
+  // For multi-page, divide by page count so each page still gets ~3% padding.
+  const dynamicPad = +(0.03 / totalPages).toFixed(4)
+  const dynamicPadWide = +(0.08 / totalPages).toFixed(4)
+  logStaged(pipelineRunId, 'basic', 'dynamic crop padding', { totalPages, pad: dynamicPad, padWide: dynamicPadWide })
+
   // Focused checkbox crops: single_check / multi_check / multi_choice
   // We pre-crop first, then exclude successful IDs from full-image ReadAnswer.
   const focusedCheckboxCandidates = classifyAligned.filter(
@@ -4246,7 +4253,8 @@ export async function runStagedGradingPhaseA({
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
           q.answerBbox,
-          true
+          true,
+          dynamicPad
         )
         return { questionId: q.questionId, cropData }
       })
@@ -4292,15 +4300,12 @@ export async function runStagedGradingPhaseA({
             h: minH
           }
         }
-        // single_choice uses smaller padding (0.008) to prevent capturing
-        // adjacent questions in multi-page merged images (default 0.03 = 18% of one page in 6-page image)
-        const customPad = isSingleChoiceNarrow ? 0.008 : null
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
           bboxToUse,
           true,
-          customPad
+          dynamicPad
         )
         return { questionId: q.questionId, cropData }
       })
@@ -4469,7 +4474,8 @@ export async function runStagedGradingPhaseA({
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
           q.bracketBbox,
-          true // useActualBbox: tight crop
+          true,
+          dynamicPad
         )
         if (!croppedData) {
           logStaged(pipelineRunId, 'basic', `bracket-read crop-failed qid=${q.questionId}`)
@@ -4655,9 +4661,9 @@ export async function runStagedGradingPhaseA({
         const codeSet = multiFillCodeSetMap.get(q.questionId) || 'bopomofo'
         // read1: tight crop (pad=0.03) — same as allQuestionCropMap
         const cropTight = allQuestionCropMap.get(q.questionId)
-        // read2: wide crop (pad=0.08) — more context, different view to catch bbox misalignment
+        // read2: wide crop — more context, different view to catch bbox misalignment
         const cropWide = inlineImage
-          ? await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, true, 0.08)
+          ? await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, true, dynamicPadWide)
           : cropTight
         const [res1, res2] = await Promise.all([
           executeStage({
@@ -5415,10 +5421,12 @@ export async function runStagedGradingPhaseB({
       const img = inlineImages[0]?.inlineData
       if (img?.data && img?.mimeType) {
         const MAX_CALC_CROPS = 16 // 安全上限，避免 payload 過大
+        const phaseBPages = new Set(questionIds.map((id) => { const m = id.match(/^(\d+)-/); return m ? parseInt(m[1], 10) : 1 })).size || 1
+        const phaseBPad = +(0.01 / Math.max(1, phaseBPages)).toFixed(4)
         const cropTargets = calcQuestions.slice(0, MAX_CALC_CROPS)
         const cropResults = await Promise.all(
           cropTargets.map(async (q) => {
-            const cropData = await cropInlineImageByBbox(img.data, img.mimeType, q.answerBbox, true, 0.01)
+            const cropData = await cropInlineImageByBbox(img.data, img.mimeType, q.answerBbox, true, phaseBPad)
             return { questionId: q.questionId, cropData }
           })
         )
