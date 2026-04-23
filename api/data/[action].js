@@ -2139,6 +2139,39 @@ async function handleImportTemplate(req, res) {
   }
 }
 
+// ── 清除作業的批改結果 ────────────────────────────────────────────────────
+async function handleClearGrading(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const assignmentId = typeof body?.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const { error } = await supabaseDb
+      .from('submissions')
+      .update({
+        status: 'synced',
+        score: null,
+        ai_score: null,
+        score_source: null,
+        feedback: null,
+        grading_result: null,
+        graded_at: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('assignment_id', assignmentId)
+      .eq('owner_id', user.id)
+      .not('grading_result', 'is', null)
+    if (error) throw new Error(error.message)
+    console.log(`✅ [clear-grading] 已清除 assignment=${assignmentId} 的批改結果`)
+    res.status(200).json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '清除失敗' })
+  }
+}
+
 async function handleManualGrade(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -6218,6 +6251,10 @@ export default async function handler(req, res) {
   }
   if (action === 'dispute-resolve') {
     await handleDisputeResolve(req, res)
+    return
+  }
+  if (action === 'clear-grading') {
+    await handleClearGrading(req, res)
     return
   }
   if (action === 'import-template') {
