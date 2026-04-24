@@ -3794,39 +3794,58 @@ async function handleSync(req, res) {
         syncTimerEnd('submissions-upsert')
 
         syncTimer('submissions-transitions')
-        // 只對「server 上還沒有 grading_result 但 incoming 有」的 submissions 跑 state transitions
-        // 這代表是本地新批改的，需要更新 assignment_student_state
-        // 排除：server 上已經有 grading_result 的（只是重複 push 同樣的資料）
-        const existingGradedIds = new Set()
-        try {
+        // grading 資料由 save-grading 寫入，sync push 不再包含 grading_result。
+        // 因此改為 upsert 後從 DB 查出已有 grading_result 的 submissions，
+        // 再對尚未建立 state 的記錄觸發 state transitions。
+        {
           const submissionIds = submissionRows.map(r => r.id).filter(Boolean)
+          let dbGradedRows = []
           if (submissionIds.length > 0) {
-            const { data: existingRows } = await supabaseDb
-              .from('submissions')
-              .select('id')
-              .in('id', submissionIds)
-              .not('grading_result', 'is', null)
-            if (existingRows) existingRows.forEach(r => existingGradedIds.add(r.id))
+            try {
+              const { data } = await supabaseDb
+                .from('submissions')
+                .select('id, assignment_id, student_id, status, graded_at, grading_result, source')
+                .eq('owner_id', user.id)
+                .in('id', submissionIds)
+                .not('grading_result', 'is', null)
+              dbGradedRows = data || []
+            } catch { /* non-fatal */ }
           }
-        } catch { /* non-fatal */ }
-        const stateTransitionRows = submissionRows.filter(
-          (row) => (row.grading_result && !existingGradedIds.has(row.id)) || row.source === 'student_correction'
-        )
-        console.log(`⏱️ [sync] stateTransitionRows: ${stateTransitionRows.length}/${submissionRows.length} (existingGraded=${existingGradedIds.size})`)
-        if (stateTransitionRows.length > 0) {
-          await applySubmissionStateTransitions(supabaseDb, user.id, stateTransitionRows).catch(
-            (err) => console.warn('[sync] applySubmissionStateTransitions failed (non-fatal):', err?.message)
+          // 也包含 student_correction 來源（不管是否已有 grading_result）
+          const correctionRows = submissionRows.filter(
+            (row) => row.source === 'student_correction' && !dbGradedRows.some(g => g.id === row.id)
           )
+          // 為 correction rows 補充 DB 資料（可能缺少 assignment_id 等）
+          let correctionDbRows = []
+          if (correctionRows.length > 0) {
+            try {
+              const correctionIds = correctionRows.map(r => r.id).filter(Boolean)
+              const { data } = await supabaseDb
+                .from('submissions')
+                .select('id, assignment_id, student_id, status, graded_at, grading_result, source')
+                .eq('owner_id', user.id)
+                .in('id', correctionIds)
+              correctionDbRows = data || []
+            } catch { /* non-fatal */ }
+          }
+          const stateTransitionRows = [...dbGradedRows, ...correctionDbRows]
+          console.log(`⏱️ [sync] stateTransitionRows: ${stateTransitionRows.length}/${submissionRows.length} (dbGraded=${dbGradedRows.length}, correction=${correctionDbRows.length})`)
+          if (stateTransitionRows.length > 0) {
+            await applySubmissionStateTransitions(supabaseDb, user.id, stateTransitionRows).catch(
+              (err) => console.warn('[sync] applySubmissionStateTransitions failed (non-fatal):', err?.message)
+            )
+          }
         }
         syncTimerEnd('submissions-transitions')
       }
 
       syncTimerEnd('submissions')
 
+      // sync push 不再包含 grading_result，改為檢查 status 或直接查 DB
       const touchedAssignments = new Set(
         submissionRows
           .filter((row) => row.assignment_id)
-          .filter((row) => row.grading_result !== undefined || row.status === 'graded')
+          .filter((row) => row.status === 'graded')
           .map((row) => row.assignment_id)
       )
 
