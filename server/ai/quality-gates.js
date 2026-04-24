@@ -164,11 +164,12 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds) {
   }
 
   // ── Bbox size anomaly ──
+  // min area 0.0001: 容許表格小格（4頁合併後 w≈0.045, h≈0.004 → area≈0.00018）
   const bboxes = visibleQuestions.filter((q) => q.answerBbox).map((q) => ({ id: q.questionId, ...q.answerBbox }))
   let sizeAnomalyCount = 0
   for (const b of bboxes) {
     const area = b.w * b.h
-    if (area < 0.0005 || area > 0.5) sizeAnomalyCount++
+    if (area < 0.0001 || area > 0.5) sizeAnomalyCount++
   }
   metrics.sizeAnomalyCount = sizeAnomalyCount
   if (bboxes.length > 0 && sizeAnomalyCount / bboxes.length > 0.2) {
