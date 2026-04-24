@@ -3116,7 +3116,8 @@ function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
 
 【SHORT WORD MODE】(correctAnswer has 1-2 words, e.g. "kitchen", "dining room"):
 Focus: does the student know the word?
-- SPACING ERROR (correct letters, wrong spacing, e.g. "bath room" → "bathroom"): minor → deduct 1 point.
+- SPACING ERROR — WRONG SPACE IN SINGLE WORD (correct letters but student inserted a space inside one word, e.g. "bath room" → "bathroom", "din ing" → "dining"): student does not know the word boundary → score = 0. This is NOT a minor error.
+- SPACING ERROR — MISSING SPACE IN TWO-WORD ANSWER (correct letters but student omitted the space between two words, e.g. "diningroom" → "dining room"): minor → deduct 1 point.
 - MISSPELLING (wrong/extra/missing letters, e.g. "writeing" → "writing", "kitchan" → "kitchen"): student cannot spell → score = 0.
 
 【SENTENCE MODE】(correctAnswer has 3+ words, e.g. "Dad is cooking in the kitchen."):
@@ -3281,7 +3282,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - score = Math.round(correctCount / totalCount * maxScore).
   - isCorrect = (correctCount === totalCount && studentSet.size === totalCount) [no extra codes AND all correct].
   - errorType: 'concept' if wrong/missing codes; 'blank' if studentAnswerRaw is blank/未作答.
-  - scoringReason: list which codes were correct, which were missing, which were extra (if any).
+  - scoringReason: use format「學生填入___，正確答案為___，（列出正確/缺少/多餘的代碼）」. e.g. "學生填入ㄅ、ㄇ，正確答案為ㄅ、ㄇ、ㄉ，漏填ㄉ".
 
 - MAP-FILL SCORING (地圖填圖題): If the AnswerKey question has acceptableAnswers (list of correct names) AND a long referenceAnswer describing positions:
   - The student's answer contains position:name pairs (e.g. "位置A: 泰國, 位置B: 越南").
@@ -3289,18 +3290,43 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - correctCount = number of positions where the student wrote the correct name.
   - score = Math.round(correctCount / totalPositions * maxScore).
   - isCorrect = (score === maxScore).
-  - scoringReason MUST explain which positions the student answered incorrectly by describing the error pattern (e.g. "學生將位置C和位置D填反，其他位置正確"). Do NOT just say "X/Y correct". Describe WHAT went wrong so the teacher understands.
+  - scoringReason MUST use format「學生將位置X填為「___」，正確答案為___，（錯誤描述）」. e.g. "學生將位置C填為「越南」、位置D填為「泰國」，正確答案為C=泰國、D=越南，兩者填反". Do NOT just say "X/Y correct".
 - MAP-DRAW SCORING (繪圖/標記題): The student's answer is a description of what was drawn and where (e.g. "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"). The referenceAnswer in the AnswerKey describes where the symbol SHOULD be placed.
   - Judge whether the drawn symbol is correct (right type of symbol).
   - Judge whether the position is correct by comparing the described location against the referenceAnswer's required coordinates/grid position.
   - A position is correct if the student placed it in the correct grid cell or within reasonable proximity of the required coordinate intersection.
-  - scoringReason should clearly explain: what symbol was drawn, where it was placed, and whether the position matches the requirement.
-- scoringReason must clearly explain WHY the answer is correct or incorrect. Write in Traditional Chinese.
-  - For correct answers: briefly confirm (e.g. "答案完全正確").
-  - For incorrect answers: describe the specific error pattern (e.g. "學生將九州寫成九洲，同音異字", "學生填寫的國名與實際位置不符").
-  - NEVER just state a score count like "9/11 correct".
-- scoringReason and feedbackBrief must NOT reveal the correct answer text, option, or number.
-- Never write phrases like "correct answer is ...", "應為 ...", "答案是 ...".
+  - scoringReason MUST use format「學生繪製___於___，正確位置為___，（位置/符號是否正確）」. e.g. "學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移".
+- scoringReason MUST follow a UNIFIED STRUCTURE. Write in Traditional Chinese. NEVER just state a score count like "9/11 correct".
+  STRUCTURE:
+  - Correct: 「學生寫/選「___」，答案正確」
+  - Wrong:   「學生寫/選「___」，正確答案為「___」，（具體錯誤原因）」
+  - Blank:   「學生未作答」
+  - Unreadable: 「學生作答內容無法辨識」
+
+  SCORING REASON TEMPLATES PER CATEGORY:
+  - single_choice:     correct→「學生選A，答案正確」 wrong→「學生選B，正確答案為A，選項判斷錯誤」
+  - true_false:        correct→「學生判斷○，答案正確」 wrong→「學生判斷○，正確答案為✕，此敘述不正確」
+  - single_check:      correct→「學生勾選第2項，答案正確」 wrong→「學生勾選第3項，正確答案為第2項，勾選錯誤」
+  - fill_blank:        correct→「學生寫「15公分」，答案正確」 wrong→「學生寫「15公尺」，正確答案為「15公分」，單位錯誤，公尺與公分不可互換」
+  - fill_variants:     correct→「學生寫「台灣」，答案正確，屬可接受答案」 wrong→「學生寫「台北」，正確答案為「台灣/臺灣」，不在可接受答案範圍內」
+  - multi_check/multi_choice: correct→「學生選①③④，答案正確」 wrong→「學生選①②③，正確答案為①③④，多選了②、漏選了④」
+  - multi_check_other: same as multi_check + append 其他 evaluation. e.g. 「學生選①②，正確答案為①③，多選了②、漏選了③；其他選項文字合理」
+  - multi_fill:        correct→「學生填入ㄅ、ㄇ、ㄉ，全部正確」 wrong→「學生填入ㄅ、ㄇ，正確答案為ㄅ、ㄇ、ㄉ，漏填ㄉ」
+  - calculation:       correct→「算式過程正確，最終答案36正確」 wrong→「學生最終答案為38，正確答案為36，第二步乘法運算錯誤」. When rubricsDimensions exist, describe each dimension: 「算式過程(2/3分)：第二步運算錯誤；最終答案(0/2分)：學生寫38，正確答案為36」
+  - word_problem:      correct→「列式正確，答句「36公分」正確」 wrong→「學生答句寫「36公尺」，正確答案為「36公分」，列式正確但答句單位錯誤」. When rubricsDimensions exist, describe each dimension: 「列式計算(2/3分)：算式正確但漏寫單位；答句(0/2分)：學生寫「36公尺」，正確答案為「36公分」，單位錯誤」
+  - short_answer:      correct→「學生回答內容完整，概念正確」 wrong→「學生寫「因為天氣很熱」，正確答案應涵蓋「蒸發作用」概念，學生僅描述現象未說明原理」. When rubricsDimensions exist, describe each dimension's score.
+  - matching:          correct→「學生配對「2公尺/秒」，答案正確」 wrong→「學生配對「3公尺/秒」，正確答案為「2公尺/秒」，配對錯誤」
+  - map_fill:          correct→「所有位置填寫正確」 wrong→「學生將位置C填為「越南」、位置D填為「泰國」，正確答案為C=泰國、D=越南，兩者填反」
+  - map_draw:          correct→「學生繪製颱風符號於右下格，位置與符號皆正確」 wrong→「學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移」
+  - diagram_color:     correct→「塗色比例2/3與位置皆正確」 wrong→「學生塗色比例約1/2，正確比例為2/3，塗色面積不足」
+  - diagram_draw:      correct→「圖表數值與標籤皆正確」 wrong→「學生標示番茄汁為60°，正確值為80°，數值偏差過大」
+
+  ENGLISH DOMAIN EXTRA (fill_blank / short_answer): When wrong, list each deduction item separately with format「扣分類型：學生寫___，正確為___，扣N分」:
+  - 「拼寫錯誤：學生寫 cookking，正確為 cooking，扣1分」
+  - 「大小寫錯誤：學生寫 apple，正確為 Apple，扣1分」
+  - 「標點錯誤：學生句尾缺少問號，扣1分」
+  - 「空格錯誤：學生寫 bath room，正確為 bathroom，不認識該單字，0分」
+  - 「字序錯誤：學生寫 Where your brother is?，正確為 Where is your brother?，is 位置不正確，扣1分」
 - Return strict JSON only.
 
 Output:
