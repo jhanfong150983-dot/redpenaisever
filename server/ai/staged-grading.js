@@ -1556,11 +1556,7 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
       if (!answerBbox && questionBbox) answerBbox = questionBbox
     }
 
-    // 表格題：強制用 refBbox.x 覆蓋 classify 的 answerBbox（w 在第二輪用欄寬計算）
-    const tableRefBbox = spec?.tablePosition?.refBbox
-    if (tableRefBbox && typeof tableRefBbox.x === 'number' && answerBbox) {
-      answerBbox = { ...answerBbox, x: tableRefBbox.x }
-    }
+    // 表格題：不在第一輪強制 x，保留 classify 原始偵測值，第二輪統一修正
 
     return {
       ...row,
@@ -1575,9 +1571,13 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
     }
   })
 
-  // 表格題第二輪：用同組欄位的 x 間距計算正確的 w，內縮 padding 避免看到鄰格
+  // 表格題第二輪：混合定位 — refBbox 提供相對間距，classify 提供絕對位置校準
+  // 1. 收集每格的 classify.x 和 refBbox.x
+  // 2. 計算中位數 offset（掃描水平偏移量）
+  // 3. 所有格子 x = refBbox.x + offset（保持精確相對間距，修正掃描偏移）
+  // 4. w = 欄間距 - padding（避免看到鄰格）
   const TABLE_CELL_PADDING = 0.008
-  const tableGroups = new Map() // key = "row-totalCols-totalRows" → [{index, col, x}]
+  const tableGroups = new Map() // key = "row-totalCols-totalRows" → [{index, col, classifyX, refX, refW}]
   for (let i = 0; i < alignedQuestions.length; i += 1) {
     const q = alignedQuestions[i]
     const spec = specByQuestionId.get(q.questionId)
@@ -1585,29 +1585,44 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
     if (!tp || !tp.refBbox || typeof tp.refBbox.x !== 'number') continue
     const groupKey = `${tp.row}-${tp.totalCols}-${tp.totalRows}`
     if (!tableGroups.has(groupKey)) tableGroups.set(groupKey, [])
-    tableGroups.get(groupKey).push({ index: i, col: tp.col, x: tp.refBbox.x, w: tp.refBbox.w || 0 })
+    tableGroups.get(groupKey).push({
+      index: i,
+      col: tp.col,
+      classifyX: q.answerBbox?.x ?? tp.refBbox.x,
+      refX: tp.refBbox.x,
+      refW: tp.refBbox.w || 0
+    })
   }
   for (const members of tableGroups.values()) {
+    // 計算掃描偏移量：classify.x 與 refBbox.x 的中位數差距
+    const offsets = members.map((m) => m.classifyX - m.refX)
+    offsets.sort((a, b) => a - b)
+    const medianOffset = offsets.length % 2 === 1
+      ? offsets[Math.floor(offsets.length / 2)]
+      : (offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2
+
     if (members.length < 2) {
-      // 單格：只強制 x，用 refBbox.w（無法從間距推算）
+      // 單格：用 refBbox.x + offset，用 refBbox.w
       const m = members[0]
       const q = alignedQuestions[m.index]
       if (q.answerBbox) {
-        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: m.x, w: m.w } }
+        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +(m.refX + medianOffset).toFixed(4), w: m.refW } }
       }
       continue
     }
     members.sort((a, b) => a.col - b.col)
     for (let j = 0; j < members.length; j += 1) {
       const m = members[j]
-      // 計算實際欄寬：與下一欄的 x 差距（最後一欄用前一欄的間距）
+      // x = refBbox.x + 掃描偏移量（保持 refBbox 的精確相對間距）
+      const correctedX = m.refX + medianOffset
+      // 計算實際欄寬：refBbox 的欄間距（比 classify 更準確）
       const colWidth = j < members.length - 1
-        ? members[j + 1].x - m.x
-        : (j > 0 ? m.x - members[j - 1].x : m.w)
+        ? members[j + 1].refX - m.refX
+        : (j > 0 ? m.refX - members[j - 1].refX : m.refW)
       // 內縮 padding，居中
-      const safeW = Math.max(colWidth - TABLE_CELL_PADDING, m.w, 0.02)
+      const safeW = Math.max(colWidth - TABLE_CELL_PADDING, m.refW, 0.02)
       const xShift = (colWidth - safeW) / 2
-      const safeX = m.x + xShift
+      const safeX = correctedX + xShift
       const q = alignedQuestions[m.index]
       if (q.answerBbox) {
         alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +safeX.toFixed(4), w: +safeW.toFixed(4) } }
