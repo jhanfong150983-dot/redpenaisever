@@ -1556,11 +1556,10 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
       if (!answerBbox && questionBbox) answerBbox = questionBbox
     }
 
-    // 表格題：強制用 refBbox 的 x/w 覆蓋 classify 的 answerBbox
-    // 答案卷和學生卷是同一份試卷，表格水平位置相同，refBbox.x 比 AI 判斷更可靠
+    // 表格題：強制用 refBbox.x 覆蓋 classify 的 answerBbox（w 在第二輪用欄寬計算）
     const tableRefBbox = spec?.tablePosition?.refBbox
-    if (tableRefBbox && typeof tableRefBbox.x === 'number' && typeof tableRefBbox.w === 'number' && answerBbox) {
-      answerBbox = { ...answerBbox, x: tableRefBbox.x, w: tableRefBbox.w }
+    if (tableRefBbox && typeof tableRefBbox.x === 'number' && answerBbox) {
+      answerBbox = { ...answerBbox, x: tableRefBbox.x }
     }
 
     return {
@@ -1575,6 +1574,46 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
         questionType === 'single_choice' ? normalizeBboxRef(row?.bracketBbox) : undefined
     }
   })
+
+  // 表格題第二輪：用同組欄位的 x 間距計算正確的 w，內縮 padding 避免看到鄰格
+  const TABLE_CELL_PADDING = 0.008
+  const tableGroups = new Map() // key = "row-totalCols-totalRows" → [{index, col, x}]
+  for (let i = 0; i < alignedQuestions.length; i += 1) {
+    const q = alignedQuestions[i]
+    const spec = specByQuestionId.get(q.questionId)
+    const tp = spec?.tablePosition
+    if (!tp || !tp.refBbox || typeof tp.refBbox.x !== 'number') continue
+    const groupKey = `${tp.row}-${tp.totalCols}-${tp.totalRows}`
+    if (!tableGroups.has(groupKey)) tableGroups.set(groupKey, [])
+    tableGroups.get(groupKey).push({ index: i, col: tp.col, x: tp.refBbox.x, w: tp.refBbox.w || 0 })
+  }
+  for (const members of tableGroups.values()) {
+    if (members.length < 2) {
+      // 單格：只強制 x，用 refBbox.w（無法從間距推算）
+      const m = members[0]
+      const q = alignedQuestions[m.index]
+      if (q.answerBbox) {
+        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: m.x, w: m.w } }
+      }
+      continue
+    }
+    members.sort((a, b) => a.col - b.col)
+    for (let j = 0; j < members.length; j += 1) {
+      const m = members[j]
+      // 計算實際欄寬：與下一欄的 x 差距（最後一欄用前一欄的間距）
+      const colWidth = j < members.length - 1
+        ? members[j + 1].x - m.x
+        : (j > 0 ? m.x - members[j - 1].x : m.w)
+      // 內縮 padding，居中
+      const safeW = Math.max(colWidth - TABLE_CELL_PADDING, m.w, 0.02)
+      const xShift = (colWidth - safeW) / 2
+      const safeX = m.x + xShift
+      const q = alignedQuestions[m.index]
+      if (q.answerBbox) {
+        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +safeX.toFixed(4), w: +safeW.toFixed(4) } }
+      }
+    }
+  }
 
   // matching group_context: same group shares one union bbox.
   const groupMeta = new Map()
