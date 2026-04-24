@@ -11,6 +11,7 @@ import {
   validateClassifyReadConsistency,
   validateReadAccessorConsistency
 } from './quality-gates.js'
+import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -5505,6 +5506,31 @@ Return JSON:
     needsReviewCount: unstableCount
   })
 
+  // Fire-and-forget: 寫入 Phase A stage log 到 Supabase
+  if (internalContext?.ownerId) {
+    const phaseALogData = extractPhaseALogData({
+      pipelineRunId,
+      classifyResult,
+      readAnswerResult: readAnswerParsed,
+      reReadAnswerResult: reReadAnswerParsed,
+      arbiterResult: Array.from(arbiterByQuestionId.entries()).map(([qId, r]) => ({ questionId: qId, ...r })),
+      stageResponses,
+      needsReviewCount: unstableCount,
+      stableCount,
+      diffCount: 0,
+      unstableCount
+    })
+    saveGradingStageLog({
+      ownerId: internalContext.ownerId,
+      assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
+      submissionId: internalContext.submissionId || payload?.submissionId || '',
+      pipelineRunId,
+      phase: 'phase_a',
+      model,
+      logData: phaseALogData
+    }).catch(() => {}) // fire-and-forget
+  }
+
   return {
     phaseAComplete: true,
     questionResults,
@@ -5921,6 +5947,26 @@ export async function runStagedGradingPhaseB({
     detailCount: Array.isArray(finalResult.details) ? finalResult.details.length : 0,
     needsReview: finalResult.needsReview
   })
+
+  // Fire-and-forget: 寫入 Phase B stage log 到 Supabase（含自動一致性比對）
+  if (internalContext?.ownerId) {
+    const phaseBLogData = extractPhaseBLogData({
+      pipelineRunId,
+      accessorResult,
+      explainResult,
+      finalResult,
+      stageResponses
+    })
+    saveGradingStageLog({
+      ownerId: internalContext.ownerId,
+      assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
+      submissionId: internalContext.submissionId || payload?.submissionId || '',
+      pipelineRunId,
+      phase: 'phase_b',
+      model,
+      logData: phaseBLogData
+    }).catch(() => {}) // fire-and-forget
+  }
 
   const usageMetadata = aggregateUsageMetadata(stageResponses)
   const stagedResponse = serializeCandidateJson(finalResult)

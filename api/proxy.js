@@ -572,7 +572,10 @@ export default async function handler(req, res) {
         answerKeyImages,
         answerSheetMode,
         questionBookletImages,
-        domainHint: payload?.domain || undefined
+        domainHint: payload?.domain || undefined,
+        ownerId: user.id,
+        assignmentId: payload?.assignmentId || undefined,
+        submissionId: payload?.submissionId || undefined
       }
     })
 
