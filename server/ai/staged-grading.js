@@ -1556,6 +1556,13 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
       if (!answerBbox && questionBbox) answerBbox = questionBbox
     }
 
+    // 表格題：強制用 refBbox 的 x/w 覆蓋 classify 的 answerBbox
+    // 答案卷和學生卷是同一份試卷，表格水平位置相同，refBbox.x 比 AI 判斷更可靠
+    const tableRefBbox = spec?.tablePosition?.refBbox
+    if (tableRefBbox && typeof tableRefBbox.x === 'number' && typeof tableRefBbox.w === 'number' && answerBbox) {
+      answerBbox = { ...answerBbox, x: tableRefBbox.x, w: tableRefBbox.w }
+    }
+
     return {
       ...row,
       questionType,
