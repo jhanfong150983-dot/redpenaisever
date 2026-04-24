@@ -229,9 +229,11 @@ export async function saveGradingStageLog({
 
     const { error } = await supabase.from('grading_stage_logs').insert(row)
     if (error) {
-      console.warn('[stage-log-writer] insert error:', error.message)
+      console.warn(`[stage-log-writer] insert error (${phase}):`, error.message, error.details || '')
+    } else {
+      console.log(`[stage-log] saved ${phase} run=${pipelineRunId} submission=${submissionId || '(empty)'}`)
     }
   } catch (err) {
-    console.warn('[stage-log-writer] saveGradingStageLog error:', err.message)
+    console.warn(`[stage-log-writer] saveGradingStageLog error (${phase}):`, err.message)
   }
 }
