@@ -242,6 +242,30 @@ async function fetchAnswerSheetImagesForClassify(supabaseAdmin, userId, assignme
   }
 }
 
+async function fetchQuestionBookletImages(supabaseAdmin, userId, assignmentId) {
+  try {
+    const { data: assignment } = await supabaseAdmin
+      .from('assignments')
+      .select('id, owner_id')
+      .eq('id', assignmentId)
+      .maybeSingle()
+    if (!assignment || assignment.owner_id !== userId) return []
+
+    const images = []
+    for (let i = 0; i < 20; i++) {
+      const path = `question-booklets/${assignmentId}/page-${i}.webp`
+      const { data, error } = await supabaseAdmin.storage.from('homework-images').download(path)
+      if (error || !data) break
+      const buffer = Buffer.from(await data.arrayBuffer())
+      images.push({ mimeType: 'image/webp', data: buffer.toString('base64') })
+    }
+    return images
+  } catch (err) {
+    console.warn('[QuestionBooklet] fetchQuestionBookletImages failed:', err?.message || err)
+    return []
+  }
+}
+
 async function resolveInkSession(supabaseAdmin, userId, inkSessionId) {
   if (!inkSessionId) return { ok: false, reason: 'no_session_id' }
 
@@ -515,6 +539,18 @@ export default async function handler(req, res) {
     }
   }
 
+  // ── 題本圖（Phase B explain 使用，answer_only 模式下需要題本圖來讀題目）────
+  const answerSheetMode = payload?.answerSheetMode || 'with_questions'
+  let questionBookletImages = []
+  if (routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId) {
+    questionBookletImages = await fetchQuestionBookletImages(
+      supabaseAdmin, user.id, payload.assignmentId
+    )
+    if (questionBookletImages.length > 0) {
+      console.log(`📖 [QuestionBooklet] 載入 ${questionBookletImages.length} 頁題本圖 assignmentId=${payload.assignmentId}`)
+    }
+  }
+
   try {
     const pipelineResult = await runAiPipeline({
       apiKey,
@@ -534,6 +570,8 @@ export default async function handler(req, res) {
         gradingMode,
         readAnswerSplitMode,
         answerKeyImages,
+        answerSheetMode,
+        questionBookletImages,
         domainHint: payload?.domain || undefined
       }
     })

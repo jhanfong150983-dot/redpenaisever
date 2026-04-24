@@ -2004,7 +2004,7 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
-function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answerKeyPageCount = 0, classifyCorrections = []) {
+function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answerKeyPageCount = 0, classifyCorrections = [], answerSheetMode = 'with_questions') {
   const specs = Array.isArray(questionSpecs) ? questionSpecs : []
 
   // Page boundary section: injected when the submission image is composed of multiple merged photos
@@ -2035,11 +2035,26 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
       })()
     : ''
 
+  const isAnswerOnly = answerSheetMode === 'answer_only'
+
+  const answerOnlySection = isAnswerOnly
+    ? `\nANSWER-ONLY SHEET MODE:
+This student submission is a PURE ANSWER SHEET — it contains ONLY question numbers and answer blanks/boxes. There is NO question stem text printed on this sheet.
+- Locate questions by their printed question NUMBERS only (e.g. "1", "2", "3" or "一", "二", "三").
+- The answer area is the blank space/box/line next to or below each question number.
+- Do NOT expect to see question stem text on the student sheet.
+- answerBbox should frame "question number + answer blank area" only.
+- For fill_blank sub-questions: each blank box is a separate sub-question. Use the same ordering rules (TOP-TO-BOTTOM, LEFT-TO-RIGHT).
+`
+    : ''
+
   return `
 You are stage CLASSIFY.
-Task: identify which question IDs are visible on this student submission image, and locate each visible question's bbox.
+Task: ${isAnswerOnly
+    ? 'identify which question numbers are visible on this answer sheet, and locate each visible question\'s answer blank bbox. The sheet contains ONLY question numbers and answer blanks — there is NO question stem text.'
+    : 'identify which question IDs are visible on this student submission image, and locate each visible question\'s bbox.'}
 Do NOT infer question type. Question type is fixed by specs.
-${imageReferenceSection}
+${imageReferenceSection}${answerOnlySection}
 Allowed question IDs:
 ${JSON.stringify(questionIds)}
 
@@ -2059,7 +2074,7 @@ Rules:
 - bboxPolicy MUST follow Question Specs:
   - full_image: questionBbox and answerBbox must both be {x:0,y:0,w:1,h:1}.
   - group_context: questions in the same bboxGroupId MUST share the same questionBbox/answerBbox.
-  - question_context: minimum bbox must include question number + stem + student answer area.
+  - question_context: ${isAnswerOnly ? 'minimum bbox must include question number + student answer blank area (no stem text on answer-only sheets).' : 'minimum bbox must include question number + stem + student answer area.'}
 - TABLE POSITION RULE (HIGHEST PRIORITY — when tablePosition is present in the spec, this rule OVERRIDES ALL other bbox rules including ANCHOR RULE, TABLE COLUMN RULE, and ORDERING RULE. Skip them entirely.):
     When a question spec includes tablePosition (e.g. {"col": 3, "row": 3, "totalCols": 7, "totalRows": 3}), the answer is in a TABLE GRID.
 
@@ -2090,7 +2105,7 @@ Rules:
 
     8. Output tablePositionReasoning (MANDATORY): format: "refBbox.x=X, applied x=Y. Target col=N → [header]. bbox=[x,y,w,h]"
 - For visible=true questions with question_context/group_context, output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
-  - Include the question number, question stem text, AND the student's answer area all within the bbox.
+  - ${isAnswerOnly ? 'Include the question number and the student\'s answer blank area within the bbox. There is no question stem text on answer-only sheets.' : 'Include the question number, question stem text, AND the student\'s answer area all within the bbox.'}
   - For map_draw, diagram_draw, and diagram_color: frame the entire diagram/map/grid area plus any visible question stem above it.
   - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer. If the calculation question has a table cell (student fills a value in a table) AND a work/formula area elsewhere on the page, the answerBbox must cover BOTH the table cell AND the work area — do NOT crop just the table cell alone.
   - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must be a TIGHT crop of ONLY that single blank box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box. ANCHOR RULE (MANDATORY — takes priority): if the spec includes anchorHint, it is the AUTHORITATIVE locator for this question's cell. You MUST locate the exact cell described by the anchorHint and place the bbox precisely on that cell. TABLE COLUMN RULE: when the anchorHint references a column header (e.g. "標題『建功國中』正下方"), find that column header's horizontal position, then trace STRAIGHT DOWN to the target row. The answerBbox left and right edges MUST NOT extend beyond that column's boundaries — content from adjacent columns is FORBIDDEN. Each anchorHint uniquely identifies one cell; if your bbox could plausibly contain content from a neighboring column, it is WRONG — shrink it. Only fall back to ORDERING RULE when no anchorHint is provided. ORDERING RULE (fallback only): assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). Do NOT re-order based on content — position is the only criterion. readBbox is NOT needed for sub-question fill_blank (answerBbox is already tight).
@@ -3396,7 +3411,8 @@ function buildExplainPrompt(
   readAnswerResult,
   accessorResult,
   explainQuestionIds,
-  domainHint
+  domainHint,
+  answerSheetMode = 'with_questions'
 ) {
   const explainSet = new Set(explainQuestionIds)
   const keyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
@@ -3410,7 +3426,9 @@ function buildExplainPrompt(
 
   return `
 You are stage Explain. Your job is to write STUDENT-FACING correction guidance for each wrong question.
-The student's homework image is attached. Use it actively.
+${answerSheetMode === 'answer_only'
+    ? 'The QUESTION BOOKLET image is attached (the student\'s answer sheet has no question text). Use the question booklet to read the actual question text for each wrong question.'
+    : 'The student\'s homework image is attached. Use it actively.'}
 
 AUDIENCE: Taiwan elementary school students (小學生). Use simple, everyday spoken Chinese — the kind a caring teacher would say face-to-face. Middle schoolers can read this too, so clarity matters more than difficulty level.
 
@@ -3427,8 +3445,9 @@ Scoring analysis (wrong questions only) — use scoringReason as your primary ba
 ${JSON.stringify(wrongScores)}
 
 == STEP-BY-STEP for each wrong question ==
-1. Find the question in the attached image by its ID or position number.
-2. Read the ACTUAL question text from the image carefully.
+${answerSheetMode === 'answer_only'
+    ? '1. Find the question in the attached QUESTION BOOKLET image by its ID or position number.\n2. Read the ACTUAL question text from the question booklet carefully.'
+    : '1. Find the question in the attached image by its ID or position number.\n2. Read the ACTUAL question text from the image carefully.'}
 3. Read the student's answer and the scoringReason to understand exactly what went wrong.
 4. Write studentGuidance following the THREE-PART structure below.
 
@@ -3889,7 +3908,8 @@ export async function runStagedGradingPhaseA({
   const answerKeyImageParts = rawAnswerKeyImages.map(img => ({
     inlineData: { mimeType: img.mimeType || 'image/webp', data: img.data }
   }))
-  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length}`)
+  const answerSheetMode = internalContext?.answerSheetMode || 'with_questions'
+  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length} answerSheetMode=${answerSheetMode}`)
 
   const stageResponses = []
   const stageWarnings = []
@@ -3971,7 +3991,7 @@ export async function runStagedGradingPhaseA({
     const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
     const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
     const akPageCount = answerKeyImageParts.length > 0 ? answerKeyImageParts.length : 0
-    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, akPageCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, akPageCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
     const classifyResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
@@ -4015,7 +4035,7 @@ export async function runStagedGradingPhaseA({
           const akPage = answerKeyImageParts[pageNum - 1]
           const akParts = akPage ? [akPage] : []
           const akCount = akPage ? 1 : 0
-          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
@@ -4059,7 +4079,7 @@ export async function runStagedGradingPhaseA({
           const akParts = akPage ? [akPage] : []
           const akCount = akPage ? 1 : 0
           // No pageBreaks — single-page image, AI outputs bbox in 0~1 relative to this page
-          const prompt = buildClassifyPrompt(ids, specs, [], akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+          const prompt = buildClassifyPrompt(ids, specs, [], akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           const pageImagePart = { inlineData: splitPages[i].inlineData }
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
@@ -4187,7 +4207,7 @@ export async function runStagedGradingPhaseA({
       const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
       const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
       const akPageCount = answerKeyImageParts.length > 0 ? answerKeyImageParts.length : 0
-      const retryPrompt = buildClassifyPrompt(ids, specs, pageBreaks, akPageCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+      const retryPrompt = buildClassifyPrompt(ids, specs, pageBreaks, akPageCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
       const retryResp = await executeStage({
         apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
@@ -4216,7 +4236,7 @@ export async function runStagedGradingPhaseA({
           const akPage = answerKeyImageParts[pageNum - 1]
           const akParts = akPage ? [akPage] : []
           const akCount = akPage ? 1 : 0
-          const prompt = buildClassifyPrompt(ids, specs, useSplit ? [] : pageBreaks, akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)))
+          const prompt = buildClassifyPrompt(ids, specs, useSplit ? [] : pageBreaks, akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           const imgPart = useSplit ? { inlineData: splitPages[i].inlineData } : submissionImageParts[0]
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
@@ -5463,6 +5483,16 @@ export async function runStagedGradingPhaseB({
   const inlineImages = extractInlineImages(contents)
   const submissionImageParts = inlineImages.length > 0 ? [inlineImages[0]] : []
 
+  // 答案卷模式 + 題本圖（answer_only 模式下 Explain 用題本圖而非學生答案卷）
+  const answerSheetMode = internalContext?.answerSheetMode || 'with_questions'
+  const rawBookletImages = Array.isArray(internalContext?.questionBookletImages) ? internalContext.questionBookletImages : []
+  const questionBookletImageParts = rawBookletImages.map(img => ({
+    inlineData: { mimeType: img.mimeType || 'image/webp', data: img.data }
+  }))
+  const explainImageParts = answerSheetMode === 'answer_only' && questionBookletImageParts.length > 0
+    ? questionBookletImageParts
+    : submissionImageParts
+
   const phaseBStartedAt = Date.now()
   const PHASE_B_BUDGET_MS = 180_000
   const getRemainingBudget = () => Math.max(1000, PHASE_B_BUDGET_MS - (Date.now() - phaseBStartedAt))
@@ -5718,7 +5748,8 @@ export async function runStagedGradingPhaseB({
       finalReadAnswerResult,
       accessorResult,
       explainQuestionIds,
-      internalContext?.domainHint
+      internalContext?.domainHint,
+      answerSheetMode
     )
     logStageStart(pipelineRunId, 'explain')
     const explainResponse = await executeStage({
@@ -5728,7 +5759,7 @@ export async function runStagedGradingPhaseB({
       timeoutMs: getRemainingBudget(),
       routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_EXPLAIN,
-      stageContents: [{ role: 'user', parts: [{ text: explainPrompt }, ...submissionImageParts] }]
+      stageContents: [{ role: 'user', parts: [{ text: explainPrompt }, ...explainImageParts] }]
     })
     logStageEnd(pipelineRunId, 'explain', explainResponse)
     stageResponses.push(explainResponse)
@@ -5754,7 +5785,7 @@ export async function runStagedGradingPhaseB({
       const retryExplainResp = await executeStage({
         apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_EXPLAIN,
-        stageContents: [{ role: 'user', parts: [{ text: explainPrompt }, ...submissionImageParts] }]
+        stageContents: [{ role: 'user', parts: [{ text: explainPrompt }, ...explainImageParts] }]
       })
       logStageEnd(pipelineRunId, 'explain-qg-retry', retryExplainResp)
       stageResponses.push(retryExplainResp)

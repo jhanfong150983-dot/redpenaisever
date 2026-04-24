@@ -112,15 +112,19 @@ async function handleAnswerSheetDownload(req, res, user, supabaseDb) {
 }
 
 async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
-  const { assignmentId, imagesBase64 } = req.body ?? {}
+  const { assignmentId, imagesBase64, storagePrefix } = req.body ?? {}
   if (!assignmentId || typeof assignmentId !== 'string') {
     res.status(400).json({ error: 'Missing assignmentId' }); return
   }
   if (!Array.isArray(imagesBase64) || imagesBase64.length === 0) {
     res.status(400).json({ error: 'Missing imagesBase64 array' }); return
   }
-  if (imagesBase64.length > MAX_ANSWER_SHEET_PAGES) {
-    res.status(400).json({ error: `Too many pages (max ${MAX_ANSWER_SHEET_PAGES})` }); return
+  // 允許 answer-sheets（預設）和 question-booklets 兩種前綴
+  const allowedPrefixes = ['answer-sheets', 'question-booklets']
+  const prefix = allowedPrefixes.includes(storagePrefix) ? storagePrefix : 'answer-sheets'
+  const maxPages = prefix === 'question-booklets' ? 20 : MAX_ANSWER_SHEET_PAGES
+  if (imagesBase64.length > maxPages) {
+    res.status(400).json({ error: `Too many pages (max ${maxPages})` }); return
   }
 
   const own = await verifyAssignmentOwnership(supabaseDb, assignmentId, user.id)
@@ -134,11 +138,12 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
     if (buffer.length > MAX_ANSWER_SHEET_IMAGE_SIZE) {
       res.status(400).json({ error: `Page ${i} exceeds max size of 2 MB` }); return
     }
+    const storagePath = `${prefix}/${assignmentId}/page-${i}.webp`
     const { error: uploadError } = await supabaseDb.storage
       .from('homework-images')
-      .upload(answerSheetPath(assignmentId, i), buffer, { contentType: 'image/webp', upsert: true })
+      .upload(storagePath, buffer, { contentType: 'image/webp', upsert: true })
     if (uploadError) { res.status(500).json({ error: `Upload failed for page ${i}: ${uploadError.message}` }); return }
-    paths.push(answerSheetPath(assignmentId, i))
+    paths.push(storagePath)
   }
   res.status(200).json({ paths })
 }
