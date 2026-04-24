@@ -2202,6 +2202,23 @@ async function handleSaveGrading(req, res) {
         .eq('owner_id', user.id)
       if (!error) updated++
     }
+    // 觸發學生端狀態轉換（graded_once、訂正流程等）
+    if (updated > 0) {
+      try {
+        // 查詢剛更新的 submissions 來取得 assignment_id
+        const updatedIds = submissions.filter(s => s?.id).map(s => s.id)
+        const { data: updatedSubs } = await supabaseDb
+          .from('submissions')
+          .select('id, assignment_id, student_id, status, graded_at, grading_result, source')
+          .eq('owner_id', user.id)
+          .in('id', updatedIds)
+        if (updatedSubs && updatedSubs.length > 0) {
+          await applySubmissionStateTransitions(supabaseDb, user.id, updatedSubs)
+        }
+      } catch (err) {
+        console.warn('[save-grading] applySubmissionStateTransitions failed (non-fatal):', err?.message)
+      }
+    }
     res.status(200).json({ success: true, updated })
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : '儲存失敗' })
