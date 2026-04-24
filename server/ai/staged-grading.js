@@ -2752,24 +2752,37 @@ FILL-BLANK (questions in FILL-BLANK list):
   This forces you to examine each letter individually. If rawSpelling disagrees with studentAnswerRaw, rawSpelling is authoritative.
 
 CALCULATION (questions in CALCULATION list):
-- Read the ENTIRE answer work area: formula steps (橫式/直式) AND the final result.
-- Copy ALL calculation content written by the student, including intermediate steps.
+- 🚨 LINE-BY-LINE TRANSCRIPTION (absolute rule):
+  Scan the student's work area from TOP to BOTTOM. For each PHYSICAL LINE of handwriting, output exactly what that line contains. Separate lines with "\\n" (newline) in studentAnswerRaw.
+  - Each physical line of handwriting = one output line. Do NOT merge multiple lines into one. Do NOT split one line into multiple.
+  - The number of output lines MUST MATCH the number of physical handwritten lines visible in the image.
+  - FORBIDDEN: inserting steps the student did not write. If the student jumped from step A directly to step C, output A and C only — do NOT insert step B.
+  - FORBIDDEN: rewriting or reorganizing the student's work in a "cleaner" or "more logical" order.
+  - You are a line-by-line photocopier. You have ZERO math knowledge. You cannot tell if a step is "missing" because you do not understand math.
 - Copy exactly as written: "25×6=150" → output "25×6=150"; wrong calc "6+3=8" → output "6+3=8".
 - Include the final answer line if present (e.g. "答: 150" or just "= 150").
 - STRIP printed question labels: do NOT include any printed label that appears before the student's formula (e.g. "東北亞：", "A：", "B：", "①：", "(1)"). Output only from the first digit, operator, or bracket of the student's written content.
 - If the work area is blank (no fresh marks) → status="blank".
-- VERTICAL FORMAT (直式): If the student uses a vertical layout (直式加/減/乘/除), convert it to a horizontal equation for output. Copy the student's written numbers exactly — do NOT recalculate or correct errors.
+- SELF-CORRECTION (student crossed out with blue/black ink): If a line is crossed out by the student, SKIP that line entirely. Read only the final version the student intended.
+- VERTICAL FORMAT (直式): If the student uses a vertical layout (直式加/減/乘/除), convert it to a horizontal equation for output. This counts as ONE output line. Copy the student's written numbers exactly — do NOT recalculate or correct errors.
   - 直式除法: identify dividend (被除數), divisor (除數), quotient (商), remainder (餘數 if any). Output as "[dividend]÷[divisor]=[quotient]" or "[dividend]÷[divisor]=[quotient]…[remainder]" if remainder > 0.
   - 直式乘法: identify multiplicand, multiplier, product. Output as "[multiplicand]×[multiplier]=[product]".
   - 直式加法/減法: output as "[top]±[bottom]=[result]".
   - CRITICAL: Copy the student's written numbers as-is. If the student wrote a wrong quotient (e.g. 25 instead of 26), output 25. NEVER verify or correct the arithmetic.
+- Example (3-line student work):
+  Student wrote three lines:
+    1/2×2/3+2/3
+    =3/3
+    =1
+  Output: studentAnswerRaw = "1/2×2/3+2/3\\n=3/3\\n=1" (3 lines, matching 3 physical lines)
+  WRONG output: "1/2×2/3+2/3 = 1/3+2/3 = 1" (merged into 1 line, inserted a step "1/3+2/3" that student never wrote)
 
 WORD-PROBLEM (questions in WORD-PROBLEM list):
-- Read the ENTIRE answer work area: ALL formula lines, intermediate steps, AND the final answer sentence (答:/A:/Ans:).
-- Copy ALL student-written content in reading order (top to bottom, left to right).
+- 🚨 LINE-BY-LINE TRANSCRIPTION: Same rule as CALCULATION — scan top to bottom, one output line per physical handwritten line, separated by "\\n". Output line count must match physical line count.
+- FORBIDDEN: inserting steps, merging lines, or reorganizing the student's work.
 - Include the final answer sentence if present (e.g. "答: 小明走了120公尺").
 - If the work area is blank (no fresh marks) → status="blank".
-- VERTICAL FORMAT (直式): Same conversion rule as CALCULATION above — convert 直式 to horizontal equation, copy student's numbers faithfully without correction.
+- VERTICAL FORMAT (直式): Same conversion rule as CALCULATION above — convert 直式 to horizontal equation (counts as one line), copy student's numbers faithfully without correction.
 
 PROPORTION TABLE FORMAT (比例式格式) — applies to WORD-PROBLEM and CALCULATION questions:
 Students in Taiwan write ratio-scaling in several visual layouts. ALL of the following count as valid 列式:
