@@ -2139,32 +2139,23 @@ Rules:
 - TABLE POSITION RULE (HIGHEST PRIORITY — when tablePosition is present in the spec, this rule OVERRIDES ALL other bbox rules including ANCHOR RULE, TABLE COLUMN RULE, and ORDERING RULE. Skip them entirely.):
     When a question spec includes tablePosition (e.g. {"col": 3, "row": 3, "totalCols": 7, "totalRows": 3}), the answer is in a TABLE GRID.
 
-    【參考座標定位法】（最優先）
-    當 tablePosition 包含 refBbox（答案卷上該格的精確座標）時，直接以 refBbox.x 作為 answerBbox 的 x 起點，refBbox.w 作為寬度。
-    答案卷和學生卷是同一份試卷，表格的水平位置相同，因此 refBbox 的 x 座標可直接套用。
+    【格線偵測法】（唯一定位方法 — 必須在學生卷圖片上實際偵測格線）
     步驟：
-    1. answerBbox.x = refBbox.x
-    2. answerBbox.w = refBbox.w
-    3. answerBbox.y 和 answerBbox.h：找到學生卷上表格的目標列（row），用該列的上下格線決定 y 和 h
-    4. 不需要自己數垂直格線 — refBbox 已經提供精確的 x 定位
-
-    【格線計數法】（僅當 refBbox 不存在時使用的備援方案）
-    步驟：
-    1. 找到表格的外框邊界（最外圍的格線）
+    1. 在 STUDENT_SUBMISSION 圖片上找到表格的外框邊界（最外圍的格線）
     2. 數垂直格線（含左右外框）：從左到右依序編號 V1, V2, V3, ..., V(N+1)。N+1 條垂直線 = N 欄
     3. 數水平格線（含上下外框）：從上到下依序編號 H1, H2, H3, ..., H(M+1)。M+1 條水平線 = M 列
     4. 第 C 欄 = V(C) 與 V(C+1) 之間的空間。第 R 列 = H(R) 與 H(R+1) 之間的空間
     5. 驗證：totalCols（spec 給的）應等於你數的垂直線數 - 1。若不符，重新計數
     6. 目標格 bbox: x = V(col) 的 x 座標, y = H(row) 的 y 座標, w = V(col+1) - V(col), h = H(row+1) - H(row)
+    ⚠️ 重要：你必須在學生卷圖片上實際找到格線位置。不要直接複製 refBbox 的座標 — refBbox 來自答案卷，可能因掃描對齊差異而有水平偏移。
+    refBbox 僅供驗證用：如果你偵測到的 x 與 refBbox.x 差距超過 0.08，代表格線計數可能有誤，請重新計數。
 
     🚨 空白格防漂移規則（最高優先）：
     當目標格內沒有任何學生手寫內容（空白格）時，你仍然必須將 answerBbox 放在該空白格的正確位置上。
     嚴禁因為目標格是空白的，就把 bbox 漂移到相鄰的有內容的格子。
     bbox 的位置由座標決定，與格內是否有內容完全無關。
 
-    ⚠️ 自我驗證：輸出 bbox 後，確認 bbox.x 與 refBbox.x 的差距不超過 0.02。若差距過大，代表定位錯誤，應優先採用 refBbox.x。
-
-    8. Output tablePositionReasoning (MANDATORY): format: "refBbox.x=X, applied x=Y. Target col=N → [header]. bbox=[x,y,w,h]"
+    8. Output tablePositionReasoning (MANDATORY): format: "detected V-lines=[x1,x2,...]. Target col=N → V(N)=x, V(N+1)=x2. refBbox.x=X (verify). bbox=[x,y,w,h]"
 - For visible=true questions with question_context/group_context, output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
   - ${isAnswerOnly ? 'Include the question number and the student\'s answer blank area within the bbox. There is no question stem text on answer-only sheets.' : 'Include the question number, question stem text, AND the student\'s answer area all within the bbox.'}
   - For map_draw, diagram_draw, and diagram_color: frame the entire diagram/map/grid area plus any visible question stem above it.
