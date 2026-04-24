@@ -1521,7 +1521,7 @@ function buildBboxUnion(bboxes) {
   }
 }
 
-function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
+function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 1) {
   const alignedRaw = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
   if (alignedRaw.length === 0) return classifyResult
 
@@ -1577,7 +1577,8 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
   // 3. 所有格子 x = refBbox.x + offset（保持精確相對間距，修正掃描偏移）
   // 4. w = 欄間距 - padding（避免看到鄰格）
   const TABLE_CELL_PADDING = 0.008
-  const tableGroups = new Map() // key = "row-totalCols-totalRows" → [{index, col, classifyX, refX, refW}]
+  const pageScale = 1 / (totalPages || 1) // per-page coords → full-image coords 的比例
+  const tableGroups = new Map() // key = "row-totalCols-totalRows" → [{index, col, classifyX, refX, refW, refH}]
   for (let i = 0; i < alignedQuestions.length; i += 1) {
     const q = alignedQuestions[i]
     const spec = specByQuestionId.get(q.questionId)
@@ -1590,7 +1591,8 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
       col: tp.col,
       classifyX: q.answerBbox?.x ?? tp.refBbox.x,
       refX: tp.refBbox.x,
-      refW: tp.refBbox.w || 0
+      refW: tp.refBbox.w || 0,
+      refH: tp.refBbox.h || 0
     })
   }
   for (const members of tableGroups.values()) {
@@ -1601,12 +1603,17 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
       ? offsets[Math.floor(offsets.length / 2)]
       : (offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2
 
+    // 計算目標列的最大高度：refBbox.h（per-page）轉 full-image，給 1.5 倍餘量
+    const refHFullImage = (members[0].refH || 0.02) * pageScale
+    const maxH = Math.max(refHFullImage * 1.5, 0.005)
+
     if (members.length < 2) {
-      // 單格：用 refBbox.x + offset，用 refBbox.w
+      // 單格：用 refBbox.x + offset，用 refBbox.w，限制 h
       const m = members[0]
       const q = alignedQuestions[m.index]
       if (q.answerBbox) {
-        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +(m.refX + medianOffset).toFixed(4), w: m.refW } }
+        const cappedH = Math.min(q.answerBbox.h, maxH)
+        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +(m.refX + medianOffset).toFixed(4), w: m.refW, h: +cappedH.toFixed(4) } }
       }
       continue
     }
@@ -1625,7 +1632,9 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
       const safeX = correctedX + xShift
       const q = alignedQuestions[m.index]
       if (q.answerBbox) {
-        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +safeX.toFixed(4), w: +safeW.toFixed(4) } }
+        // 限制 h：只裁切目標列，不包含表頭和人數列
+        const cappedH = Math.min(q.answerBbox.h, maxH)
+        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +safeX.toFixed(4), w: +safeW.toFixed(4), h: +cappedH.toFixed(4) } }
       }
     }
   }
@@ -4078,7 +4087,7 @@ export async function runStagedGradingPhaseA({
     if (classifyResponse.warnings.length > 0) stageWarnings.push(...classifyResponse.warnings.map((w) => `[classify-p1] ${w}`))
     const classifyParsed = parseCandidateJson(classifyResponse.data)
     if (!classifyParsed || typeof classifyParsed !== 'object') throw new Error('PhaseA classify parse failed')
-    classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs)
+    classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs, pageEntries.length || 1)
   } else {
     // Multi-page: split merged image into individual pages, one classify call per page (parallel).
     // Each call gets ONLY its page's image → AI outputs bbox in single-page coords (0~1)
@@ -4135,7 +4144,7 @@ export async function runStagedGradingPhaseA({
         coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-      }, classifyQuestionSpecs)
+      }, classifyQuestionSpecs, pageEntries.length || 1)
     } else {
       // Success: each page gets its own cropped image — no pageBreaks needed in prompt
       logStaged(pipelineRunId, stagedLogLevel, 'classify split success', {
@@ -4203,7 +4212,7 @@ export async function runStagedGradingPhaseA({
         coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-      }, classifyQuestionSpecs)
+      }, classifyQuestionSpecs, pageEntries.length || 1)
     }
   }
 
@@ -4288,7 +4297,7 @@ export async function runStagedGradingPhaseA({
       if (retryResp.ok) {
         const retryParsed = parseCandidateJson(retryResp.data)
         if (retryParsed && typeof retryParsed === 'object') {
-          classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs)
+          classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs, pageEntries.length || 1)
           const retryQG = validateClassifyQuality(classifyResult, questionIds)
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: retryQG.severity, warnings: retryQG.warnings
@@ -4342,7 +4351,7 @@ export async function runStagedGradingPhaseA({
             coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
             unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
             pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-          }, classifyQuestionSpecs)
+          }, classifyQuestionSpecs, pageEntries.length || 1)
           const retryQG = validateClassifyQuality(classifyResult, questionIds)
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: retryQG.severity, warnings: retryQG.warnings
