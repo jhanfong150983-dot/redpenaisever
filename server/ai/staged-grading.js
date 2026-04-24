@@ -2738,6 +2738,11 @@ FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
 - Empty blank → "_". Unreadable blank → "?". All blanks empty → status="blank".
 - FORBIDDEN: surrounding printed text ("答", underline markers).
+- 🚨 MATH FILL-BLANK RULE (數學填充題):
+  For math fill-in-the-blank questions, students often write auxiliary calculations (輔助計算/草稿) next to or near the blank — such as vertical arithmetic (直式), scratch formulas, or intermediate steps.
+  IGNORE all auxiliary calculations. Read ONLY the final answer written INSIDE the parentheses ( ) or blank line ___.
+  The auxiliary work is the student's scratch process and is NOT part of the answer.
+  Example: student wrote "25×4=100" as scratch work nearby, and filled "100" inside the ( ) → output "100" only.
 - 🚨 ENGLISH SPELLING RULE (for English domain fill_blank):
   DO NOT auto-correct spelling. Copy each letter EXACTLY as the student wrote it.
   "dinng" stays "dinng" (NOT "dining"). "kitchan" stays "kitchan" (NOT "kitchen").
