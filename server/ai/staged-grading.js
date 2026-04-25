@@ -1170,6 +1170,29 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
   const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
   const byQuestionId = mapByQuestionId(questions, (item) => item?.id)
 
+  // 計算 fill_blank 子題的 ordinal（同父題內第幾個）
+  // e.g. 1-3-1-1 和 1-3-1-2 → parentId=1-3-1, ordinal=1/2, total=2
+  const fillBlankOrdinalMap = new Map()
+  const parentGroups = new Map()
+  for (const qId of questionIds) {
+    const parts = qId.split('-')
+    if (parts.length < 3) continue
+    const q = byQuestionId.get(qId)
+    const expectedType = q ? resolveExpectedQuestionType(q) : 'fill_blank'
+    if (expectedType !== 'fill_blank') continue
+    // 跳過表格型
+    if (q?.tablePosition) continue
+    const parentId = parts.slice(0, -1).join('-')
+    if (!parentGroups.has(parentId)) parentGroups.set(parentId, [])
+    parentGroups.get(parentId).push(qId)
+  }
+  for (const [parentId, children] of parentGroups) {
+    if (children.length < 2) continue  // 只有一個子題不需要 ordinal
+    for (let i = 0; i < children.length; i++) {
+      fillBlankOrdinalMap.set(children[i], { ordinal: i + 1, totalBlanks: children.length })
+    }
+  }
+
   return questionIds.map((questionId) => {
     const question = byQuestionId.get(questionId)
     const expectedType = question ? resolveExpectedQuestionType(question) : 'fill_blank'
@@ -1209,6 +1232,12 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     const skipAnchorForFillBlankSubQ = isFillBlankSubQ
     if (akAnchorHint && anchorHintUsefulTypes.has(expectedType) && (expectedType !== 'fill_blank' || isSubQuestion) && !skipAnchorForFillBlankSubQ) {
       spec.anchorHint = akAnchorHint
+    }
+    // fill_blank 子題加上 ordinal（同一行第幾個填空）
+    const ordinalInfo = fillBlankOrdinalMap.get(questionId)
+    if (ordinalInfo) {
+      spec.blankOrdinal = ordinalInfo.ordinal
+      spec.blankTotal = ordinalInfo.totalBlanks
     }
     // 表格座標定位（優先於 anchorHint）
     if (question?.tablePosition && typeof question.tablePosition.col === 'number' && typeof question.tablePosition.row === 'number') {
@@ -2206,7 +2235,8 @@ Rules:
   - For map_draw, diagram_draw, and diagram_color: frame the entire diagram/map/grid area plus any visible question stem above it.
   - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer. If the calculation question has a table cell (student fills a value in a table) AND a work/formula area elsewhere on the page, the answerBbox must cover BOTH the table cell AND the work area — do NOT crop just the table cell alone.
   - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must frame the student's handwritten answer inside that blank.
-    BLANK BBOX RULE: Fill-in-the-blank questions have blanks embedded in printed sentences, marked by ( ), □, or ___. The student writes their answer INSIDE these marks. The answerBbox must frame the student's handwritten answer inside the correct blank for THIS question (identified by anchorHint).
+    BLANK BBOX RULE: Fill-in-the-blank questions have blanks embedded in printed sentences, marked by ( ), □, or ___. The student writes their answer INSIDE these marks.
+    ORDINAL RULE (MANDATORY when blankOrdinal is present): When the spec includes blankOrdinal and blankTotal, this line contains MULTIPLE blanks. You MUST count the blanks from LEFT to RIGHT on the same printed line, and frame the Nth blank (where N = blankOrdinal). Example: if blankOrdinal=1, blankTotal=2, the line has 2 blanks — frame the FIRST (leftmost) blank. If blankOrdinal=2, frame the SECOND blank. Do NOT be attracted to handwriting in adjacent blanks.
     Examples:
     - Parentheses: 印刷文字「答案是(　　　)元」→ student wrote "150" inside ( ) → frame "150", NOT the printed text around it
     - Square box: 印刷文字「2½ □ (4.73 □ 2.73)」→ student wrote "×" inside □ → frame "×"
