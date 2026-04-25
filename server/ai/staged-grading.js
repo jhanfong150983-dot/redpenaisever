@@ -1559,28 +1559,19 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
 
     // 表格題：不在第一輪強制 x，保留 classify 原始偵測值，第二輪統一修正
 
-    // fill_blank 子題（3+ segments）：用 answerBboxHint 強制定位
-    // 這些題目的 bbox 不穩定（每次 classify 切到不同位置），用答案卷座標固定
-    // answerBboxHint 是 per-page 座標，需要轉換為 full-image 座標
+    // fill_blank 子題（3+ segments）：修正 bbox 比例
+    // 位置用 classify 的（適應學生卷），比例強制寬矮（括號型填空特徵）
+    // 表格型填空有 tablePosition → 跳過，交給第二輪表格後處理
     const isSubQ = questionType === 'fill_blank' && questionId.split('-').length >= 3
-    const hint = spec?.answerBboxHint
-    if (isSubQ && hint && typeof hint.x === 'number' && typeof hint.y === 'number' && answerBbox && !spec?.tablePosition) {
-      // 括號型填空 (　　　)：用 answerBboxHint 強制定位，寬而矮
-      // 表格型填空有 tablePosition → 跳過，交給第二輪表格後處理（需要 classify 原始 x 算偏移）
-      const pageNum = parseInt(String(questionId).split('-')[0], 10) || 1
+    if (isSubQ && answerBbox && !spec?.tablePosition) {
       const pageHeight = 1 / (totalPages || 1)
-      const pageStartY = (pageNum - 1) * pageHeight
-      // h 上限：per-page 0.012（約頁面 1.2%，一行手寫高度）
-      // w 下限：per-page 0.08（確保覆蓋整個括號區域）
-      const MAX_PAREN_H = 0.008   // 頁面 0.8%，約一行手寫高度
-      const MIN_PAREN_W = 0.15    // 頁面 15%，覆蓋整個 (　　　) 括號區域
-      const cappedH = Math.min(hint.h || 0.012, MAX_PAREN_H)
-      const ensuredW = Math.max(hint.w || 0.08, MIN_PAREN_W)
+      const MAX_PAREN_H_FULL = 0.008 * pageHeight  // 頁面 0.8%（full-image coords）
+      const MIN_PAREN_W = 0.15                      // 頁面 15%
       answerBbox = {
-        x: hint.x,
-        y: +(pageStartY + hint.y * pageHeight).toFixed(4),
-        w: ensuredW,
-        h: +(cappedH * pageHeight).toFixed(4)
+        x: answerBbox.x,
+        y: answerBbox.y,
+        w: Math.max(answerBbox.w, MIN_PAREN_W),
+        h: Math.min(answerBbox.h, MAX_PAREN_H_FULL)
       }
     }
 
