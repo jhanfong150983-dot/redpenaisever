@@ -1646,11 +1646,12 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
   }
 
   // 括號型 fill_blank 子題第三輪：只限制 w/h 比例，x/y 交給 classify
-  // 括號型 fill_blank 子題：用 akHint 的 h（與答案卷一致），確保最小寬度
+  // 括號型 fill_blank 子題：w 用 akHint 的 w（原始大小），h 用 akHint 的 h × 0.7
   {
     const parenPageHeight = 1 / (totalPages || 1)
-    const DEFAULT_H_FULL = 0.025 * parenPageHeight  // 預設 h（沒有 akHint 時用）
-    const MIN_PAREN_W = 0.15
+    const DEFAULT_H_FULL = 0.025 * parenPageHeight
+    const DEFAULT_W = 0.08
+    const HINT_H_SCALE = 0.7
 
     for (let i = 0; i < alignedQuestions.length; i += 1) {
       const q = alignedQuestions[i]
@@ -1659,16 +1660,14 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const qSpec = specByQuestionId.get(q.questionId)
       if (!isQSubQ || qSpec?.tablePosition) continue
 
-      // 用 akHint 的 h × 0.7（轉 full-image），避免 h 太大切到鄰題答案
-      // 0.7 是校正係數：akHint h 包含括號+周圍空白，實際手寫只需要 70%
-      const HINT_H_SCALE = 0.7
       const qHint = qSpec?.answerBboxHint
       const hintHFull = (qHint && typeof qHint.h === 'number') ? +(qHint.h * parenPageHeight * HINT_H_SCALE).toFixed(4) : DEFAULT_H_FULL
+      const hintW = (qHint && typeof qHint.w === 'number') ? qHint.w : DEFAULT_W
 
       alignedQuestions[i] = { ...q, answerBbox: {
         x: q.answerBbox.x,
         y: q.answerBbox.y,
-        w: Math.max(q.answerBbox.w, MIN_PAREN_W),
+        w: hintW,
         h: hintHFull
       }}
     }
