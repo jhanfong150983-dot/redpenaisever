@@ -1572,8 +1572,8 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const pageStartY = (pageNum - 1) * pageHeight
       // h 上限：per-page 0.012（約頁面 1.2%，一行手寫高度）
       // w 下限：per-page 0.08（確保覆蓋整個括號區域）
-      const MAX_PAREN_H = 0.012
-      const MIN_PAREN_W = 0.08
+      const MAX_PAREN_H = 0.008   // 頁面 0.8%，約一行手寫高度
+      const MIN_PAREN_W = 0.15    // 頁面 15%，覆蓋整個 (　　　) 括號區域
       const cappedH = Math.min(hint.h || 0.012, MAX_PAREN_H)
       const ensuredW = Math.max(hint.w || 0.08, MIN_PAREN_W)
       answerBbox = {
