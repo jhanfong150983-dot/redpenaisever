@@ -5523,7 +5523,7 @@ Return JSON:
     needsReviewCount: unstableCount
   })
 
-  // Fire-and-forget: 寫入 Phase A stage log 到 Supabase
+  // 寫入 Phase A stage log 到 Supabase（await 確保 serverless 環境下不漏存）
   if (internalContext?.ownerId) {
     const phaseALogData = extractPhaseALogData({
       pipelineRunId,
@@ -5537,7 +5537,7 @@ Return JSON:
       diffCount: 0,
       unstableCount
     })
-    saveGradingStageLog({
+    await saveGradingStageLog({
       ownerId: internalContext.ownerId,
       assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
       submissionId: internalContext.submissionId || payload?.submissionId || '',
@@ -5545,7 +5545,7 @@ Return JSON:
       phase: 'phase_a',
       model,
       logData: phaseALogData
-    }).catch(() => {}) // fire-and-forget
+    }).catch(() => {})
   }
 
   return {
@@ -5965,7 +5965,7 @@ export async function runStagedGradingPhaseB({
     needsReview: finalResult.needsReview
   })
 
-  // Fire-and-forget: 寫入 Phase B stage log 到 Supabase（含自動一致性比對）
+  // 寫入 Phase B stage log 到 Supabase（含自動一致性比對，await 確保不漏存）
   if (internalContext?.ownerId) {
     const phaseBLogData = extractPhaseBLogData({
       pipelineRunId,
@@ -5974,7 +5974,7 @@ export async function runStagedGradingPhaseB({
       finalResult,
       stageResponses
     })
-    saveGradingStageLog({
+    await saveGradingStageLog({
       ownerId: internalContext.ownerId,
       assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
       submissionId: internalContext.submissionId || payload?.submissionId || '',
@@ -5982,7 +5982,7 @@ export async function runStagedGradingPhaseB({
       phase: 'phase_b',
       model,
       logData: phaseBLogData
-    }).catch(() => {}) // fire-and-forget
+    }).catch(() => {})
   }
 
   const usageMetadata = aggregateUsageMetadata(stageResponses)
