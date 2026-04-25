@@ -1645,17 +1645,13 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
     }
   }
 
-  // 括號型 fill_blank 子題第三輪：錨點定位法
-  // 策略：同組子題中，第一個（最上面的）用 classify.y 當錨點，
-  // 其他子題用 hint 的相對間距定位（hint.y_current - hint.y_first）
-  // 這樣第一個子題的絕對位置準確（classify），其餘的相對位置也準確（hint 間距）
+  // 括號型 fill_blank 子題第三輪：只限制 w/h 比例，x/y 交給 classify
+  // PARENTHESES BBOX RULE 已告訴 classify 如何精確框 ( )，這裡只做比例保險
   {
     const parenPageHeight = 1 / (totalPages || 1)
-    const MAX_PAREN_H_FULL = 0.008 * parenPageHeight
-    const MIN_PAREN_W = 0.15
+    const MAX_PAREN_H_FULL = 0.008 * parenPageHeight  // 頁面 0.8%
+    const MIN_PAREN_W = 0.15                           // 頁面 15%
 
-    // 收集括號型子題，按父題分組
-    const parenGroups = new Map() // parentKey → [{index, hintY, classifyY}]
     for (let i = 0; i < alignedQuestions.length; i += 1) {
       const q = alignedQuestions[i]
       if (!q.visible || !q.answerBbox) continue
@@ -1663,53 +1659,12 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const qSpec = specByQuestionId.get(q.questionId)
       if (!isQSubQ || qSpec?.tablePosition) continue
 
-      const qHint = qSpec?.answerBboxHint
-      if (!qHint || typeof qHint.y !== 'number') {
-        // 沒有 hint：只修正比例
-        alignedQuestions[i] = { ...q, answerBbox: {
-          ...q.answerBbox,
-          w: Math.max(q.answerBbox.w, MIN_PAREN_W),
-          h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
-        }}
-        continue
-      }
-
-      // 父題 key：取前兩段（如 1-3-2-1 → "1-3"）
-      const segments = q.questionId.split('-')
-      const parentKey = segments.slice(0, 2).join('-')
-      const pageNum = parseInt(segments[0], 10) || 1
-      const pageStartY = (pageNum - 1) * parenPageHeight
-      const hintYFull = pageStartY + qHint.y * parenPageHeight
-
-      if (!parenGroups.has(parentKey)) parenGroups.set(parentKey, [])
-      parenGroups.get(parentKey).push({
-        index: i,
-        hintYFull,
-        classifyY: q.answerBbox.y,
-        classifyX: q.answerBbox.x,
-        classifyW: q.answerBbox.w,
-        classifyH: q.answerBbox.h
-      })
-    }
-
-    // 對每組：第一個子題的 classify.y 當錨點，其餘用 hint 間距
-    for (const members of parenGroups.values()) {
-      if (members.length === 0) continue
-      // 按 hintY 排序，最上面的當錨點
-      members.sort((a, b) => a.hintYFull - b.hintYFull)
-      const anchor = members[0]
-      const yOffset = anchor.classifyY - anchor.hintYFull // 掃描偏移量
-
-      for (const m of members) {
-        const correctedY = +(m.hintYFull + yOffset).toFixed(4)
-        const q = alignedQuestions[m.index]
-        alignedQuestions[m.index] = { ...q, answerBbox: {
-          x: m.classifyX,
-          y: correctedY,
-          w: Math.max(m.classifyW, MIN_PAREN_W),
-          h: Math.min(m.classifyH, MAX_PAREN_H_FULL)
-        }}
-      }
+      alignedQuestions[i] = { ...q, answerBbox: {
+        x: q.answerBbox.x,
+        y: q.answerBbox.y,
+        w: Math.max(q.answerBbox.w, MIN_PAREN_W),
+        h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
+      }}
     }
   }
 
