@@ -1728,9 +1728,11 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const finalW = Math.max(rawW, MIN_W)
       const center = rawX + rawW / 2
       const finalX = Math.max(0, center - finalW / 2)
+      // y 微調往下：classify 的 y 有偏上傾向，加小偏移避免裁切到上一行
+      const Y_DOWN_OFFSET = +(0.002 / (totalPages || 1)).toFixed(5)
       alignedQuestions[i] = { ...q, answerBbox: {
         x: +finalX.toFixed(4),
-        y: q.answerBbox.y,
+        y: +(q.answerBbox.y + Y_DOWN_OFFSET).toFixed(4),
         w: +finalW.toFixed(4),
         h: FIXED_H
       }}
