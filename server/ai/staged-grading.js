@@ -1655,7 +1655,7 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
   // 不依賴 answerKey bbox（答案卷可能是拍照，跟 PDF 學生卷座標系不同）
   {
     const parenPageHeight = 1 / (totalPages || 1)
-    const FIXED_H = +(0.02 * parenPageHeight).toFixed(4)  // 固定 2% 頁高（一行手寫）
+    const FIXED_H = +(0.03 * parenPageHeight).toFixed(4)  // 固定 3% 頁高（一行手寫）
 
     for (let i = 0; i < alignedQuestions.length; i += 1) {
       const q = alignedQuestions[i]
@@ -4472,7 +4472,7 @@ export async function runStagedGradingPhaseA({
         // fill_blank 子題（括號型）用更小的 padding，避免裁切到上下相鄰的括號
         const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
           && !classifyAligned.find(cq => cq.questionId === q.questionId && cq.tablePositionReasoning)
-        const cropPad = isParenSubQ ? +(0.01 / totalPages).toFixed(4) : dynamicPad
+        const cropPad = isParenSubQ ? +(0.02 / totalPages).toFixed(4) : dynamicPad
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
