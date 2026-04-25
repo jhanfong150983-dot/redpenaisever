@@ -1568,11 +1568,16 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const pageNum = parseInt(String(questionId).split('-')[0], 10) || 1
       const pageHeight = 1 / (totalPages || 1)
       const pageStartY = (pageNum - 1) * pageHeight
+      // 填空子題高度上限：per-page 0.012（約頁面 1.2%，一行手寫的高度）
+      // 防止 answerBboxHint 太高讀到上下其他題的答案
+      const MAX_SUBQ_H_PER_PAGE = 0.012
+      const rawH = hint.h || answerBbox.h
+      const cappedH = Math.min(rawH, MAX_SUBQ_H_PER_PAGE)
       answerBbox = {
         x: hint.x,
         y: +(pageStartY + hint.y * pageHeight).toFixed(4),
         w: hint.w || answerBbox.w,
-        h: +((hint.h || answerBbox.h) * pageHeight).toFixed(4)
+        h: +(cappedH * pageHeight).toFixed(4)
       }
     }
 
