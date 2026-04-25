@@ -2910,9 +2910,9 @@ FILL-BLANK (questions in FILL-BLANK list):
   The auxiliary work is the student's scratch process and is NOT part of the answer.
   Example: student wrote "25×4=100" as scratch work nearby, and filled "100" inside the ( ) → output "100" only.
 - 🚨 MULTIPLE BLANKS IN CROP (裁切圖包含多個括號):
-  If the cropped image shows content from MULTIPLE blanks or lines (e.g., you see two different ( ) with different answers), read ONLY the TOPMOST blank — the one closest to the TOP of the crop image.
-  - Content near the BOTTOM edge of the crop belongs to the NEXT question below — do NOT read it.
-  - The target blank is always the UPPERMOST one in the image.
+  If the cropped image shows content from MULTIPLE blanks or lines (e.g., you see two different ( ) with different answers), read ONLY the blank closest to the CENTER of the crop image — both horizontally and vertically.
+  - Content near the EDGES (top, bottom, left, right) of the crop belongs to ADJACENT questions — do NOT read it.
+  - The target blank is always the one nearest to the CENTER of the image.
 - 🚨 ENGLISH SPELLING RULE (for English domain fill_blank):
   DO NOT auto-correct spelling. Copy each letter EXACTLY as the student wrote it.
   "dinng" stays "dinng" (NOT "dining"). "kitchan" stays "kitchan" (NOT "kitchen").
