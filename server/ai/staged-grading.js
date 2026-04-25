@@ -1646,12 +1646,11 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
   }
 
   // 括號型 fill_blank 子題第三輪：只限制 w/h 比例，x/y 交給 classify
-  // 括號型 fill_blank 子題：w 用 akHint 的 w（原始大小），h 用 akHint 的 h × 0.7
+  // 括號型 fill_blank 子題：x/y/w 交給 classify，h 固定一行高度
+  // 不依賴 answerKey bbox（答案卷可能是拍照，跟 PDF 學生卷座標系不同）
   {
     const parenPageHeight = 1 / (totalPages || 1)
-    const DEFAULT_H_FULL = 0.025 * parenPageHeight
-    const DEFAULT_W = 0.08
-    const HINT_H_SCALE = 0.7
+    const FIXED_H = +(0.02 * parenPageHeight).toFixed(4)  // 固定 2% 頁高（一行手寫）
 
     for (let i = 0; i < alignedQuestions.length; i += 1) {
       const q = alignedQuestions[i]
@@ -1660,15 +1659,11 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const qSpec = specByQuestionId.get(q.questionId)
       if (!isQSubQ || qSpec?.tablePosition) continue
 
-      const qHint = qSpec?.answerBboxHint
-      const hintHFull = (qHint && typeof qHint.h === 'number') ? +(qHint.h * parenPageHeight * HINT_H_SCALE).toFixed(4) : DEFAULT_H_FULL
-      const hintW = (qHint && typeof qHint.w === 'number') ? qHint.w : DEFAULT_W
-
       alignedQuestions[i] = { ...q, answerBbox: {
-        x: q.answerBbox.x,
-        y: q.answerBbox.y,
-        w: hintW,  // answerKey bbox 的寬度，確保完整答案可見
-        h: hintHFull
+        x: q.answerBbox.x,  // classify 決定
+        y: q.answerBbox.y,  // classify 決定
+        w: q.answerBbox.w,  // classify 決定
+        h: FIXED_H          // 固定一行高度
       }}
     }
   }
@@ -2844,10 +2839,9 @@ FILL-BLANK (questions in FILL-BLANK list):
   The auxiliary work is the student's scratch process and is NOT part of the answer.
   Example: student wrote "25×4=100" as scratch work nearby, and filled "100" inside the ( ) → output "100" only.
 - 🚨 MULTIPLE BLANKS IN CROP (裁切圖包含多個括號):
-  If the cropped image shows content from MULTIPLE blanks or lines (e.g., you see two different ( ) with different answers), read ONLY the blank that is CLOSEST TO THE VERTICAL CENTER of the crop image.
-  - Content near the TOP or BOTTOM edges of the crop belongs to NEIGHBORING questions — do NOT read it.
-  - The target blank is always the one nearest to the vertical midpoint of the image.
-  - If you cannot determine which blank is centered, read the one that appears most prominently (largest, most centered).
+  If the cropped image shows content from MULTIPLE blanks or lines (e.g., you see two different ( ) with different answers), read ONLY the TOPMOST blank — the one closest to the TOP of the crop image.
+  - Content near the BOTTOM edge of the crop belongs to the NEXT question below — do NOT read it.
+  - The target blank is always the UPPERMOST one in the image.
 - 🚨 ENGLISH SPELLING RULE (for English domain fill_blank):
   DO NOT auto-correct spelling. Copy each letter EXACTLY as the student wrote it.
   "dinng" stays "dinng" (NOT "dining"). "kitchan" stays "kitchan" (NOT "kitchen").
