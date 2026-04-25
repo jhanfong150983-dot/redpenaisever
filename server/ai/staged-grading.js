@@ -2206,9 +2206,10 @@ Rules:
   - For map_draw, diagram_draw, and diagram_color: frame the entire diagram/map/grid area plus any visible question stem above it.
   - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer. If the calculation question has a table cell (student fills a value in a table) AND a work/formula area elsewhere on the page, the answerBbox must cover BOTH the table cell AND the work area — do NOT crop just the table cell alone.
   - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must frame the student's handwritten answer inside that blank.
-    BLANK BBOX RULE: Fill-in-the-blank questions have blanks embedded in printed sentences, marked by ( ), □, or ___. The student writes their answer INSIDE these marks. The answerBbox must frame the student's handwritten answer inside the correct blank for THIS question (identified by anchorHint).
+    BLANK BBOX RULE: Fill-in-the-blank questions have blanks embedded in printed sentences, marked by ( ), □, or ___. The student writes their answer INSIDE these marks.
+    PARENTHESIS ANCHOR: For blanks marked by parentheses ( ), use the PRINTED "(" character as the x anchor. Set answerBbox.x to the left edge of the printed "(", and w to span from "(" to ")". The printed parentheses are fixed landmarks — do NOT guess x from the handwritten content inside. This ensures stable positioning regardless of what the student wrote.
     Examples:
-    - Parentheses: 印刷文字「答案是(　　　)元」→ student wrote "150" inside ( ) → frame "150", NOT the printed text around it
+    - Parentheses: 印刷文字「答案是(　　　)元」→ find the printed "(" → set x = left edge of "(", w = distance from "(" to ")" → the bbox covers the entire blank area including parentheses
     - Square box: 印刷文字「2½ □ (4.73 □ 2.73)」→ student wrote "×" inside □ → frame "×"
     - Underline: 印刷文字「___公尺」→ student wrote "25" on the line → frame "25" ANCHOR RULE (MANDATORY — takes priority): if the spec includes anchorHint, it is the AUTHORITATIVE locator for this question's cell. You MUST locate the exact cell described by the anchorHint and place the bbox precisely on that cell. TABLE COLUMN RULE: when the anchorHint references a column header (e.g. "標題『建功國中』正下方"), find that column header's horizontal position, then trace STRAIGHT DOWN to the target row. The answerBbox left and right edges MUST NOT extend beyond that column's boundaries — content from adjacent columns is FORBIDDEN. Each anchorHint uniquely identifies one cell; if your bbox could plausibly contain content from a neighboring column, it is WRONG — shrink it. Only fall back to ORDERING RULE when no anchorHint is provided. ORDERING RULE (fallback only): assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). Do NOT re-order based on content — position is the only criterion. readBbox is NOT needed for sub-question fill_blank (answerBbox is already tight).
   - For fill_blank with a single blank (questionId has 1–2 segments, e.g. "3", "1-2"): frame the blank and surrounding question text for answerBbox. Additionally output readBbox: a TIGHT crop of ONLY the blank writing area, excluding the question stem text.
@@ -4471,12 +4472,10 @@ export async function runStagedGradingPhaseA({
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
         const bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
-        // fill_blank 子題（括號型）：左右寬（抓完整數字）、上下窄（避免看到鄰行）
+        // fill_blank 子題（括號型）用小 padding，避免裁切到上下相鄰的括號
         const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
           && !classifyAligned.find(cq => cq.questionId === q.questionId && cq.tablePositionReasoning)
-        const cropPad = isParenSubQ
-          ? { padX: +(0.02 / totalPages).toFixed(4), padY: +(0.005 / totalPages).toFixed(4) }
-          : dynamicPad
+        const cropPad = isParenSubQ ? +(0.01 / totalPages).toFixed(4) : dynamicPad
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
