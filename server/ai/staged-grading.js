@@ -1659,12 +1659,10 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const qSpec = specByQuestionId.get(q.questionId)
       if (!isQSubQ || qSpec?.tablePosition) continue
 
-      // w 加 2% padding（學生可能寫出括號/方框一點點），不動 x y h
-      const W_PADDING = 0.02
       alignedQuestions[i] = { ...q, answerBbox: {
         x: q.answerBbox.x,
         y: q.answerBbox.y,
-        w: Math.max(q.answerBbox.w + W_PADDING, MIN_PAREN_W),
+        w: Math.max(q.answerBbox.w, MIN_PAREN_W),
         h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
       }}
     }
