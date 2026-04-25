@@ -1645,70 +1645,41 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
     }
   }
 
-  // 括號型 fill_blank 子題第三輪：用 answerBboxHint 的 y + 頁級偏移修正
-  // 策略：用同頁非子題的 classify.y vs hint.y 差距，算出整頁掃描偏移量
-  // 然後用 hint.y + 偏移量定位（hint 提供精確的相對位置，偏移量修正掃描差異）
-  const parenPageHeight = 1 / (totalPages || 1)
-  const MAX_PAREN_H_FULL = 0.008 * parenPageHeight
-  const MIN_PAREN_W = 0.15
+  // 括號型 fill_blank 子題第三輪：用 hint.y 定位 + 寬矮比例
+  // hint.y 精確區分相鄰子題，掃描偏移小（PDF模式），配合 h-capping 仍可覆蓋目標
+  {
+    const parenPageHeight = 1 / (totalPages || 1)
+    const MAX_PAREN_H_FULL = 0.008 * parenPageHeight  // 頁面 0.8%
+    const MIN_PAREN_W = 0.15                           // 頁面 15%
 
-  // 先收集每頁的 y 偏移量（用非子題的 classify.y - hint_converted.y）
-  const pageYOffsets = new Map() // pageNum → [offset1, offset2, ...]
-  for (const q of alignedQuestions) {
-    if (!q.visible || !q.answerBbox) continue
-    const qSpec = specByQuestionId.get(q.questionId)
-    const qHint = qSpec?.answerBboxHint
-    if (!qHint || typeof qHint.y !== 'number') continue
-    const isQSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
-    if (isQSubQ) continue // 跳過子題本身，只用非子題算偏移
-    const pageNum = parseInt(String(q.questionId).split('-')[0], 10) || 1
-    const pageStartY = (pageNum - 1) * parenPageHeight
-    const hintYFull = pageStartY + qHint.y * parenPageHeight
-    const offset = q.answerBbox.y - hintYFull
-    if (!pageYOffsets.has(pageNum)) pageYOffsets.set(pageNum, [])
-    pageYOffsets.get(pageNum).push(offset)
-  }
-  // 算每頁中位數 y 偏移
-  const pageYOffsetMedian = new Map()
-  for (const [pageNum, offsets] of pageYOffsets) {
-    offsets.sort((a, b) => a - b)
-    const mid = offsets.length % 2 === 1
-      ? offsets[Math.floor(offsets.length / 2)]
-      : (offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2
-    pageYOffsetMedian.set(pageNum, mid)
-  }
+    for (let i = 0; i < alignedQuestions.length; i += 1) {
+      const q = alignedQuestions[i]
+      if (!q.visible || !q.answerBbox) continue
+      const isQSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
+      const qSpec = specByQuestionId.get(q.questionId)
+      if (!isQSubQ || qSpec?.tablePosition) continue
 
-  // 套用到括號型 fill_blank 子題
-  for (let i = 0; i < alignedQuestions.length; i += 1) {
-    const q = alignedQuestions[i]
-    if (!q.visible || !q.answerBbox) continue
-    const isQSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
-    const qSpec = specByQuestionId.get(q.questionId)
-    if (!isQSubQ || qSpec?.tablePosition) continue // 只處理括號型
-
-    const qHint = qSpec?.answerBboxHint
-    if (!qHint || typeof qHint.y !== 'number') {
-      // 沒有 hint，至少修正比例
-      alignedQuestions[i] = { ...q, answerBbox: {
-        ...q.answerBbox,
-        w: Math.max(q.answerBbox.w, MIN_PAREN_W),
-        h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
-      }}
-      continue
+      const qHint = qSpec?.answerBboxHint
+      if (qHint && typeof qHint.y === 'number') {
+        // 有 hint：用 hint.y 定位（精確區分相鄰子題）
+        const pageNum = parseInt(String(q.questionId).split('-')[0], 10) || 1
+        const pageStartY = (pageNum - 1) * parenPageHeight
+        const hintYFull = +(pageStartY + qHint.y * parenPageHeight).toFixed(4)
+        alignedQuestions[i] = { ...q, answerBbox: {
+          x: q.answerBbox.x,
+          y: hintYFull,
+          w: Math.max(q.answerBbox.w, MIN_PAREN_W),
+          h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
+        }}
+      } else {
+        // 沒有 hint：只修正比例
+        alignedQuestions[i] = { ...q, answerBbox: {
+          ...q.answerBbox,
+          w: Math.max(q.answerBbox.w, MIN_PAREN_W),
+          h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
+        }}
+      }
     }
-
-    const pageNum = parseInt(String(q.questionId).split('-')[0], 10) || 1
-    const pageStartY = (pageNum - 1) * parenPageHeight
-    const hintYFull = pageStartY + qHint.y * parenPageHeight
-    const yOffset = pageYOffsetMedian.get(pageNum) ?? 0
-    const correctedY = hintYFull + yOffset
-
-    alignedQuestions[i] = { ...q, answerBbox: {
-      x: q.answerBbox.x,               // classify 的 x（水平位置準確）
-      y: +correctedY.toFixed(4),        // hint.y + 頁級偏移修正
-      w: Math.max(q.answerBbox.w, MIN_PAREN_W),
-      h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
-    }}
   }
 
   // matching group_context: same group shares one union bbox.
