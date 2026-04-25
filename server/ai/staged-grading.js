@@ -4307,7 +4307,7 @@ export async function runStagedGradingPhaseA({
   // Convert akHint.y to full-image space for meaningful comparison.
   const akByIdForLog = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
   const totalPages = pageEntries.length || 1
-  logStaged(pipelineRunId, 'basic', 'classify bbox detail', classifyAligned
+  logStaged(pipelineRunId, 'verbose', 'classify bbox detail', classifyAligned
     .filter((q) => q.visible)
     .map((q) => {
       const akQ = akByIdForLog.get(q.questionId)
@@ -4346,7 +4346,7 @@ export async function runStagedGradingPhaseA({
     .filter((q) => q.tablePositionReasoning)
     .map((q) => ({ id: q.questionId, reasoning: q.tablePositionReasoning }))
   if (tableReasoningDebug.length > 0) {
-    logStaged(pipelineRunId, 'basic', 'classify tablePosition reasoning', tableReasoningDebug)
+    logStaged(pipelineRunId, 'verbose', 'classify tablePosition reasoning', tableReasoningDebug)
   }
   const multiFillBboxDebug = classifyAligned
     .filter((q) => q.visible && q.questionType === 'multi_fill')
@@ -4669,8 +4669,8 @@ export async function runStagedGradingPhaseA({
   // Log per-question read results for debugging
   const readAnswerLogMode = getReadAnswerLogMode()
   if (readAnswerLogMode !== 'off') {
-    logStaged(pipelineRunId, 'basic', 'ReadAnswer per-question', toReadAnswerSchemaPreview(readAnswerParsed))
-    logStaged(pipelineRunId, 'basic', 'reReadAnswer per-question', toReadAnswerSchemaPreview(reReadAnswerParsed))
+    logStaged(pipelineRunId, 'verbose', 'ReadAnswer per-question', toReadAnswerSchemaPreview(readAnswerParsed))
+    logStaged(pipelineRunId, 'verbose', 'reReadAnswer per-question', toReadAnswerSchemaPreview(reReadAnswerParsed))
   }
 
   // ── A3b: Focused bracket read for single_choice questions (crop-based, context-free) ──
@@ -5360,13 +5360,13 @@ Return JSON:
             reason: r.reason || undefined
           })
         }
-        logStaged(pipelineRunId, stagedLogLevel, 'AI3 consistency summary', {
+        logStaged(pipelineRunId, 'verbose', 'AI3 consistency summary', {
           sent: arbiterItems.length,
           received: results.length,
           consistent: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'arbitrated_agree').length,
           inconsistent: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
         })
-        logStaged(pipelineRunId, stagedLogLevel, 'AI3 consistency per-question', Array.from(arbiterByQuestionId.entries()).map(([qId, v]) => ({
+        logStaged(pipelineRunId, 'verbose', 'AI3 consistency per-question', Array.from(arbiterByQuestionId.entries()).map(([qId, v]) => ({
           questionId: qId,
           arbiterStatus: v.arbiterStatus,
           finalAnswer: v.finalAnswer,
@@ -5430,6 +5430,22 @@ Return JSON:
     }
     return { ...qr, arbiterResult, answerCropImageUrl, hasCropImage: !!cropData }
   })
+
+  // ── Per-question consolidated log ──
+  const perQuestionLog = questionResults
+    .filter((qr) => qr.visible !== false)
+    .map((qr) => {
+      const bbox = qr.answerBbox
+      const bboxStr = bbox ? `x=${(+bbox.x).toFixed(3)} y=${(+bbox.y).toFixed(3)} w=${(+bbox.w).toFixed(3)}` : 'no-bbox'
+      const ai1 = qr.readAnswer1?.status === 'blank' ? '(blank)' : qr.readAnswer1?.studentAnswer || '?'
+      const ai2 = qr.readAnswer2?.status === 'blank' ? '(blank)' : qr.readAnswer2?.studentAnswer || '?'
+      const ar = qr.arbiterResult || {}
+      const ai3 = ar.arbiterStatus === 'arbitrated_agree'
+        ? `✓ consistent → ${ar.finalAnswer || '(blank)'}`
+        : `✗ inconsistent${ar.reason ? ` (${ar.reason})` : ''} → needs_review`
+      return `${qr.questionId} [${qr.questionType}] | bbox: ${bboxStr} | AI1: ${ai1} | AI2: ${ai2} | AI3: ${ai3}`
+    })
+  logStaged(pipelineRunId, 'basic', 'per-question summary', '\n' + perQuestionLog.join('\n'))
 
   // ── Table edge leak detection: flag suspicious table cell readings for teacher review ──
   // If a table cell's final answer matches the adjacent left cell's known value,
