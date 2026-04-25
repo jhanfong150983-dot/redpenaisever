@@ -3193,121 +3193,58 @@ const BOPOMOFO_ARBITER_GUIDE = `
 `.trim()
 
 function buildArbiterPrompt(arbiterItems) {
-  // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status, agreementStatus, disagreementReason, correctAnswer? }]
-  const hasMultiFill = arbiterItems.some((item) => item.questionType === 'multi_fill')
-  const hasEnglishSpelling = arbiterItems.some((item) => item.correctAnswer)
+  // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status }]
   const questionBlocks = arbiterItems.map((item) => {
     const ai1Str = item.ai1Status === 'blank' ? '（空白）' : item.ai1Status === 'unreadable' ? '（無法辨識）' : `「${item.ai1Answer}」`
     const ai2Str = item.ai2Status === 'blank' ? '（空白）' : item.ai2Status === 'unreadable' ? '（無法辨識）' : `「${item.ai2Answer}」`
-    const isAgree = item.agreementStatus === 'agree'
-    const modeNote = isAgree
-      ? 'mode: agree_review（兩者等價後相同）→ 請評估 agreementSupport'
-      : 'mode: disagree_review（兩者等價後不同）→ 請分別評估 ai1Support 與 ai2Support'
-    const uncertainNote = item.disagreementReason === 'uncertain_chars'
-      ? '\n  ⚠️ 注意：AI2 對部分字符信心不足（uncertain_chars），即使表面相同也請仔細確認筆跡'
-      : ''
-    const spellingNote = item.correctAnswer
-      ? `\n  📝 英語拼寫舉證：正確答案＝「${item.correctAnswer}」→ 請執行逐字母比對（見下方英語拼寫鑑識規則）`
-      : ''
     return `題目 ${item.questionId}（類型：${item.questionType}）
-  AI1（細節）讀到：${ai1Str}（status: ${item.ai1Status}）
-  AI2（全局派）讀到：${ai2Str}（status: ${item.ai2Status}）
-  ${modeNote}${uncertainNote}${spellingNote}
-  [此題裁切圖緊接在下方]`
+  AI1（客觀抄寫）讀到：${ai1Str}（status: ${item.ai1Status}）
+  AI2（校對審查）讀到：${ai2Str}（status: ${item.ai2Status}）`
   }).join('\n\n---\n\n')
 
-  return `你是學生答案讀取的鑑識人員（AI3）。
-你將看到：完整作業圖（第一張圖）以及每道題的 answerBbox 裁切圖（每題一張，附標籤），
-以及 AI1（細節派）和 AI2（全局派）各自以裁切圖讀取的結果。
+  return `你是一致性判官（AI3）。
 
-你的任務是【鑑識】，不是裁決、不是重新讀取：
-- 針對每道題，評估圖像對 AI1 和 AI2 各自讀取值的支持程度。
-- 最終決定由系統根據你的評估自動執行，你只需如實回報圖像支持強度。
+你的唯一任務：判斷 AI1 和 AI2 對同一題的讀取結果是否【語意一致】。
+你不需要看圖、不需要重新讀取、不需要判斷誰對誰錯。
 
-支持程度（support）定義：
-  "strong"     ：有明確、清晰的圖像特徵支持此讀取值（可指出具體筆跡位置或形狀）
-  "weak"       ：有部分支持，但圖像模糊、字跡不清，或有疑慮，無法完全放心
-  "unsupported"：缺乏關鍵圖像依據，或圖像與讀取值明顯矛盾
+== 判斷規則 ==
 
-鑑識規則：
-情境 A — agree_review（AI1 與 AI2 讀取相同）：
-  → 評估這個共識是否有圖像支持
-  → 輸出：{ "mode": "agree_review", "agreementSupport": "strong | weak | unsupported" }
-  → ⚠️ 不得因「兩者相同」就草率給 strong，必須確實觀察到筆跡依據
-  → ⚠️ 特例：若兩者讀出的答案為【單一字元】（如 ×、−、○、C、A 等英文字母或符號），
-       只要圖片中能見到任何手寫痕跡，必須給 weak 或以上，不得給 unsupported。
-       單字元筆跡面積本就小，難以找到「明確筆跡依據」是正常現象，不應因此降為 unsupported。
+「一致」(consistent) 的條件 — 以下任一成立即為一致：
+  - 兩者答案完全相同（含空白對空白）
+  - 兩者答案僅有格式差異，語意相同（如 "−" vs "－"、"×" vs "✕"、"0.75" vs ".75"）
+  - 計算題/應用題：步驟文字不同，但最終答案（最後一行的數值或結論）相同
+  - 順序不同但內容相同（如 "A, B" vs "B, A"）
 
-情境 B — disagree_review（AI1 與 AI2 讀取不同）：
-  → 分別獨立評估 AI1 和 AI2 各自的圖像支持程度，兩者互不影響
-  → 輸出：{ "mode": "disagree_review", "ai1Support": "strong | weak | unsupported", "ai2Support": "strong | weak | unsupported" }
-  → ⚠️ 即使你傾向支持一方，另一方也要誠實評估，不得為了強化結論而壓低另一方
+「不一致」(inconsistent) 的條件 — 以下任一成立即為不一致：
+  - 數字不同（"7" vs "70"、"8" vs "18"、"3/10" vs "1/10"）
+  - 文字內容不同（"麥塊教案" vs "麥塊教育版"）
+  - 一方是 blank/unreadable，另一方有答案
+  - 答案長度差異大且不是純格式差異
 
-⚠️ 若圖像不清晰、筆跡無法確認 → 降評為 weak 或 unsupported，不得勉強給 strong。
-⚠️ 你不需要也不應該自行產生答案或做最終選擇。
+⚠️ 寧可誤判為「不一致」，也不要把真正不同的答案判為「一致」。
+⚠️ 不要猜測誰對誰錯，不要考慮正確答案，只做一致性比較。
 
-${hasMultiFill ? BOPOMOFO_ARBITER_GUIDE + '\n' : ''}${hasEnglishSpelling ? `英語拼寫鑑識規則（適用於標有「📝 英語拼寫舉證」的題目）：
-當題目附有正確答案時，你必須額外執行以下逐字母比對程序：
-
-1. 逐字母拆解：觀察裁切圖中學生的手寫，從左到右逐一辨識每個字母，記為 studentLetters（用 dash 分隔，如 d-i-n-n-g）。
-   ⚠️ 嚴禁自動修正：看到什麼寫什麼。學生寫 "dinng" 就記 "d-i-n-n-g"，不可記成 "d-i-n-i-n-g"。
-2. 正確答案拆解：將正確答案同樣逐字母拆解，記為 correctLetters（如 d-i-n-i-n-g）。
-3. 差異比對：逐位置比較 studentLetters 與 correctLetters，找出：
-   - 多餘字母（student 有但 correct 沒有）
-   - 缺少字母（correct 有但 student 沒有）
-   - 替換字母（同位置但不同字母）
-   - 順序錯誤（字母相同但位置不對）
-4. 判定：
-   - 若發現任何拼寫差異 → 在 spellingEvidence 中列出差異，並將 support 降為 "weak"（agree 模式下降 agreementSupport，disagree 模式下降對應方的 support）。
-   - 若 AI1 和 AI2 讀出的拼寫與圖片不符（例如都讀成正確拼寫但圖片明顯拼錯）→ support 降為 "unsupported"。
-   - 若逐字母比對確認無差異 → 正常評估 support。
-
-⚠️ 常見陷阱：AI 語言模型傾向自動修正拼字（如把 "dinng" 讀成 "dining"）。你必須抵抗這個傾向，仔細看每一個字母的實際筆跡。
-⚠️ 大小寫也要注意：如正確答案首字母大寫 "Kitchen"，但學生寫 "kitchen"（小寫 k），視為差異。
-` : ''}需鑑識的題目如下（全圖在最前，各題裁切圖依序附在題目說明之後）：
+== 需判斷的題目 ==
 
 ${questionBlocks}
 
-輸出 JSON，格式如下（每道題擇一情境）：
+== 輸出 JSON ==
 {
-  "forensics": [
-    { "questionId": "...", "mode": "agree_review", "agreementSupport": "strong | weak | unsupported" },
-    { "questionId": "...", "mode": "disagree_review", "ai1Support": "strong | weak | unsupported", "ai2Support": "strong | weak | unsupported" }
+  "consistencyResults": [
+    { "questionId": "...", "consistent": true },
+    { "questionId": "...", "consistent": false, "reason": "簡短說明不一致的原因" }
   ]
-}
-${hasEnglishSpelling ? `若題目有英語拼寫舉證，請在該題的 forensic 物件中額外加入 spellingEvidence：
-{ "questionId": "...", "mode": "agree_review", "agreementSupport": "weak",
-  "spellingEvidence": { "studentLetters": "d-i-n-n-g", "correctLetters": "d-i-n-i-n-g", "differences": ["position 4: student='n', correct='i'", "student has 5 letters, correct has 6"] } }
-spellingEvidence 僅在發現差異時必填，無差異時可省略。` : ''}`.trim()
+}`.trim()
 }
 
-// Apply forensic decision table to produce arbiterStatus + finalAnswer
+// Apply consistency decision: consistent → use AI1 answer, inconsistent → needs_review
 function applyForensicDecision(forensic, ai1Answer, ai2Answer) {
-  const mode = ensureString(forensic?.mode, '')
-  if (mode === 'agree_review') {
-    if (forensic.agreementSupport === 'strong' || forensic.agreementSupport === 'weak') {
-      // strong: AI3 明確確認圖片支持此讀取結果
-      // weak: AI3 認為圖片稍微模糊，但兩個獨立 AI 讀出相同答案本身就是強證據，放行
-      return { arbiterStatus: 'arbitrated_agree', finalAnswer: ai1Answer }
-    }
-    // unsupported: AI3 認為圖片不支持此讀取
-    // 豁免：單字元答案（×、−、C、A 等）→ 兩個獨立 AI 讀出相同本身就是強證據，不送審
-    if (ai1Answer.trim().length <= 1) {
-      return { arbiterStatus: 'arbitrated_agree', finalAnswer: ai1Answer }
-    }
-    return { arbiterStatus: 'needs_review' }
+  const isConsistent = forensic?.consistent === true
+  if (isConsistent) {
+    // 一致 → 一律使用 AI1（客觀抄寫員）的答案
+    return { arbiterStatus: 'arbitrated_agree', finalAnswer: ai1Answer }
   }
-  if (mode === 'disagree_review') {
-    const ai1Support = ensureString(forensic.ai1Support, '')
-    const ai2Support = ensureString(forensic.ai2Support, '')
-    if (ai1Support === 'strong' && ai2Support === 'unsupported') {
-      return { arbiterStatus: 'arbitrated_pick_1', finalAnswer: ai1Answer }
-    }
-    if (ai2Support === 'strong' && ai1Support === 'unsupported') {
-      return { arbiterStatus: 'arbitrated_pick_2', finalAnswer: ai2Answer }
-    }
-    return { arbiterStatus: 'needs_review' }
-  }
+  // 不一致 → 送人工審查
   return { arbiterStatus: 'needs_review' }
 }
 
@@ -5369,86 +5306,32 @@ Return JSON:
   // ── AI3 Arbiter (serial): compare AI1/AI2 results and make evidence-based decision ──
   // Filter: skip questions where both AI1 and AI2 are blank (auto agree) or both unreadable (auto needs_review)
   const akByQidForArbiter = isEnglishDomainForSpelling ? mapByQuestionId(answerKeyQuestions, (q) => q?.id) : null
+  // AI3 一致性判官：所有題目都送 AI3 做語意一致性比較，不做程式碼預判
   const arbiterItems = questionResultsRaw
     .filter((qr) => {
       const s1 = qr.readAnswer1.status
       const s2 = qr.readAnswer2.status
+      // 雙方都 blank → 自動一致，不需送 AI3
       if (s1 === 'blank' && s2 === 'blank') return false
-      if (s1 === 'unreadable' && s2 === 'unreadable') return false
       return true
     })
-    .map((qr) => {
-      const isCalcType = qr.questionType === 'calculation' || qr.questionType === 'word_problem'
-      const useFinalAnswerOnly = isCalcType && qr.consistencyStatus === 'stable'
-      // calculation/word_problem stable：傳提取後的最終答案給 AI3，避免步驟格式差異
-      // 導致 AI3 看到兩段不同文字卻被標為 agree 而混淆；完整文字仍保留給 accessor
-      const ai1Answer = useFinalAnswerOnly
-        ? (extractFinalAnswerFromCalc(qr.readAnswer1.studentAnswer) ?? qr.readAnswer1.studentAnswer)
-        : qr.readAnswer1.studentAnswer
-      const ai2Answer = useFinalAnswerOnly
-        ? (extractFinalAnswerFromCalc(qr.readAnswer2.studentAnswer) ?? qr.readAnswer2.studentAnswer)
-        : qr.readAnswer2.studentAnswer
-      // English fill_blank/short_answer: attach correctAnswer for spelling evidence
-      const isEnglishSpellingType = isEnglishDomainForSpelling &&
-        (qr.questionType === 'fill_blank' || qr.questionType === 'short_answer')
-      const correctAnswer = isEnglishSpellingType && akByQidForArbiter
-        ? ensureString(akByQidForArbiter.get(qr.questionId)?.answer || akByQidForArbiter.get(qr.questionId)?.referenceAnswer, '').trim()
-        : undefined
-      return {
-        questionId: qr.questionId,
-        questionType: qr.questionType,
-        ai1Answer,
-        ai1Status: qr.readAnswer1.status,
-        ai2Answer,
-        ai2Status: qr.readAnswer2.status,
-        agreementStatus: qr.consistencyStatus === 'stable' ? 'agree' : 'disagree',
-        disagreementReason: qr.consistencyReason === 'uncertain_chars' ? 'uncertain_chars' : undefined,
-        correctAnswer: correctAnswer || undefined
-      }
-    })
-
-  // ── Pre-arbiter: single_choice/true_false with different numeric answers → directly needs_review ──
-  // AI3 can't reliably resolve "2 vs 3" — both are clear readings, it's a coin flip.
-  // Skip AI3 and let the teacher decide.
-  const SIMPLE_ANSWER_TYPES = new Set([
-    'single_choice', 'true_false', 'single_check',
-    'multi_choice', 'multi_check', 'multi_check_other',
-    'fill_blank', 'fill_variants'
-  ])
-  const directReviewIds = new Set()
-  for (const item of arbiterItems) {
-    if (!SIMPLE_ANSWER_TYPES.has(item.questionType)) continue
-    if (item.agreementStatus === 'agree') continue
-    // Both are read status with different short answers → genuine ambiguity
-    const a1 = ensureString(item.ai1Answer, '').trim()
-    const a2 = ensureString(item.ai2Answer, '').trim()
-    if (a1 && a2 && a1 !== a2 && item.ai1Status === 'read' && item.ai2Status === 'read') {
-      directReviewIds.add(item.questionId)
-    }
-  }
-  if (directReviewIds.size > 0) {
-    logStaged(pipelineRunId, 'basic', 'single_choice direct needs_review (skip AI3)', Array.from(directReviewIds))
-  }
+    .map((qr) => ({
+      questionId: qr.questionId,
+      questionType: qr.questionType,
+      ai1Answer: qr.readAnswer1.studentAnswer,
+      ai1Status: qr.readAnswer1.status,
+      ai2Answer: qr.readAnswer2.studentAnswer,
+      ai2Status: qr.readAnswer2.status
+    }))
 
   const arbiterByQuestionId = new Map()
-  // Pre-populate direct review decisions (bypass AI3)
-  for (const qId of directReviewIds) {
-    arbiterByQuestionId.set(qId, { arbiterStatus: 'needs_review', directReview: true })
-  }
-  // Filter out direct-review items from AI3 input
-  const arbiterItemsForAI3 = arbiterItems.filter((item) => !directReviewIds.has(item.questionId))
+  const arbiterItemsForAI3 = arbiterItems
   if (arbiterItemsForAI3.length > 0) {
     try {
       // Build AI3 parts: text prompt + full image + interleaved (label + crop) per question
       const arbiterPromptText = buildArbiterPrompt(arbiterItemsForAI3)
-      const arbiterParts = [{ text: arbiterPromptText }, ...submissionImageParts]
-      for (const item of arbiterItemsForAI3) {
-        const crop = allQuestionCropMap.get(item.questionId)
-        if (crop) {
-          arbiterParts.push({ text: `--- 題目 ${item.questionId} 裁切圖 ---` })
-          arbiterParts.push({ inlineData: crop })
-        }
-      }
+      // AI3 一致性判官：只看文字，不看圖片
+      const arbiterParts = [{ text: arbiterPromptText }]
       logStageStart(pipelineRunId, 'AI3-arbiter')
       const arbiterResponse = await executeStage({
         apiKey,
@@ -5463,55 +5346,32 @@ Return JSON:
       stageResponses.push(arbiterResponse)
       if (arbiterResponse.ok) {
         const arbiterParsed = parseCandidateJson(arbiterResponse.data)
-        const forensics = Array.isArray(arbiterParsed?.forensics) ? arbiterParsed.forensics : []
-        for (const f of forensics) {
-          const qId = ensureString(f?.questionId).trim()
+        const results = Array.isArray(arbiterParsed?.consistencyResults) ? arbiterParsed.consistencyResults : []
+        for (const r of results) {
+          const qId = ensureString(r?.questionId).trim()
           if (!qId) continue
           const item = arbiterItems.find((i) => i.questionId === qId)
           if (!item) continue
-          // multi_fill disagree → always needs_review regardless of AI3 rating
-          // (注音符號視覺相似度高，AI3 鑑識同樣容易誤判，只有 agree 才信任自動通過)
-          if (item.questionType === 'multi_fill' && item.agreementStatus === 'disagree') {
-            arbiterByQuestionId.set(qId, {
-              arbiterStatus: 'needs_review',
-              forensicMode: ensureString(f.mode, ''),
-              ai1Support: f.ai1Support,
-              ai2Support: f.ai2Support
-            })
-            continue
-          }
-          const decision = applyForensicDecision(f, item.ai1Answer, item.ai2Answer)
-          // English spelling evidence: if AI3 found spelling differences, force needs_review
-          const hasSpellingDiff = f.spellingEvidence?.differences?.length > 0
-          if (hasSpellingDiff && item.correctAnswer) {
-            console.log(`[english-spelling-arbiter] ${qId} AI3 found spelling differences:`, JSON.stringify(f.spellingEvidence))
-          }
+          const decision = applyForensicDecision(r, item.ai1Answer, item.ai2Answer)
           arbiterByQuestionId.set(qId, {
-            arbiterStatus: hasSpellingDiff && item.correctAnswer ? 'needs_review' : decision.arbiterStatus,
-            finalAnswer: hasSpellingDiff && item.correctAnswer ? undefined : decision.finalAnswer,
-            forensicMode: ensureString(f.mode, ''),
-            agreementSupport: f.agreementSupport,
-            ai1Support: f.ai1Support,
-            ai2Support: f.ai2Support,
-            spellingEvidence: f.spellingEvidence || undefined
+            arbiterStatus: decision.arbiterStatus,
+            finalAnswer: decision.finalAnswer,
+            consistent: r.consistent,
+            reason: r.reason || undefined
           })
         }
-        logStaged(pipelineRunId, stagedLogLevel, 'AI3 forensic summary', {
+        logStaged(pipelineRunId, stagedLogLevel, 'AI3 consistency summary', {
           sent: arbiterItems.length,
-          received: forensics.length,
-          arbitrated_agree: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'arbitrated_agree').length,
-          arbitrated_pick: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus?.startsWith('arbitrated_pick')).length,
-          needs_review: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
+          received: results.length,
+          consistent: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'arbitrated_agree').length,
+          inconsistent: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
         })
-        logStaged(pipelineRunId, stagedLogLevel, 'AI3 forensic per-question', Array.from(arbiterByQuestionId.entries()).map(([qId, r]) => ({
+        logStaged(pipelineRunId, stagedLogLevel, 'AI3 consistency per-question', Array.from(arbiterByQuestionId.entries()).map(([qId, v]) => ({
           questionId: qId,
-          arbiterStatus: r.arbiterStatus,
-          finalAnswer: r.finalAnswer,
-          forensicMode: r.forensicMode,
-          agreementSupport: r.agreementSupport,
-          ai1Support: r.ai1Support,
-          ai2Support: r.ai2Support,
-          spellingEvidence: r.spellingEvidence || undefined
+          arbiterStatus: v.arbiterStatus,
+          finalAnswer: v.finalAnswer,
+          consistent: v.consistent,
+          reason: v.reason
         })))
       }
     } catch (arbiterErr) {
@@ -5521,12 +5381,10 @@ Return JSON:
     }
   }
 
-  // ── Arbiter Quality Gate (only check AI3 results, not direct-review items) ──
-  const ai3ResultCount = arbiterByQuestionId.size - directReviewIds.size
+  // ── Arbiter Quality Gate ──
+  const ai3ResultCount = arbiterByQuestionId.size
   if (ai3ResultCount > 0) {
-    const arbiterResults = Array.from(arbiterByQuestionId.entries())
-      .filter(([qId]) => !directReviewIds.has(qId))
-      .map(([, v]) => v)
+    const arbiterResults = Array.from(arbiterByQuestionId.values())
     const arbiterExpectedIds = arbiterItemsForAI3.map((item) => item.questionId)
     const arbiterQG = validateArbiterQuality(arbiterResults, arbiterExpectedIds)
     logStaged(pipelineRunId, 'basic', 'arbiter quality-gate', {
