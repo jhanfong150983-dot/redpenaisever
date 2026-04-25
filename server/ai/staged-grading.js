@@ -4585,11 +4585,27 @@ export async function runStagedGradingPhaseA({
   // caused single_check to output option text characters instead of symbol labels.
   // Per-question crops anchor AI2 to the correct answer cell; using buildDetailReadPrompt
   // ensures the prompt correctly describes the crop-based format.
+  // AI2 用 CLAHE 增強對比的裁切圖，讓淡筆跡更清晰（與 AI1 的原圖形成視覺差異）
+  const { default: sharpForAi2 } = await import('sharp')
+  const ai2EnhancedCropMap = new Map()
+  for (const [qId, crop] of allQuestionCropMap) {
+    try {
+      const enhanced = await sharpForAi2(Buffer.from(crop.data, 'base64'))
+        .grayscale()
+        .clahe({ width: 3, height: 3 })
+        .sharpen()
+        .jpeg({ quality: 90 })
+        .toBuffer()
+      ai2EnhancedCropMap.set(qId, { data: enhanced.toString('base64'), mimeType: 'image/jpeg' })
+    } catch {
+      ai2EnhancedCropMap.set(qId, crop) // fallback to original
+    }
+  }
   const globalReadPrompt = buildDetailReadPrompt(classifyResult, { answerKeyQuestions })
   const ai2Parts = [{ text: globalReadPrompt }]
   for (const q of classifyAligned) {
     if (!q.visible) continue
-    const crop = allQuestionCropMap.get(q.questionId)
+    const crop = ai2EnhancedCropMap.get(q.questionId)
     if (!crop) continue
     ai2Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}）---` })
     ai2Parts.push({ inlineData: crop })
