@@ -2311,7 +2311,7 @@ async function handleManualGrade(req, res) {
       status: 'graded',
       graded_once: true,
       upload_locked: true,
-      last_status_reason: 'teacher_manual_grade'
+      last_status_reason: '教師手動批改成績'
     })
     res.status(200).json({ success: true, newStatus: 'graded' })
   } catch (err) {
@@ -2355,7 +2355,7 @@ async function handleCorrectionManualPass(req, res) {
     // Mark correction as passed
     await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
       status: 'correction_passed',
-      last_status_reason: 'teacher_manual_pass'
+      last_status_reason: '教師手動通過訂正'
     })
     res.status(200).json({ success: true, newStatus: 'correction_passed' })
   } catch (err) {

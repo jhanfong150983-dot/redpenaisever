@@ -1203,7 +1203,9 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     const anchorHintUsefulTypes = new Set(['multi_fill', 'fill_blank'])
     const isSubQuestion = questionId.split('-').length >= 3
     const akAnchorHint = ensureString(question?.anchorHint, '').trim()
-    if (akAnchorHint && anchorHintUsefulTypes.has(expectedType) && (expectedType !== 'fill_blank' || isSubQuestion)) {
+    // fill_blank 子題不傳 anchorHint — 測試純 classify 定位
+    const skipAnchorForFillBlankSubQ = isFillBlankSubQ
+    if (akAnchorHint && anchorHintUsefulTypes.has(expectedType) && (expectedType !== 'fill_blank' || isSubQuestion) && !skipAnchorForFillBlankSubQ) {
       spec.anchorHint = akAnchorHint
     }
     // 表格座標定位（優先於 anchorHint）
