@@ -327,10 +327,10 @@ function stripExplicitFinalMarkerLines(text) {
     .join('\n')
 }
 
-function shouldLogStaged(configuredLevel, requiredLevel = 'basic') {
+function shouldLogStaged(configuredLevel, requiredLevel = 'detail') {
   if (configuredLevel === 'off') return false
-  if (requiredLevel === 'detail') return configuredLevel === 'detail'
-  return configuredLevel === 'basic' || configuredLevel === 'detail'
+  if (requiredLevel === 'basic') return true  // 明確標為 basic 的永遠顯示
+  return configuredLevel === 'detail'  // 其餘只在 detail 模式顯示
 }
 
 function logStaged(pipelineRunId, configuredLevel, message, payload, requiredLevel = 'basic') {
@@ -4087,23 +4087,23 @@ export async function runStagedGradingPhaseA({
     const maxPage = pageNums.size > 0 ? Math.max(...pageNums) : 1
     if (maxPage >= 2) {
       pageBreaks = Array.from({ length: maxPage - 1 }, (_, i) => +((i + 1) / maxPage).toFixed(4))
-      logStaged(pipelineRunId, stagedLogLevel, 'pageBreaks auto-estimated (equal split)', { maxPage, pageBreaks })
+      logStaged(pipelineRunId, stagedLogLevel, 'pageBreaks auto-estimated (equal split)', { maxPage, pageBreaks }, 'detail')
     }
   }
   const classifyCorrections = Array.isArray(payload?.classifyCorrections) ? payload.classifyCorrections : []
   if (classifyCorrections.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'classify corrections received', classifyCorrections)
+    logStaged(pipelineRunId, stagedLogLevel, 'classify corrections received', classifyCorrections, 'detail')
   }
   const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
   // Log anchorHint specs so we can verify hints are correct before trusting them
   const specsWithAnchor = classifyQuestionSpecs.filter((s) => s.anchorHint)
   if (specsWithAnchor.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'classify anchorHint specs', specsWithAnchor.map((s) => ({ id: s.questionId, anchorHint: s.anchorHint })))
+    logStaged(pipelineRunId, stagedLogLevel, 'classify anchorHint specs', specsWithAnchor.map((s, 'detail') => ({ id: s.questionId, anchorHint: s.anchorHint })))
   }
   // Log tablePosition specs for debugging table cell targeting
   const specsWithTable = classifyQuestionSpecs.filter((s) => s.tablePosition)
   if (specsWithTable.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'classify tablePosition specs', specsWithTable.map((s) => ({ id: s.questionId, tablePosition: s.tablePosition })))
+    logStaged(pipelineRunId, stagedLogLevel, 'classify tablePosition specs', specsWithTable.map((s, 'detail') => ({ id: s.questionId, tablePosition: s.tablePosition })))
   }
 
   // Per-page classify: one call per page, all dispatched in parallel.
@@ -4138,7 +4138,7 @@ export async function runStagedGradingPhaseA({
     numPages: pageEntries.length,
     answerKeyPages: answerKeyImageParts.length,
     pages: pageEntries.map(([p, ids]) => ({ page: p, count: ids.length }))
-  })
+  }, 'detail')
 
   let classifyResult
 
@@ -4176,14 +4176,14 @@ export async function runStagedGradingPhaseA({
       mimeType: submissionImg.mimeType,
       pageBreaks,
       pageBreaksLength: pageBreaks.length
-    })
+    }, 'detail')
     const splitPages = await splitSubmissionImageByPageBreaks(submissionImg.data, submissionImg.mimeType, pageBreaks)
 
     if (!splitPages || splitPages.length !== pageEntries.length) {
       // Fallback: split failed or page count mismatch → send full image with pageBreaks (old behavior)
       logStaged(pipelineRunId, stagedLogLevel, 'classify split failed, fallback to full image', {
         splitPages: splitPages?.length, pageEntries: pageEntries.length, pageBreaksLength: pageBreaks.length
-      })
+      }, 'detail')
       const classifyResponses = await Promise.all(
         pageEntries.map(([pageNum, ids]) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
@@ -4226,7 +4226,7 @@ export async function runStagedGradingPhaseA({
       // Success: each page gets its own cropped image — no pageBreaks needed in prompt
       logStaged(pipelineRunId, stagedLogLevel, 'classify split success', {
         pages: splitPages.map((p, i) => ({ page: pageEntries[i][0], startY: +p.pageStartY.toFixed(3), endY: +p.pageEndY.toFixed(3) }))
-      })
+      }, 'detail')
       const classifyResponses = await Promise.all(
         pageEntries.map(([pageNum, ids], i) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
@@ -4300,7 +4300,7 @@ export async function runStagedGradingPhaseA({
     bboxCount: classifyAligned.filter((q) => q.answerBbox).length,
     perPage: pageEntries.length > 1,
     ...(classifyResult.pixelBboxRejected?.length > 0 && { pixelBboxRejected: classifyResult.pixelBboxRejected })
-  })
+  }, 'detail')
   // Detailed bbox log: classify bbox vs answer key bbox comparison
   // Answer key bbox is in per-page coordinates (0~1 within that page).
   // Classify bbox is in full-image coordinates (0~1 across all merged pages).
@@ -4340,19 +4340,19 @@ export async function runStagedGradingPhaseA({
         ...(yDiff !== null && Math.abs(yDiff) > 0.02 ? { warn: 'Y_DRIFT' } : {})
       }
     })
-  )
+  , 'detail')
   // Log tablePosition reasoning for debugging table cell targeting
   const tableReasoningDebug = classifyAligned
     .filter((q) => q.tablePositionReasoning)
     .map((q) => ({ id: q.questionId, reasoning: q.tablePositionReasoning }))
   if (tableReasoningDebug.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'classify tablePosition reasoning', tableReasoningDebug)
+    logStaged(pipelineRunId, stagedLogLevel, 'classify tablePosition reasoning', tableReasoningDebug, 'detail')
   }
   const multiFillBboxDebug = classifyAligned
     .filter((q) => q.visible && q.questionType === 'multi_fill')
     .map((q) => ({ questionId: q.questionId, answerBbox: q.answerBbox }))
   if (multiFillBboxDebug.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'multi_fill answerBbox coords', multiFillBboxDebug)
+    logStaged(pipelineRunId, stagedLogLevel, 'multi_fill answerBbox coords', multiFillBboxDebug, 'detail')
   }
 
   // ── Classify Quality Gate + Auto-Retry (max 1) ────────────────────────────
@@ -4361,7 +4361,7 @@ export async function runStagedGradingPhaseA({
     severity: classifyQG.severity, warnings: classifyQG.warnings, metrics: classifyQG.metrics
   })
   if (classifyQG.severity === QG_SEVERITY.FAIL) {
-    logStaged(pipelineRunId, stagedLogLevel, 'classify quality FAIL → retry (1/1)')
+    logStaged(pipelineRunId, stagedLogLevel, 'classify quality FAIL → retry (1/1)', 'detail')
     // Re-run classify: single-page path (simple retry with same prompt)
     if (pageEntries.length <= 1) {
       const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
@@ -4457,7 +4457,7 @@ export async function runStagedGradingPhaseA({
   // For multi-page, divide by page count so each page still gets ~3% padding.
   const dynamicPad = +(0.03 / totalPages).toFixed(4)
   const dynamicPadWide = +(0.08 / totalPages).toFixed(4)
-  logStaged(pipelineRunId, stagedLogLevel, 'dynamic crop padding', { totalPages, pad: dynamicPad, padWide: dynamicPadWide })
+  logStaged(pipelineRunId, stagedLogLevel, 'dynamic crop padding', { totalPages, pad: dynamicPad, padWide: dynamicPadWide }, 'detail')
 
   // Focused checkbox crops: single_check / multi_check / multi_choice
   // We pre-crop first, then exclude successful IDs from full-image ReadAnswer.
@@ -4485,7 +4485,7 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox crop prepare', {
       candidateCount: focusedCheckboxCandidates.length,
       preparedCount: focusedCheckboxCropMap.size
-    })
+    }, 'detail')
   }
   const focusedCheckboxQuestionIds = Array.from(focusedCheckboxCropMap.keys())
 
@@ -4524,7 +4524,7 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, stagedLogLevel, 'AI1 crop-all-questions', {
       candidates: ai1CropCandidates.length,
       succeeded: allQuestionCropMap.size
-    })
+    }, 'detail')
   }
   // Merge: checkbox crops also available for AI3 evidence
   for (const [qId, cropData] of focusedCheckboxCropMap) {
@@ -4569,7 +4569,7 @@ export async function runStagedGradingPhaseA({
   logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', {
     ai1CropCount: ai1IncludeIds.length,
     ai2CropCount: ai2Parts.filter((p) => p.inlineData).length
-  })
+  }, 'detail')
   const parallelCalls = [
     // AI1: detail read (crop images only)
     executeStage({
@@ -4669,8 +4669,8 @@ export async function runStagedGradingPhaseA({
   // Log per-question read results for debugging
   const readAnswerLogMode = getReadAnswerLogMode()
   if (readAnswerLogMode !== 'off') {
-    logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer per-question', toReadAnswerSchemaPreview(readAnswerParsed))
-    logStaged(pipelineRunId, stagedLogLevel, 'reReadAnswer per-question', toReadAnswerSchemaPreview(reReadAnswerParsed))
+    logStaged(pipelineRunId, stagedLogLevel, 'ReadAnswer per-question', toReadAnswerSchemaPreview(readAnswerParsed, 'detail'))
+    logStaged(pipelineRunId, stagedLogLevel, 'reReadAnswer per-question', toReadAnswerSchemaPreview(reReadAnswerParsed, 'detail'))
   }
 
   // ── A3b: Focused bracket read for single_choice questions (crop-based, context-free) ──
@@ -4679,7 +4679,7 @@ export async function runStagedGradingPhaseA({
   )
   if (bracketQuestions.length > 0) {
     const inlineImage = inlineImages[0]
-    logStaged(pipelineRunId, stagedLogLevel, 'bracket-read begin', { count: bracketQuestions.length })
+    logStaged(pipelineRunId, stagedLogLevel, 'bracket-read begin', { count: bracketQuestions.length }, 'detail')
     const bracketReadResults = await Promise.all(
       bracketQuestions.map(async (q) => {
         const croppedData = await cropInlineImageByBbox(
@@ -4690,7 +4690,7 @@ export async function runStagedGradingPhaseA({
           dynamicPad
         )
         if (!croppedData) {
-          logStaged(pipelineRunId, stagedLogLevel, `bracket-read crop-failed qid=${q.questionId}`)
+          logStaged(pipelineRunId, stagedLogLevel, `bracket-read crop-failed qid=${q.questionId}`, 'detail')
           return null
         }
         const focusedPrompt = buildFocusedBracketReadPrompt(q.questionId)
@@ -4704,7 +4704,7 @@ export async function runStagedGradingPhaseA({
           stageContents: [{ role: 'user', parts: [{ text: focusedPrompt }, { inlineData: croppedData }] }]
         })
         if (!bracketResponse.ok) {
-          logStaged(pipelineRunId, stagedLogLevel, `bracket-read failed qid=${q.questionId}`)
+          logStaged(pipelineRunId, stagedLogLevel, `bracket-read failed qid=${q.questionId}`, 'detail')
           return null
         }
         const parsed = parseCandidateJson(bracketResponse.data)
@@ -4714,7 +4714,7 @@ export async function runStagedGradingPhaseA({
             studentAnswerRaw: answer.studentAnswerRaw,
             status: answer.status,
             formatBReasoning: answer.formatBReasoning
-          })
+          }, 'detail')
         }
         return answer ? { questionId: q.questionId, answer } : null
       })
@@ -4728,7 +4728,7 @@ export async function runStagedGradingPhaseA({
     if (overrideMap.size > 0) {
       // Override AI1 (detail read) only — AI2 keeps its independent crop reading so AI3 can arbitrate
       readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
-      logStaged(pipelineRunId, stagedLogLevel, 'bracket-read overrides applied (AI1 only)', { count: overrideMap.size })
+      logStaged(pipelineRunId, stagedLogLevel, 'bracket-read overrides applied (AI1 only)', { count: overrideMap.size }, 'detail')
     }
   }
 
@@ -4736,7 +4736,7 @@ export async function runStagedGradingPhaseA({
   if (focusedCheckboxCropMap.size > 0) {
     logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read begin', {
       count: focusedCheckboxCropMap.size
-    })
+    }, 'detail')
     const classifyByQuestionId = mapByQuestionId(classifyAligned, (item) => item?.questionId)
     const focusedReadResults = await Promise.all(
       Array.from(focusedCheckboxCropMap.entries()).map(async ([questionId, cropData]) => {
@@ -4753,7 +4753,7 @@ export async function runStagedGradingPhaseA({
           stageContents: [{ role: 'user', parts: [{ text: focusedPrompt }, { inlineData: cropData }] }]
         })
         if (!focusedResponse.ok) {
-          logStaged(pipelineRunId, stagedLogLevel, `focused-checkbox-read failed qid=${questionId}`)
+          logStaged(pipelineRunId, stagedLogLevel, `focused-checkbox-read failed qid=${questionId}`, 'detail')
           return null
         }
 
@@ -4764,7 +4764,7 @@ export async function runStagedGradingPhaseA({
             questionType,
             studentAnswerRaw: answer.studentAnswerRaw,
             status: answer.status
-          })
+          }, 'detail')
         }
         return answer ? { questionId, answer } : null
       })
@@ -4780,7 +4780,7 @@ export async function runStagedGradingPhaseA({
       readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
       logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read overrides applied (AI1 only)', {
         count: overrideMap.size
-      })
+      }, 'detail')
     }
 
     const missingFocusedIds = focusedCheckboxQuestionIds.filter((questionId) => !overrideMap.has(questionId))
@@ -4788,7 +4788,7 @@ export async function runStagedGradingPhaseA({
       logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read fallback to full-image', {
         missingCount: missingFocusedIds.length,
         questionIds: missingFocusedIds
-      })
+      }, 'detail')
       const fallbackPrompt = buildReadAnswerPrompt(classifyResult, {
         includeQuestionIds: missingFocusedIds
       })
@@ -4819,7 +4819,7 @@ export async function runStagedGradingPhaseA({
           }
           logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read fallback overrides applied (AI1 only)', {
             count: fallbackOverrideMap.size
-          })
+          }, 'detail')
         }
       }
 
@@ -4837,7 +4837,7 @@ export async function runStagedGradingPhaseA({
         logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read unresolved forced-unreadable (AI1 only)', {
           count: unresolvedIds.length,
           questionIds: unresolvedIds
-        })
+        }, 'detail')
       }
     }
   }
@@ -4866,7 +4866,7 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill-read begin (dual: direct + analytic)', {
       count: multiFillCropCandidates.length,
       codeSetSummary
-    })
+    }, 'detail')
     const inlineImage = inlineImages[0]
     const multiFillDualResults = await Promise.all(
       multiFillCropCandidates.map(async (q) => {
@@ -4902,7 +4902,7 @@ export async function runStagedGradingPhaseA({
         logStaged(pipelineRunId, stagedLogLevel, `focused-multifill-read dual qid=${q.questionId}`, {
           read1: answer1 ? { raw: answer1.studentAnswerRaw, status: answer1.status } : null,
           read2: answer2 ? { raw: answer2.studentAnswerRaw, status: answer2.status, uncertain: answer2.uncertainChars } : null
-        })
+        }, 'detail')
         return { questionId: q.questionId, answer1, answer2 }
       })
     )
@@ -4922,18 +4922,18 @@ export async function runStagedGradingPhaseA({
     if (multiFillUncertainIds.size > 0) {
       logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill uncertain chars detected', {
         questionIds: [...multiFillUncertainIds]
-      })
+      }, 'detail')
     }
     // Override AI1 (readAnswerParsed) with read-1 results
     if (multiFillRead1Map.size > 0) {
       readAnswerParsed = applyAnswerOverrides(readAnswerParsed, multiFillRead1Map)
-      logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill read-1 overrides applied → AI1', { count: multiFillRead1Map.size })
+      logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill read-1 overrides applied → AI1', { count: multiFillRead1Map.size }, 'detail')
     }
     // Override AI2 (reReadAnswerParsed) with read-2 results — replacing unreliable full-image reads
     if (multiFillRead2Map.size > 0) {
       reReadAnswerParsed = reReadAnswerParsed ?? { answers: [] }
       reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, multiFillRead2Map)
-      logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill read-2 overrides applied → AI2', { count: multiFillRead2Map.size })
+      logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill read-2 overrides applied → AI2', { count: multiFillRead2Map.size }, 'detail')
     }
   }
 
@@ -5044,7 +5044,7 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, stagedLogLevel, 'mismatch batch-retry', {
       candidates: mismatchCandidates.length,
       confirmed: mismatchIds.size
-    })
+    }, 'detail')
   }
 
   // Normalize read1 with mismatch flags & unordered remap
@@ -5079,7 +5079,7 @@ export async function runStagedGradingPhaseA({
   // If both read quality AND cross-stage fail → likely a systematic bbox issue.
   // Re-run classify once, then re-crop and re-read (costly but necessary).
   if (readQG.severity === QG_SEVERITY.FAIL && classifyReadQG.severity === QG_SEVERITY.FAIL) {
-    logStaged(pipelineRunId, stagedLogLevel, 'read+classify cross-stage FAIL → flagging for batch-level retry')
+    logStaged(pipelineRunId, stagedLogLevel, 'read+classify cross-stage FAIL → flagging for batch-level retry', 'detail')
     stageWarnings.push('[QualityGate] read+classify cross-stage FAIL (bbox systematic issue likely)')
   } else if (readQG.severity === QG_SEVERITY.FAIL) {
     stageWarnings.push(`[QualityGate] read quality FAIL: ${readQG.warnings.join(', ')}`)
@@ -5159,7 +5159,7 @@ export async function runStagedGradingPhaseA({
     }
   }
   if (efFlaggedIds.size > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'E↔F underline ambiguity flagged', Array.from(efFlaggedIds))
+    logStaged(pipelineRunId, stagedLogLevel, 'E↔F underline ambiguity flagged', Array.from(efFlaggedIds, 'detail'))
   }
 
   // ── Attach crop image URLs for teacher review (uses allQuestionCropMap from pre-AI1 step) ──
@@ -5235,7 +5235,7 @@ Return JSON:
       }
 
       try {
-        logStaged(pipelineRunId, stagedLogLevel, 'english-spelling-verify begin', { count: spellingItems.length })
+        logStaged(pipelineRunId, stagedLogLevel, 'english-spelling-verify begin', { count: spellingItems.length }, 'detail')
         const spellingResponse = await executeStage({
           apiKey, model,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
@@ -5268,7 +5268,7 @@ Return JSON:
               overrideCount.skipped++
             }
           }
-          logStaged(pipelineRunId, stagedLogLevel, 'english-spelling-verify result', overrideCount)
+          logStaged(pipelineRunId, stagedLogLevel, 'english-spelling-verify result', overrideCount, 'detail')
         }
       } catch (err) {
         console.warn('[english-spelling-verify] failed, continuing without override:', err?.message)
@@ -5365,8 +5365,8 @@ Return JSON:
           received: results.length,
           consistent: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'arbitrated_agree').length,
           inconsistent: Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
-        })
-        logStaged(pipelineRunId, stagedLogLevel, 'AI3 consistency per-question', Array.from(arbiterByQuestionId.entries()).map(([qId, v]) => ({
+        }, 'detail')
+        logStaged(pipelineRunId, stagedLogLevel, 'AI3 consistency per-question', Array.from(arbiterByQuestionId.entries(, 'detail')).map(([qId, v]) => ({
           questionId: qId,
           arbiterStatus: v.arbiterStatus,
           finalAnswer: v.finalAnswer,
@@ -5377,7 +5377,7 @@ Return JSON:
     } catch (arbiterErr) {
       logStaged(pipelineRunId, stagedLogLevel, 'AI3 arbiter failed (fallback to consistency status)', {
         error: arbiterErr?.message
-      })
+      }, 'detail')
     }
   }
 
@@ -5497,7 +5497,7 @@ Return JSON:
     }
   }
   if (tableLeakFlagged.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'table edge leak flagged for review', tableLeakFlagged)
+    logStaged(pipelineRunId, stagedLogLevel, 'table edge leak flagged for review', tableLeakFlagged, 'detail')
   }
 
   // ── English spacing review: force needs_review for questions flagged with spacing differences ──
@@ -5519,7 +5519,7 @@ Return JSON:
     }
   }
   if (spacingReviewFlagged.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'english spacing flagged for review', spacingReviewFlagged)
+    logStaged(pipelineRunId, stagedLogLevel, 'english spacing flagged for review', spacingReviewFlagged, 'detail')
   }
 
   const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
@@ -5656,7 +5656,7 @@ export async function runStagedGradingPhaseB({
         logStaged(pipelineRunId, stagedLogLevel, 'PhaseB calc crop for Accessor', {
           candidates: cropTargets.length,
           succeeded: calcCropMap.size
-        })
+        }, 'detail')
       }
     }
   }
@@ -5825,7 +5825,7 @@ export async function runStagedGradingPhaseB({
     severity: accessorQG.severity, warnings: accessorQG.warnings, metrics: accessorQG.metrics
   })
   if (accessorQG.severity === QG_SEVERITY.FAIL && !accessorResult._retried) {
-    logStaged(pipelineRunId, stagedLogLevel, 'accessor quality FAIL → retry (1/1)')
+    logStaged(pipelineRunId, stagedLogLevel, 'accessor quality FAIL → retry (1/1)', 'detail')
     // Re-run accessor using single-page prompt (full question set)
     const retryPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint)
     const retryContents = [{ role: 'user', parts: buildAccessorParts(retryPrompt, allAnswerIds, calcCropMap) }]
@@ -5909,7 +5909,7 @@ export async function runStagedGradingPhaseB({
       severity: explainQG.severity, warnings: explainQG.warnings, metrics: explainQG.metrics
     })
     if (explainQG.severity === QG_SEVERITY.FAIL) {
-      logStaged(pipelineRunId, stagedLogLevel, 'explain quality FAIL → retry (1/1)')
+      logStaged(pipelineRunId, stagedLogLevel, 'explain quality FAIL → retry (1/1)', 'detail')
       logStageStart(pipelineRunId, 'explain-qg-retry')
       const retryExplainResp = await executeStage({
         apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
@@ -5933,7 +5933,7 @@ export async function runStagedGradingPhaseB({
       }
     }
   } else {
-    logStaged(pipelineRunId, stagedLogLevel, 'skip stage=explain reason=no_wrong_questions')
+    logStaged(pipelineRunId, stagedLogLevel, 'skip stage=explain reason=no_wrong_questions', 'detail')
   }
 
   // B3: Locate removed — bbox from Phase A Classify is accurate enough
