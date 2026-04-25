@@ -372,7 +372,7 @@ export function validateReadAnswerQuality(readResult1, readResult2, expectedQues
     metrics.ai1ai2Comparisons = comparisons
     metrics.ai1ai2Disagreements = disagreements
     metrics.ai1ai2DisagreementRate = +disagreementRate.toFixed(3)
-    if (comparisons >= 3 && disagreementRate > 0.4) {
+    if (comparisons >= 3 && disagreementRate > 0.5) {  // AI1/AI2 角色分化後閾值從 0.4 調至 0.5
       warnings.push(`FAIL:READ_HIGH_DISAGREEMENT(${disagreements}/${comparisons}=${metrics.ai1ai2DisagreementRate})`)
     }
   }
@@ -516,7 +516,7 @@ export function validateArbiterQuality(arbiterResults, expectedQuestionIds) {
 
   // ── Decision validity ──
   const VALID_STATUSES = new Set([
-    'arbitrated_agree', 'arbitrated_pick_1', 'arbitrated_pick_2', 'needs_review'
+    'arbitrated_agree', 'needs_review'  // AI3 改為一致性判官後，不再有 pick_1/pick_2
   ])
   const invalidStatusCount = results.filter((r) => !VALID_STATUSES.has(r.arbiterStatus)).length
   metrics.invalidStatusCount = invalidStatusCount
