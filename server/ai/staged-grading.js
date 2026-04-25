@@ -1646,11 +1646,11 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
   }
 
   // 括號型 fill_blank 子題第三輪：只限制 w/h 比例，x/y 交給 classify
-  // PARENTHESES BBOX RULE 已告訴 classify 如何精確框 ( )，這裡只做比例保險
+  // 括號型 fill_blank 子題：用 akHint 的 h（與答案卷一致），確保最小寬度
   {
     const parenPageHeight = 1 / (totalPages || 1)
-    const MAX_PAREN_H_FULL = 0.008 * parenPageHeight  // 頁面 0.8%
-    const MIN_PAREN_W = 0.15                           // 頁面 15%
+    const DEFAULT_H_FULL = 0.025 * parenPageHeight  // 預設 h（沒有 akHint 時用）
+    const MIN_PAREN_W = 0.15
 
     for (let i = 0; i < alignedQuestions.length; i += 1) {
       const q = alignedQuestions[i]
@@ -1659,11 +1659,15 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const qSpec = specByQuestionId.get(q.questionId)
       if (!isQSubQ || qSpec?.tablePosition) continue
 
+      // 用 akHint 的 h（轉 full-image），沒有就用預設值
+      const qHint = qSpec?.answerBboxHint
+      const hintHFull = (qHint && typeof qHint.h === 'number') ? +(qHint.h * parenPageHeight).toFixed(4) : DEFAULT_H_FULL
+
       alignedQuestions[i] = { ...q, answerBbox: {
         x: q.answerBbox.x,
         y: q.answerBbox.y,
         w: Math.max(q.answerBbox.w, MIN_PAREN_W),
-        h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
+        h: hintHFull
       }}
     }
   }
