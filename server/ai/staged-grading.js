@@ -4282,19 +4282,23 @@ export async function runStagedGradingPhaseA({
         const pageStartY = (pageNum - 1) / totalPages
         const pageHeight = 1 / totalPages
         akHintFullImage = {
+          x: +akBbox.x.toFixed(4),
           y: +(pageStartY + akBbox.y * pageHeight).toFixed(4),
+          w: +akBbox.w.toFixed(4),
           h: +(akBbox.h * pageHeight).toFixed(4)
         }
       } else if (akBbox) {
-        akHintFullImage = { y: +akBbox.y.toFixed(4), h: +akBbox.h.toFixed(4) }
+        akHintFullImage = { x: +akBbox.x.toFixed(4), y: +akBbox.y.toFixed(4), w: +akBbox.w.toFixed(4), h: +akBbox.h.toFixed(4) }
       }
       const yDiff = (cBbox && akHintFullImage) ? +(cBbox.y - akHintFullImage.y).toFixed(4) : null
+      const xDiff = (cBbox && akHintFullImage) ? +(cBbox.x - akHintFullImage.x).toFixed(4) : null
       return {
         id: q.questionId,
         type: q.questionType,
         classify: cBbox ? { y: +cBbox.y.toFixed(3), h: +cBbox.h.toFixed(3), x: +cBbox.x.toFixed(3), w: +cBbox.w.toFixed(3) } : null,
         akHint: akHintFullImage,
         yDiff,
+        xDiff,
         ...(yDiff !== null && Math.abs(yDiff) > 0.02 ? { warn: 'Y_DRIFT' } : {})
       }
     })
