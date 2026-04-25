@@ -4471,11 +4471,10 @@ export async function runStagedGradingPhaseA({
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
         const bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
-        // fill_blank 子題（括號型）：左右寬（抓完整數字）、上下窄（避免看到鄰行）
+        // fill_blank 子題（括號型）用小 padding，避免裁切到上下相鄰的括號
         const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
           && !classifyAligned.find(cq => cq.questionId === q.questionId && cq.tablePositionReasoning)
-        const cropPad = isParenSubQ
-          ? { padX: +(0.02 / totalPages).toFixed(4), padY: +(0.005 / totalPages).toFixed(4) }
+        const cropPad = isParenSubQ ? +(0.01 / totalPages).toFixed(4)
           : dynamicPad
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
