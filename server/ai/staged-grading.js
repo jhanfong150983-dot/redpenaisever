@@ -1564,34 +1564,23 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
     // answerBboxHint 是 per-page 座標，需要轉換為 full-image 座標
     const isSubQ = questionType === 'fill_blank' && questionId.split('-').length >= 3
     const hint = spec?.answerBboxHint
-    if (isSubQ && hint && typeof hint.x === 'number' && typeof hint.y === 'number' && answerBbox) {
+    if (isSubQ && hint && typeof hint.x === 'number' && typeof hint.y === 'number' && answerBbox && !spec?.tablePosition) {
+      // 括號型填空 (　　　)：用 answerBboxHint 強制定位，寬而矮
+      // 表格型填空有 tablePosition → 跳過，交給第二輪表格後處理（需要 classify 原始 x 算偏移）
       const pageNum = parseInt(String(questionId).split('-')[0], 10) || 1
       const pageHeight = 1 / (totalPages || 1)
       const pageStartY = (pageNum - 1) * pageHeight
-      const hasTablePosition = Boolean(spec?.tablePosition)
-
-      if (!hasTablePosition) {
-        // 括號型填空 (　　　)：寬而矮，一行手寫
-        // h 上限：per-page 0.012（約頁面 1.2%，一行手寫高度）
-        // w 下限：per-page 0.08（確保覆蓋整個括號區域）
-        const MAX_PAREN_H = 0.012
-        const MIN_PAREN_W = 0.08
-        const cappedH = Math.min(hint.h || 0.012, MAX_PAREN_H)
-        const ensuredW = Math.max(hint.w || 0.08, MIN_PAREN_W)
-        answerBbox = {
-          x: hint.x,
-          y: +(pageStartY + hint.y * pageHeight).toFixed(4),
-          w: ensuredW,
-          h: +(cappedH * pageHeight).toFixed(4)
-        }
-      } else {
-        // 表格型填空：由後續表格後處理覆蓋，這裡只做基本轉換
-        answerBbox = {
-          x: hint.x,
-          y: +(pageStartY + hint.y * pageHeight).toFixed(4),
-          w: hint.w || answerBbox.w,
-          h: +((hint.h || answerBbox.h) * pageHeight).toFixed(4)
-        }
+      // h 上限：per-page 0.012（約頁面 1.2%，一行手寫高度）
+      // w 下限：per-page 0.08（確保覆蓋整個括號區域）
+      const MAX_PAREN_H = 0.012
+      const MIN_PAREN_W = 0.08
+      const cappedH = Math.min(hint.h || 0.012, MAX_PAREN_H)
+      const ensuredW = Math.max(hint.w || 0.08, MIN_PAREN_W)
+      answerBbox = {
+        x: hint.x,
+        y: +(pageStartY + hint.y * pageHeight).toFixed(4),
+        w: ensuredW,
+        h: +(cappedH * pageHeight).toFixed(4)
       }
     }
 
