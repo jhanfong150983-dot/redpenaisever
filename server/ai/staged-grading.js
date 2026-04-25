@@ -427,11 +427,13 @@ async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox 
     let px, py, px2, py2
     if (useActualBbox) {
       // 直接使用 bbox 實際範圍，加 pad 邊距（預設 0.03，可透過 customPad 覆蓋）
-      const pad = customPad !== null ? customPad : 0.03
-      px = Math.max(0, bbox.x - pad)
-      py = Math.max(0, bbox.y - pad)
-      px2 = Math.min(1, bbox.x + bbox.w + pad)
-      py2 = Math.min(1, bbox.y + bbox.h + pad)
+      // customPad 可以是數值（四邊等距）或 { padX, padY }（水平/垂直分開）
+      const padX = customPad !== null ? (typeof customPad === 'object' ? customPad.padX : customPad) : 0.03
+      const padY = customPad !== null ? (typeof customPad === 'object' ? customPad.padY : customPad) : 0.03
+      px = Math.max(0, bbox.x - padX)
+      py = Math.max(0, bbox.y - padY)
+      px2 = Math.min(1, bbox.x + bbox.w + padX)
+      py2 = Math.min(1, bbox.y + bbox.h + padY)
     } else {
       // 以 bbox 中心點為錨，向外擴展至固定尺寸
       const cx = bbox.x + bbox.w / 2
@@ -1655,7 +1657,7 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
   // 不依賴 answerKey bbox（答案卷可能是拍照，跟 PDF 學生卷座標系不同）
   {
     const parenPageHeight = 1 / (totalPages || 1)
-    const FIXED_H = +(0.03 * parenPageHeight).toFixed(4)  // 固定 3% 頁高（一行手寫）
+    const FIXED_H = +(0.02 * parenPageHeight).toFixed(4)  // 固定 2% 頁高（一行手寫）
 
     for (let i = 0; i < alignedQuestions.length; i += 1) {
       const q = alignedQuestions[i]
@@ -4469,10 +4471,12 @@ export async function runStagedGradingPhaseA({
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
         const bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
-        // fill_blank 子題（括號型）用更小的 padding，避免裁切到上下相鄰的括號
+        // fill_blank 子題（括號型）：左右寬（抓完整數字）、上下窄（避免看到鄰行）
         const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
           && !classifyAligned.find(cq => cq.questionId === q.questionId && cq.tablePositionReasoning)
-        const cropPad = isParenSubQ ? +(0.02 / totalPages).toFixed(4) : dynamicPad
+        const cropPad = isParenSubQ
+          ? { padX: +(0.02 / totalPages).toFixed(4), padY: +(0.005 / totalPages).toFixed(4) }
+          : dynamicPad
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
