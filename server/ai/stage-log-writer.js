@@ -52,7 +52,8 @@ export function extractPhaseALogData({
     questionId: a.questionId,
     status: a.arbiterStatus,
     finalAnswer: a.finalAnswer,
-    support: a.agreementSupport || a.ai1Support || a.ai2Support
+    consistent: a.consistent,
+    reason: a.reason || undefined
   }))
 
   // stage latencies
