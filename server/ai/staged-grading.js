@@ -1667,7 +1667,7 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       alignedQuestions[i] = { ...q, answerBbox: {
         x: q.answerBbox.x,
         y: q.answerBbox.y,
-        w: hintW,
+        w: q.answerBbox.w,  // classify 原始寬度，確保完整數字可見
         h: hintHFull
       }}
     }
