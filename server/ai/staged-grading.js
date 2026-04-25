@@ -2772,20 +2772,18 @@ Report your stroke observation in the "digitStrokeNote" field (1 sentence). Exam
     : ''
 
   return `
-You are an answer reader. Your only job is to report what the student physically wrote or drew in each question's designated answer space. You have NO mathematical knowledge and must NOT solve, infer, or guess.
+Your job is to report what the student physically wrote or drew in each question's designated answer space.
 
 Visible question IDs on this image:
 ${JSON.stringify(visibleIds)}
 ${singleChoiceNote}${numericChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}${tableCellHintNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
-You do NOT know what the correct answer is. You do NOT know what the student intended to write.
+You may ONLY output what is physically, visibly written by the student's own hand.
+NEVER output content that does not exist as physical handwriting in the image.
 NEVER output an answer based on:
-- what you think the correct answer should be
-- the question stem or context clues
 - answers you see in neighboring questions
 - printed option labels (A B C D 甲乙丙丁) that the student did NOT mark
-You may ONLY output what is physically, visibly written by the student's own hand.
 If the answer space is empty → blank. There are NO exceptions.
 
 == INK COLOR RULE (critical) ==
@@ -2853,8 +2851,8 @@ FORMAT A — WRITE-IN (student writes a symbol in an empty blank):
 FORMAT B — CIRCLE-IN-PARENS 圈圈看 (both options pre-printed inside parens):
 - Both options are pre-printed inside the same parentheses, e.g. "（可以，不可以）" or "（會，不會）" or "（大於，小於，等於）".
 - The student circles, underlines, or otherwise marks ONE of the pre-printed words.
-- ❌ FORBIDDEN: using the question stem, subject knowledge, or logic to guess which word is correct — you have NO knowledge of correct answers.
 - ❌ FORBIDDEN: outputting an answer just because one option "sounds right" or "makes sense" given the question context.
+- You MUST determine the answer by the physical position of the student's mark (circle/underline), NOT by logic or knowledge.
 - REQUIRED: For every FORMAT B question, you MUST fill in the "formatBReasoning" field before deciding the answer. Follow these steps IN ORDER and write each step into formatBReasoning:
   Step 1 — Identify options: "OPTION_LEFT=[first word before the comma], OPTION_RIGHT=[second word after the comma]"
   Step 2 — Describe the mark: "I see a [circle/underline/cross-out] drawn by the student."
@@ -3111,19 +3109,52 @@ function buildReReadAnswerPrompt(classifyResult, options = {}) {
   return buildGlobalReadPrompt(classifyResult, options)
 }
 
-// ── AI1（細節派）：只看 answerBbox 裁切圖，不看全圖 ─────────────────────────
+// ── AI2（校對審查員）：看裁切圖 + 知道正確答案 ─────────────────────────────────
+// AI2 receives the same crops as AI1, but also knows the correct answer for each question.
+// This creates cognitive diversity: AI1 is pure OCR, AI2 is reference-aware review.
+function buildReviewReadPrompt(classifyResult, options = {}) {
+  const basePrompt = buildReadAnswerPrompt(classifyResult, options)
+  return `== ROLE: 校對審查員 (Review Reader) ==
+You are a review reader. You see the same cropped answer regions as the transcriber, but you ALSO know the correct answer for each question (shown in the label).
+
+Your job is still to report what the student ACTUALLY wrote — NOT the correct answer.
+
+HOW TO USE THE CORRECT ANSWER:
+- Use it as a VERIFICATION HINT: after your initial reading, compare with the correct answer.
+- If your reading DIFFERS from the correct answer, look again MORE CAREFULLY for any faint, small, or partially hidden strokes you might have missed.
+- If after careful re-examination you still see the same thing → report what you see. The student may genuinely have written something different from the correct answer.
+- NEVER output the correct answer unless you can physically see it in the student's handwriting.
+
+You will see a series of CROPPED answer regions, one image per question.
+Each crop is preceded by a label: "--- 題目 [ID]（類型：[type]，正確答案：[answer]）---"
+
+STRICT RULES:
+- Your output must be what the student PHYSICALLY WROTE, not the correct answer.
+- If the student wrote something different from the correct answer, report what the student wrote.
+- If the answer space is empty → status='blank', even if you know the correct answer.
+- The correct answer only helps you LOOK MORE CAREFULLY — it does NOT change what you report.
+
+${basePrompt}`
+}
+
+// ── AI1（客觀抄寫員）：只看裁切圖，不知道正確答案 ─────────────────────────
 // The same question-type rules apply, but:
 // - Images sent = one crop per question (NO full submission image)
 // - AI1 CANNOT see question stems or surrounding context
 // - Must apply blank-first strictly (crop may be the answer space only)
 function buildDetailReadPrompt(classifyResult, options = {}) {
   const basePrompt = buildReadAnswerPrompt(classifyResult, options)
-  return `IMPORTANT — DETAIL READ MODE (AI1):
+  return `== ROLE: 客觀抄寫員 (Objective Transcriber) ==
+You are a pure OCR transcriber. You do NOT know the correct answer. You have NO mathematical knowledge and must NOT solve, infer, or guess.
+Your only job is to faithfully copy what the student physically wrote — nothing more, nothing less.
+
 You will see a series of CROPPED answer regions, one image per question.
 Each crop is preceded by a label: "--- 題目 [ID]（類型：[type]）---"
 You CANNOT see the full submission. You CANNOT see question stems or neighboring questions.
 
-STRICT RULES FOR CROP-ONLY MODE:
+STRICT RULES:
+- You do NOT know what the correct answer is. You do NOT know what the student intended to write.
+- NEVER output an answer based on what you think the correct answer should be, or based on the question stem or context clues.
 - blank-first: If no fresh handwriting is visible in the crop → status='blank', studentAnswerRaw=''
 - unreadable: If handwriting exists but is illegible → status='unreadable', studentAnswerRaw=''
 - NEVER infer the answer from the question type or any context. Only read what is physically written.
@@ -4583,15 +4614,19 @@ export async function runStagedGradingPhaseA({
   // Reason: full-image reading caused AI2 to read the wrong row in table-style
   // calculation questions (positional confusion in dense answer grids), and also
   // caused single_check to output option text characters instead of symbol labels.
-  // Per-question crops anchor AI2 to the correct answer cell; using buildDetailReadPrompt
-  // ensures the prompt correctly describes the crop-based format.
-  const globalReadPrompt = buildDetailReadPrompt(classifyResult, { answerKeyQuestions })
+  // AI2 uses buildReviewReadPrompt: same rules as AI1, but knows correct answers (review role).
+  // Labels include correct answer so AI2 can use it as a verification hint.
+  const akMapForAi2 = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
+  const globalReadPrompt = buildReviewReadPrompt(classifyResult, { answerKeyQuestions })
   const ai2Parts = [{ text: globalReadPrompt }]
   for (const q of classifyAligned) {
     if (!q.visible) continue
     const crop = allQuestionCropMap.get(q.questionId)
     if (!crop) continue
-    ai2Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}）---` })
+    const akQ = akMapForAi2.get(q.questionId)
+    const correctAnswer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
+    const answerLabel = correctAnswer ? `，正確答案：${correctAnswer}` : ''
+    ai2Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}${answerLabel}）---` })
     ai2Parts.push({ inlineData: crop })
   }
   logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', {
@@ -4609,7 +4644,7 @@ export async function runStagedGradingPhaseA({
       routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
       stageContents: [{ role: 'user', parts: ai1Parts }]
     }),
-    // AI2: global read (same per-question crops as AI1, different prompt/reading style)
+    // AI2: review read (same crops as AI1, but knows correct answers — acts as reviewer)
     executeStage({
       apiKey,
       model,
