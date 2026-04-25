@@ -1720,12 +1720,19 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const qSpec = specByQuestionId.get(q.questionId)
       if (!isQSubQ || qSpec?.tablePosition) continue
 
-      const MIN_W = 0.05  // 最小寬度，避免數字被切半（70→7, 12→2）
+      // 以 classify bbox 中心為錨，左右對稱擴寬到最小寬度
+      // 避免 x 偏移時單側數字被切掉（12→2, 70→7）
+      const MIN_W = 0.08
+      const rawX = q.answerBbox.x
+      const rawW = q.answerBbox.w
+      const finalW = Math.max(rawW, MIN_W)
+      const center = rawX + rawW / 2
+      const finalX = Math.max(0, center - finalW / 2)
       alignedQuestions[i] = { ...q, answerBbox: {
-        x: q.answerBbox.x,  // classify 決定
-        y: q.answerBbox.y,  // classify 決定
-        w: Math.max(q.answerBbox.w, MIN_W),  // classify 決定，但不低於最小寬度
-        h: FIXED_H          // 固定一行高度
+        x: +finalX.toFixed(4),
+        y: q.answerBbox.y,
+        w: +finalW.toFixed(4),
+        h: FIXED_H
       }}
     }
   }
