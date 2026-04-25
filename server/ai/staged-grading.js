@@ -1559,6 +1559,23 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
 
     // 表格題：不在第一輪強制 x，保留 classify 原始偵測值，第二輪統一修正
 
+    // fill_blank 子題（3+ segments）：用 answerBboxHint 強制定位
+    // 這些題目的 bbox 不穩定（每次 classify 切到不同位置），用答案卷座標固定
+    // answerBboxHint 是 per-page 座標，需要轉換為 full-image 座標
+    const isSubQ = questionType === 'fill_blank' && questionId.split('-').length >= 3
+    const hint = spec?.answerBboxHint
+    if (isSubQ && hint && typeof hint.x === 'number' && typeof hint.y === 'number' && answerBbox) {
+      const pageNum = parseInt(String(questionId).split('-')[0], 10) || 1
+      const pageHeight = 1 / (totalPages || 1)
+      const pageStartY = (pageNum - 1) * pageHeight
+      answerBbox = {
+        x: hint.x,
+        y: +(pageStartY + hint.y * pageHeight).toFixed(4),
+        w: hint.w || answerBbox.w,
+        h: +((hint.h || answerBbox.h) * pageHeight).toFixed(4)
+      }
+    }
+
     return {
       ...row,
       questionType,
