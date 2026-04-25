@@ -305,7 +305,7 @@ function getReadAnswerLogMode() {
 function getStagedLogLevel() {
   const raw = String(process.env.STAGED_GRADING_LOG_LEVEL || '').trim().toLowerCase()
   if (raw === 'off' || raw === 'basic' || raw === 'detail') return raw
-  return 'basic' // 預設 basic：只顯示 quality-gate 和 per-question summary
+  return 'off' // 預設關閉細節 log，只保留 'basic' 標記的（quality-gate + per-question summary）
 }
 
 function isReadAnswerHardFailCloseEnabled() {
