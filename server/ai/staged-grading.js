@@ -1659,9 +1659,11 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const qSpec = specByQuestionId.get(q.questionId)
       if (!isQSubQ || qSpec?.tablePosition) continue
 
-      // 用 akHint 的 h（轉 full-image），沒有就用預設值
+      // 用 akHint 的 h × 0.7（轉 full-image），避免 h 太大切到鄰題答案
+      // 0.7 是校正係數：akHint h 包含括號+周圍空白，實際手寫只需要 70%
+      const HINT_H_SCALE = 0.7
       const qHint = qSpec?.answerBboxHint
-      const hintHFull = (qHint && typeof qHint.h === 'number') ? +(qHint.h * parenPageHeight).toFixed(4) : DEFAULT_H_FULL
+      const hintHFull = (qHint && typeof qHint.h === 'number') ? +(qHint.h * parenPageHeight * HINT_H_SCALE).toFixed(4) : DEFAULT_H_FULL
 
       alignedQuestions[i] = { ...q, answerBbox: {
         x: q.answerBbox.x,
