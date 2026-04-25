@@ -1170,26 +1170,47 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
   const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
   const byQuestionId = mapByQuestionId(questions, (item) => item?.id)
 
-  // 計算 fill_blank 子題的 ordinal（同父題內第幾個）
+  // 計算 fill_blank 子題的 ordinal（同行第幾個）和 blankRow（第幾行）
   // e.g. 1-3-1-1 和 1-3-1-2 → parentId=1-3-1, ordinal=1/2, total=2
+  // e.g. 1-3-1-x, 1-3-2-x, 1-3-3-x → grandParentId=1-3, blankRow=1/2/3, totalRows=3
   const fillBlankOrdinalMap = new Map()
-  const parentGroups = new Map()
+  const parentGroups = new Map()  // parentId → [qId, ...]（同行的子題）
+  const grandParentGroups = new Map()  // grandParentId → Set<parentId>（同題組的行）
   for (const qId of questionIds) {
     const parts = qId.split('-')
     if (parts.length < 3) continue
     const q = byQuestionId.get(qId)
     const expectedType = q ? resolveExpectedQuestionType(q) : 'fill_blank'
     if (expectedType !== 'fill_blank') continue
-    // 跳過表格型
     if (q?.tablePosition) continue
     const parentId = parts.slice(0, -1).join('-')
     if (!parentGroups.has(parentId)) parentGroups.set(parentId, [])
     parentGroups.get(parentId).push(qId)
+    // 4+ segment IDs: 計算 blankRow（grandParent 層級的行數）
+    if (parts.length >= 4) {
+      const grandParentId = parts.slice(0, -2).join('-')
+      if (!grandParentGroups.has(grandParentId)) grandParentGroups.set(grandParentId, [])
+      const rows = grandParentGroups.get(grandParentId)
+      if (!rows.includes(parentId)) rows.push(parentId)
+    }
   }
-  for (const [parentId, children] of parentGroups) {
-    if (children.length < 2) continue  // 只有一個子題不需要 ordinal
+  // 計算 ordinal（同行第幾個）
+  for (const [, children] of parentGroups) {
+    if (children.length < 2) continue
     for (let i = 0; i < children.length; i++) {
       fillBlankOrdinalMap.set(children[i], { ordinal: i + 1, totalBlanks: children.length })
+    }
+  }
+  // 計算 blankRow（同題組第幾行）
+  for (const [, rows] of grandParentGroups) {
+    if (rows.length < 2) continue
+    for (let r = 0; r < rows.length; r++) {
+      const parentId = rows[r]
+      const children = parentGroups.get(parentId) || []
+      for (const qId of children) {
+        const existing = fillBlankOrdinalMap.get(qId) || {}
+        fillBlankOrdinalMap.set(qId, { ...existing, blankRow: r + 1, totalRows: rows.length })
+      }
     }
   }
 
@@ -1238,6 +1259,10 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     if (ordinalInfo) {
       spec.blankOrdinal = ordinalInfo.ordinal
       spec.blankTotal = ordinalInfo.totalBlanks
+      if (ordinalInfo.blankRow) {
+        spec.blankRow = ordinalInfo.blankRow
+        spec.blankRowTotal = ordinalInfo.totalRows
+      }
     }
     // 表格座標定位（優先於 anchorHint）
     if (question?.tablePosition && typeof question.tablePosition.col === 'number' && typeof question.tablePosition.row === 'number') {
@@ -1695,10 +1720,11 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const qSpec = specByQuestionId.get(q.questionId)
       if (!isQSubQ || qSpec?.tablePosition) continue
 
+      const MIN_W = 0.05  // 最小寬度，避免數字被切半（70→7, 12→2）
       alignedQuestions[i] = { ...q, answerBbox: {
         x: q.answerBbox.x,  // classify 決定
         y: q.answerBbox.y,  // classify 決定
-        w: q.answerBbox.w,  // classify 決定
+        w: Math.max(q.answerBbox.w, MIN_W),  // classify 決定，但不低於最小寬度
         h: FIXED_H          // 固定一行高度
       }}
     }
@@ -2237,6 +2263,7 @@ Rules:
   - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must frame the student's handwritten answer inside that blank.
     BLANK BBOX RULE: Fill-in-the-blank questions have blanks embedded in printed sentences, marked by ( ), □, or ___. The student writes their answer INSIDE these marks.
     ORDINAL RULE (MANDATORY when blankOrdinal is present): When the spec includes blankOrdinal and blankTotal, this line contains MULTIPLE blanks. You MUST count the blanks from LEFT to RIGHT on the same printed line, and frame the Nth blank (where N = blankOrdinal). Example: if blankOrdinal=1, blankTotal=2, the line has 2 blanks — frame the FIRST (leftmost) blank. If blankOrdinal=2, frame the SECOND blank. Do NOT be attracted to handwriting in adjacent blanks.
+    ROW RULE (MANDATORY when blankRow is present): When the spec includes blankRow and blankRowTotal, this question group has MULTIPLE printed lines. You MUST find the correct printed line by counting from TOP to BOTTOM within this question group — blankRow=1 is the FIRST (topmost) line, blankRow=2 is the SECOND line, etc. First locate the correct ROW, then apply ORDINAL RULE within that row. Do NOT let the Y position drift to adjacent rows.
     Examples:
     - Parentheses: 印刷文字「答案是(　　　)元」→ student wrote "150" inside ( ) → frame "150", NOT the printed text around it
     - Square box: 印刷文字「2½ □ (4.73 □ 2.73)」→ student wrote "×" inside □ → frame "×"
