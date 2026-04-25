@@ -4501,14 +4501,16 @@ export async function runStagedGradingPhaseA({
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
         const bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
-        // No width narrowing — dynamic padding (adjusted by page count) ensures
-        // crops don't include too many adjacent questions.
+        // fill_blank 子題（括號型）用更小的 padding，避免裁切到上下相鄰的括號
+        const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
+          && !classifyAligned.find(cq => cq.questionId === q.questionId && cq.tablePositionReasoning)
+        const cropPad = isParenSubQ ? +(0.01 / totalPages).toFixed(4) : dynamicPad
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
           bboxToUse,
           true,
-          dynamicPad
+          cropPad
         )
         return { questionId: q.questionId, cropData }
       })
