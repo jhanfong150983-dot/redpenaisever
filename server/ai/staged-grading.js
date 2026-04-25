@@ -1568,16 +1568,30 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const pageNum = parseInt(String(questionId).split('-')[0], 10) || 1
       const pageHeight = 1 / (totalPages || 1)
       const pageStartY = (pageNum - 1) * pageHeight
-      // 填空子題高度上限：per-page 0.012（約頁面 1.2%，一行手寫的高度）
-      // 防止 answerBboxHint 太高讀到上下其他題的答案
-      const MAX_SUBQ_H_PER_PAGE = 0.012
-      const rawH = hint.h || answerBbox.h
-      const cappedH = Math.min(rawH, MAX_SUBQ_H_PER_PAGE)
-      answerBbox = {
-        x: hint.x,
-        y: +(pageStartY + hint.y * pageHeight).toFixed(4),
-        w: hint.w || answerBbox.w,
-        h: +(cappedH * pageHeight).toFixed(4)
+      const hasTablePosition = Boolean(spec?.tablePosition)
+
+      if (!hasTablePosition) {
+        // 括號型填空 (　　　)：寬而矮，一行手寫
+        // h 上限：per-page 0.012（約頁面 1.2%，一行手寫高度）
+        // w 下限：per-page 0.08（確保覆蓋整個括號區域）
+        const MAX_PAREN_H = 0.012
+        const MIN_PAREN_W = 0.08
+        const cappedH = Math.min(hint.h || 0.012, MAX_PAREN_H)
+        const ensuredW = Math.max(hint.w || 0.08, MIN_PAREN_W)
+        answerBbox = {
+          x: hint.x,
+          y: +(pageStartY + hint.y * pageHeight).toFixed(4),
+          w: ensuredW,
+          h: +(cappedH * pageHeight).toFixed(4)
+        }
+      } else {
+        // 表格型填空：由後續表格後處理覆蓋，這裡只做基本轉換
+        answerBbox = {
+          x: hint.x,
+          y: +(pageStartY + hint.y * pageHeight).toFixed(4),
+          w: hint.w || answerBbox.w,
+          h: +((hint.h || answerBbox.h) * pageHeight).toFixed(4)
+        }
       }
     }
 
