@@ -1186,7 +1186,10 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     // For single_choice: helps classify locate the bracket row (prevents reading option row instead).
     // For other types: provides a spatial anchor to improve bbox accuracy.
     const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
-    if (akAnswerBbox) {
+    // fill_blank 子題不傳 answerBboxHint（答案卷可能是拍照，y 座標會污染 classify 判斷）
+    const isFillBlankSubQ = questionId.split('-').length >= 3 && expectedType === 'fill_blank'
+    const skipHintForSubQ = isFillBlankSubQ
+    if (akAnswerBbox && !skipHintForSubQ) {
       spec.answerBboxHint = {
         x: +akAnswerBbox.x.toFixed(4),
         y: +akAnswerBbox.y.toFixed(4),
