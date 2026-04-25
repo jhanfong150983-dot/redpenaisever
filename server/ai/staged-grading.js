@@ -1559,21 +1559,10 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
 
     // 表格題：不在第一輪強制 x，保留 classify 原始偵測值，第二輪統一修正
 
-    // fill_blank 子題（3+ segments）：修正 bbox 比例
-    // 位置用 classify 的（適應學生卷），比例強制寬矮（括號型填空特徵）
-    // 表格型填空有 tablePosition → 跳過，交給第二輪表格後處理
+    // 括號型 fill_blank 子題：第一輪只標記，第三輪統一修正 y
+    // 表格型填空有 tablePosition → 跳過
     const isSubQ = questionType === 'fill_blank' && questionId.split('-').length >= 3
-    if (isSubQ && answerBbox && !spec?.tablePosition) {
-      const pageHeight = 1 / (totalPages || 1)
-      const MAX_PAREN_H_FULL = 0.008 * pageHeight  // 頁面 0.8%（full-image coords）
-      const MIN_PAREN_W = 0.15                      // 頁面 15%
-      answerBbox = {
-        x: answerBbox.x,
-        y: answerBbox.y,
-        w: Math.max(answerBbox.w, MIN_PAREN_W),
-        h: Math.min(answerBbox.h, MAX_PAREN_H_FULL)
-      }
-    }
+    const isParenSubQ = isSubQ && !spec?.tablePosition
 
     return {
       ...row,
@@ -1654,6 +1643,72 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
         alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +safeX.toFixed(4), w: +safeW.toFixed(4), h: +cappedH.toFixed(4) } }
       }
     }
+  }
+
+  // 括號型 fill_blank 子題第三輪：用 answerBboxHint 的 y + 頁級偏移修正
+  // 策略：用同頁非子題的 classify.y vs hint.y 差距，算出整頁掃描偏移量
+  // 然後用 hint.y + 偏移量定位（hint 提供精確的相對位置，偏移量修正掃描差異）
+  const parenPageHeight = 1 / (totalPages || 1)
+  const MAX_PAREN_H_FULL = 0.008 * parenPageHeight
+  const MIN_PAREN_W = 0.15
+
+  // 先收集每頁的 y 偏移量（用非子題的 classify.y - hint_converted.y）
+  const pageYOffsets = new Map() // pageNum → [offset1, offset2, ...]
+  for (const q of alignedQuestions) {
+    if (!q.visible || !q.answerBbox) continue
+    const qSpec = specByQuestionId.get(q.questionId)
+    const qHint = qSpec?.answerBboxHint
+    if (!qHint || typeof qHint.y !== 'number') continue
+    const isQSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
+    if (isQSubQ) continue // 跳過子題本身，只用非子題算偏移
+    const pageNum = parseInt(String(q.questionId).split('-')[0], 10) || 1
+    const pageStartY = (pageNum - 1) * parenPageHeight
+    const hintYFull = pageStartY + qHint.y * parenPageHeight
+    const offset = q.answerBbox.y - hintYFull
+    if (!pageYOffsets.has(pageNum)) pageYOffsets.set(pageNum, [])
+    pageYOffsets.get(pageNum).push(offset)
+  }
+  // 算每頁中位數 y 偏移
+  const pageYOffsetMedian = new Map()
+  for (const [pageNum, offsets] of pageYOffsets) {
+    offsets.sort((a, b) => a - b)
+    const mid = offsets.length % 2 === 1
+      ? offsets[Math.floor(offsets.length / 2)]
+      : (offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2
+    pageYOffsetMedian.set(pageNum, mid)
+  }
+
+  // 套用到括號型 fill_blank 子題
+  for (let i = 0; i < alignedQuestions.length; i += 1) {
+    const q = alignedQuestions[i]
+    if (!q.visible || !q.answerBbox) continue
+    const isQSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
+    const qSpec = specByQuestionId.get(q.questionId)
+    if (!isQSubQ || qSpec?.tablePosition) continue // 只處理括號型
+
+    const qHint = qSpec?.answerBboxHint
+    if (!qHint || typeof qHint.y !== 'number') {
+      // 沒有 hint，至少修正比例
+      alignedQuestions[i] = { ...q, answerBbox: {
+        ...q.answerBbox,
+        w: Math.max(q.answerBbox.w, MIN_PAREN_W),
+        h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
+      }}
+      continue
+    }
+
+    const pageNum = parseInt(String(q.questionId).split('-')[0], 10) || 1
+    const pageStartY = (pageNum - 1) * parenPageHeight
+    const hintYFull = pageStartY + qHint.y * parenPageHeight
+    const yOffset = pageYOffsetMedian.get(pageNum) ?? 0
+    const correctedY = hintYFull + yOffset
+
+    alignedQuestions[i] = { ...q, answerBbox: {
+      x: q.answerBbox.x,               // classify 的 x（水平位置準確）
+      y: +correctedY.toFixed(4),        // hint.y + 頁級偏移修正
+      w: Math.max(q.answerBbox.w, MIN_PAREN_W),
+      h: Math.min(q.answerBbox.h, MAX_PAREN_H_FULL)
+    }}
   }
 
   // matching group_context: same group shares one union bbox.
