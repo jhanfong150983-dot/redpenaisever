@@ -3181,6 +3181,7 @@ async function handleSync(req, res) {
           questionCount: row.question_count ?? undefined,
           totalScore: row.total_score ?? undefined,
           shareCode: row.share_code ?? undefined,
+          pageOrientations: row.page_orientations ?? undefined,
           updatedAt: toMillis(row.updated_at) ?? undefined
         }))
 
@@ -3551,6 +3552,7 @@ async function handleSync(req, res) {
           question_count: t.questionCount ?? t.question_count ?? undefined,
           total_score: t.totalScore ?? t.total_score ?? undefined,
           share_code: t.shareCode ?? t.share_code ?? ('AK-' + Math.random().toString(36).substring(2, 8).toUpperCase()),
+          page_orientations: t.pageOrientations ?? t.page_orientations ?? undefined,
           updated_at: toIsoTimestamp(t.updatedAt ?? t.updated_at) ?? nowIso
         }))
         const tplResult = await supabaseDb
