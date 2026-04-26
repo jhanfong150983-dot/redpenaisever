@@ -1729,12 +1729,13 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const center = rawX + rawW / 2
       const finalX = Math.max(0, center - finalW / 2)
       // y 微調往下：classify 的 y 有偏上傾向，加小偏移避免裁切到上一行
-      const Y_DOWN_OFFSET = +(0.002 / (totalPages || 1)).toFixed(5)
+      // bboxCorrected 的跳過（中位數校正後的 bbox 已經包含 y 偏移）
+      const Y_DOWN_OFFSET = q.bboxCorrected ? 0 : +(0.002 / (totalPages || 1)).toFixed(5)
       alignedQuestions[i] = { ...q, answerBbox: {
         x: +finalX.toFixed(4),
         y: +(q.answerBbox.y + Y_DOWN_OFFSET).toFixed(4),
         w: +finalW.toFixed(4),
-        h: FIXED_H
+        h: q.bboxCorrected ? q.answerBbox.h : FIXED_H  // bboxCorrected 時保留原 h
       }}
     }
   }
