@@ -4163,7 +4163,7 @@ export async function runStagedGradingPhaseA({
     pages: pageEntries.map(([p, ids]) => ({ page: p, count: ids.length }))
   })
 
-  let classifyResult
+  // classifyResult 已在外層 if/else 之前宣告（let classifyResult）
 
   if (pageEntries.length <= 1) {
     // Single page (or all questions share one page) — one call
