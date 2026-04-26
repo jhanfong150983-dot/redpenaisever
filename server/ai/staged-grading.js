@@ -4316,28 +4316,8 @@ export async function runStagedGradingPhaseA({
   }
   } // end else (skip classify when bboxOverrides)
 
-  // bboxOverrides: 用前端傳入的校正 bbox 覆蓋 classify 結果
+  // classifyAligned: bboxOverrides 時已在上方構造好，不需要再覆蓋
   let classifyAligned = classifyResult.alignedQuestions
-  if (bboxOverrides && bboxOverrides.length > 0) {
-    const overrideMap = new Map(bboxOverrides.map((o) => [o.questionId, o]))
-    for (let i = 0; i < classifyAligned.length; i++) {
-      const q = classifyAligned[i]
-      const override = overrideMap.get(q.questionId)
-      if (override) {
-        classifyAligned[i] = {
-          ...q,
-          answerBbox: override.answerBbox ?? q.answerBbox,
-          readBbox: override.readBbox ?? q.readBbox,
-          bboxCorrected: override.corrected || false
-        }
-      }
-    }
-    const correctedCount = classifyAligned.filter((q) => q.bboxCorrected).length
-    logStaged(pipelineRunId, 'basic', 'bboxOverrides applied', {
-      total: bboxOverrides.length,
-      corrected: correctedCount
-    })
-  }
   logStaged(pipelineRunId, stagedLogLevel, 'classify normalized-summary', {
     coverage: classifyResult.coverage,
     visibleCount: classifyAligned.filter((q) => q.visible).length,
