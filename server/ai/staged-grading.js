@@ -4111,6 +4111,25 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, stagedLogLevel, 'classify tablePosition specs', specsWithTable.map((s) => ({ id: s.questionId, tablePosition: s.tablePosition })))
   }
 
+  // Build per-page question groups（classify 和 bboxOverrides 都需要）
+  const pageQuestionsMap = new Map()
+  const otherIds = []
+  for (const id of questionIds) {
+    const m = id.match(/^(\d+)-/)
+    if (m) {
+      const pageNum = parseInt(m[1], 10)
+      if (!pageQuestionsMap.has(pageNum)) pageQuestionsMap.set(pageNum, [])
+      pageQuestionsMap.get(pageNum).push(id)
+    } else {
+      otherIds.push(id)
+    }
+  }
+  if (!pageQuestionsMap.has(1)) pageQuestionsMap.set(1, [])
+  pageQuestionsMap.get(1).push(...otherIds)
+  const pageEntries = [...pageQuestionsMap.entries()]
+    .filter(([, ids]) => ids.length > 0)
+    .sort(([a], [b]) => a - b)
+
   // ── bboxOverrides → 跳過 classify AI，用前端 bbox ──
   let classifyResult
   if (bboxOverrides && bboxOverrides.length > 0) {
@@ -4130,31 +4149,6 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, 'basic', 'bboxOverrides → skip classify AI', { questions: questionIds.length })
   } else {
   // Per-page classify: one call per page, all dispatched in parallel.
-  // Each call receives the FULL merged student image but only its own page's questions,
-  // reducing per-call token load and improving bbox accuracy.
-  // Questions without a numeric page prefix (e.g. "Q1") are grouped into page 1.
-
-  // Build per-page question groups
-  const pageQuestionsMap = new Map() // pageNum (1-indexed) -> questionId[]
-  const otherIds = []
-  for (const id of questionIds) {
-    const m = id.match(/^(\d+)-/)
-    if (m) {
-      const pageNum = parseInt(m[1], 10)
-      if (!pageQuestionsMap.has(pageNum)) pageQuestionsMap.set(pageNum, [])
-      pageQuestionsMap.get(pageNum).push(id)
-    } else {
-      otherIds.push(id)
-    }
-  }
-  // Assign non-prefixed IDs to page 1
-  if (!pageQuestionsMap.has(1)) pageQuestionsMap.set(1, [])
-  pageQuestionsMap.get(1).push(...otherIds)
-
-  // Only dispatch calls for pages that actually have questions, sorted by page number
-  const pageEntries = [...pageQuestionsMap.entries()]
-    .filter(([, ids]) => ids.length > 0)
-    .sort(([a], [b]) => a - b)
 
   logStageStart(pipelineRunId, 'classify')
   logStaged(pipelineRunId, stagedLogLevel, 'classify per-page plan', {
