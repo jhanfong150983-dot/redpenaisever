@@ -4112,6 +4112,7 @@ export async function runStagedGradingPhaseA({
   }
 
   // ── bboxOverrides → 跳過 classify AI，用前端 bbox ──
+  let classifyResult
   if (bboxOverrides && bboxOverrides.length > 0) {
     const overrideMap = new Map(bboxOverrides.map((o) => [o.questionId, o]))
     classifyResult = { alignedQuestions: questionIds.map((qId) => {
