@@ -3405,9 +3405,19 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - errorType: same as multi_check (based on non-其他 tokens only).
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
   - VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached for this question (labelled "學生作答圖"), use the IMAGE as the primary source for judging 列式計算. The text transcription may be inaccurate for fractions, subscripts, and multi-line calculations. Look at the image to verify the student's actual written work.
-  🚨 列式計算 STABILITY RULE: When judging the 列式計算 dimension, apply the same principle as calculation's 算式過程: if the student's formula/steps lead logically to their final answer (even if abbreviated), give full marks for this dimension. Only deduct if the steps contain a clear mathematical error or use the wrong formula entirely. NEVER deduct for missing intermediate steps or non-standard notation.
+  🚨 列式計算 SCORING RULE (must follow strictly for consistency):
+  STEP 1 — CHECK 答句 FIRST:
+  - If 答句 is WRONG (wrong numeric value or wrong unit) → score = 0 for the ENTIRE question (both 列式計算 and 答句). Do NOT give partial credit for correct steps when the final answer is wrong.
+  STEP 2 — Only when 答句 is CORRECT, evaluate 列式計算:
+  - If the student's formula/steps lead logically to their final answer (even if abbreviated), give full marks for this dimension.
+  - Only deduct if the steps contain a clear mathematical error or use the wrong formula entirely.
+  - NEVER deduct for missing intermediate steps or non-standard notation.
+  - When in doubt, GIVE the marks. Stability is more important than strictness.
 - calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 最終答案: check if the final numeric value matches referenceAnswer.
   🚨 算式過程 SCORING RULE (must follow strictly for consistency):
+  STEP 1 — CHECK 最終答案 FIRST:
+  - If 最終答案 is WRONG → score = 0 for the ENTIRE question (both 算式過程 and 最終答案). Do NOT give partial credit for process when the final answer is wrong.
+  STEP 2 — Only when 最終答案 is CORRECT, evaluate 算式過程:
   - GIVE full marks if: the student wrote at least ONE intermediate step that leads logically to the final answer, even if steps are abbreviated or skip trivial operations.
   - GIVE full marks if: the steps contain minor transcription differences (e.g. "0.6÷0.6" vs "1") as long as the mathematical logic is correct.
   - DEDUCT only if: the steps contain a clear mathematical ERROR (wrong operation, wrong number) that happens to produce the correct final answer by coincidence, OR the steps show a completely different problem/formula.
