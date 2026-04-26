@@ -367,8 +367,16 @@ export async function runAiPipeline({
       pipelineResult = await runStagedGradingPhaseA({
         apiKey, model, contents, payload, routeHint, internalContext
       })
+      // classifyOnly mode: return bbox results directly
+      if (pipelineResult?.classifyOnly) {
+        pipelineResult = {
+          status: 200,
+          data: { candidates: [{ content: { parts: [{ text: JSON.stringify(pipelineResult) }] } }] },
+          pipelineMeta: { pipeline: 'grading-classify-only', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+        }
+      }
       // Wrap phaseA result so it travels through the standard pipeline response shape
-      if (pipelineResult?.phaseAComplete) {
+      else if (pipelineResult?.phaseAComplete) {
         const phaseAData = { phaseAComplete: true, ...pipelineResult }
         // Strip _internal (has raw crop images), but preserve essential fields for Phase B as _phaseContext
         const _internal = phaseAData._internal || {}
