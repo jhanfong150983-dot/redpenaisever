@@ -84,15 +84,21 @@ export function extractPhaseBLogData({
   qualityGates,
   stageResponses
 }) {
-  // accessor scores
-  const scores = Array.isArray(accessorResult?.scores) ? accessorResult.scores : []
-  const accessor = scores.map(s => ({
-    questionId: s.questionId,
-    score: s.score,
-    maxScore: s.maxScore,
-    isCorrect: s.isCorrect,
-    reason: s.scoringReason || ''
-  }))
+  // accessor scores — 使用 finalResult.details（程式化覆核後）而非 accessorResult.scores（原始）
+  // 程式化覆核可能修改 score/isCorrect（如 fill_blank 數字比對），確保 log 與 totalScore 一致
+  const details = Array.isArray(finalResult?.details) ? finalResult.details : []
+  const accessorRaw = Array.isArray(accessorResult?.scores) ? accessorResult.scores : []
+  const accessorRawById = new Map(accessorRaw.map(s => [s.questionId, s]))
+  const accessor = details.map(d => {
+    const raw = accessorRawById.get(d.questionId)
+    return {
+      questionId: d.questionId,
+      score: d.score ?? raw?.score ?? 0,
+      maxScore: d.maxScore ?? raw?.maxScore ?? 0,
+      isCorrect: d.isCorrect ?? raw?.isCorrect ?? false,
+      reason: d.reason || raw?.scoringReason || ''
+    }
+  })
 
   // explain
   const details = Array.isArray(explainResult?.details) ? explainResult.details : []
