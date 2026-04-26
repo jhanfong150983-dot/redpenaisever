@@ -18,6 +18,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   REPORT_TEACHER_SUMMARY: 'report.teacher_summary',
   REPORT_DOMAIN_DIAGNOSIS: 'report.domain_diagnosis',
   ADMIN_TAG_AGGREGATION: 'admin.tag_aggregation',
+  PERSPECTIVE_DETECT_CORNERS: 'perspective.detect_corners',
   UNKNOWN: 'unknown'
 })
 
