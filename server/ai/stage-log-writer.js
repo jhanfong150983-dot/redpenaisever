@@ -101,8 +101,8 @@ export function extractPhaseBLogData({
   })
 
   // explain
-  const details = Array.isArray(explainResult?.details) ? explainResult.details : []
-  const explainStage = details.map(d => ({
+  const explainDetails = Array.isArray(explainResult?.details) ? explainResult.details : []
+  const explainStage = explainDetails.map(d => ({
     questionId: d.questionId,
     explanation: d.explanation || ''
   }))
