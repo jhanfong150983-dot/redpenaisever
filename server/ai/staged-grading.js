@@ -3403,32 +3403,27 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
     - ⚠️ 其他 text is NEVER penalized regardless of reasonableness — it only affects scoringReason.
   - isCorrect = (score === maxScore).
   - errorType: same as multi_check (based on non-其他 tokens only).
-- word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
-  - VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached for this question (labelled "學生作答圖"), use the IMAGE as the primary source for judging 列式計算. The text transcription may be inaccurate for fractions, subscripts, and multi-line calculations. Look at the image to verify the student's actual written work.
-  🚨 列式計算 SCORING RULE (must follow strictly for consistency):
-  STEP 1 — CHECK 答句數值 FIRST:
-  - If the numeric value in 答句 is WRONG → score = 0 for the ENTIRE question (both 列式計算 and 答句). Do NOT give partial credit for correct steps when the final answer is wrong. STOP here.
-  STEP 2 — CHECK 答句單位 (only when numeric value is correct):
-  - If the referenceAnswer includes a unit (e.g. cm², m², 分鐘, km/h) but the student OMITTED the unit entirely → deduct 1 point from the total score.
-  - If the student wrote a WRONG unit (not in the UNIT EQUIVALENCE TABLE) → score = 0 for the ENTIRE question (wrong unit = wrong answer).
-  - If the student wrote a correct or equivalent unit → no deduction.
-  STEP 3 — CHECK 列式計算 (only when 答句 is correct or only missing unit):
-  - If the student's formula/steps lead logically to their final answer (even if abbreviated), give full marks for this dimension.
-  - Only deduct if the steps contain a clear mathematical error or use the wrong formula entirely.
-  - NEVER deduct for missing intermediate steps or non-standard notation.
-  - When in doubt, GIVE the marks. Stability is more important than strictness.
-- calculation: Grade using rubricsDimensions (算式過程 + 最終答案). SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else (formula steps, intermediate results) is the 算式過程. HARD RULE: NEVER require an answer sentence prefix like "答：", "A:", or "Ans:" for calculation questions. NO unit checking for calculation questions — the student does NOT need to write units. For 最終答案: check if the final numeric value matches referenceAnswer.
-  🚨 算式過程 SCORING RULE (must follow strictly for consistency):
-  STEP 1 — CHECK 最終答案 FIRST:
-  - If 最終答案 is WRONG → score = 0 for the ENTIRE question (both 算式過程 and 最終答案). Do NOT give partial credit for process when the final answer is wrong.
-  STEP 2 — Only when 最終答案 is CORRECT, evaluate 算式過程:
-  - GIVE full marks if: the student wrote at least ONE intermediate step that leads logically to the final answer, even if steps are abbreviated or skip trivial operations.
-  - GIVE full marks if: the steps contain minor transcription differences (e.g. "0.6÷0.6" vs "1") as long as the mathematical logic is correct.
-  - DEDUCT only if: the steps contain a clear mathematical ERROR (wrong operation, wrong number) that happens to produce the correct final answer by coincidence, OR the steps show a completely different problem/formula.
-  - NEVER deduct for: missing intermediate steps, abbreviated notation, skipping obvious steps, or not showing enough "work". Students who reach the correct answer via a shortcut deserve full process marks.
-  - When in doubt, GIVE the process mark. Stability is more important than strictness for process scoring.
-  - VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached for this question (labelled "學生作答圖"), use the IMAGE as the primary source for judging 算式過程. The text transcription (studentAnswerRaw) may be inaccurate for fractions, subscripts, and multi-line calculations. Look at the image to verify: fraction notation (分子/分母), reduction/simplification marks, decimal alignment, and step-by-step flow.
-  - LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score even if 算式過程 is weak/incomplete.
+- word_problem: Standard-answer question type with FIXED DEDUCTION scoring (not multi-dimension rubric).
+  SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句; everything above is the 列式計算 (process). If no such line exists, treat the entire answer as process only (答句 = blank).
+  VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached (labelled "學生作答圖"), use the IMAGE as the primary source. The text transcription may be inaccurate for fractions, subscripts, and multi-line calculations.
+  🚨 FIXED DEDUCTION SCORING (word_problem — must follow strictly):
+  Start with score = maxScore, then apply deductions in order:
+  STEP 1 — 答句數值: If the numeric value is WRONG → score = 0. STOP.
+  STEP 2 — 答句單位: If referenceAnswer has a unit but student OMITTED it → deduct 1. If student wrote a WRONG unit (not in UNIT EQUIVALENCE TABLE) → score = 0. STOP.
+  STEP 3 — 列式計算: If process contains a clear mathematical ERROR (wrong formula, wrong operation) → deduct 1. If process is missing entirely (only 答句, no steps) → deduct 1. Abbreviated or skipped trivial steps = NO deduction.
+  Final score = max(0, score after deductions). Each deficiency deducts exactly 1 point, never more.
+  When in doubt on STEP 3, do NOT deduct. Stability > strictness.
+- calculation: Standard-answer question type with FIXED DEDUCTION scoring (not multi-dimension rubric).
+  SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else is the 算式過程 (process).
+  HARD RULE: NEVER require "答：", "A:", or "Ans:" prefix. NO unit checking — students do NOT need to write units.
+  VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached (labelled "學生作答圖"), use the IMAGE as the primary source for judging 算式過程.
+  🚨 FIXED DEDUCTION SCORING (calculation — must follow strictly):
+  Start with score = maxScore, then apply deductions in order:
+  STEP 1 — 最終答案: If the final numeric value is WRONG → score = 0. STOP.
+  STEP 2 — 算式過程: If process contains a clear mathematical ERROR (wrong formula, wrong operation) → deduct 1. If process is missing entirely (only final answer, no steps) → deduct 1. Abbreviated or skipped trivial steps = NO deduction.
+  Final score = max(0, score after deductions). Each deficiency deducts exactly 1 point, never more.
+  When in doubt, do NOT deduct. Stability > strictness.
+  LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score regardless of process.
 - short_answer: Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback. No unit checking required.
   - ⚠️ OPEN-CHOICE DIMENSION RULE: When a dimension's criteria says "完成選擇即可，無對錯" (or similar), award full marks for that dimension as long as the student made any choice — regardless of WHICH option they chose. This applies to "承上題" follow-up questions where students choose one aspect from the previous question and explain it. Do NOT deduct points for choosing 休閒娛樂 vs 文化傳承 vs 教育 etc. — all valid options from the preceding question are equally acceptable.
     - IMPLICIT CHOICE COUNTS: The student does NOT need to name the layer explicitly. If their explanation clearly describes one layer (e.g. "娛樂身心" → 休閒娛樂 layer), treat that as a valid choice. Do NOT compare their explanation to other unchosen layers.
@@ -3516,8 +3511,8 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - multi_check/multi_choice: correct→「學生選①③④，答案正確」 wrong→「學生選①②③，正確答案為①③④，多選了②、漏選了④」
   - multi_check_other: same as multi_check + append 其他 evaluation. e.g. 「學生選①②，正確答案為①③，多選了②、漏選了③；其他選項文字合理」
   - multi_fill:        correct→「學生填入ㄅ、ㄇ、ㄉ，全部正確」 wrong→「學生填入ㄅ、ㄇ，正確答案為ㄅ、ㄇ、ㄉ，漏填ㄉ」
-  - calculation:       correct→「算式過程正確，最終答案36正確」 wrong→「學生最終答案為38，正確答案為36，第二步乘法運算錯誤」. When rubricsDimensions exist, describe each dimension: 「算式過程(2/3分)：第二步運算錯誤；最終答案(0/2分)：學生寫38，正確答案為36」
-  - word_problem:      correct→「列式正確，答句「36公分」正確」 wrong→「學生答句寫「36公尺」，正確答案為「36公分」，列式正確但答句單位錯誤」. When rubricsDimensions exist, describe each dimension: 「列式計算(2/3分)：算式正確但漏寫單位；答句(0/2分)：學生寫「36公尺」，正確答案為「36公分」，單位錯誤」
+  - calculation:       correct→「算式過程正確，最終答案36正確」 wrong→「學生最終答案為38，正確答案為36，答案錯誤」 process_error→「最終答案36正確，算式過程有誤（第二步乘法錯誤），扣1分」
+  - word_problem:      correct→「列式正確，答句「36公分」正確」 wrong→「學生答句寫「38公分」，正確答案為「36公分」，答案錯誤」 missing_unit→「答句數值36正確，但缺少單位「公分」，扣1分」 process_error→「答句「36公分」正確，列式過程有誤（第二步乘法錯誤），扣1分」
   - short_answer:      correct→「學生回答內容完整，概念正確」 wrong→「學生寫「因為天氣很熱」，正確答案應涵蓋「蒸發作用」概念，學生僅描述現象未說明原理」. When rubricsDimensions exist, describe each dimension's score.
   - matching:          correct→「學生配對「2公尺/秒」，答案正確」 wrong→「學生配對「3公尺/秒」，正確答案為「2公尺/秒」，配對錯誤」
   - map_fill:          correct→「所有位置填寫正確」 wrong→「學生將位置C填為「越南」、位置D填為「泰國」，正確答案為C=泰國、D=越南，兩者填反」
