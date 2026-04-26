@@ -3406,9 +3406,13 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - word_problem: Grade using rubricsDimensions (列式計算 + 答句). SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句 dimension; everything above that line is the 列式計算 dimension. If no such line exists, treat the entire answer as 列式計算 only (答句 = blank → 0 for that dimension). UNIT RULE: In the 答句 dimension, if the expected answer contains a unit, the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "60 km/h" = "60 公里/小時" ✓). Wrong unit that is not an equivalent pair = that dimension loses points (errorType='unit').
   - VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached for this question (labelled "學生作答圖"), use the IMAGE as the primary source for judging 列式計算. The text transcription may be inaccurate for fractions, subscripts, and multi-line calculations. Look at the image to verify the student's actual written work.
   🚨 列式計算 SCORING RULE (must follow strictly for consistency):
-  STEP 1 — CHECK 答句 FIRST:
-  - If 答句 is WRONG (wrong numeric value or wrong unit) → score = 0 for the ENTIRE question (both 列式計算 and 答句). Do NOT give partial credit for correct steps when the final answer is wrong.
-  STEP 2 — Only when 答句 is CORRECT, evaluate 列式計算:
+  STEP 1 — CHECK 答句數值 FIRST:
+  - If the numeric value in 答句 is WRONG → score = 0 for the ENTIRE question (both 列式計算 and 答句). Do NOT give partial credit for correct steps when the final answer is wrong. STOP here.
+  STEP 2 — CHECK 答句單位 (only when numeric value is correct):
+  - If the referenceAnswer includes a unit (e.g. cm², m², 分鐘, km/h) but the student OMITTED the unit entirely → deduct 1 point from the total score.
+  - If the student wrote a WRONG unit (not in the UNIT EQUIVALENCE TABLE) → score = 0 for the ENTIRE question (wrong unit = wrong answer).
+  - If the student wrote a correct or equivalent unit → no deduction.
+  STEP 3 — CHECK 列式計算 (only when 答句 is correct or only missing unit):
   - If the student's formula/steps lead logically to their final answer (even if abbreviated), give full marks for this dimension.
   - Only deduct if the steps contain a clear mathematical error or use the wrong formula entirely.
   - NEVER deduct for missing intermediate steps or non-standard notation.
