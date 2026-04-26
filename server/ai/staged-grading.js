@@ -2931,7 +2931,22 @@ FILL-BLANK (questions in FILL-BLANK list):
   This forces you to examine each letter individually. If rawSpelling disagrees with studentAnswerRaw, rawSpelling is authoritative.
 
 CALCULATION (questions in CALCULATION list):
-- 🚨 LINE-BY-LINE TRANSCRIPTION (absolute rule):
+- 🚨 CALCULATION QUESTION STRUCTURE:
+  A calculation question has TWO parts:
+  1. FIRST LINE (printed question): a formula ending with "=( )" or "=(   )" — the student writes their FINAL ANSWER inside the parentheses. This is THE answer.
+  2. BELOW THE FIRST LINE: the student's handwritten calculation process (scratch work).
+
+  🚨 READING PRIORITY:
+  - FIRST: Read what the student wrote INSIDE the parentheses "( )" on the first line. This is the studentFinalAnswer.
+  - THEN: Read the calculation process below (line by line).
+  - The parentheses answer is ALWAYS the student's intended final answer, even if the calculation process below shows a different result.
+  - If the parentheses are empty → the student did not write a final answer → use the last line of calculation process as fallback.
+
+  🚨 BOUNDARY RULE:
+  - If you see ANOTHER printed formula line with "=( )" pattern below the calculation process, that is the NEXT question — STOP reading. Do NOT read across question boundaries.
+  - Content inside the NEXT question's parentheses belongs to the NEXT question, not this one.
+
+- LINE-BY-LINE TRANSCRIPTION (for the calculation process below the first line):
   Scan the student's work area from TOP to BOTTOM. For each PHYSICAL LINE of handwriting, output exactly what that line contains. Separate lines with "\\n" (newline) in studentAnswerRaw.
   - Each physical line of handwriting = one output line. Do NOT merge multiple lines into one. Do NOT split one line into multiple.
   - The number of output lines MUST MATCH the number of physical handwritten lines visible in the image.
@@ -3414,7 +3429,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   Final score = max(0, score after deductions). Each deficiency deducts exactly 1 point, never more.
   When in doubt on STEP 3, do NOT deduct. Stability > strictness.
 - calculation: Standard-answer question type with FIXED DEDUCTION scoring (not multi-dimension rubric).
-  SPLIT RULE: The last standalone "= X" result is the 最終答案; everything else is the 算式過程 (process).
+  SPLIT RULE: If studentAnswerRaw starts with the parentheses answer (the value the student wrote inside "=( )"), that is the 最終答案. The remaining lines are the 算式過程 (process). If no parentheses answer is present, use the last standalone "= X" result as the 最終答案.
   HARD RULE: NEVER require "答：", "A:", or "Ans:" prefix. NO unit checking — students do NOT need to write units.
   VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached (labelled "學生作答圖"), use the IMAGE as the primary source for judging 算式過程.
   🚨 FIXED DEDUCTION SCORING (calculation — must follow strictly):
