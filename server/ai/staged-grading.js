@@ -2813,6 +2813,11 @@ When reading a tightly-cropped table cell, look for VERTICAL GRID LINES (直線)
 - If the area between the grid lines (or in the center of the crop if no lines are visible) is empty → status="blank", studentAnswerRaw="未作答".
 - Numbers or text visible beyond a grid line are the NEIGHBOR's answer, not this question's. Reading them would cause cascading errors across all table questions.
 
+== DIGIT-ONE RULE ==
+When reading a number, if you see a single vertical stroke (一豎) BETWEEN two clearly written digits, it is the digit "1". Do NOT skip it.
+Example: if you see 4|0 (a "4", then a vertical stroke, then a "0"), read it as "410" — the vertical stroke between the two digits is the handwritten "1".
+This rule ONLY applies when the stroke is between two digits. A vertical stroke at the edge (before the first digit or after the last digit) is NOT "1".
+
 == COPY RULES (only when non-blank) ==
 You are an OCR scanner. Your ONLY job is to copy exactly what the student wrote. You have NO language ability, NO grammar knowledge, and NO understanding of meaning.
 
