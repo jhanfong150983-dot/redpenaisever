@@ -3075,11 +3075,16 @@ ${diagramDrawNote ? `
 DIAGRAM-DRAW RULE (圖表繪製題):
 For question IDs in DIAGRAM-DRAW list, the student drew a chart (bar chart, pie chart, etc.) with labels and values.
 - Read ALL label-value pairs the student drew or wrote on the chart.
-- For pie charts: output each sector as "標籤 角度/百分比" (e.g. "番茄汁 80°, 紅蘿蔔汁 60°, 蘋果汁 40°").
+- For pie charts: output each sector as "標籤 比率" (e.g. "番茄汁 2/5, 紅蘿蔔汁 1/10, 蘋果汁 3/20").
 - For bar charts: output each bar as "標籤 高度/數值" (e.g. "一月 50, 二月 30, 三月 45").
 - List ALL sectors/bars the student drew, in reading order.
 - If no fresh drawn marks → status="blank", studentAnswerRaw="未作答".
 - FORBIDDEN: inferring labels or values not physically written by the student.
+
+🚨 PIE CHART READING SCOPE (圓形圖讀取範圍限制):
+- ONLY read text and numbers that are written INSIDE the pie chart or NEAR its circumference (labels pointing to sectors).
+- Text or numbers NOT inside or near the pie chart (e.g. scratch calculations in blank space nearby, data tables above/below the chart) do NOT belong to this question's answer. Do NOT transcribe them.
+- The answer for a pie chart question is ONLY what the student drew/wrote on the chart itself.
 ` : ''}
 ${diagramColorNote ? `
 DIAGRAM-COLOR RULE (塗色題):
@@ -3473,10 +3478,17 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - 塗色位置: check if the colored region is the correct side/area (e.g. left vs right, which cells). Position must match referenceAnswer.
   - 塗色完整性: check if coloring is continuous and covers the correct regions without major gaps.
   - errorType: 'concept' if wrong proportion or wrong region; 'blank' if no fresh marks described.
-- diagram_draw: studentAnswerRaw is a description of label-value pairs the student drew on a chart (e.g. "番茄汁 80°, 紅蘿蔔汁 60°, 蘋果汁 40°"). referenceAnswer describes the correct data. Grade using rubricsDimensions:
-  - 數值正確性: compare each label's value against the correct value. Allow ±2 units tolerance for bar heights; ±3° for pie chart angles.
-  - 標籤完整性: check if all required labels are present and correctly placed.
-  - errorType: 'concept' if wrong values or missing labels; 'blank' if no chart drawn.
+- diagram_draw: studentAnswerRaw is a description of label-value pairs the student drew on a chart (e.g. "番茄汁 2/5, 紅蘿蔔汁 1/10, 蘋果汁 3/20"). referenceAnswer describes the correct data.
+  FOR BAR CHARTS: Grade using rubricsDimensions (數值正確性 + 標籤完整性). Allow ±2 units tolerance for bar heights.
+  🚨 FOR PIE CHARTS: Use FIXED DEDUCTION scoring (not rubricsDimensions):
+  Start with score = maxScore. Check EACH expected sector/item from referenceAnswer:
+  Each item must meet ALL 3 conditions to count as correct:
+    1. Has item name (項目名, e.g. "光武國中")
+    2. Has proportion value (比率: fraction, decimal, or percentage — any one format is acceptable)
+    3. Sector size is reasonable (the drawn sector's visual proportion roughly matches the stated value)
+  If ANY of the 3 conditions is NOT met for an item → deduct 1 point (per item, not per condition).
+  Final score = max(0, score after deductions).
+  errorType: 'concept' if wrong values or missing labels; 'blank' if no chart drawn.
 - matching: studentAnswerRaw is the right-side text the student connected to this left-side item (e.g. "2公尺/秒"). The AnswerKey answer field is the correct right-side text.
   - Compare case-insensitively, ignoring leading/trailing whitespace.
   - Allow equivalent unit representations (e.g. "km/h" = "公里/小時").
@@ -3533,7 +3545,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - map_fill:          correct→「所有位置填寫正確」 wrong→「學生將位置C填為「越南」、位置D填為「泰國」，正確答案為C=泰國、D=越南，兩者填反」
   - map_draw:          correct→「學生繪製颱風符號於右下格，位置與符號皆正確」 wrong→「學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移」
   - diagram_color:     correct→「塗色比例2/3與位置皆正確」 wrong→「學生塗色比例約1/2，正確比例為2/3，塗色面積不足」
-  - diagram_draw:      correct→「圖表數值與標籤皆正確」 wrong→「學生標示番茄汁為60°，正確值為80°，數值偏差過大」
+  - diagram_draw:      correct→「圖表數值與標籤皆正確」 wrong(pie)→「光武國中 2/5 正確；康乃薾 缺少比率，扣1分；實驗中學 缺少項目名與比率，扣1分」 wrong(bar)→「學生標示番茄汁為60°，正確值為80°，數值偏差過大」
 
   ENGLISH DOMAIN EXTRA (fill_blank / short_answer): When wrong, list each deduction item separately with format「扣分類型：學生寫___，正確為___，扣N分」:
   - 「拼寫錯誤：學生寫 cookking，正確為 cooking，扣1分」
