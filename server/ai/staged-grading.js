@@ -4110,6 +4110,23 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, stagedLogLevel, 'classify tablePosition specs', specsWithTable.map((s) => ({ id: s.questionId, tablePosition: s.tablePosition })))
   }
 
+  // ── bboxOverrides → 跳過 classify AI，用前端 bbox ──
+  if (bboxOverrides && bboxOverrides.length > 0) {
+    const overrideMap = new Map(bboxOverrides.map((o) => [o.questionId, o]))
+    classifyResult = { alignedQuestions: questionIds.map((qId) => {
+      const override = overrideMap.get(qId)
+      const akQ = answerKeyQuestions.find((q) => q?.id === qId)
+      return {
+        questionId: qId,
+        questionType: akQ ? resolveExpectedQuestionType(akQ) : 'fill_blank',
+        visible: true,
+        answerBbox: override?.answerBbox || null,
+        readBbox: override?.readBbox || null,
+        bboxCorrected: override?.corrected || false
+      }
+    }), coverage: 1 }
+    logStaged(pipelineRunId, 'basic', 'bboxOverrides → skip classify AI', { questions: questionIds.length })
+  } else {
   // Per-page classify: one call per page, all dispatched in parallel.
   // Each call receives the FULL merged student image but only its own page's questions,
   // reducing per-call token load and improving bbox accuracy.
@@ -4296,6 +4313,7 @@ export async function runStagedGradingPhaseA({
       }, classifyQuestionSpecs, pageEntries.length || 1)
     }
   }
+  } // end else (skip classify when bboxOverrides)
 
   // bboxOverrides: 用前端傳入的校正 bbox 覆蓋 classify 結果
   let classifyAligned = classifyResult.alignedQuestions
