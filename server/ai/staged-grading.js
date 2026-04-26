@@ -4078,6 +4078,7 @@ export async function runStagedGradingPhaseA({
 
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+  const bboxOverrides = Array.isArray(payload?.bboxOverrides) ? payload.bboxOverrides : null
   let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
   // Fallback: if pageBreaks is empty but questionIds have multi-page prefixes (1-*, 2-*, 3-*, ...),
   // estimate equal-split pageBreaks so per-page classify can still work.
@@ -4296,7 +4297,28 @@ export async function runStagedGradingPhaseA({
     }
   }
 
+  // bboxOverrides: 用前端傳入的校正 bbox 覆蓋 classify 結果
   let classifyAligned = classifyResult.alignedQuestions
+  if (bboxOverrides && bboxOverrides.length > 0) {
+    const overrideMap = new Map(bboxOverrides.map((o) => [o.questionId, o]))
+    for (let i = 0; i < classifyAligned.length; i++) {
+      const q = classifyAligned[i]
+      const override = overrideMap.get(q.questionId)
+      if (override) {
+        classifyAligned[i] = {
+          ...q,
+          answerBbox: override.answerBbox ?? q.answerBbox,
+          readBbox: override.readBbox ?? q.readBbox,
+          bboxCorrected: override.corrected || false
+        }
+      }
+    }
+    const correctedCount = classifyAligned.filter((q) => q.bboxCorrected).length
+    logStaged(pipelineRunId, 'basic', 'bboxOverrides applied', {
+      total: bboxOverrides.length,
+      corrected: correctedCount
+    })
+  }
   logStaged(pipelineRunId, stagedLogLevel, 'classify normalized-summary', {
     coverage: classifyResult.coverage,
     visibleCount: classifyAligned.filter((q) => q.visible).length,
@@ -4461,6 +4483,20 @@ export async function runStagedGradingPhaseA({
   const dynamicPad = +(0.03 / totalPages).toFixed(4)
   const dynamicPadWide = +(0.08 / totalPages).toFixed(4)
   logStaged(pipelineRunId, stagedLogLevel, 'dynamic crop padding', { totalPages, pad: dynamicPad, padWide: dynamicPadWide })
+
+  // ── classifyOnly mode: 回傳 bbox 就結束，不做 crop/read/AI3 ─────────────
+  if (payload?.classifyOnly) {
+    const bboxResults = classifyAligned
+      .filter((q) => q.visible)
+      .map((q) => ({
+        questionId: q.questionId,
+        questionType: q.questionType,
+        answerBbox: q.answerBbox || null,
+        readBbox: q.readBbox || null
+      }))
+    logStaged(pipelineRunId, 'basic', 'classifyOnly → return bbox', { count: bboxResults.length })
+    return { classifyOnly: true, bboxResults, stageResponses }
+  }
 
   // Focused checkbox crops: single_check / multi_check / multi_choice
   // We pre-crop first, then exclude successful IDs from full-image ReadAnswer.
@@ -5123,6 +5159,7 @@ export async function runStagedGradingPhaseA({
         studentAnswer: read2?.studentAnswerRaw ?? '無法辨識'
       },
       answerBbox: classifyRow?.answerBbox ?? null,
+      bboxCorrected: classifyRow?.bboxCorrected || false,
       calculationAnswerMismatch: read1?.calculationAnswerMismatch === true
     }
   })
@@ -5439,7 +5476,8 @@ Return JSON:
     .filter((qr) => qr.visible !== false)
     .map((qr) => {
       const bbox = qr.answerBbox
-      const bboxStr = bbox ? `x=${(+bbox.x).toFixed(3)} y=${(+bbox.y).toFixed(3)} w=${(+bbox.w).toFixed(3)}` : 'no-bbox'
+      const correctedTag = qr.bboxCorrected ? ' ⚡corrected' : ''
+      const bboxStr = bbox ? `x=${(+bbox.x).toFixed(3)} y=${(+bbox.y).toFixed(3)} w=${(+bbox.w).toFixed(3)}${correctedTag}` : 'no-bbox'
       const ai1 = qr.readAnswer1?.status === 'blank' ? '(blank)' : qr.readAnswer1?.studentAnswer || '?'
       const ai2 = qr.readAnswer2?.status === 'blank' ? '(blank)' : qr.readAnswer2?.studentAnswer || '?'
       const ar = qr.arbiterResult || {}
