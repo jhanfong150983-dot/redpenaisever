@@ -3330,6 +3330,7 @@ STEP 1 — CHECK WORDS FIRST: Compare the SET of words (ignoring order and punct
   - If the student used ALL the same words, just in different order → this is PURELY a word order issue. Do NOT report missing/extra words.
   - Only report MISSING WORD if a word in correctAnswer does not appear anywhere in the student's answer.
   - Only report EXTRA WORD if a word in the student's answer does not appear anywhere in correctAnswer.
+  🚨 MISSPELLING vs MISSING+EXTRA: If a student's word looks like a partial or misspelled version of a correct word (e.g. "kit" → "kitchen", "broth" → "brother", "cook" → "cooking"), treat it as ONE SPELLING ERROR — NOT as "missing word + extra word". A word is a misspelling if it shares 3+ leading characters with the correct word OR has edit distance ≤ 2. Only count as separate missing+extra when the two words are completely unrelated.
 
 STEP 2 — APPLY DEDUCTIONS:
 - SPELLING ERROR (e.g. "cookking" → "cooking"): deduct 1 point per misspelled word.
