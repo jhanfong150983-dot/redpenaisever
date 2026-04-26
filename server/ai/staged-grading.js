@@ -4379,7 +4379,8 @@ export async function runStagedGradingPhaseA({
   logStaged(pipelineRunId, 'basic', 'classify quality-gate', {
     severity: classifyQG.severity, warnings: classifyQG.warnings, metrics: classifyQG.metrics
   })
-  if (classifyQG.severity === QG_SEVERITY.FAIL) {
+  if (classifyQG.severity === QG_SEVERITY.FAIL && !payload?.classifyOnly) {
+    // classifyOnly 不 retry — 中位數校正會修復 bbox 問題
     logStaged(pipelineRunId, stagedLogLevel, 'classify quality FAIL → retry (1/1)')
     // Re-run classify: single-page path (simple retry with same prompt)
     if (pageEntries.length <= 1) {
