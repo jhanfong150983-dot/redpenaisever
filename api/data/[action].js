@@ -2991,7 +2991,7 @@ async function handleSync(req, res) {
             answerKey: row.answer_key ?? undefined,
             answerKeyTemplateId: row.answer_key_template_id ?? undefined,
             conceptTags: row.concept_tags ?? undefined,
-            photoRules: row.photo_rules ?? undefined,
+            studentUploadEnabled: row.student_upload_enabled ?? undefined,
             updatedAt: toMillis(row.updated_at) ?? undefined
           })
         )
@@ -3515,7 +3515,7 @@ async function handleSync(req, res) {
             answer_key: a.answerKey ?? undefined,
             answer_key_template_id: a.answerKeyTemplateId ?? a.answer_key_template_id ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
-            photo_rules: a.photoRules ?? a.photo_rules ?? undefined,
+            student_upload_enabled: a.studentUploadEnabled ?? a.student_upload_enabled ?? undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(a.updatedAt ?? a.updated_at) ?? nowIso
           })
@@ -4519,7 +4519,7 @@ async function handleStudentOverview(req, res) {
           getTeacherPreferences(supabaseDb, cOwnerId),
           supabaseDb
             .from('assignments')
-            .select('id, title, total_pages, student_show_score, photo_rules, updated_at')
+            .select('id, title, total_pages, student_show_score, student_upload_enabled, answer_key_template_id, updated_at')
             .eq('owner_id', cOwnerId)
             .eq('classroom_id', classroomId)
             .order('created_at', { ascending: false })
@@ -4527,6 +4527,19 @@ async function handleStudentOverview(req, res) {
         if (assignmentsResult.error) throw new Error(assignmentsResult.error.message)
 
         const aIds = (assignmentsResult.data || []).map((a) => a.id)
+
+        // 查答案卷模板的 pageOrientations
+        const templateIds = [...new Set((assignmentsResult.data || []).map(a => a.answer_key_template_id).filter(Boolean))]
+        const templateOrientationsMap = new Map()
+        if (templateIds.length > 0) {
+          const { data: tplRows } = await supabaseDb
+            .from('answer_key_templates')
+            .select('id, page_orientations')
+            .in('id', templateIds)
+          for (const row of tplRows || []) {
+            if (row.page_orientations) templateOrientationsMap.set(row.id, row.page_orientations)
+          }
+        }
 
         const [statesResult, submissionsResult, correctionItemsResult, globalQueueResult] = await Promise.all([
           aIds.length
@@ -4701,7 +4714,8 @@ async function handleStudentOverview(req, res) {
             classroomKey,
             title: assignment.title,
             totalPages: assignment.total_pages,
-            photoRules: assignment.photo_rules || undefined,
+            studentUploadEnabled: assignment.student_upload_enabled ?? true,
+            pageOrientations: templateOrientationsMap.get(assignment.answer_key_template_id) || undefined,
             status,
             gradingPending: gradingPending || undefined,
             gradingQueuePosition: gradingPending ? gradingQueuePosition : undefined,
