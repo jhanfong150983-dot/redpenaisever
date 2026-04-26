@@ -2991,6 +2991,7 @@ async function handleSync(req, res) {
             answerKey: row.answer_key ?? undefined,
             answerKeyTemplateId: row.answer_key_template_id ?? undefined,
             conceptTags: row.concept_tags ?? undefined,
+            photoRules: row.photo_rules ?? undefined,
             updatedAt: toMillis(row.updated_at) ?? undefined
           })
         )
@@ -3513,6 +3514,7 @@ async function handleSync(req, res) {
             answer_key: a.answerKey ?? undefined,
             answer_key_template_id: a.answerKeyTemplateId ?? a.answer_key_template_id ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
+            photo_rules: a.photoRules ?? a.photo_rules ?? undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(a.updatedAt ?? a.updated_at) ?? nowIso
           })
@@ -4515,7 +4517,7 @@ async function handleStudentOverview(req, res) {
           getTeacherPreferences(supabaseDb, cOwnerId),
           supabaseDb
             .from('assignments')
-            .select('id, title, total_pages, student_show_score, updated_at')
+            .select('id, title, total_pages, student_show_score, photo_rules, updated_at')
             .eq('owner_id', cOwnerId)
             .eq('classroom_id', classroomId)
             .order('created_at', { ascending: false })
@@ -4697,6 +4699,7 @@ async function handleStudentOverview(req, res) {
             classroomKey,
             title: assignment.title,
             totalPages: assignment.total_pages,
+            photoRules: assignment.photo_rules || undefined,
             status,
             gradingPending: gradingPending || undefined,
             gradingQueuePosition: gradingPending ? gradingQueuePosition : undefined,
