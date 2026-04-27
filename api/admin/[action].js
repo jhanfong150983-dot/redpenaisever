@@ -3297,10 +3297,9 @@ export default async function handler(req, res) {
   }
   const action = resolveAction(req)
 
+  // 標籤系統已停用
   if (action === 'aggregate-tags') {
-    const context = await requireAdminOrCron(req, res)
-    if (!context) return
-    return await handleAggregateTags(req, res, context.supabaseAdmin)
+    return res.status(410).json({ error: '標籤系統已停用' })
   }
 
   const adminContext = await requireAdmin(req, res)
@@ -3329,8 +3328,9 @@ export default async function handler(req, res) {
     return await handleInkOrders(req, res, supabaseAdmin, adminUser)
   }
 
+  // 標籤系統已停用
   if (action === 'tags') {
-    return await handleTags(req, res, supabaseAdmin)
+    return res.status(410).json({ error: '標籤系統已停用' })
   }
 
   if (action === 'analytics') {

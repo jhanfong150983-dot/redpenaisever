@@ -54,10 +54,5 @@
       "destination": "/api/auth/1campus?__step=oauth_callback"
     }
   ],
-  "crons": [
-    {
-      "path": "/api/admin/aggregate-tags",
-      "schedule": "0 18 * * *"
-    }
-  ]
+  "crons": []
 }

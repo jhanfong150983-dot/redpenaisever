@@ -3857,13 +3857,14 @@ async function handleSync(req, res) {
           .map((row) => row.assignment_id)
       )
 
-      if (touchedAssignments.size > 0) {
-        await touchAssignmentTagStates(
-          supabaseDb,
-          user.id,
-          Array.from(touchedAssignments)
-        )
-      }
+      // 標籤系統已停用 — 不再觸發 tag state 更新
+      // if (touchedAssignments.size > 0) {
+      //   await touchAssignmentTagStates(
+      //     supabaseDb,
+      //     user.id,
+      //     Array.from(touchedAssignments)
+      //   )
+      // }
 
       const folderRows = await buildUpsertRows(
         'folders',
@@ -5582,12 +5583,21 @@ async function handleStudentCorrections(req, res) {
 }
 
 async function handleReport(req, res) {
-  const { user, accessToken } = await getAuthUser(req, res)
+  const { user } = await getAuthUser(req, res)
   if (!user) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
 
+  // 標籤系統已停用，直接回傳空資料
+  return res.status(200).json({
+    domains: [],
+    abilities: [],
+    tagAbilityMap: [],
+    dictionary: []
+  })
+
+  // ─── 以下為標籤系統停用前的原始邏輯（保留以備重啟） ───
   const requestedOwnerId = resolveOwnerIdParam(req)
   const isOwnerOverride =
     requestedOwnerId && requestedOwnerId !== user.id
