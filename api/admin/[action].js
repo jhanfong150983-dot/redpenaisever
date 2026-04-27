@@ -1562,8 +1562,8 @@ async function handleUserStats(req, res, supabaseAdmin) {
   }
 
   try {
-    // 1. 取得所有非管理者帳號（教師）— 分頁撈取
-    const users = await fetchAllRows((from, to) =>
+    // 1. 取得所有非管理者帳號 — 分頁撈取
+    const allProfiles = await fetchAllRows((from, to) =>
       supabaseAdmin
         .from('profiles')
         .select('id, email, name, avatar_url, role, permission_tier, ink_balance, created_at, updated_at')
@@ -1573,6 +1573,7 @@ async function handleUserStats(req, res, supabaseAdmin) {
     )
 
     // 2-6. 批量查詢統計資料（平行執行）— 全部使用分頁撈取
+    // 同時撈取 students.auth_user_id 用於區分學生帳號與教師帳號
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
     const [
       classroomStatsData,
@@ -1581,6 +1582,7 @@ async function handleUserStats(req, res, supabaseAdmin) {
       submissionStatsData,
       inkStatsData,
       classroomNamesData,
+      studentAuthUserData,
     ] = await Promise.all([
       fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('owner_id').range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('students').select('id, name, owner_id, classroom_id').range(from, to)),
@@ -1588,7 +1590,12 @@ async function handleUserStats(req, res, supabaseAdmin) {
       fetchAllRows((from, to) => supabaseAdmin.from('submissions').select('owner_id, student_id, graded_at, created_at').range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('ink_ledger').select('user_id, delta').lt('delta', 0).gte('created_at', thirtyDaysAgo).range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('id, name').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('students').select('auth_user_id').not('auth_user_id', 'is', null).range(from, to)),
     ])
+
+    // 建立學生帳號 Set，用於過濾掉學生（profiles.id 出現在 students.auth_user_id 中的就是學生）
+    const studentAuthUserIds = new Set(studentAuthUserData.map(s => s.auth_user_id))
+    const users = allProfiles.filter(u => !studentAuthUserIds.has(u.id))
 
     // 班級數
     const classroomCountMap = {}
@@ -1811,7 +1818,7 @@ async function handleAnalytics(req, res, supabaseAdmin) {
 
     // ── 平行批次撈取所有原始資料（分頁撈取，避免 1000 筆上限） ──────────────
     const [
-      allTeachers,
+      allProfiles,
       allClassrooms,
       allStudents,
       allSubmissions,
@@ -1820,6 +1827,7 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       allOrders,
       packageStatsData,
       recentInkLedgerResult,
+      studentAuthUserData,
     ] = await Promise.all([
       fetchAllRows((from, to) => supabaseAdmin.from('profiles').select('id, email, name, avatar_url, ink_balance, created_at').neq('role', 'admin').order('created_at', { ascending: false }).range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('id, name, owner_id').range(from, to)),
@@ -1831,7 +1839,13 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       fetchAllRows((from, to) => supabaseAdmin.from('ink_orders').select('package_id, package_label, drops, bonus_drops').eq('status', 'paid').not('package_id', 'is', null).range(from, to)),
       // 最近 50 筆 ink_ledger 不需分頁（已有 limit）
       supabaseAdmin.from('ink_ledger').select('id, user_id, delta, reason, metadata, created_at, profiles:user_id(email,name)').order('created_at', { ascending: false }).limit(50),
+      // 撈取學生帳號 ID，用於區分教師與學生
+      fetchAllRows((from, to) => supabaseAdmin.from('students').select('auth_user_id').not('auth_user_id', 'is', null).range(from, to)),
     ])
+
+    // 過濾掉學生帳號，只保留教師
+    const studentAuthUserIds = new Set(studentAuthUserData.map(s => s.auth_user_id))
+    const allTeachers = allProfiles.filter(p => !studentAuthUserIds.has(p.id))
 
     // ── 基礎 map ─────────────────────────────────────────────────────────────
     const teacherNameMap = {}
