@@ -86,6 +86,28 @@ function parseBooleanParam(value, fallback = false) {
   return fallback
 }
 
+/**
+ * Supabase 預設每次查詢最多回傳 1000 筆。
+ * 此函式自動分頁撈取所有資料。
+ * @param {Function} queryFn - 接收 (from, to) 並回傳 supabase query builder 的函式
+ * @param {number} pageSize - 每頁筆數，預設 1000
+ * @returns {Promise<Array>} 所有資料
+ */
+async function fetchAllRows(queryFn, pageSize = 1000) {
+  const all = []
+  let from = 0
+  while (true) {
+    const to = from + pageSize - 1
+    const { data, error } = await queryFn(from, to)
+    if (error) throw error
+    if (!data || data.length === 0) break
+    all.push(...data)
+    if (data.length < pageSize) break
+    from += pageSize
+  }
+  return all
+}
+
 function resolveAction(req) {
   const actionParam = req.query?.action
   if (Array.isArray(actionParam)) {
@@ -1540,42 +1562,43 @@ async function handleUserStats(req, res, supabaseAdmin) {
   }
 
   try {
-    // 1. 取得所有非管理者帳號（教師）
-    const { data: users, error: usersError } = await supabaseAdmin
-      .from('profiles')
-      .select('id, email, name, avatar_url, role, permission_tier, ink_balance, created_at, updated_at')
-      .neq('role', 'admin')
-      .order('created_at', { ascending: false })
+    // 1. 取得所有非管理者帳號（教師）— 分頁撈取
+    const users = await fetchAllRows((from, to) =>
+      supabaseAdmin
+        .from('profiles')
+        .select('id, email, name, avatar_url, role, permission_tier, ink_balance, created_at, updated_at')
+        .neq('role', 'admin')
+        .order('created_at', { ascending: false })
+        .range(from, to)
+    )
 
-    if (usersError) throw usersError
-
-    // 2-6. 批量查詢統計資料（平行執行）
+    // 2-6. 批量查詢統計資料（平行執行）— 全部使用分頁撈取
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
     const [
-      classroomStatsResult,
-      studentListResult,
-      assignmentStatsResult,
-      submissionStatsResult,
-      inkStatsResult,
-      classroomNamesResult,
+      classroomStatsData,
+      studentListData,
+      assignmentStatsData,
+      submissionStatsData,
+      inkStatsData,
+      classroomNamesData,
     ] = await Promise.all([
-      supabaseAdmin.from('classrooms').select('owner_id'),
-      supabaseAdmin.from('students').select('id, name, owner_id, classroom_id'),
-      supabaseAdmin.from('assignments').select('owner_id'),
-      supabaseAdmin.from('submissions').select('owner_id, student_id, graded_at, created_at'),
-      supabaseAdmin.from('ink_ledger').select('user_id, delta').lt('delta', 0).gte('created_at', thirtyDaysAgo),
-      supabaseAdmin.from('classrooms').select('id, name'),
+      fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('owner_id').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('students').select('id, name, owner_id, classroom_id').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('assignments').select('owner_id').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('submissions').select('owner_id, student_id, graded_at, created_at').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('ink_ledger').select('user_id, delta').lt('delta', 0).gte('created_at', thirtyDaysAgo).range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('id, name').range(from, to)),
     ])
 
     // 班級數
     const classroomCountMap = {}
-    classroomStatsResult.data?.forEach(row => {
+    classroomStatsData.forEach(row => {
       classroomCountMap[row.owner_id] = (classroomCountMap[row.owner_id] || 0) + 1
     })
 
     // 作業數
     const assignmentCountMap = {}
-    assignmentStatsResult.data?.forEach(row => {
+    assignmentStatsData.forEach(row => {
       assignmentCountMap[row.owner_id] = (assignmentCountMap[row.owner_id] || 0) + 1
     })
 
@@ -1585,7 +1608,7 @@ async function handleUserStats(req, res, supabaseAdmin) {
     const studentSubCountMap = {}   // by student_id
     const studentGradedCountMap = {} // by student_id
     const studentLastActiveMap = {}  // by student_id
-    submissionStatsResult.data?.forEach(row => {
+    submissionStatsData.forEach(row => {
       submissionCountMap[row.owner_id] = (submissionCountMap[row.owner_id] || 0) + 1
       if (row.graded_at) gradedCountMap[row.owner_id] = (gradedCountMap[row.owner_id] || 0) + 1
       if (row.student_id) {
@@ -1600,17 +1623,17 @@ async function handleUserStats(req, res, supabaseAdmin) {
 
     // 墨水消耗
     const inkUsedMap = {}
-    inkStatsResult.data?.forEach(row => {
+    inkStatsData.forEach(row => {
       inkUsedMap[row.user_id] = (inkUsedMap[row.user_id] || 0) + Math.abs(row.delta)
     })
 
     // 班級名稱 map
     const classroomNameMap = {}
-    classroomNamesResult.data?.forEach(c => { classroomNameMap[c.id] = c.name })
+    classroomNamesData.forEach(c => { classroomNameMap[c.id] = c.name })
 
     // 學生列表 by owner_id
     const studentsByOwner = {}
-    studentListResult.data?.forEach(s => {
+    studentListData.forEach(s => {
       if (!studentsByOwner[s.owner_id]) studentsByOwner[s.owner_id] = []
       studentsByOwner[s.owner_id].push({
         studentId: s.id,
@@ -1622,7 +1645,7 @@ async function handleUserStats(req, res, supabaseAdmin) {
       })
     })
 
-    // 組合教師資料（只保留有班級的帳號）
+    // 組合教師資料（包含所有非 admin 帳號）
     const userStats = (users || [])
       .map(user => {
         const classroomCount = classroomCountMap[user.id] || 0
@@ -1630,6 +1653,9 @@ async function handleUserStats(req, res, supabaseAdmin) {
           .sort((a, b) => b.submissionCount - a.submissionCount)
         const submissionCount = submissionCountMap[user.id] || 0
         const gradedCount = gradedCountMap[user.id] || 0
+
+        // status: active=有班級的教師, new=尚未建立班級的新註冊用戶
+        const status = classroomCount > 0 ? 'active' : 'new'
 
         return {
           userId: user.id,
@@ -1650,9 +1676,9 @@ async function handleUserStats(req, res, supabaseAdmin) {
           totalInkUsed: inkUsedMap[user.id] || 0,
           lastActiveAt: user.updated_at,
           students,
+          status,
         }
       })
-      .filter(u => u.classroomCount > 0)
 
     res.status(200).json({ users: userStats })
   } catch (err) {
@@ -1783,36 +1809,29 @@ async function handleAnalytics(req, res, supabaseAdmin) {
   try {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
-    // ── 平行批次撈取所有原始資料 ──────────────────────────────────────────────
+    // ── 平行批次撈取所有原始資料（分頁撈取，避免 1000 筆上限） ──────────────
     const [
-      teacherProfilesResult,
-      classroomsResult,
-      studentsResult,
-      submissionsResult,
-      inkLedgerAllResult,
-      inkLedger30dResult,
-      ordersResult,
-      packageStatsResult,
+      allTeachers,
+      allClassrooms,
+      allStudents,
+      allSubmissions,
+      inkLedgerAll,
+      inkLedger30d,
+      allOrders,
+      packageStatsData,
       recentInkLedgerResult,
     ] = await Promise.all([
-      supabaseAdmin.from('profiles').select('id, email, name, avatar_url, ink_balance, created_at').neq('role', 'admin').order('created_at', { ascending: false }),
-      supabaseAdmin.from('classrooms').select('id, name, owner_id'),
-      supabaseAdmin.from('students').select('id, name, owner_id, classroom_id'),
-      supabaseAdmin.from('submissions').select('student_id, owner_id, graded_at, created_at'),
-      supabaseAdmin.from('ink_ledger').select('user_id, delta, reason, created_at'),
-      supabaseAdmin.from('ink_ledger').select('user_id, delta, reason, created_at').gte('created_at', thirtyDaysAgo),
-      supabaseAdmin.from('ink_orders').select('id, status, amount_twd, package_id, package_label, drops, bonus_drops, created_at').order('created_at', { ascending: false }),
-      supabaseAdmin.from('ink_orders').select('package_id, package_label, drops, bonus_drops').eq('status', 'paid').not('package_id', 'is', null),
+      fetchAllRows((from, to) => supabaseAdmin.from('profiles').select('id, email, name, avatar_url, ink_balance, created_at').neq('role', 'admin').order('created_at', { ascending: false }).range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('id, name, owner_id').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('students').select('id, name, owner_id, classroom_id').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('submissions').select('student_id, owner_id, graded_at, created_at').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('ink_ledger').select('user_id, delta, reason, created_at').range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('ink_ledger').select('user_id, delta, reason, created_at').gte('created_at', thirtyDaysAgo).range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('ink_orders').select('id, user_id, status, amount_twd, package_id, package_label, drops, bonus_drops, created_at').order('created_at', { ascending: false }).range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('ink_orders').select('package_id, package_label, drops, bonus_drops').eq('status', 'paid').not('package_id', 'is', null).range(from, to)),
+      // 最近 50 筆 ink_ledger 不需分頁（已有 limit）
       supabaseAdmin.from('ink_ledger').select('id, user_id, delta, reason, metadata, created_at, profiles:user_id(email,name)').order('created_at', { ascending: false }).limit(50),
     ])
-
-    const allTeachers = teacherProfilesResult.data || []
-    const allClassrooms = classroomsResult.data || []
-    const allStudents = studentsResult.data || []
-    const allSubmissions = submissionsResult.data || []
-    const inkLedgerAll = inkLedgerAllResult.data || []
-    const inkLedger30d = inkLedger30dResult.data || []
-    const allOrders = ordersResult.data || []
 
     // ── 基礎 map ─────────────────────────────────────────────────────────────
     const teacherNameMap = {}
@@ -1983,7 +2002,7 @@ async function handleAnalytics(req, res, supabaseAdmin) {
 
     // 熱門方案
     const packageSalesMap = {}
-    ;(packageStatsResult.data || []).forEach(o => {
+    packageStatsData.forEach(o => {
       const key = o.package_id
       if (!packageSalesMap[key]) packageSalesMap[key] = { package_id: o.package_id, package_label: o.package_label, drops: o.drops, bonus_drops: o.bonus_drops, sales_count: 0 }
       packageSalesMap[key].sales_count++
