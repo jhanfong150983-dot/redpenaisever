@@ -466,6 +466,12 @@ export async function runAiPipeline({
       routeKey: resolvedRouteKey
     })
 
+    // Log perspective.detect_corners response
+    if (resolvedRouteKey === AI_ROUTE_KEYS.PERSPECTIVE_DETECT_CORNERS) {
+      const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
+      console.log(`${logPrefix} [perspective.detect_corners] response: ${rawText}`)
+    }
+
     // Structured summary for answer_key.extract (replaces raw JSON dump)
     if (resolvedRouteKey === AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT) {
       const rawText = pipelineResult?.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
