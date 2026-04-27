@@ -1,8 +1,44 @@
 {
   "functions": {
-    "api/**/*.js": {
+    "api/proxy.js": {
       "memory": 1024,
       "maxDuration": 300
+    },
+    "api/data/[action].js": {
+      "memory": 1024,
+      "maxDuration": 300
+    },
+    "api/admin/[action].js": {
+      "memory": 512,
+      "maxDuration": 60
+    },
+    "api/auth/me.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/auth/1campus.js": {
+      "memory": 256,
+      "maxDuration": 30
+    },
+    "api/auth/callback.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/auth/google.js": {
+      "memory": 128,
+      "maxDuration": 10
+    },
+    "api/auth/logout.js": {
+      "memory": 128,
+      "maxDuration": 5
+    },
+    "api/ink/*.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/storage/download.js": {
+      "memory": 256,
+      "maxDuration": 15
     }
   },
   "env": {
