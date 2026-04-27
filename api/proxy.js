@@ -228,19 +228,28 @@ async function fetchAnswerSheetImagesForClassify(supabaseAdmin, userId, assignme
     if (!assignment || assignment.owner_id !== userId) return []
 
     const startMs = Date.now()
-    const indices = Array.from({ length: 10 }, (_, i) => i)
+    const bucket = supabaseAdmin.storage.from('homework-images')
+
+    // 先試 page-0，不存在就直接返回（避免白打 9 個 404）
+    const { data: first, error: firstErr } = await bucket.download(`answer-sheets/${assignmentId}/page-0.webp`)
+    if (firstErr || !first) {
+      console.log(`[AnswerSheet] page-0 不存在，跳過，耗時 ${Date.now() - startMs}ms`)
+      return []
+    }
+    const firstBuffer = Buffer.from(await first.arrayBuffer())
+    const firstImage = { mimeType: 'image/webp', data: firstBuffer.toString('base64') }
+
+    // page-0 存在，並行下載 page-1 ~ page-9
     const results = await Promise.allSettled(
-      indices.map(async (i) => {
-        const path = `answer-sheets/${assignmentId}/page-${i}.webp`
-        const { data, error } = await supabaseAdmin.storage.from('homework-images').download(path)
+      Array.from({ length: 9 }, (_, i) => i + 1).map(async (i) => {
+        const { data, error } = await bucket.download(`answer-sheets/${assignmentId}/page-${i}.webp`)
         if (error || !data) return null
         const buffer = Buffer.from(await data.arrayBuffer())
         return { mimeType: 'image/webp', data: buffer.toString('base64') }
       })
     )
 
-    // 保持頁碼順序：從 page-0 開始，遇到第一個 null 就停（與原本 break 語意一致）
-    const images = []
+    const images = [firstImage]
     for (const r of results) {
       const val = r.status === 'fulfilled' ? r.value : null
       if (!val) break
@@ -264,19 +273,28 @@ async function fetchQuestionBookletImages(supabaseAdmin, userId, assignmentId) {
     if (!assignment || assignment.owner_id !== userId) return []
 
     const startMs = Date.now()
-    const indices = Array.from({ length: 20 }, (_, i) => i)
+    const bucket = supabaseAdmin.storage.from('homework-images')
+
+    // 先試 page-0，不存在就直接返回（避免白打 19 個 404）
+    const { data: first, error: firstErr } = await bucket.download(`question-booklets/${assignmentId}/page-0.webp`)
+    if (firstErr || !first) {
+      console.log(`[QuestionBooklet] page-0 不存在，跳過，耗時 ${Date.now() - startMs}ms`)
+      return []
+    }
+    const firstBuffer = Buffer.from(await first.arrayBuffer())
+    const firstImage = { mimeType: 'image/webp', data: firstBuffer.toString('base64') }
+
+    // page-0 存在，並行下載 page-1 ~ page-19
     const results = await Promise.allSettled(
-      indices.map(async (i) => {
-        const path = `question-booklets/${assignmentId}/page-${i}.webp`
-        const { data, error } = await supabaseAdmin.storage.from('homework-images').download(path)
+      Array.from({ length: 19 }, (_, i) => i + 1).map(async (i) => {
+        const { data, error } = await bucket.download(`question-booklets/${assignmentId}/page-${i}.webp`)
         if (error || !data) return null
         const buffer = Buffer.from(await data.arrayBuffer())
         return { mimeType: 'image/webp', data: buffer.toString('base64') }
       })
     )
 
-    // 保持頁碼順序：從 page-0 開始，遇到第一個 null 就停（與原本 break 語意一致）
-    const images = []
+    const images = [firstImage]
     for (const r of results) {
       const val = r.status === 'fulfilled' ? r.value : null
       if (!val) break
