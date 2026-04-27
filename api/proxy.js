@@ -227,14 +227,26 @@ async function fetchAnswerSheetImagesForClassify(supabaseAdmin, userId, assignme
       .maybeSingle()
     if (!assignment || assignment.owner_id !== userId) return []
 
+    const startMs = Date.now()
+    const indices = Array.from({ length: 10 }, (_, i) => i)
+    const results = await Promise.allSettled(
+      indices.map(async (i) => {
+        const path = `answer-sheets/${assignmentId}/page-${i}.webp`
+        const { data, error } = await supabaseAdmin.storage.from('homework-images').download(path)
+        if (error || !data) return null
+        const buffer = Buffer.from(await data.arrayBuffer())
+        return { mimeType: 'image/webp', data: buffer.toString('base64') }
+      })
+    )
+
+    // 保持頁碼順序：從 page-0 開始，遇到第一個 null 就停（與原本 break 語意一致）
     const images = []
-    for (let i = 0; i < 10; i++) {
-      const path = `answer-sheets/${assignmentId}/page-${i}.webp`
-      const { data, error } = await supabaseAdmin.storage.from('homework-images').download(path)
-      if (error || !data) break
-      const buffer = Buffer.from(await data.arrayBuffer())
-      images.push({ mimeType: 'image/webp', data: buffer.toString('base64') })
+    for (const r of results) {
+      const val = r.status === 'fulfilled' ? r.value : null
+      if (!val) break
+      images.push(val)
     }
+    console.log(`[AnswerSheet] 並行下載 ${images.length} 張圖片，耗時 ${Date.now() - startMs}ms`)
     return images
   } catch (err) {
     console.warn('[AnswerSheet] fetchAnswerSheetImagesForClassify failed:', err?.message || err)
@@ -251,14 +263,26 @@ async function fetchQuestionBookletImages(supabaseAdmin, userId, assignmentId) {
       .maybeSingle()
     if (!assignment || assignment.owner_id !== userId) return []
 
+    const startMs = Date.now()
+    const indices = Array.from({ length: 20 }, (_, i) => i)
+    const results = await Promise.allSettled(
+      indices.map(async (i) => {
+        const path = `question-booklets/${assignmentId}/page-${i}.webp`
+        const { data, error } = await supabaseAdmin.storage.from('homework-images').download(path)
+        if (error || !data) return null
+        const buffer = Buffer.from(await data.arrayBuffer())
+        return { mimeType: 'image/webp', data: buffer.toString('base64') }
+      })
+    )
+
+    // 保持頁碼順序：從 page-0 開始，遇到第一個 null 就停（與原本 break 語意一致）
     const images = []
-    for (let i = 0; i < 20; i++) {
-      const path = `question-booklets/${assignmentId}/page-${i}.webp`
-      const { data, error } = await supabaseAdmin.storage.from('homework-images').download(path)
-      if (error || !data) break
-      const buffer = Buffer.from(await data.arrayBuffer())
-      images.push({ mimeType: 'image/webp', data: buffer.toString('base64') })
+    for (const r of results) {
+      const val = r.status === 'fulfilled' ? r.value : null
+      if (!val) break
+      images.push(val)
     }
+    console.log(`[QuestionBooklet] 並行下載 ${images.length} 張圖片，耗時 ${Date.now() - startMs}ms`)
     return images
   } catch (err) {
     console.warn('[QuestionBooklet] fetchQuestionBookletImages failed:', err?.message || err)
