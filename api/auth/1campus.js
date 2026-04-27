@@ -732,7 +732,20 @@ async function handleOAuthCallback(req, res) {
 
   if (req.query?.error) {
     clearStateCookie(res, secure)
-    res.writeHead(302, { Location: `${frontendUrl}?sso_error=oauth_error` })
+    // 使用者拒絕 OAuth 授權 → 用 sso_warning 而非 sso_error（Phase 1 已登入，不應踢出）
+    const errorType = req.query.error === 'access_denied' ? 'oauth_denied' : 'oauth_error'
+    const paramKey = errorType === 'oauth_denied' ? 'sso_warning' : 'sso_error'
+    // 嘗試從 state 中取出 dsns，讓前端可以提供「重新授權」按鈕
+    let deniedDsns = ''
+    const stateParam = getStringParam(req, 'state')
+    if (stateParam && errorType === 'oauth_denied') {
+      try {
+        const parsed = JSON.parse(Buffer.from(stateParam, 'base64url').toString())
+        if (parsed.dsns && isValidDsns(parsed.dsns)) deniedDsns = parsed.dsns
+      } catch { /* ignore */ }
+    }
+    const dsnsParam = deniedDsns ? `&sso_dsns=${encodeURIComponent(deniedDsns)}` : ''
+    res.writeHead(302, { Location: `${frontendUrl}?${paramKey}=${errorType}${dsnsParam}` })
     res.end()
     return
   }
