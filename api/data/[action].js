@@ -2910,7 +2910,8 @@ async function handleSync(req, res) {
         submissions: [],
         folders: [],
         gradebook_custom_columns: [],
-        gradebook_custom_scores: []
+        gradebook_custom_scores: [],
+        answer_key_templates: []
       }
       const deletedSets = {
         classrooms: new Set(),
@@ -2919,7 +2920,8 @@ async function handleSync(req, res) {
         submissions: new Set(),
         folders: new Set(),
         gradebook_custom_columns: new Set(),
-        gradebook_custom_scores: new Set()
+        gradebook_custom_scores: new Set(),
+        answer_key_templates: new Set()
       }
 
       for (const row of deletedResult.data || []) {
@@ -3184,6 +3186,7 @@ async function handleSync(req, res) {
           pageOrientations: row.page_orientations ?? undefined,
           answerSheetMode: row.answer_sheet_mode ?? undefined,
           questionBookletImagePaths: row.question_booklet_image_paths ?? undefined,
+          version: row.version ?? 1,
           updatedAt: toMillis(row.updated_at) ?? undefined
         }))
 
@@ -3199,7 +3202,7 @@ async function handleSync(req, res) {
         gradebookCustomScores: gradebookCustomScores.filter(
           (row) => !deletedSets.gradebook_custom_scores.has(row.id)
         ),
-        answerKeyTemplates,
+        answerKeyTemplates: answerKeyTemplates.filter((row) => !deletedSets.answer_key_templates.has(row.id)),
         deleted,
         ...(assignmentTags ? { assignmentTags } : {})
       })
@@ -3405,6 +3408,7 @@ async function handleSync(req, res) {
       await applyDeletes('students', deletedPayload.students)
       await applyDeletes('classrooms', deletedPayload.classrooms)
       await applyDeletes('folders', deletedPayload.folders)
+      await applyDeletes('answer_key_templates', deletedPayload.answer_key_templates)
 
       const buildUpsertRows = async (tableName, items, mapper) => {
         const filtered = items.filter((item) => item?.id)
@@ -3557,6 +3561,7 @@ async function handleSync(req, res) {
           page_orientations: t.pageOrientations ?? t.page_orientations ?? undefined,
           answer_sheet_mode: t.answerSheetMode ?? t.answer_sheet_mode ?? undefined,
           question_booklet_image_paths: t.questionBookletImagePaths ?? t.question_booklet_image_paths ?? undefined,
+          version: t.version ?? 1,
           updated_at: toIsoTimestamp(t.updatedAt ?? t.updated_at) ?? nowIso
         }))
         const tplResult = await supabaseDb
