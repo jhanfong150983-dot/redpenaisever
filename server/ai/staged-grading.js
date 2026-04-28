@@ -1749,39 +1749,11 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
     }
   }
 
-  // 括號型 fill_blank 子題第三輪：只限制 w/h 比例，x/y 交給 classify
-  // 括號型 fill_blank 子題：x/y/w 交給 classify，h 固定一行高度
-  // 不依賴 answerKey bbox（答案卷可能是拍照，跟 PDF 學生卷座標系不同）
-  {
-    const parenPageHeight = 1 / (totalPages || 1)
-    const FIXED_H = +(0.02 * parenPageHeight).toFixed(4)  // 固定 2% 頁高（一行手寫）
-
-    for (let i = 0; i < alignedQuestions.length; i += 1) {
-      const q = alignedQuestions[i]
-      if (!q.visible || !q.answerBbox) continue
-      const isQSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
-      const qSpec = specByQuestionId.get(q.questionId)
-      if (!isQSubQ || qSpec?.tablePosition) continue
-
-      // 以 classify bbox 中心為錨，左右對稱擴寬到最小寬度
-      // 避免 x 偏移時單側數字被切掉（12→2, 70→7）
-      const MIN_W = 0.10  // 對稱擴寬最小寬度，補償 x 偏右傾向
-      const rawX = q.answerBbox.x
-      const rawW = q.answerBbox.w
-      const finalW = Math.max(rawW, MIN_W)
-      const center = rawX + rawW / 2
-      const finalX = Math.max(0, center - finalW / 2)
-      // y 微調往下：classify 的 y 有偏上傾向，加小偏移避免裁切到上一行
-      // bboxCorrected 的跳過（中位數校正後的 bbox 已經包含 y 偏移）
-      const Y_DOWN_OFFSET = q.bboxCorrected ? 0 : +(0.002 / (totalPages || 1)).toFixed(5)
-      alignedQuestions[i] = { ...q, answerBbox: {
-        x: +finalX.toFixed(4),
-        y: +(q.answerBbox.y + Y_DOWN_OFFSET).toFixed(4),
-        w: +finalW.toFixed(4),
-        h: q.bboxCorrected ? q.answerBbox.h : FIXED_H  // bboxCorrected 時保留原 h
-      }}
-    }
-  }
+  // 註：括號型 fill_blank 子題的「中心對稱擴寬 + 固定 h」後處理已移除。
+  // 原本是為了避免中文數學「12 → 只框到 2」場景，但會把英文同行多空的 bbox
+  // 往左推（手寫從底線左對齊往右溢出，中心對稱擴寬反而切到右側）。
+  // 改由 classify prompt 的 UNDERLINE ANCHOR RULE 處理：bbox 右邊 = 底線最右端
+  // OR 學生手寫右端，取較右者，自然涵蓋兩種場景。
 
   // matching group_context: same group shares one union bbox.
   const groupMeta = new Map()
