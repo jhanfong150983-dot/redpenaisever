@@ -813,10 +813,22 @@ function validateAnswerKeyResponse(data) {
 
 // ── ANSWER KEY EXTRACT: deep validation ─────────────────────────────────────
 const VALID_QUESTION_CATEGORIES = new Set([
-  'fill_blank', 'single_choice', 'true_false', 'multi_check', 'multi_choice',
-  'multi_check_other', 'single_check', 'word_problem', 'calculation',
-  'short_answer', 'matching', 'map_fill', 'multi_fill', 'map_draw',
-  'diagram_draw', 'diagram_color', 'fill_variants'
+  // Bucket A
+  'single_choice', 'multi_choice', 'circle_select_one', 'circle_select_many',
+  'single_check', 'multi_check', 'true_false', 'fill_blank', 'multi_fill',
+  'matching', 'ordering', 'mark_in_text',
+  'calculation', 'word_problem',
+  // Bucket B
+  'fill_variants', 'map_fill',
+  // Bucket C
+  'short_answer',
+  'map_symbol', 'grid_geometry', 'connect_dots',
+  'diagram_draw', 'diagram_color',
+  // Bucket D
+  'compound_circle_with_explain', 'compound_check_with_explain',
+  'compound_writein_with_explain', 'multi_check_other',
+  'compound_judge_with_correction', 'compound_judge_with_explain',
+  'compound_chain_table'
 ])
 
 // Categories that MUST have a non-empty answer or referenceAnswer

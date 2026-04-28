@@ -85,11 +85,25 @@ function resolveQuestionTypeForLocate(q) {
   const answerFormat = String(q?.answerFormat ?? '').trim().toLowerCase()
   if (answerFormat === 'matching' || answerFormat === 'matching_on_map') return 'matching'
   const valid = new Set([
-    'word_problem', 'calculation', 'single_choice', 'map_fill', 'multi_fill',
-    'map_draw', 'diagram_draw', 'multi_check', 'multi_check_other',
-    'fill_blank', 'true_false', 'matching', 'multi_choice', 'single_check', 'short_answer'
+    // Bucket A
+    'single_choice', 'multi_choice', 'circle_select_one', 'circle_select_many',
+    'single_check', 'multi_check', 'true_false', 'fill_blank', 'multi_fill',
+    'matching', 'ordering', 'mark_in_text',
+    'calculation', 'word_problem',
+    // Bucket B
+    'fill_variants', 'map_fill',
+    // Bucket C
+    'short_answer',
+    'map_symbol', 'grid_geometry', 'connect_dots',
+    'diagram_draw', 'diagram_color',
+    // Bucket D
+    'compound_circle_with_explain', 'compound_check_with_explain',
+    'compound_writein_with_explain', 'multi_check_other',
+    'compound_judge_with_correction', 'compound_judge_with_explain',
+    'compound_chain_table'
   ])
-  if (category === 'fill_variants') return 'fill_blank'
+  // Legacy compat: old map_draw → map_symbol
+  if (category === 'map_draw') return 'map_symbol'
   if (valid.has(category)) return category
   return 'fill_blank'
 }

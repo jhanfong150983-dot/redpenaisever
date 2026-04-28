@@ -82,7 +82,9 @@ const QUESTION_CATEGORY_TO_BUCKET = {
   map_fill: 'B',
   // Bucket C — Rubric 給分（純文字 or 繪圖評鑑）
   short_answer: 'C',
-  map_draw: 'C',
+  map_symbol: 'C',
+  grid_geometry: 'C',
+  connect_dots: 'C',
   diagram_draw: 'C',
   diagram_color: 'C',
   // Bucket D — 複合題（多部分有依存關係，必須一起評分）
@@ -455,7 +457,7 @@ function extractInlineImages(contents) {
 // A2: 用 Sharp 裁切 base64 inline image，回傳裁切後的 inlineData
 // bbox 為 normalized [0,1] 座標；失敗時回傳 null
 // useActualBbox=false（預設）：以 bbox 中心點為錨，擴展至固定尺寸（確保一致性）
-// useActualBbox=true：直接使用 bbox 的實際範圍（map_draw 等大面積區域用）
+// useActualBbox=true：直接使用 bbox 的實際範圍（map_symbol / grid_geometry / connect_dots 等大面積區域用）
 const FIXED_CROP_W = 0.55  // 佔圖寬的 55%
 const FIXED_CROP_H = 0.20  // 佔圖高的 20%
 async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
@@ -1125,21 +1127,22 @@ function normalizeQuestionIdList(answerKey) {
 }
 
 const CLASSIFY_ALLOWED_TYPES = new Set([
-  'word_problem',
-  'calculation',
-  'single_choice',
-  'map_fill',
-  'multi_fill',
-  'map_draw',
-  'diagram_draw',
-  'diagram_color',
-  'multi_check',
-  'multi_check_other',
-  'fill_blank',
-  'true_false',
-  'matching',
-  'multi_choice',
-  'single_check'
+  // Bucket A
+  'single_choice', 'multi_choice', 'circle_select_one', 'circle_select_many',
+  'single_check', 'multi_check', 'true_false', 'fill_blank', 'multi_fill',
+  'matching', 'ordering', 'mark_in_text',
+  'calculation', 'word_problem',
+  // Bucket B
+  'fill_variants', 'map_fill',
+  // Bucket C
+  'short_answer',
+  'map_symbol', 'grid_geometry', 'connect_dots',
+  'diagram_draw', 'diagram_color',
+  // Bucket D
+  'compound_circle_with_explain', 'compound_check_with_explain',
+  'compound_writein_with_explain', 'multi_check_other',
+  'compound_judge_with_correction', 'compound_judge_with_explain',
+  'compound_chain_table'
 ])
 
 function resolveExpectedQuestionType(question) {
@@ -1169,8 +1172,11 @@ function resolveExpectedQuestionType(question) {
     return 'matching'
   }
 
-  // 3) Map-specific categories should remain map_draw / map_fill when explicitly set
-  if (category === 'map_draw' || category === 'map_fill') return category
+  // 3) Map-specific categories should remain as-is when explicitly set
+  if (category === 'map_fill') return category
+  if (category === 'map_symbol' || category === 'grid_geometry' || category === 'connect_dots') return category
+  // Legacy compat: old data with map_draw maps to map_symbol (most common drawType)
+  if (category === 'map_draw') return 'map_symbol'
 
   // 4) Some legacy category mappings
   if (category === 'fill_variants') return 'fill_blank'
@@ -1220,9 +1226,11 @@ function resolveBboxPolicyByQuestionType(questionType) {
   // group_shared (1)
   if (questionType === 'matching') return 'group_shared'
 
-  // large_visual_area (7)
+  // large_visual_area (9)
   if (
-    questionType === 'map_draw' ||
+    questionType === 'map_symbol' ||
+    questionType === 'grid_geometry' ||
+    questionType === 'connect_dots' ||
     questionType === 'diagram_draw' ||
     questionType === 'diagram_color' ||
     questionType === 'short_answer' ||
@@ -1586,21 +1594,11 @@ function normalizeClassifyResult(parsed, questionIds) {
     const row = byQuestionId.get(questionId)
     const visible = row?.visible === true
     const qt = row?.questionType
-    const VALID_QUESTION_TYPES = new Set([
-      'word_problem', 'calculation', 'single_choice', 'map_fill', 'multi_fill', 'map_draw',
-      'diagram_draw', 'diagram_color', 'multi_check', 'multi_check_other', 'fill_blank', 'true_false', 'matching',
-      'multi_choice', 'single_check'
-    ])
-    const questionType = VALID_QUESTION_TYPES.has(qt) ? qt : 'other'
-    const VALID_DRAW_TYPES = new Set(['map_symbol', 'grid_geometry', 'connect_dots'])
-    const drawType = (questionType === 'map_draw' && VALID_DRAW_TYPES.has(row?.drawType))
-      ? row.drawType
-      : (questionType === 'map_draw' ? 'map_symbol' : undefined)
+    const questionType = CLASSIFY_ALLOWED_TYPES.has(qt) ? qt : 'other'
     alignedQuestions.push({
       questionId,
       visible,
       questionType,
-      drawType,
       questionBbox: normalizeBboxRef(row?.questionBbox ?? row?.question_bbox),
       answerBbox: normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox),
       bracketBbox: (questionType === 'circle_select_one' || questionType === 'circle_select_many') ? normalizeBboxRef(row?.bracketBbox) : undefined,
@@ -2311,7 +2309,7 @@ Rules:
 - bboxPolicy MUST follow Question Specs（6 種策略，依 type 行為決定 bbox 範圍）:
   - full_page: questionBbox and answerBbox must both be {x:0,y:0,w:1,h:1}（map_fill 用，整張圖）.
   - group_shared: questions in the same bboxGroupId MUST share the same questionBbox/answerBbox（matching 用）.
-  - large_visual_area: bbox 涵蓋整個視覺/工作區域（map_draw / diagram_draw / diagram_color / short_answer / ordering / calculation / word_problem 用，含題幹+大範圍答題區）.
+  - large_visual_area: bbox 涵蓋整個視覺/工作區域（map_symbol / grid_geometry / connect_dots / diagram_draw / diagram_color / short_answer / ordering / calculation / word_problem 用，含題幹+大範圍答題區）.
   - compound_linked: bbox 必須涵蓋整題所有部分（含理由/改正/開放欄/連動 cell）。**禁止只框其一**（compound_circle/check/writein_with_explain / compound_judge_with_correction/explain / multi_check_other / compound_chain_table 用）.
   - answer_with_context: bbox 涵蓋答案區 + 鄰近印刷元素（如預印選項、方框列、文章上下文）（circle_select_one/many / single_check / multi_check / multi_choice / mark_in_text 用）.
   - tight_answer: bbox 緊框答案空格本身，**不框題幹**（${isAnswerOnly ? 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，每子題各自一個 tight bbox' : 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，single_choice 約 25-35% 頁寬'}）.
@@ -2374,7 +2372,10 @@ Rules:
   - For calculation / word_problem：題幹下方有大工作區，學生寫算式 + 最終答案。calculation 的最終答案在題幹「(    ) =」括號內；word_problem 的最終答案在工作區末尾的「答：」行。answerBbox 從題幹起，向下涵蓋所有算式行、直式、最終答案/答句。若 calculation 同時有「表格內最終答案格」+「另處工作區」，bbox 必須**同時涵蓋兩者**。不可只框最終答案格、不可漏掉學生在邊緣補寫的計算。
   - For short_answer（簡答題）：題目給一個大空白區，學生寫文字段落自由說明。answerBbox 涵蓋題幹 + 整個答題區（含學生所有手寫文字段落）。不可只框第一行；學生若補寫到旁白或邊緣，bbox 應略放寬以涵蓋。
   - For ordering（排序題）：題目給一列待排序項目，學生在每項旁邊或內部寫上 1, 2, 3, 4… 序號。answerBbox 涵蓋題幹 + 所有待排序項目區（含全部項目印刷文字 + 學生寫的所有序號）。不可只框單一序號、不可漏掉部分項目。
-  - For map_draw / diagram_draw / diagram_color：題目給一張預印的地圖、長條圖、圓餅圖、或塗色區，學生在上面繪製、標記、或塗色。answerBbox 涵蓋題幹 + 整個視覺區（地圖/圖表/塗色區 + 學生所有筆跡）。學生繪製/塗色可能延伸到圖外，bbox 應略放寬以涵蓋；不可只框已繪製的區段、不可漏掉題幹（老師需要看到題目要求）。
+  - For map_symbol（地圖符號標記題）：題目給一張預印地圖，學生在某位置畫符號（▲/★/●）。answerBbox 涵蓋題幹 + 整張地圖 + 學生符號筆跡，bbox 略放寬以容忍符號落點。不可只框符號本身、不可漏掉地圖其他區（老師需看全圖判斷位置正確性）。
+  - For grid_geometry（格線幾何繪製題）：題目給一張格線紙，學生依條件繪製幾何圖形（三角形、平行四邊形等）。answerBbox 涵蓋題幹 + 整個格線區 + 學生繪製的線條/弧線。學生線條可能延伸到格線邊緣，bbox 應略放寬。不可只框已繪製部分、不可漏掉空白格線區（老師需看完整格網判斷邊長/角度）。
+  - For connect_dots（連點繪圖題）：題目給一個點陣，學生把指定點連起來形成圖形。answerBbox 涵蓋題幹 + 整個點陣區 + 學生連線。不可只框連線部分、不可漏掉未連的點（老師需看全部點才能判斷連線正確性）。
+  - For diagram_draw / diagram_color：題目給一張預印的長條圖/圓餅圖/塗色區，學生繪製或塗色。answerBbox 涵蓋題幹 + 整個視覺區 + 學生筆跡，學生筆跡可能延伸到圖外，bbox 應略放寬以涵蓋；不可只框已繪製/塗色的區段、不可漏掉題幹。
 
   ── compound_linked 群組（複合題，必須完整框住所有部分）──
   - For compound_circle_with_explain / compound_check_with_explain / compound_writein_with_explain / compound_judge_with_correction / compound_judge_with_explain（5 個複合說明題）：policy=compound_linked。整題分**兩部分**：
@@ -2409,23 +2410,36 @@ ${classifyCorrections.map((c) => {
   return `- 題目 ${c.questionId}：請特別注意此題的 answerBbox 定位準確性。`
 }).join('\n')}
 ` : ''}
-Output:
+Output schema:
 {
   "alignedQuestions": [
     {
-      "questionId": "string",
+      "questionId": "1-2",
       "visible": true,
-      "questionType": "single_choice",
-      "bboxPolicyApplied": "tight_answer",
-      "bboxGroupId": "optional",
-      "drawType": "map_symbol",
-      "questionBbox": { "x": 0.08, "y": 0.16, "w": 0.62, "h": 0.18 },
-      "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 },
-      "bracketBbox": { "x": 0.1, "y": 0.26, "w": 0.25, "h": 0.025 },
-      "tablePositionReasoning": "table found at x=0.04-0.49. col1=比率(row label), col2=光武國中, col3=建功國中, col4=實驗中學... Target col=3 → 建功國中. bbox=[0.18,0.07,0.06,0.01]"
+      "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 }
     }
   ]
 }
+
+Required fields:
+- questionId: must match an Allowed question ID.
+- visible: true/false.
+- answerBbox: required when visible=true; omit if region cannot be determined.
+
+Conditional fields (output ONLY when applicable; omit otherwise):
+- bracketBbox: only for circle_select_one / circle_select_many.
+  Format: { "x": ..., "y": ..., "w": ..., "h": ... }
+- tablePositionReasoning: MANDATORY when spec includes tablePosition; otherwise omit.
+  Format: "detected V-lines=[x1,x2,...]. Target col=N → V(N)=x. bbox=[x,y,w,h]"
+- bboxGroupId: only for matching (echo from spec).
+
+Do NOT output:
+- questionType: fixed by spec, do not infer or echo.
+- bboxPolicyApplied: deprecated.
+- drawType: each map sub-type is now its own questionType (map_symbol / grid_geometry / connect_dots), do not infer.
+- questionBbox: deprecated; answerBbox already covers the per-type framing.
+
+When visible=false, omit all bbox fields.
 `.trim()
 }
 
@@ -2446,7 +2460,7 @@ Rules:
   - For fill_blank with multiple blanks: include all blanks and the question text together.
   - For single_choice / multi_choice: include the option rows and the parentheses where the student wrote.
   - For single_check / multi_check / multi_check_other: include all checkbox options and the student's marks (including any text written next to the last 其他 option).
-  - For map_draw / diagram_draw / diagram_color: include the entire drawn/colored area plus the question stem.
+  - For map_symbol / grid_geometry / connect_dots / diagram_draw / diagram_color: include the entire drawn/colored area plus the question stem.
 - Also output answerBbox for the precise region where the student actually wrote their answer (tighter than questionBbox). This helps highlight the specific wrong content.
 - All bboxes normalized to [0,1]: { "x": top-left x, "y": top-left y, "w": width, "h": height }.
 - Be ACCURATE and output actual dimensions — do not use placeholder sizes.
@@ -3131,19 +3145,17 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
   const matchingIds = visibleQuestions
     .filter((q) => q.questionType === 'matching')
     .map((q) => q.questionId)
-  // map_draw split by drawType
+  // 3 個 map-draw 子型別現為獨立 type
   const mapDrawSymbolIds = visibleQuestions
-    .filter((q) => q.questionType === 'map_draw' && q.drawType !== 'grid_geometry' && q.drawType !== 'connect_dots')
+    .filter((q) => q.questionType === 'map_symbol')
     .map((q) => q.questionId)
   const mapDrawGridIds = visibleQuestions
-    .filter((q) => q.questionType === 'map_draw' && q.drawType === 'grid_geometry')
+    .filter((q) => q.questionType === 'grid_geometry')
     .map((q) => q.questionId)
   const mapDrawConnectIds = visibleQuestions
-    .filter((q) => q.questionType === 'map_draw' && q.drawType === 'connect_dots')
+    .filter((q) => q.questionType === 'connect_dots')
     .map((q) => q.questionId)
-  const mapDrawIds = visibleQuestions
-    .filter((q) => q.questionType === 'map_draw')
-    .map((q) => q.questionId)
+  const mapDrawIds = [...mapDrawSymbolIds, ...mapDrawGridIds, ...mapDrawConnectIds]
 
   // SINGLE-CHOICE merged note (covers single_choice + single_check, 3 forms unified).
   // Output is constrained by the per-form rules; numericChoiceNote removed (output limit + human review handle digit ambiguity).
@@ -3891,7 +3903,7 @@ function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
   const strictness = answerKey?.strictness || 'standard'
   const strictnessRule =
     strictness === 'strict'
-      ? 'GRADING STRICTNESS: STRICT — For objective categories (single_choice, true_false, fill_blank, fill_variants, single_check, multi_check, multi_choice), enforce exact correctness per category rules. For rubric categories (calculation, word_problem, short_answer, map_draw, diagram_draw, diagram_color), judge by rubric dimensions and mathematical/concept correctness; do NOT require literal format matching unless the category rule explicitly requires it.'
+      ? 'GRADING STRICTNESS: STRICT — For objective categories (single_choice, true_false, fill_blank, fill_variants, single_check, multi_check, multi_choice), enforce exact correctness per category rules. For rubric categories (short_answer, map_symbol, grid_geometry, connect_dots, diagram_draw, diagram_color), judge by rubric dimensions and visual/concept correctness; do NOT require literal format matching unless the category rule explicitly requires it.'
       : strictness === 'lenient'
         ? 'GRADING STRICTNESS: LENIENT — Accept the answer if the core meaning is correct, even if phrasing, word order, or minor formatting differ. However, unit substitution (e.g. 公尺 for 公分) is still wrong even in lenient mode for fill_blank and word_problem questions. Exception: unit pairs listed in the UNIT EQUIVALENCE TABLE below are always treated as identical.'
         : 'GRADING STRICTNESS: STANDARD — Accept minor variations (synonyms, commutative factor order, equivalent units per the UNIT EQUIVALENCE TABLE below) but reject wrong meaning, wrong numbers, wrong key terms, or different units.'
@@ -4105,7 +4117,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - errorType: 'concept' if wrong connection; 'blank' if "未連線" or "未作答".
 - map_fill: See MAP-FILL SCORING below.
 - multi_fill: See MULTI-FILL SCORING below.
-- map_draw: See MAP-DRAW SCORING below.
+- map_symbol / grid_geometry / connect_dots: See MAP-DRAW SCORING below.
 - (If questionCategory is absent, fall back to type-based rules: type=1 → exact match, type=2 → acceptableAnswers match, type=3 → use rubricsDimensions-style concept grading; do NOT use rubric 4-level fallback.)
 
 - MULTI-FILL SCORING (多項填入題): Each question is one blank box; the student writes multiple codes (e.g. "ㄅ、ㄇ、ㄉ").
@@ -4151,7 +4163,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - short_answer:      correct→「學生回答內容完整，概念正確」 wrong→「學生寫「因為天氣很熱」，正確答案應涵蓋「蒸發作用」概念，學生僅描述現象未說明原理」. When rubricsDimensions exist, describe each dimension's score.
   - matching:          correct→「學生配對「2公尺/秒」，答案正確」 wrong→「學生配對「3公尺/秒」，正確答案為「2公尺/秒」，配對錯誤」
   - map_fill:          correct→「所有位置填寫正確」 wrong→「學生將位置C填為「越南」、位置D填為「泰國」，正確答案為C=泰國、D=越南，兩者填反」
-  - map_draw:          correct→「學生繪製颱風符號於右下格，位置與符號皆正確」 wrong→「學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移」
+  - map_symbol/grid_geometry/connect_dots: correct→「學生繪製颱風符號於右下格，位置與符號皆正確」 wrong→「學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移」
   - diagram_color:     correct→「塗色比例2/3與位置皆正確」 wrong→「學生塗色比例約1/2，正確比例為2/3，塗色面積不足」
   - diagram_draw:      correct→「圖表數值與標籤皆正確」 wrong(pie)→「光武國中 2/5 正確；康乃薾 缺少比率，扣1分；實驗中學 缺少項目名與比率，扣1分」 wrong(bar)→「學生標示番茄汁為60°，正確值為80°，數值偏差過大」
 
@@ -6793,7 +6805,7 @@ GRADING RULES per questionCategory ("questionCategory" is authoritative. Only fa
     * HARD RULE: NEVER require "答：" / "A：" / "Ans:" format for calculation.
     * If the student writes extra intermediate steps, do not fail only because of extra steps; focus on correctness.
     * LENIENT FOCUS RULE: when item.strictness = "lenient", prioritize 最終答案. If final numeric answer is correct, allow pass even if process is brief.
-- short_answer / map_draw: This is a correction submission.
+- short_answer / map_symbol / grid_geometry / connect_dots: This is a correction submission.
     * Judge based on referenceAnswer and whether the student demonstrates genuine understanding of the concept.
     * The answer does not need to be perfect, but must show the student understood their mistake and addressed it meaningfully.
     * LENIENT FOCUS RULE: when item.strictness = "lenient":
