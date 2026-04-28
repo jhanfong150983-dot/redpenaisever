@@ -2398,17 +2398,16 @@ Rules:
 - Return strict JSON only.
 ${Array.isArray(classifyCorrections) && classifyCorrections.length > 0 ? `
 ⚠️ BBOX POSITIONING REMINDER:
-The following questions need extra attention on answerBbox positioning:
+前一輪 Read 結果偵測到下列題目可能有 bbox 定位問題，請特別注意：
 ${classifyCorrections.map((c) => {
   if (c.type === 'neighbor_match') {
-    return `- 題目 ${c.questionId}：此題的 answerBbox 可能偏移到了相鄰題目 ${c.neighborId} 的空格。請仔細區分這兩題的空格位置，確保各題框選到各自正確的空格。`
-  } else if (c.type === 'consecutive_blank') {
-    return `- 題目 ${c.questionId}：此題需特別注意 answerBbox 定位，請確保框選到學生的書寫區域，不要遺漏細小或淺色的筆跡。`
-  } else if (c.type === 'type_mismatch') {
-    return `- 題目 ${c.questionId}：此題需特別注意 answerBbox 定位，確保框選的是正確的空格位置，不要框到相鄰的空格或題目區域。`
+    return `- 題目 ${c.questionId}：此題學生答案恰好等於相鄰題目 ${c.neighborId} 的正解，bbox 可能飄移到鄰題空格。請仔細區分這兩題的空格邊界，確保各題框選到各自正確的空格。`
   }
-  return `- 題目 ${c.questionId}：請特別注意此題的 answerBbox 定位準確性。`
-}).join('\n')}
+  if (c.type === 'consecutive_blank') {
+    return `- 題目 ${c.questionId}：此題與其他題目連續被讀為 blank/unreadable。請確認 answerBbox 確實對齊到該題的書寫區（不是漂移到題幹/空白區）。若 bbox 正確且學生確實留空，blank 是合理結論——不要為了「找筆跡」而誤把雜訊讀成內容。`
+  }
+  return ''
+}).filter(Boolean).join('\n')}
 ` : ''}
 Output schema:
 {
