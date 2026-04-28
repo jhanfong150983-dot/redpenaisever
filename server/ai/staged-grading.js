@@ -2331,16 +2331,45 @@ Rules:
 
   ── tight_answer 群組（緊框答案空格，不含題幹）──
   - For fill_blank 子題（questionId 含 3+ segments，如 "1-2-1"）：每個子題對應題幹中的一個空白標記（( )、□、___），學生在標記內寫值（含單位則一併寫）。answerBbox 緊框該空白標記區（含學生手寫），不含題幹。不可漂移到相鄰子題的空白、不可跨行。
-    子規則（依優先級）：
-    1. ANCHOR RULE（spec 帶 anchorHint）：以 anchorHint 描述為權威定位，最高優先。anchorHint 描述的是答案格本身，不要把 bbox 放在 landmark 文字上。
-    2. TABLE COLUMN RULE（anchorHint 指欄標題時）：找到欄標題水平位置，bbox 左右邊**不可超出該欄邊界**；若可能含到鄰欄內容，必須縮小。
+
+    ⚠️ 兩階段框架（識別 → 定位 — 兩階段不衝突）：
+
+    【階段 A：識別 WHICH — 先確定「目標空白是這行的第幾個」】
+    依下列子規則優先級走：
+    1. ANCHOR RULE（spec 帶 anchorHint）：以 anchorHint 描述為權威識別目標空白。anchorHint 是用來**找到目標空白**，不是 bbox 的起點座標。
+    2. TABLE COLUMN RULE（anchorHint 指欄標題時）：bbox 左右邊**不可超出該欄邊界**；若可能含到鄰欄內容，必須縮小。
     3. ROW RULE（spec 帶 blankRow + blankRowTotal）：先由上至下數，找到第 blankRow 行，再進入該行。
-    4. ORDINAL RULE（spec 帶 blankOrdinal + blankTotal）：在對的行內，從左到右數第 blankOrdinal 個空白。
+    4. ORDINAL RULE（spec 帶 blankOrdinal + blankTotal）：在對的行內，從左到右數，目標 = 第 blankOrdinal 個空白。
     5. ORDERING RULE（無任何 hint）：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應。
+
+    【階段 B：定位 WHERE — bbox 邊界**直接觀察底線/括號像素**】
+    🚨 UNDERLINE ANCHOR RULE（最高優先）：
+    階段 A 識別到目標空白後，bbox 邊界**必須直接觀察該底線/括號本身的像素位置**，
+    **不可**用「鄰近印刷單字」當 bbox 起點的代理。
+    - bbox 左邊 = 該底線/括號最左端的像素
+    - bbox 右邊 = 該底線/括號最右端的像素 OR 學生手寫的右端，取較右者（容忍 overflow）
+    - 上下 = 含學生手寫筆跡的高度，含一點上下邊距
+    - 兩空格之間的印刷字（in / the / is / 是 / 的）必須在 bbox 之外
+
+    ❌ 同行多空最常見的 bug（必須避免）：
+    - ❌ 看 anchorHint 說「Mom is 後的底線」，就把 bbox 起點放在 "is" 字後面
+      → 用印刷字位置「推算」底線位置 → bbox 偏左 → 切到學生手寫「cookin」尾巴
+    - ❌ 看到「___ in the ___」，把 "the" 當第二底線的 anchor → bbox 起點落在 "the"
+      → 還沒到第二底線就開始畫 → 切錯位置
+
+    🔍 視覺自我檢查：
+    bbox 左邊**第一眼看到的應該是底線/括號的起點**，不該是任何印刷字母。
+    若你的 bbox 左邊有印刷字母（i / t / n / 是 / 的）→ anchor 選錯了，重畫。
+
     範例：
     - 括號型：「答案是(　　　)元」→ 框 (　　　) 這個括號內部
     - 方框型：「2½ □ (4.73 □ 2.73)」→ 框該 □ 格本身
     - 底線型：「___公尺」→ 框 ___ 這個底線區
+    - 同行多空（英文常見）：「Mom is _____ in the _____.」blankTotal=2
+       ✅ ordinal=1 → bbox 緊框第 1 個 _____ 像素，含手寫 cooking
+       ✅ ordinal=2 → bbox 緊框第 2 個 _____ 像素，含手寫 kitchen
+       ❌ 從 "is" 推位置 → bbox 偏左 → 切到 "cookin" 尾
+       ❌ 從 "the" 推位置 → bbox 偏左 → 切到 "kitche" 尾
   - For fill_blank 單一空格（questionId 1-2 segments，如 "3"、"1-2"）：題目可能含 1 個或多個空白標記，整題只有一個 questionId（不分子題）。answerBbox 緊框該題所有空白標記（含學生手寫），不含題幹。不可漂移到鄰題的空白。
   - For fill_variants：規則同 fill_blank（容多元說法是 Read 階段的判斷，classify 階段處理方式相同）。
   - For single_choice / multi_choice / true_false：學生在空括號 (   ) 內寫代號或符號（A/B/C/甲/乙/①/②、○/✗ 等）。single_choice / true_false 寫 1 個；multi_choice 寫多個（如 "A,C"）。answerBbox 緊框該空括號，左右各加少許邊距以容忍對齊誤差。不可含題幹文字、不可延伸到下方選項清單行。寬度約占頁寬 25-35%，以括號為中心。
