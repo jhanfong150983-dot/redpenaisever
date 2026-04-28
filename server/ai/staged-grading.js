@@ -4174,6 +4174,36 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - map_fill: See MAP-FILL SCORING below.
 - multi_fill: See MULTI-FILL SCORING below.
 - map_symbol / grid_geometry / connect_dots: See MAP-DRAW SCORING below.
+- circle_select_one: Student wrote the selected option **text** (not letter), e.g. "同意". Compare to answer field (correct option text) — exact text match after whitespace trim and full-width/half-width normalize. score = maxScore if match, else 0. errorType: 'concept' if wrong; 'blank' if empty/未圈.
+- circle_select_many: Student answer is comma-separated option **texts** (e.g. "同意,中立"). answer field is correct set as comma-separated texts. Apply SEPARATOR NORMALIZATION + set comparison logic identical to multi_check (correct ∩, extraWrong = max(0, |wrong|−|missing|), partial credit formula). errorType: 'concept' if wrong; 'blank' if empty.
+- mark_in_text: Student answer is comma-separated marked words (e.g. "春天,夏天"). answer field is correct set as comma-separated. Use the same set comparison + partial credit formula as multi_check. errorType: 'concept' if wrong words marked; 'blank' if empty.
+- compound_circle_with_explain / compound_check_with_explain / compound_writein_with_explain: Compound D-bucket question. studentAnswerRaw uses "⧉" as separator: "[partA] ⧉ [partB]" where partA = 圈選/勾選位置編號/寫入代號, partB = 理由文字.
+  REQUIRED: rubricsDimensions present (typically 2 dims: 圈選/勾選/代號 + 理由).
+  Apply per-dimension scoring:
+  - 圈選/勾選/代號 dimension: judge partA against criteria. 自選情境（criteria 含「有圈選任一即可」）→ 任何選擇即 full. 必選情境（criteria 含「必須圈選正確選項」）→ partA 須符合 answer field 才 full.
+  - 理由 dimension: judge partB content against criteria — 理由是否能 support partA 所選選項、是否符合 criteria 描述的概念.
+  score = sum of dimension scores. isCorrect = (score === maxScore).
+  errorType: 'concept' if any dimension fails; 'blank' if both parts empty (partA="未圈" / "未勾" / 等空白標記 AND partB="未說明").
+- compound_judge_with_correction: studentAnswerRaw "[judgment] ⧉ [correction]" where judgment = ○ 或 ✗, correction = 改正文字（學生判 ✗ 才需要寫）or "無需改正" or "未改正".
+  Use rubricsDimensions if present (2 dims: 判斷 + 改正); otherwise FIXED DEDUCTION:
+  Start with score = maxScore.
+  STEP 1 — 判斷正確性: judgment 與 answer field（○ 或 ✗）一致 → 通過；不一致 → score = 0, STOP.
+  STEP 2 — 改正合理性: if answer = ✗ (敘述應改正) AND student also judged ✗ → 比對 correction 與 referenceAnswer 的改正內容. correction 正確 → 通過；correction = "未改正" → deduct 1; correction 內容錯誤 → deduct 1.
+  STEP 3 — 不需改正: if answer = ○ AND student judged ○ → correction = "無需改正" or 空白皆可，full marks.
+  Final score = max(0, score after deductions).
+  errorType: 'concept' if 判斷 wrong; 'blank' if both empty.
+- compound_judge_with_explain: studentAnswerRaw "[judgment] ⧉ [explanation]". 判斷 + 解釋為什麼.
+  REQUIRED: rubricsDimensions (typically 2 dims: 判斷 + 說明).
+  - 判斷 dimension: judgment 與 answer field 一致 → full; 否則 0.
+  - 說明 dimension: judge explanation against criteria — 是否符合 criteria 的概念描述.
+  score = sum. errorType: 'concept' if any wrong; 'blank' if both empty.
+- compound_chain_table: studentAnswerRaw is multi-line table content, each line uses "|" to separate columns (e.g. "孔子 | 周遊列國 | 教學興盛\\n孟子 | ...").
+  Parse rows by "\\n", parse cells by "|". Compare to referenceAnswer's row structure.
+  Use rubricsDimensions if present (typically per-row or per-aspect rubric); otherwise per-row scoring:
+  - Each row's cells must all match referenceAnswer's corresponding row to count as correct.
+  - 🚨 CHAIN DEPENDENCY: cells in a row are linked — if cell N is wrong, cells N+1..end of that row are auto-wrong (依存錯誤). Award 0 for that row.
+  - score = round(correctRows / totalRows × maxScore).
+  - errorType: 'concept' if cells wrong; 'blank' if no rows or all "_".
 - (If questionCategory is absent, fall back to type-based rules: type=1 → exact match, type=2 → acceptableAnswers match, type=3 → use rubricsDimensions-style concept grading; do NOT use rubric 4-level fallback.)
 
 - MULTI-FILL SCORING (多項填入題): Each question is one blank box; the student writes multiple codes (e.g. "ㄅ、ㄇ、ㄉ").
@@ -4220,6 +4250,13 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - matching:          correct→「學生配對「2公尺/秒」，答案正確」 wrong→「學生配對「3公尺/秒」，正確答案為「2公尺/秒」，配對錯誤」
   - map_fill:          correct→「所有位置填寫正確」 wrong→「學生將位置C填為「越南」、位置D填為「泰國」，正確答案為C=泰國、D=越南，兩者填反」
   - map_symbol/grid_geometry/connect_dots: correct→「學生繪製颱風符號於右下格，位置與符號皆正確」 wrong→「學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移」
+  - circle_select_one: correct→「學生圈選「同意」，答案正確」 wrong→「學生圈選「不同意」，正確答案為「同意」，圈選錯誤」
+  - circle_select_many: correct→「學生圈選「同意、中立」，答案正確」 wrong→「學生圈選「同意、不同意」，正確答案為「同意、中立」，多圈了不同意、漏圈中立」
+  - mark_in_text: correct→「學生圈出「春天、夏天、秋天、冬天」，全部正確」 wrong→「學生圈出「春天、夏天」，正確答案為「春天、夏天、秋天、冬天」，漏圈秋天、冬天」
+  - compound_circle_with_explain / compound_check_with_explain / compound_writein_with_explain: 兩段分開描述，例：「圈選「同意」（自選 OK）；理由說明「促進和平」與所選選項一致，理由維度滿分」 或 wrong→「圈選「同意」（自選 OK）；理由僅一句「我覺得好」，未具體支持選項，理由維度扣 N 分」
+  - compound_judge_with_correction: correct(○)→「學生判斷○，答案正確，無需改正」 correct(✗)→「學生判斷✗，答案正確；改正內容「太陽從東方升起」正確」 wrong→「學生判斷○，正確答案為✗，敘述需改正卻判為正確」 wrong_correction→「學生判斷✗ 正確；但改正內容「太陽往天空跑」未明確指出正確事實，扣1分」
+  - compound_judge_with_explain: correct→「學生判斷○ 正確；說明「地球自轉造成晝夜變化」概念正確」 wrong→「學生判斷✗，正確答案為○，判斷錯誤；說明維度依據判斷錯誤，整體 0 分」
+  - compound_chain_table: correct→「3 列全部正確」 wrong→「第 1 列「孔子-周遊列國-教學興盛」全對；第 2 列「孟子」後續欄位錯，依序判 0 分；第 3 列空白」
   - diagram_color:     correct→「塗色比例2/3與位置皆正確」 wrong→「學生塗色比例約1/2，正確比例為2/3，塗色面積不足」
   - diagram_draw:      correct→「圖表數值與標籤皆正確」 wrong(pie)→「光武國中 2/5 正確；康乃薾 缺少比率，扣1分；實驗中學 缺少項目名與比率，扣1分」 wrong(bar)→「學生標示番茄汁為60°，正確值為80°，數值偏差過大」
 
