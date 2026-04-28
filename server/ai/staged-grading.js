@@ -1179,8 +1179,9 @@ function resolveExpectedQuestionType(question) {
   if (category === 'map_draw') return 'map_symbol'
 
   // 4) Some legacy category mappings
+  // fill_variants 行為跟 fill_blank 對 OCR 來說相同（容多元差異在 grading 階段才用），所以 collapse
   if (category === 'fill_variants') return 'fill_blank'
-  if (category === 'short_answer') return 'word_problem'
+  // short_answer 是獨立 type（自由文字段落），不再 collapse 到 word_problem
   if (CLASSIFY_ALLOWED_TYPES.has(category)) return category
 
   // 5) Fallback to numeric resolveQuestionType (legacy behavior)
@@ -3107,68 +3108,55 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
       return !excludedIds.has(questionId)
     })
     : []
+  // ── Per-type ID extraction（每 type 獨立列表，no more merged effective lists）──
+  // 設計原則：每種 type 有自己的規則段，AI 不再做「3-form 辨識」。
+  // 標籤已在裁切圖前面標明 type，AI 直接套對應 rule 即可。
+  const idsOf = (type) => visibleQuestions.filter((q) => q.questionType === type).map((q) => q.questionId)
   const visibleIds = visibleQuestions.map((q) => q.questionId)
-  const singleChoiceIds = visibleQuestions
-    .filter((q) => q.questionType === 'single_choice')
-    .map((q) => q.questionId)
-  const trueFalseIds = visibleQuestions
-    .filter((q) => q.questionType === 'true_false')
-    .map((q) => q.questionId)
-  const mapFillIds = visibleQuestions
-    .filter((q) => q.questionType === 'map_fill')
-    .map((q) => q.questionId)
-  const multiFillIds = visibleQuestions
-    .filter((q) => q.questionType === 'multi_fill')
-    .map((q) => q.questionId)
-  const multiCheckIds = visibleQuestions
-    .filter((q) => q.questionType === 'multi_check')
-    .map((q) => q.questionId)
-  const multiCheckOtherIds = visibleQuestions
-    .filter((q) => q.questionType === 'multi_check_other')
-    .map((q) => q.questionId)
-  const multiChoiceIds = visibleQuestions
-    .filter((q) => q.questionType === 'multi_choice')
-    .map((q) => q.questionId)
-  const singleCheckIds = visibleQuestions
-    .filter((q) => q.questionType === 'single_check')
-    .map((q) => q.questionId)
-  // ── Merged effective ID lists for prompt purposes ──
-  // single_choice + single_check are 3 forms of the same logical "single choice" type.
-  // multi_choice + multi_check + multi_check_other are 3 forms of the same logical "multi choice" type.
-  // The merged list drives the unified 3-form rule. classify still tags each visible question
-  // with its native type — that tag is preserved for downstream logic; the prompt just describes
-  // 3 forms and lets AI identify visually.
-  const effectiveSingleChoiceIds = [...singleChoiceIds, ...singleCheckIds]
-  const effectiveMultiChoiceIds = [...multiChoiceIds, ...multiCheckIds, ...multiCheckOtherIds]
-  const fillBlankIds = visibleQuestions
-    .filter((q) => q.questionType === 'fill_blank')
-    .map((q) => q.questionId)
-  const calculationIds = visibleQuestions
-    .filter((q) => q.questionType === 'calculation')
-    .map((q) => q.questionId)
-  const wordProblemIds = visibleQuestions
-    .filter((q) => q.questionType === 'word_problem')
-    .map((q) => q.questionId)
-  const diagramDrawIds = visibleQuestions
-    .filter((q) => q.questionType === 'diagram_draw')
-    .map((q) => q.questionId)
-  const diagramColorIds = visibleQuestions
-    .filter((q) => q.questionType === 'diagram_color')
-    .map((q) => q.questionId)
-  const matchingIds = visibleQuestions
-    .filter((q) => q.questionType === 'matching')
-    .map((q) => q.questionId)
-  // 3 個 map-draw 子型別現為獨立 type
-  const mapDrawSymbolIds = visibleQuestions
-    .filter((q) => q.questionType === 'map_symbol')
-    .map((q) => q.questionId)
-  const mapDrawGridIds = visibleQuestions
-    .filter((q) => q.questionType === 'grid_geometry')
-    .map((q) => q.questionId)
-  const mapDrawConnectIds = visibleQuestions
-    .filter((q) => q.questionType === 'connect_dots')
-    .map((q) => q.questionId)
-  const mapDrawIds = [...mapDrawSymbolIds, ...mapDrawGridIds, ...mapDrawConnectIds]
+
+  // Bucket A: tight_answer
+  const singleChoiceIds = idsOf('single_choice')
+  const multiChoiceIds = idsOf('multi_choice')
+  const trueFalseIds = idsOf('true_false')
+  const fillBlankIds = idsOf('fill_blank')
+  const multiFillIds = idsOf('multi_fill')
+
+  // Bucket A: answer_with_context
+  const circleSelectOneIds = idsOf('circle_select_one')
+  const circleSelectManyIds = idsOf('circle_select_many')
+  const singleCheckIds = idsOf('single_check')
+  const multiCheckIds = idsOf('multi_check')
+  const markInTextIds = idsOf('mark_in_text')
+
+  // Bucket A: group_shared / large_visual_area
+  const matchingIds = idsOf('matching')
+  const orderingIds = idsOf('ordering')
+  const calculationIds = idsOf('calculation')
+  const wordProblemIds = idsOf('word_problem')
+
+  // Bucket B
+  const mapFillIds = idsOf('map_fill')
+  // fill_variants 已被 resolveExpectedQuestionType 收編成 fill_blank（OCR 行為相同）
+
+  // Bucket C: large_visual_area
+  const shortAnswerIds = idsOf('short_answer')
+  const mapSymbolIds = idsOf('map_symbol')
+  const gridGeometryIds = idsOf('grid_geometry')
+  const connectDotsIds = idsOf('connect_dots')
+  const diagramDrawIds = idsOf('diagram_draw')
+  const diagramColorIds = idsOf('diagram_color')
+
+  // Bucket D: compound_linked
+  const compoundCircleIds = idsOf('compound_circle_with_explain')
+  const compoundCheckIds = idsOf('compound_check_with_explain')
+  const compoundWriteinIds = idsOf('compound_writein_with_explain')
+  const compoundJudgeCorrectionIds = idsOf('compound_judge_with_correction')
+  const compoundJudgeExplainIds = idsOf('compound_judge_with_explain')
+  const multiCheckOtherIds = idsOf('multi_check_other')
+  const compoundChainTableIds = idsOf('compound_chain_table')
+
+  // Aggregate: all map-draw subtypes (kept for backward-compat conditional logic if any)
+  const mapDrawIds = [...mapSymbolIds, ...gridGeometryIds, ...connectDotsIds]
 
   // ── Per-type questionIds 清單已移除（每張裁切圖標籤已標註 type，清單純冗餘）──
   // ── bboxHintNote 已移除（裁切圖無關全圖座標，AI 看不到全圖無法用 normalized 座標）──
@@ -3247,50 +3235,62 @@ This rule ONLY applies when the stroke is between two digits. A vertical stroke 
   Example: student wrote "25×4=100" as scratch work nearby, and filled "100" inside the ( ) → output "100" only.` : ''
 
   // ── Per-type rule blocks: only emit when the test paper actually has that type ──
-  // ── SINGLE-CHOICE unified rule (covers single_choice + single_check, 3 forms) ──
-  const singleChoiceRules = effectiveSingleChoiceIds.length > 0 ? `
-SINGLE-CHOICE (questions in SINGLE-CHOICE list):
-單選題：從預設選項中挑選「唯一」一個答案。視覺上有 3 種形式。
-先識別形式，再依該形式三步驟（理解 → 抄錄 → 輸出）處理。
+  // 每 type 獨立規則。標籤已標明 type，AI 直接套規則，不再辨識 form。
+  // 共用「理解 → 抄錄 → 輸出」三段架構 + readingReasoning 必填。
 
-⚠️ 必填欄位 readingReasoning：
-   每題必須填寫推理過程，依「理解 / 抄錄 / 輸出」三段書寫。
-   不可跳步驟、不可只給結論。
+  // ── single_choice：空括號 + 寫代號 1 個 ──
+  const singleChoiceRules = singleChoiceIds.length > 0 ? `
+SINGLE-CHOICE (single_choice 題)：學生在空括號 (    ) 內寫一個代號。
 
-═══════════════════════════════════════════════════════════
-FORM 1 — 代號選擇題 (CODE-WRITE-IN)
-特徵：題號前有空白括號 "(        )1. 題目敘述..."；括號外有 A/B/C/D 等選項清單。
-
-① 理解：學生在空括號內寫了一個代號
-② 抄錄：找到 "(        )" → 抄寫括號內的手寫筆跡
+① 理解：括號內手寫一個代號
+② 抄錄：抄寫括號內筆跡
 ③ 輸出：僅輸出單一代號
        允許：A/B/C/D | 甲/乙/丙/丁 | 1/2/3/4 | ①/②/③/④
        不可輸出選項內容文字
 
-readingReasoning 範例：
-   "理解：括號內手寫一個英文字母 B。抄錄：直接抄寫該代號。輸出：B。"
+readingReasoning 範例：「理解：括號內手寫一個英文字母 B。抄錄：直接抄寫。輸出：B。」
 
 邊界：
 - 括號完全空白 → blank
 - 字跡無法辨識為任何代號 → unreadable
-- 看到多個代號（理論上不該出現於單選）→ unreadable
+- 看到多個代號（不該出現於單選）→ unreadable
 
-═══════════════════════════════════════════════════════════
-FORM 2 — 圈選題 (CIRCLE-IN-OPTIONS)
-特徵：括號內預印 2+ 個選項，以 ／、/、，分隔。
-       例：(同意／不同意)、(大於／等於／小於)、(小熊, 大熊, 中熊)
+統一禁止：不可從題目語意推測；不可從相鄰題推斷；AI2 不可用正解 hint 反推。
+` : ''
+
+  // ── multi_choice：空括號 + 寫代號多個 ──
+  const multiChoiceRules = multiChoiceIds.length > 0 ? `
+MULTI-CHOICE (multi_choice 題)：學生在空括號 (    ) 內寫多個代號。
+
+① 理解：括號內手寫多個代號
+② 抄錄：抄寫括號內所有代號（依寫的順序）
+③ 輸出：用「,」連接多個代號（無空格）
+       例：A,C 或 ①,③；單個代號則只輸出該代號
+
+readingReasoning 範例：「理解：括號內手寫 A 和 C。抄錄：兩個代號。輸出：A,C。」
+
+邊界：
+- 括號完全空白 → blank
+- 所有代號都無法辨識 → unreadable
+- 部分代號可辨、部分不可辨 → 用 "?" 取代不可辨的，例：A,?
+
+統一禁止：同 single_choice。
+注意：多選若所有代號都被寫入仍照樣輸出（非 unreadable，與單選不同）。
+` : ''
+
+  // ── circle_select_one：括號內預印多個選項 + 圈選 1 個 ──
+  const circleSelectOneRules = circleSelectOneIds.length > 0 ? `
+CIRCLE-SELECT-ONE (circle_select_one 題)：括號內預印 2+ 個選項（以 ／、/、，分隔），學生用筆跡圈選 1 個。
+範例：(同意／不同意)、(大於／等於／小於)、(小熊, 大熊, 中熊)
 
 ① 理解：學生用筆跡（圈/底線/劃掉）標記其中一個選項
 ② 抄錄：
    Step 1：識別括號內所有預印選項
    Step 2：找出學生筆跡覆蓋的選項位置
    Step 3：用分隔符（／、,）當錨點，確認標記中心在哪一側
-③ 輸出：僅輸出被標記的選項文字
-       不含括號、不含分隔符、不含其他選項
+③ 輸出：僅輸出被標記的選項文字（不含括號、分隔符、其他選項）
 
-readingReasoning 範例：
-   "理解：括號內預印「同意／不同意」兩個選項，學生用圓圈包住右側。
-    抄錄：以「／」為錨點，圓圈中心在右側。輸出：不同意。"
+readingReasoning 範例：「理解：括號內預印「同意／不同意」，學生圈住右側。抄錄：以「／」為錨點，圓圈中心在右。輸出：不同意。」
 
 邊界：
 - 沒有任何標記 → blank
@@ -3298,116 +3298,94 @@ readingReasoning 範例：
 - 標記中心模糊（卡在分隔符上）→ unreadable
 - 劃掉式：所有選項都沒劃掉 → blank；剩唯一一個沒劃掉 → 輸出那個
 
-═══════════════════════════════════════════════════════════
-FORM 3 — 勾選題 (CHECKBOX)
-特徵：每個選項前面有 □（方形勾選框）。
-       例：□ 父親  □ 母親  □ 祖父  □ 祖母
-
-① 理解：學生在某個 □ 內畫上 ✓/✗/●/X 等標記
-② 抄錄：
-   Step 1：識別所有 □ 與其對應的選項文字（依閱讀順序：左→右、上→下編號）
-   Step 2：找出有標記的 □（畫勾、塗黑、打叉等）
-   Step 3：判定該 □ 是第幾個（1-based）
-③ 輸出：被打勾 □ 的 1-based 位置編號
-       例如「1」表示第 1 個 □、「2」表示第 2 個...
-       純數字。不含 □、不含勾號 ✓、不含選項文字
-
-readingReasoning 範例：
-   "理解：四個 □ 對應「父親、母親、祖父、祖母」，第二個 □（母親前）被打勾。
-    抄錄：標記在第 2 個位置。輸出：2。"
-
-邊界：
-- 沒有 □ 被標記 → blank
-- 多個 □ 被標記 → unreadable（單選不能多選）
-- 標記跨越兩個 □（位置模糊）→ unreadable
-
-═══════════════════════════════════════════════════════════
-ALL FORMS — 統一禁止：
-- ❌ 不可依「哪個答案聽起來合理」決定 → 只看實際筆跡位置
-- ❌ 不可從相鄰題目推斷
-- ❌ AI2：不可用正確答案 hint 反推學生選擇
-- ✅ SELF-CHECK：「學生有在『這題』的答案區做標記嗎？」沒有 → blank
+統一禁止：同 single_choice。
 ` : ''
 
-  // ── MULTI-CHOICE unified rule (covers multi_choice + multi_check + multi_check_other, 3 forms) ──
-  const multiChoiceRules = effectiveMultiChoiceIds.length > 0 ? `
-MULTI-CHOICE (questions in MULTI-CHOICE list):
-多選題：從預設選項中挑選「所有」正確或符合的答案，少一個依規定扣分。
-視覺上有 3 種形式。先識別形式，再依該形式三步驟（理解 → 抄錄 → 輸出）處理。
-
-⚠️ 必填欄位 readingReasoning：
-   每題必須填寫推理過程，依「理解 / 抄錄 / 輸出」三段書寫。
-
-═══════════════════════════════════════════════════════════
-FORM 1 — 代號選擇題（多選版） (CODE-WRITE-IN)
-特徵：題號前有空白括號；括號外有 A/B/C/D 等選項清單。
-
-① 理解：學生在空括號內寫了多個代號
-② 抄錄：找到 "(        )" → 抄寫括號內所有代號（依寫的順序）
-③ 輸出：用「,」連接多個代號（無空格）
-       例：A,C 或 ①,③；單個代號則只輸出該代號
-
-readingReasoning 範例：
-   "理解：括號內手寫「A、C」。抄錄：兩個代號 A 與 C。輸出：A,C。"
-
-═══════════════════════════════════════════════════════════
-FORM 2 — 圈選題（多選版） (CIRCLE-IN-OPTIONS)
-特徵：括號內預印多個選項，以 ／、/、，分隔。
+  // ── circle_select_many：括號內預印多個選項 + 圈選多個 ──
+  const circleSelectManyRules = circleSelectManyIds.length > 0 ? `
+CIRCLE-SELECT-MANY (circle_select_many 題)：括號內預印多個選項，學生圈選多個。
 
 ① 理解：學生用筆跡標記了一個或多個選項
 ② 抄錄：
    Step 1：識別括號內所有預印選項
    Step 2：找出所有有筆跡覆蓋的選項
-③ 輸出：用「,」連接被標記的選項文字
-       例：同意,大於
+③ 輸出：用「,」連接被標記的選項文字。例：同意,中立
 
-readingReasoning 範例：
-   "理解：括號內預印「同意,不同意,中立」三個選項，學生圈了「同意」與「中立」。
-    抄錄：兩個選項被圈。輸出：同意,中立。"
+readingReasoning 範例：「理解：括號內「同意,不同意,中立」三個選項，學生圈了同意與中立。抄錄：兩個被圈。輸出：同意,中立。」
 
-═══════════════════════════════════════════════════════════
-FORM 3 — 勾選題（多選版） (CHECKBOX)
-特徵：每個選項前面有 □。
+邊界：
+- 沒有任何標記 → blank
+- 全部都被標記也照樣輸出（多選允許）
+
+統一禁止：同 single_choice。
+` : ''
+
+  // ── single_check：□ 列 + 打勾 1 個 ──
+  const singleCheckRules = singleCheckIds.length > 0 ? `
+SINGLE-CHECK (single_check 題)：每個選項前面有 □（方框），學生在 1 個 □ 內畫 ✓/✗/●/X。
+範例：□ 父親  □ 母親  □ 祖父  □ 祖母
+
+① 理解：學生在某個 □ 內畫上標記
+② 抄錄：
+   Step 1：識別所有 □ 與其對應選項文字（依閱讀順序：左→右、上→下編號）
+   Step 2：找出有標記的 □
+   Step 3：判定該 □ 是第幾個（1-based）
+③ 輸出：被打勾 □ 的 1-based 位置編號
+       純數字。不含 □、勾號 ✓、選項文字
+
+readingReasoning 範例：「理解：四個 □ 對應「父親、母親、祖父、祖母」，第二個被打勾。抄錄：標記在第 2 個位置。輸出：2。」
+
+邊界：
+- 沒有 □ 被標記 → blank
+- 多個 □ 被標記（單選不能多選）→ unreadable
+- 標記跨越兩個 □（位置模糊）→ unreadable
+
+統一禁止：同 single_choice。
+` : ''
+
+  // ── multi_check：□ 列 + 打勾多個 ──
+  const multiCheckRules = multiCheckIds.length > 0 ? `
+MULTI-CHECK (multi_check 題)：□ 列 + 學生在多個 □ 內畫標記。
 
 ① 理解：學生在多個 □ 內畫上標記
 ② 抄錄：
-   Step 1：識別所有 □ 與其對應的選項文字（依閱讀順序：左→右、上→下編號）
+   Step 1：識別所有 □ 與其對應選項文字（依閱讀順序：左→右、上→下編號）
    Step 2：找出所有有標記的 □
    Step 3：紀錄各被標記 □ 的 1-based 位置
-③ 輸出：用「,」連接所有位置編號
-       例：1,3 表示第 1 與第 3 個 □ 被標記
+③ 輸出：用「,」連接所有位置編號。例：1,3
 
-子情境：MULTI-CHECK-OTHER（最後一個 □ 是「其他：___」開放欄位）：
-   - 若該 □ 被打勾且學生寫了文字 → 輸出 "N：[文字]"
-     例：「4：轉為文風鼎盛的社會」
-   - 若該 □ 被打勾但沒寫文字 → 只輸出位置編號（如 "4"）
-   - 若該 □ 沒打勾 → 忽略
-   組合範例：「1,3,4：轉為文風鼎盛的社會」（第 1、3 普通選項 + 第 4 其他含文字）
+readingReasoning 範例：「理解：四個 □ 中，第 1 與第 3 個被打勾。抄錄：兩個被標記。輸出：1,3。」
 
-readingReasoning 範例：
-   "理解：四個 □ 中，第 1 和第 4 個（其他：___）被打勾，其他欄位寫了「轉為文風鼎盛的社會」。
-    抄錄：位置 1 + 位置 4 含文字。輸出：1,4：轉為文風鼎盛的社會。"
+統一禁止：同 single_choice。
+注意：多選若所有 □ 都被打勾仍照樣輸出。
+` : ''
 
-═══════════════════════════════════════════════════════════
-ALL FORMS — 統一禁止：
-- ❌ 不可依語意/邏輯決定 → 只看實際筆跡位置
-- ❌ 不可從相鄰題目推斷
-- ❌ AI2：不可用正確答案 hint 反推學生選擇
-- ✅ SELF-CHECK：學生有在『這題』的答案區做標記嗎？沒有 → blank
-- 注意：多選若所有選項都被標記，仍照樣輸出（非 unreadable，與單選不同）
+  // ── multi_check_other：□ 列 + 打勾，最後 □ 是「其他：___」開放欄 ──
+  const multiCheckOtherRules = multiCheckOtherIds.length > 0 ? `
+MULTI-CHECK-OTHER (multi_check_other 題)：□ 列 + 最後 1 個 □ 是「其他：___」開放欄位。
+
+① 理解：同 multi_check，但最後一個 □ 配「其他：___」開放欄位
+② 抄錄：
+   - 一般 □：紀錄 1-based 位置
+   - 最後「其他」□：判斷有無打勾 + 開放欄是否寫文字
+③ 輸出規則：
+   - 一般 □ 被打勾 → 該位置編號
+   - 「其他」□ 被打勾且寫文字 → 輸出 "N：[文字]"（N 為位置編號）
+   - 「其他」□ 被打勾但沒寫文字 → 只輸出位置編號
+   - 多個用「,」連接，例：1,3,4：轉為文風鼎盛的社會
+
+readingReasoning 範例：「理解：四個 □ 中，第 1、3 普通 + 第 4「其他」被打勾並寫了文字。輸出：1,3,4：轉為文風鼎盛的社會。」
+
+統一禁止：同 single_choice。
 ` : ''
 
   const trueFalseRules = trueFalseIds.length > 0 ? `
-TRUE-FALSE (questions in TRUE-FALSE list):
+TRUE-FALSE (true_false 題)：學生在空括號 (    ) 內寫 ○ 或 ✗。
 - Output ONLY the symbol or word the student wrote in the answer space.
 - Valid outputs: "○", "✗", "對", "錯", "是", "否", or the exact character written.
 - Do NOT append any explanatory text (e.g. output "○" NOT "○ 正確").
+- 括號空白 → blank。字跡無法辨識為任一符號 → unreadable。
 ` : ''
-
-  // single_check / multi_check / multi_check_other 規則已併入 single/multi-choice 統一規則 (3 forms)
-  const singleCheckRules = ''
-  const multiCheckRules = ''
-  const multiCheckOtherRules = ''
 
   const fillBlankRules = fillBlankIds.length > 0 ? `
 FILL-BLANK (questions in FILL-BLANK list):
@@ -3513,6 +3491,209 @@ Rules for all formats:
 - The operator may appear as: "×1000", "÷60", "÷10", "×5", etc.
 ` : ''
 
+  // ── matching：連連看（同組共用 bbox）──
+  const matchingRules = matchingIds.length > 0 ? `
+MATCHING (matching 題)：連連看，左欄編號項目 (1)(2)(3)(4)，右欄選項，學生畫線連接。
+- 同一組 matching 的所有 questionId 共用同一張裁切圖（整組左欄+右欄+連線）。
+- 對左欄每個項目，跟隨學生畫的線找到右欄對應的選項。
+- 輸出格式：每個 questionId 輸出該左欄項目連到的右欄選項文字。
+  例：(1) 連到「2公尺/秒」→ 該題的 questionId 輸出「2公尺/秒」
+- questionId 在 MATCHING list 對應左欄順序：第一個 ID = (1)、第二個 = (2)、依此類推。
+- 沒連線或連線不明確 → studentAnswerRaw="未連線", status="read"
+- 整組沒任何連線 → status="blank", studentAnswerRaw="未作答"
+- 禁止：輸出左欄項目文字（必須輸出右欄選項文字）。
+` : ''
+
+  // ── mapFill：整圖填地名（多位置-名稱配對）──
+  const mapFillRules = mapFillIds.length > 0 ? `
+MAP-FILL (map_fill 題)：整張圖即一題，學生在地圖多位置寫地名/標籤。
+- 掃描整張裁切圖。
+- 找出所有學生手寫的標籤/文字。
+- 每個標籤描述大致位置 + 寫的文字。
+- 輸出格式：「位置A: 泰國, 位置B: 越南, 位置C: 緬甸, ...」
+  - 若印有位置標記（A, B, C, ①, ②）→ 用印刷標記為位置識別
+  - 若無印刷標記 → 用空間描述：「左上方」「中間偏右」「右下角」等
+- 包含所有手寫文字（即使拼字錯誤）。
+- 有任何手寫 → status="read"。完全空白 → status="blank"。
+` : ''
+
+  // ── multiFill：多格填值（每子題對應一格）──
+  const multiFillRules = multiFillIds.length > 0 ? `
+MULTI-FILL (multi_fill 題)：圖中多個固定位置空白格，每子題對應一格。
+- 裁切圖框該子題對應的單一格（含學生手寫）。
+- 抄寫該格內所有手寫代號/符號（例如「ㄅ、ㄇ、ㄉ」），保留分隔符（、 或 ，）。
+- 不可推測缺漏代號、不可從鄰格讀取。
+- 有手寫 → status="read"。空格 → status="blank"。
+` : ''
+
+  // ── ordering：排序題 ──
+  const orderingRules = orderingIds.length > 0 ? `
+ORDERING (ordering 題)：題目給一列待排序項目，學生在每項旁/內寫上 1, 2, 3, 4… 序號。
+- 掃描整個答題區，找出每個項目對應的學生寫的序號。
+- 依項目原本印刷順序輸出序號，用「,」分隔。
+  例：項目 A,B,C,D 印刷順序固定，學生寫 3,1,4,2 → 輸出「3,1,4,2」
+- 漏寫某項 → 該位置寫 "?"。例：「3,1,?,2」
+- 完全沒寫 → status="blank", studentAnswerRaw="未作答"
+- 禁止：依「合理排序」推測漏寫；只看實際寫的數字。
+` : ''
+
+  // ── markInText：圈詞題 ──
+  const markInTextRules = markInTextIds.length > 0 ? `
+MARK-IN-TEXT (mark_in_text 題)：題目是一段印刷文章，學生在某些字詞上圈/底線/標記。
+- 掃描整段文章，找出所有被圈/底線/標記的字詞（藍/黑筆跡 = 學生）。
+- 列出全部被圈詞語，用「,」分隔。
+  例：「春天,夏天,秋天」
+- 圈選範圍模糊（半圈、線到半路）→ 仍列入但加註，例：「春天,夏(半圈)」
+- 完全沒筆跡 → status="blank"
+- 禁止：列出未被圈的詞；不可依語意推測「應該圈哪些」。
+` : ''
+
+  // ── shortAnswer：簡答題（自由文字段落）──
+  const shortAnswerRules = shortAnswerIds.length > 0 ? `
+SHORT-ANSWER (short_answer 題)：學生在大空白區寫文字段落自由說明。
+- 抄寫整段學生手寫文字（藍/黑筆跡）。
+- 保留學生原始換行（用 "\\n" 分隔）。
+- 即使語法錯誤、用字不當、邏輯不通 — **照原樣抄寫**，不修正。
+- 無法辨識的字 → 用 "?" 取代該字並繼續抄。
+- 完全空白 → status="blank"。整段都無法辨識 → status="unreadable"。
+- 禁止：摘要、改寫、補完；不可以「應該寫的內容」取代學生實際寫的內容。
+` : ''
+
+  // ── map_symbol / grid_geometry / connect_dots：3 個 map-draw 子型 ──
+  const mapSymbolRules = mapSymbolIds.length > 0 ? `
+MAP-SYMBOL (map_symbol 題)：學生在地圖某位置畫符號（▲/★/●/箭頭等）。
+描述學生繪圖，三部分組成：
+  1. 符號 / 形狀：學生畫了什麼？精確命名（例：颱風符號、箭頭向右、圓點、叉號）
+  2. 參考線：列出所有印刷可見的參考線/標籤（例：23.5°N、121°E、赤道）
+  3. 位置：相對參考線的位置描述
+     - 座標格：「在[A]緯線以[南/北]、[B]經線以[東/西]」+ 格子位置
+     - 編號格：「在第 N 格」或「在[標籤]格」
+     - 交點附近：「在[A]與[B]交點附近」
+輸出格式：「[符號名稱]，位置：[精確描述]」
+範例：「颱風符號，位置：23.5°N 緯線以南、121°E 經線以東的格子（右下格）」
+無筆跡 → status="blank"
+` : ''
+
+  const gridGeometryRules = gridGeometryIds.length > 0 ? `
+GRID-GEOMETRY (grid_geometry 題)：學生在格線紙上依條件繪製幾何圖形。
+描述學生繪製的圖形，三部分組成：
+  1. 形狀：什麼圖形？（例：正方形、三角形、長方形、平行四邊形）
+  2. 大小：以格數計（例：邊長 3 格、底 3 格高 2 格、邊長 4×3）
+  3. 位置：圖形左上角或參考點起始位置（例：從第 2 列第 3 格開始）
+輸出格式：「圖形：[形狀]，大小：[尺寸]，位置：[起始位置]」
+範例：「圖形：正方形，大小：邊長 3 格，位置：從第 1 列第 2 格開始」
+無筆跡 → status="blank"
+` : ''
+
+  const connectDotsRules = connectDotsIds.length > 0 ? `
+CONNECT-DOTS (connect_dots 題)：學生把指定的點連起來形成圖形。
+描述學生連線：
+  1. 連線順序：依學生畫線順序列出連接的點（例：1→2→3→4→1）
+  2. 形成圖形：連起來形成什麼形狀？（例：三角形、Z 字形、正方形）
+輸出格式：「連線：[點的連接順序]，形成圖形：[形狀名稱]」
+範例：「連線：1→2→3→4→5，形成圖形：Z 字形」
+無筆跡 → status="blank"
+` : ''
+
+  // ── diagramDraw / diagramColor ──
+  const diagramDrawRules = diagramDrawIds.length > 0 ? `
+DIAGRAM-DRAW (diagram_draw 題)：學生在預印圖表（長條圖/圓餅圖等）上繪製數據。
+- 讀取所有學生繪製或寫上的標籤-數值配對。
+- 圓餅圖：每個扇形以「標籤 比率」格式（例：「番茄汁 2/5, 紅蘿蔔汁 1/10, 蘋果汁 3/20」）
+- 長條圖：每個長條以「標籤 高度/數值」格式（例：「一月 50, 二月 30, 三月 45」）
+- 依閱讀順序列出所有扇形/長條。
+- 無筆跡 → status="blank", studentAnswerRaw="未作答"。
+- 禁止：推測未實際寫出的標籤或數值。
+
+🚨 圓餅圖讀取範圍限制：
+- 只讀餅圖內或圓周附近的文字數字（指向扇形的標籤）。
+- 圖外文字數字（例：旁邊的草稿計算、上下方資料表）**不屬於**此題答案，不抄。
+` : ''
+
+  const diagramColorRules = diagramColorIds.length > 0 ? `
+DIAGRAM-COLOR (diagram_color 題)：學生在預印圖形上塗色。
+- 只描述學生塗色的部分，不描述未塗區域。
+- 固定模板：「塗色：[描述塗色範圍]」
+  - 圓/分數圖：哪幾個圓全/部分塗色、什麼比例、哪一側
+    例：「塗色：第 1 個圓完整，第 2 個圓左側 2/3，第 3 個圓未塗」
+  - 分數條/格：塗了幾格 + 位置
+    例：「塗色：10 格中的 7 格（左側連續 7 格）」
+  - 其他形狀：用空間詞（左/右/上/下/中）描述
+- 位置很重要：永遠描述「哪個區域」被塗，不只是「塗了多少」。
+- 無塗色 → status="blank"。
+- 禁止：把預印輪廓、格線、標籤當成學生的塗色。
+` : ''
+
+  // ── compound_*_with_explain (5 個複合說明題) ──
+  const compoundCircleRules = compoundCircleIds.length > 0 ? `
+COMPOUND-CIRCLE-WITH-EXPLAIN (compound_circle_with_explain 題)：圈印刷選項 + 寫理由。
+整題分兩部分，**兩部分都要讀**：
+- 答案部分：括號內預印選項，學生圈選 1 個（同 circle_select_one 邏輯）
+- 說明部分：下方理由區，學生寫文字理由
+輸出格式（兩段用 ⧉ 分隔）：「[圈選的選項] ⧉ [理由文字]」
+範例：「同意 ⧉ 因為這是促進和平的方法」
+- 圈選空白 → 該段輸出 "未圈"
+- 理由空白 → 該段輸出 "未說明"
+- 兩段都空 → status="blank"
+` : ''
+
+  const compoundCheckRules = compoundCheckIds.length > 0 ? `
+COMPOUND-CHECK-WITH-EXPLAIN (compound_check_with_explain 題)：□ 打勾 + 寫理由。
+- 答案部分：□ 列，學生打勾（同 single_check 邏輯，輸出位置編號）
+- 說明部分：下方理由區
+輸出格式：「[勾選位置編號] ⧉ [理由文字]」
+範例：「2 ⧉ 因為這個方法最能保護環境」
+邊界同 compound_circle_with_explain。
+` : ''
+
+  const compoundWriteinRules = compoundWriteinIds.length > 0 ? `
+COMPOUND-WRITEIN-WITH-EXPLAIN (compound_writein_with_explain 題)：空括號寫代號 + 寫理由。
+- 答案部分：括號內手寫代號（同 single_choice 邏輯，輸出代號）
+- 說明部分：下方理由區
+輸出格式：「[代號] ⧉ [理由文字]」
+範例：「B ⧉ 因為它符合題目所給的條件」
+邊界同 compound_circle_with_explain。
+` : ''
+
+  const compoundJudgeCorrectionRules = compoundJudgeCorrectionIds.length > 0 ? `
+COMPOUND-JUDGE-WITH-CORRECTION (compound_judge_with_correction 題)：判斷對錯 + 改正錯的部分。
+- 答案部分：括號內 ○ 或 ✗（同 true_false 邏輯）
+- 改正部分：下方空白，若判 ✗ 學生需寫正確改寫
+輸出格式：「[○/✗] ⧉ [改正文字或「無需改正」]」
+範例：「✗ ⧉ 太陽從東方升起」「○ ⧉ 無需改正」
+- 判 ○ 但學生寫了東西 → 仍輸出該文字（讓 grading 自行判定）
+- 判 ✗ 但沒寫改正 → 輸出 "✗ ⧉ 未改正"
+` : ''
+
+  const compoundJudgeExplainRules = compoundJudgeExplainIds.length > 0 ? `
+COMPOUND-JUDGE-WITH-EXPLAIN (compound_judge_with_explain 題)：判斷對錯 + 解釋為什麼。
+- 答案部分：括號內 ○ 或 ✗（同 true_false 邏輯）
+- 說明部分：下方說明區，學生寫文字解釋
+輸出格式：「[○/✗] ⧉ [說明文字]」
+範例：「○ ⧉ 因為地球自轉，所以看起來太陽從東方升起」
+邊界同 compound_judge_with_correction。
+` : ''
+
+  const compoundChainTableRules = compoundChainTableIds.length > 0 ? `
+COMPOUND-CHAIN-TABLE (compound_chain_table 題)：表格內多 cell 有依賴關係（前格答案影響後格判斷）。
+- 整個表格區為一題，依列順序逐 cell 抄寫。
+- 輸出格式：每列用「|」分隔欄，每列之間用 "\\n" 分隔
+  例：「人物 | 事件 | 影響\\n孔子 | 周遊列國 | 教學興盛\\n...」
+- 第一列若是欄標題（印刷字）→ 仍抄錄作為脈絡（但若標題列無學生筆跡，可省略）
+- 空格 → 該位置寫 "_"
+- 不可從學科知識推測缺漏 cell；只抄學生實際寫的。
+- 整表沒筆跡 → status="blank"
+` : ''
+
+  // 是否需要 readingReasoning（選擇/勾選/圈選類必填）
+  const needsReadingReasoning = (
+    singleChoiceIds.length + multiChoiceIds.length +
+    circleSelectOneIds.length + circleSelectManyIds.length +
+    singleCheckIds.length + multiCheckIds.length + multiCheckOtherIds.length +
+    compoundCircleIds.length + compoundCheckIds.length + compoundWriteinIds.length +
+    compoundJudgeCorrectionIds.length + compoundJudgeExplainIds.length
+  ) > 0
+
   return `
 Your job is to report what the student physically wrote or drew in each question's designated answer space.
 
@@ -3547,152 +3728,64 @@ Before reading each question, ask yourself: "Is there fresh handwriting in this 
 - Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count.
 - Only FRESH student BLUE/BLACK pen/pencil marks count. RED ink is the teacher's, not the student's.
 
-🚨 TABLE CELL EDGE RULE (applies to fill_blank questions in tables):
-When reading a tightly-cropped table cell, look for VERTICAL GRID LINES (直線) inside the crop image.
-- If you see a vertical grid line: that line is the cell boundary. Content on the OTHER SIDE of that line belongs to an adjacent cell — do NOT read it.
-  - Vertical line near the LEFT edge: only read content to the RIGHT of that line.
-  - Vertical line near the RIGHT edge: only read content to the LEFT of that line.
-  - Vertical lines on BOTH sides: only read content BETWEEN the two lines.
-- If the area between the grid lines (or in the center of the crop if no lines are visible) is empty → status="blank", studentAnswerRaw="未作答".
-- Numbers or text visible beyond a grid line are the NEIGHBOR's answer, not this question's. Reading them would cause cascading errors across all table questions.
+🚨 TABLE CELL EDGE RULE (適用於表格內格子的所有題型 — fill_blank / multi_fill / calculation / compound_chain_table)：
+凡是裁切圖框的是表格內的格子，請依下列規則：
+- 在裁切圖內找垂直格線（直線）。垂直格線即格子邊界。
+- 線的另一邊內容屬於相鄰格，**不可讀**。
+  - 線靠左 → 只讀線右側內容
+  - 線靠右 → 只讀線左側內容
+  - 兩側都有線 → 只讀兩線之間的內容
+- 兩線之間（或裁切圖中央區）若空白 → status="blank", studentAnswerRaw="未作答"。
+- 越過格線可見的數字/文字屬於鄰格答案，**不是這題**。誤讀會造成相鄰題目連鎖錯誤。
 
 ${digitOneRuleBlock}
 == COPY RULES (only when non-blank) ==
 You are an OCR scanner. Your ONLY job is to copy exactly what the student wrote. You have NO language ability, NO grammar knowledge, and NO understanding of meaning.
 
-1. Copy every character the student wrote, in the exact order written. Do NOT rearrange, reorder, or restructure.${mathSymbolPreserveRules}
-4. Copy grammatically wrong or nonsensical sentences exactly as written:
-   - Student wrote "你那麼高興，既然多吃一點" → output "你那麼高興，既然多吃一點" (do NOT reorder to fix grammar)
-   - Student wrote "既然你 ? 麼高" → output "既然你 ? 麼高" (copy the ? as written)
-5. Single unreadable character → replace with "?" and continue copying the rest. Do NOT mark the whole answer as unreadable just because one character is unclear.
-   - Example: student wrote "既然你[unclear]麼高興" → output "既然你?麼高興"
-6. Entire answer completely unreadable (cannot make out any characters) → status="unreadable", studentAnswerRaw="無法辨識".
-${outputLanguageRule}
-8. ABSOLUTELY FORBIDDEN — Character substitution:
-   Do NOT replace a written character with one that looks similar, sounds similar, or "makes more sense" in context.
-   Output exactly what is physically written, even if:
-   - It appears to be a typo (e.g. student wrote 它們 → output 它們, do NOT change to 他們)
-   - It seems grammatically wrong (e.g. student wrote 心裡 → output 心裡, do NOT change to 心理)
-   - A different character would be more "correct" (e.g. student wrote 仇恨 → output 仇恨, do NOT change to 仇視)
-   Your job is to report what the student physically wrote, not what they should have written.
-9. INSERTION MARK (插入符號 ∧ or 入-shape):
-   If the student uses a handwritten ∧ or 入-shaped symbol to indicate a text insertion:
-   - The tip of the symbol points to the insertion position in the original text.
-   - The inserted text is written above the symbol (between the symbol and the line above).
-   - Merge the inserted text into the original sentence at exactly that position.
-   - Output the COMPLETE merged result as if the insertion was always there. Do NOT mention the symbol.
-   - Follow the student's intent faithfully even if the merged result sounds grammatically odd.
-   - Example: student wrote "小明走路∧上學" with "快速" written above the ∧ → output "小明走路快速上學"
-   - Example: student wrote "答：速率為60∧" with "公尺" above the ∧ → output "答：速率為60公尺"
-${domainSectionBlock}${formatBComponentBlock}
+1. Copy every character the student wrote, in the exact order written. Do NOT rearrange, reorder, or restructure.
+2. Copy grammatically wrong or nonsensical sentences exactly as written:
+   - Student wrote "你那麼高興，既然多吃一點" → output "你那麼高興，既然多吃一點"（不可重組以修文法）
+   - Student wrote "既然你 ? 麼高" → output "既然你 ? 麼高"（? 照抄）
+3. Single unreadable character → "?" 取代並繼續抄寫其他字。**不可**因單一字看不清就把整答案標 unreadable。
+   - 範例：「既然你[unclear]麼高興」→ 輸出「既然你?麼高興」
+4. Entire answer completely unreadable → status="unreadable", studentAnswerRaw="無法辨識"。
+5. ${outputLanguageRule.replace(/^7\. /, '')}
+6. ABSOLUTELY FORBIDDEN — Character substitution:
+   不可用相似字、同音字、或「文意更通順的字」取代學生實際寫的字。即使：
+   - 學生寫「它們」→ 輸出「它們」，**不可**改「他們」
+   - 學生寫「心裡」→ 輸出「心裡」，**不可**改「心理」
+   - 學生寫「仇恨」→ 輸出「仇恨」，**不可**改「仇視」
+   你的工作是回報學生實際寫了什麼，不是「該寫什麼」。
+7. INSERTION MARK (插入符號 ∧ 或 入-shape):
+   學生用 ∧ / 入 形手寫符號表示文字插入：
+   - 符號尖端指向原文中的插入位置
+   - 插入文字寫在符號上方（介於符號與上一行之間）
+   - 把插入文字合併到該位置的原句內
+   - 輸出**完整合併結果**（如同插入本來就存在），不提符號
+   - 即使合併結果文意怪也照舊
+   - 範例：「小明走路∧上學」+ 上方寫「快速」→ 輸出「小明走路快速上學」
+${mathSymbolPreserveRules ? `
+== MATH-SPECIFIC COPY RULES ==${mathSymbolPreserveRules.replace(/^\n2\. /, '\n- ').replace(/\n3\. /, '\n- ')}
+` : ''}${domainSectionBlock}${formatBComponentBlock}
 
-== QUESTION TYPE RULES ==${singleChoiceRules}${multiChoiceRules}${trueFalseRules}${singleCheckRules}${multiCheckRules}${multiCheckOtherRules}${fillBlankRules}${calculationRules}${wordProblemRules}${proportionTableRules}
-FORBIDDEN:
-- Guessing or inferring what the student meant to write
-- Outputting any answer for a question with an empty answer space
-- Correcting student errors
-- English descriptions
-
-REQUIRED:
-- Empty answer space → status="blank", studentAnswerRaw="未作答"
-- Student wrote "A: 6.12 cm²" → output "A: 6.12 cm²", status="read"
-- Single-choice: student marked "②" in answer blank → output "②", status="read"
-${mapFillIds.length > 0 ? `
-MAP-FILL RULE (地圖填圖題):
-- For question IDs in MAP-FILL list, scan the ENTIRE image.
-- Find ALL handwritten labels/text the student wrote on the map/diagram.
-- For each label, describe its approximate position on the map AND the text written.
-- Output format: "位置A: 泰國, 位置B: 越南, 位置C: 緬甸, ..." (use the position markers or spatial descriptions from the image).
-- If the image has printed position markers (A, B, C, ①, ②, etc.), use those as position identifiers.
-- If no printed markers, use spatial descriptions like "左上方", "中間偏右", "右下角".
-- Include ALL student-written text, even if misspelled.
-- status="read" if any handwritten text found, status="blank" if none.
-` : ''}
-${multiFillIds.length > 0 ? `
-MULTI-FILL RULE (多項填入題):
-- For question IDs in MULTI-FILL list, each question is ONE specific blank box in a diagram/map.
-- The answer bbox for each question points to that specific box — read ONLY what is written inside that box.
-- Transcribe ALL codes/symbols the student wrote in the box (e.g., "ㄅ、ㄇ、ㄉ"), faithfully and completely.
-- Output format: exactly what the student wrote, preserving the separator (、or ，).
-- Do NOT infer or guess missing codes. Do NOT read from neighboring boxes.
-- status="read" if any handwritten codes found, status="blank" if box is empty.
-` : ''}
-${mapDrawIds.length > 0 ? `
-MAP-DRAW RULES (繪圖/標記題):
-Apply the rule that matches the question's sub-type listed above.
-
-${mapDrawSymbolIds.length > 0 ? `MAP-DRAW (map_symbol) — for IDs ${JSON.stringify(mapDrawSymbolIds)}:
-Describe the student's drawing with THREE parts:
-  1. SYMBOL/SHAPE: What did the student draw? Name the symbol exactly (e.g., 颱風符號、箭頭向右、圓點、叉號).
-  2. REFERENCE LINES: Read ALL printed reference lines and labels visible (e.g., 23.5°N、121°E、赤道). List them.
-  3. POSITION: Describe where the drawing is relative to the printed reference lines:
-     - If coordinate grid: "在[A]緯線以[南/北]、[B]經線以[東/西]" + grid cell (e.g., 右下格)
-     - If numbered/labeled grid cells: "在第[N]格" or "在[標籤]格"
-     - If near a specific intersection: "在[A]與[B]交點附近"
-Output format: "[符號名稱]，位置：[精確位置描述含參考線]"
-Example: "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"
-If no student drawing found → status="blank"
-` : ''}
-${mapDrawGridIds.length > 0 ? `MAP-DRAW (grid_geometry) — for IDs ${JSON.stringify(mapDrawGridIds)}:
-Describe the geometric shape the student drew on the grid paper:
-  1. SHAPE: What shape did the student draw? (e.g., 正方形、三角形、長方形)
-  2. SIZE: How many grid squares wide/tall? (e.g., 邊長3格、底3格高2格)
-  3. POSITION: Where on the grid is the shape's top-left corner or reference point? (e.g., 從第2列第3格開始)
-Output format: "圖形：[形狀]，大小：[尺寸描述]，位置：[起始位置]"
-Example: "圖形：正方形，大小：邊長3格，位置：從第1列第2格開始"
-If no student drawing found → status="blank"
-` : ''}
-${mapDrawConnectIds.length > 0 ? `MAP-DRAW (connect_dots) — for IDs ${JSON.stringify(mapDrawConnectIds)}:
-Describe how the student connected the numbered dots:
-  1. CONNECTION ORDER: List the order in which dots are connected (e.g., 1→2→3→4→1).
-  2. RESULTING SHAPE: What shape is formed? (e.g., 三角形、Z字形、正方形)
-Output format: "連線：[點的連接順序]，形成圖形：[形狀名稱]"
-Example: "連線：1→2→3→4→5，形成圖形：Z字形"
-If no student connection marks found → status="blank"
-` : ''}
-` : ''}
-${diagramDrawIds.length > 0 ? `
-DIAGRAM-DRAW RULE (圖表繪製題):
-For question IDs in DIAGRAM-DRAW list, the student drew a chart (bar chart, pie chart, etc.) with labels and values.
-- Read ALL label-value pairs the student drew or wrote on the chart.
-- For pie charts: output each sector as "標籤 比率" (e.g. "番茄汁 2/5, 紅蘿蔔汁 1/10, 蘋果汁 3/20").
-- For bar charts: output each bar as "標籤 高度/數值" (e.g. "一月 50, 二月 30, 三月 45").
-- List ALL sectors/bars the student drew, in reading order.
-- If no fresh drawn marks → status="blank", studentAnswerRaw="未作答".
-- FORBIDDEN: inferring labels or values not physically written by the student.
-
-🚨 PIE CHART READING SCOPE (圓形圖讀取範圍限制):
-- ONLY read text and numbers that are written INSIDE the pie chart or NEAR its circumference (labels pointing to sectors).
-- Text or numbers NOT inside or near the pie chart (e.g. scratch calculations in blank space nearby, data tables above/below the chart) do NOT belong to this question's answer. Do NOT transcribe them.
-- The answer for a pie chart question is ONLY what the student drew/wrote on the chart itself.
-` : ''}
-${diagramColorIds.length > 0 ? `
-DIAGRAM-COLOR RULE (塗色題):
-For question IDs in DIAGRAM-COLOR list, describe ONLY fresh student coloring/shading marks on pre-printed figures.
-- Report only what the student colored — do NOT describe uncolored regions unless needed for context.
-- FIXED TEMPLATE: "塗色：[描述塗色範圍]"
-  - For circles/fraction diagrams: describe which circles are fully/partially colored, what fraction, AND which side/region.
-    Example: "塗色：第1個圓完整，第2個圓左側2/3，第3個圓未塗"
-  - For fraction bars/grids: describe how many cells are colored AND their position (left/right/which cells).
-    Example: "塗色：10格中的7格（左側連續7格）"
-  - For other shapes: describe the colored region using spatial words (左側/右側/上方/下方/中間).
-- Position matters: always describe WHICH region was colored, not just how much.
-- If no fresh coloring marks → status="blank", studentAnswerRaw="未作答".
-- FORBIDDEN: describing pre-printed outlines, grid lines, or labels as student marks.
-` : ''}
-${matchingIds.length > 0 ? `
-MATCHING RULE (連連看):
-For question IDs in MATCHING list, scan the ENTIRE matching section as ONE group.
-- The section has a LEFT column (numbered items like (1)(2)(3)(4)) and a RIGHT column (text options).
-- The student draws lines connecting left items to right items.
-- For EACH left item, follow the drawn line and identify which right item it connects to.
-- Output format per question ID: the text of the right-side item it connects to.
-  Example: if (1) connects to "2公尺/秒", output for question "3-1" → studentAnswerRaw: "2公尺/秒"
-- The question IDs in MATCHING list correspond to left items in order: first ID = (1), second ID = (2), etc.
-- If a line is ambiguous or missing for an item → studentAnswerRaw: "未連線", status: "read"
-- If NO lines drawn at all → status: "blank", studentAnswerRaw: "未作答"
-- FORBIDDEN: outputting the left-side item text as the answer — only output the right-side item it connects to.
-` : ''}
+== QUESTION TYPE RULES ==
+${[
+  // tight_answer
+  singleChoiceRules, multiChoiceRules, trueFalseRules, fillBlankRules, multiFillRules,
+  // answer_with_context
+  circleSelectOneRules, circleSelectManyRules, singleCheckRules, multiCheckRules, markInTextRules,
+  // group_shared
+  matchingRules,
+  // full_page
+  mapFillRules,
+  // large_visual_area
+  shortAnswerRules, calculationRules, wordProblemRules, proportionTableRules, orderingRules,
+  mapSymbolRules, gridGeometryRules, connectDotsRules, diagramDrawRules, diagramColorRules,
+  // compound_linked
+  compoundCircleRules, compoundCheckRules, compoundWriteinRules,
+  compoundJudgeCorrectionRules, compoundJudgeExplainRules,
+  multiCheckOtherRules, compoundChainTableRules
+].filter(Boolean).join('')}
 
 Return:
 {
@@ -3700,9 +3793,9 @@ Return:
     {
       "questionId": "string",
       "studentAnswerRaw": "exact text as written",
-      "status": "read|blank|unreadable",
-      "readingReasoning": "理解 → 抄錄 → 輸出 三段推理 (REQUIRED for SINGLE-CHOICE / MULTI-CHOICE; future types may also require it)",
-      "rawSpelling": "d-i-n-n-g r-o-o-m (English fill_blank only: spell out every letter with dashes, spaces between words)"
+      "status": "read|blank|unreadable"${needsReadingReasoning ? `,
+      "readingReasoning": "理解 → 抄錄 → 輸出 三段推理（必填於：single_choice / multi_choice / circle_select_one|many / single_check / multi_check / multi_check_other / compound_*_with_explain / compound_judge_*）。其他 type 可省略此欄位。"` : ''}${(isEnglish && fillBlankIds.length > 0) ? `,
+      "rawSpelling": "d-i-n-n-g r-o-o-m（**只在英語 fill_blank** 才輸出，其他 type 與其他領域 omit 此欄位）"` : ''}
     }
   ]
 }
