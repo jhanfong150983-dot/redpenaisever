@@ -91,6 +91,7 @@ const QUESTION_CATEGORY_TO_BUCKET = {
   compound_writein_with_explain: 'D',
   multi_check_other: 'D',
   compound_judge_with_correction: 'D',
+  compound_judge_with_explain: 'D',
   compound_chain_table: 'D',
 }
 
