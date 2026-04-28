@@ -75,13 +75,13 @@ const QUESTION_CATEGORY_TO_BUCKET = {
   matching: 'A',
   ordering: 'A',
   mark_in_text: 'A',
+  calculation: 'A',     // 數學計算題：只看最終答案
+  word_problem: 'A',    // 數學應用題：只看最終答案（含單位）
   // Bucket B — 標準答案 + 容多元
   fill_variants: 'B',
   map_fill: 'B',
-  // Bucket C — Rubric 給分
+  // Bucket C — Rubric 給分（純文字 or 繪圖評鑑）
   short_answer: 'C',
-  calculation: 'C',
-  word_problem: 'C',
   map_draw: 'C',
   diagram_draw: 'C',
   diagram_color: 'C',
