@@ -97,40 +97,17 @@ const QUESTION_CATEGORY_TO_BUCKET = {
   compound_chain_table: 'D',
 }
 
-// Bucket → 舊 internal type 1/2/3 (向後相容用，新代碼應直接使用 bucket)
-const BUCKET_TO_LEGACY_TYPE = { A: 1, B: 2, C: 3, D: 3 }
-
 /**
- * Resolve bucket from question (preferred). Falls back to legacy `type` for old data.
+ * Resolve bucket from question. Reads from question.bucket first, then derives from questionCategory.
+ * Legacy `type` 1|2|3 fallback removed — old data must have questionCategory or bucket.
  */
 function resolveQuestionBucket(question) {
   if (question?.bucket) return question.bucket
   if (question?.questionCategory && QUESTION_CATEGORY_TO_BUCKET[question.questionCategory]) {
     return QUESTION_CATEGORY_TO_BUCKET[question.questionCategory]
   }
-  // Fallback: derive from legacy type 1|2|3
-  const t = Number(question?.type)
-  if (t === 1) return 'A'
-  if (t === 2) return 'B'
-  if (t === 3) return 'C'
   return 'A' // default
 }
-
-/**
- * @deprecated 改用 resolveQuestionBucket()
- * Resolve effective type 1|2|3 from question. Kept for backward compat with old grading logic.
- */
-function resolveQuestionType(question) {
-  return BUCKET_TO_LEGACY_TYPE[resolveQuestionBucket(question)] || 1
-}
-
-/**
- * @deprecated 改用 QUESTION_CATEGORY_TO_BUCKET
- * 舊 questionCategory → type 1|2|3 映射（保留以避免直接讀取的下游 break）
- */
-const CATEGORY_TO_TYPE = Object.fromEntries(
-  Object.entries(QUESTION_CATEGORY_TO_BUCKET).map(([cat, bucket]) => [cat, BUCKET_TO_LEGACY_TYPE[bucket]])
-)
 
 function toFiniteNumber(value) {
   const parsed = Number(value)
@@ -1152,7 +1129,7 @@ function resolveExpectedQuestionType(question) {
       ? question.rubricsDimensions.map((dim) => ensureString(dim?.name, '')).join('|')
       : ''
     if (/算式過程|最終答案/.test(dimNames)) category = 'calculation'
-    else if (resolveQuestionType(question) === 3) category = 'short_answer'
+    else if (resolveQuestionBucket(question) === 'C') category = 'short_answer'
   }
   const answerFormat = ensureString(question?.answerFormat, '').trim().toLowerCase()
 
@@ -1184,11 +1161,11 @@ function resolveExpectedQuestionType(question) {
   // short_answer 是獨立 type（自由文字段落），不再 collapse 到 word_problem
   if (CLASSIFY_ALLOWED_TYPES.has(category)) return category
 
-  // 5) Fallback to numeric resolveQuestionType (legacy behavior)
-  const resolvedType = resolveQuestionType(question)
-  if (resolvedType === 3) return 'word_problem'
-  if (resolvedType === 2) return 'fill_blank'
-  return 'fill_blank'
+  // 5) Fallback by bucket (no questionCategory matched any allowed type)
+  const bucket = resolveQuestionBucket(question)
+  if (bucket === 'C') return 'word_problem' // Rubric → 預設 word_problem
+  if (bucket === 'B') return 'fill_blank'   // 容多元 → 預設 fill_blank
+  return 'fill_blank' // default
 }
 
 function resolveMatchingGroupId(question) {
@@ -1412,15 +1389,16 @@ function buildQuestionExpectedVariants(question) {
     variants.push(normalized)
   }
 
-  const resolvedType = resolveQuestionType(question)
-  if (resolvedType === 1) {
+  const bucket = resolveQuestionBucket(question)
+  if (bucket === 'A' || bucket === 'D') {
     pushVariant(question?.answer)
-  } else if (resolvedType === 2) {
+  } else if (bucket === 'B') {
     pushVariant(question?.referenceAnswer)
     if (Array.isArray(question?.acceptableAnswers)) {
       for (const value of question.acceptableAnswers) pushVariant(value)
     }
   } else {
+    // bucket === 'C'
     pushVariant(question?.answer)
     pushVariant(question?.referenceAnswer)
   }
@@ -2449,8 +2427,6 @@ Conditional fields (output ONLY when applicable; omit otherwise):
 
 Do NOT output:
 - questionType: fixed by spec, do not infer or echo.
-- bboxPolicyApplied: deprecated.
-- drawType: each map sub-type is now its own questionType (map_symbol / grid_geometry / connect_dots), do not infer.
 - questionBbox: deprecated; answerBbox already covers the per-type framing.
 
 When visible=false, omit all bbox fields.
@@ -4546,7 +4522,6 @@ function buildFinalGradingResult({
     const hasMismatch = answer?.calculationAnswerMismatch === true
     const row = {
       questionId,
-      detectedType: toFiniteNumber(question?.type) ?? undefined,
       studentAnswer: ensureString(answer?.studentAnswerRaw, '無法辨識'),
       isCorrect: hasMismatch ? false : score?.isCorrect === true,
       score: hasMismatch ? 0 : toFiniteNumber(score?.score) ?? 0,
