@@ -3165,6 +3165,13 @@ STRICT RULES:
 - If the answer space is empty → status='blank', even if you know the correct answer.
 - The correct answer only helps you LOOK MORE CAREFULLY — it does NOT change what you report.
 
+⚠️ DIGIT-1 SPECIAL CASE (重要例外):
+The handwritten digit "1" is, by its nature, just a single vertical stroke (一豎). This is its NORMAL appearance — not noise, not a stray mark, not a hallucination.
+- If you see a single vertical stroke inside the answer space, it IS a valid handwritten "1". Output "1", status="read".
+- Do NOT dismiss it as blank just because the stroke looks minimal or because you are worried about confirming the correct answer.
+- This applies regardless of whether the correct answer is "1" or not. A vertical stroke is a "1" based on its physical shape, not based on the answer hint.
+- Anti-confirmation bias does NOT mean you should reject legitimate minimal strokes. "1" really does look like just one line — that is the truth of the digit, not a trick.
+
 ${basePrompt}`
 }
 
