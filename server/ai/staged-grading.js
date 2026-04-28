@@ -1203,10 +1203,57 @@ function resolveMatchingGroupId(question) {
   return questionId
 }
 
+/**
+ * 27 type 對應 6 種 bboxPolicy（行為導向）。
+ *
+ * - full_page          : 整張圖（map_fill）
+ * - group_shared      : 同 group 子題共享 bbox（matching）
+ * - large_visual_area : 大範圍視覺區（圖/長文/工作區）
+ * - compound_linked   : 多部分連動，必須整題框（含理由/改正/其他欄/連動 cell）
+ * - answer_with_context: 答案區 + 鄰近印刷元素（選項/方框/文章上下文）
+ * - tight_answer      : 緊框答案空格（含 multi_fill 每子題各自一個 tight bbox）
+ */
 function resolveBboxPolicyByQuestionType(questionType) {
-  if (questionType === 'map_fill') return 'full_image'
-  if (questionType === 'matching') return 'group_context'
-  return 'question_context'
+  // full_page (1)
+  if (questionType === 'map_fill') return 'full_page'
+
+  // group_shared (1)
+  if (questionType === 'matching') return 'group_shared'
+
+  // large_visual_area (7)
+  if (
+    questionType === 'map_draw' ||
+    questionType === 'diagram_draw' ||
+    questionType === 'diagram_color' ||
+    questionType === 'short_answer' ||
+    questionType === 'ordering' ||
+    questionType === 'calculation' ||
+    questionType === 'word_problem'
+  ) return 'large_visual_area'
+
+  // compound_linked (7) — 全部 D bucket，包含表格連動題
+  if (
+    questionType === 'compound_circle_with_explain' ||
+    questionType === 'compound_check_with_explain' ||
+    questionType === 'compound_writein_with_explain' ||
+    questionType === 'compound_judge_with_correction' ||
+    questionType === 'compound_judge_with_explain' ||
+    questionType === 'multi_check_other' ||
+    questionType === 'compound_chain_table'
+  ) return 'compound_linked'
+
+  // answer_with_context (6)
+  if (
+    questionType === 'circle_select_one' ||
+    questionType === 'circle_select_many' ||
+    questionType === 'single_check' ||
+    questionType === 'multi_check' ||
+    questionType === 'multi_choice' ||
+    questionType === 'mark_in_text'
+  ) return 'answer_with_context'
+
+  // tight_answer (5) — single_choice / true_false / fill_blank / fill_variants / multi_fill
+  return 'tight_answer'
 }
 
 function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
@@ -1266,7 +1313,7 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       questionType: expectedType,
       bboxPolicy
     }
-    if (bboxPolicy === 'group_context') {
+    if (bboxPolicy === 'group_shared') {
       const groupId = resolveMatchingGroupId(question)
       if (groupId) spec.bboxGroupId = groupId
     }
@@ -1653,7 +1700,7 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       ? normalizeBboxRef(row?.readBbox ?? row?.read_bbox) ?? null
       : null
 
-    if (bboxPolicy === 'full_image') {
+    if (bboxPolicy === 'full_page') {
       questionBbox = fullImageBbox
       answerBbox = fullImageBbox
     } else {
@@ -1789,7 +1836,7 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
     const row = alignedQuestions[index]
     if (row?.visible !== true) continue
     const spec = specByQuestionId.get(row.questionId)
-    if (!spec || spec.bboxPolicy !== 'group_context') continue
+    if (!spec || spec.bboxPolicy !== 'group_shared') continue
     const groupId = ensureString(spec?.bboxGroupId, '').trim()
     if (!groupId) continue
 
@@ -2285,10 +2332,13 @@ Rules:
   STEP 2 — Map to STUDENT_SUBMISSION: The student paper has the same printed layout. Use the position found in Step 1 to locate the corresponding area on STUDENT_SUBMISSION. Output that region as answerBbox. The student will have written their answer in that same area.
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
-- bboxPolicy MUST follow Question Specs:
-  - full_image: questionBbox and answerBbox must both be {x:0,y:0,w:1,h:1}.
-  - group_context: questions in the same bboxGroupId MUST share the same questionBbox/answerBbox.
-  - question_context: ${isAnswerOnly ? 'minimum bbox must include question number + student answer blank area (no stem text on answer-only sheets).' : 'minimum bbox must include question number + stem + student answer area.'}
+- bboxPolicy MUST follow Question Specs（6 種策略，依 type 行為決定 bbox 範圍）:
+  - full_page: questionBbox and answerBbox must both be {x:0,y:0,w:1,h:1}（map_fill 用，整張圖）.
+  - group_shared: questions in the same bboxGroupId MUST share the same questionBbox/answerBbox（matching 用）.
+  - large_visual_area: bbox 涵蓋整個視覺/工作區域（map_draw / diagram_draw / diagram_color / short_answer / ordering / calculation / word_problem 用，含題幹+大範圍答題區）.
+  - compound_linked: bbox 必須涵蓋整題所有部分（含理由/改正/開放欄/連動 cell）。**禁止只框其一**（compound_circle/check/writein_with_explain / compound_judge_with_correction/explain / multi_check_other / compound_chain_table 用）.
+  - answer_with_context: bbox 涵蓋答案區 + 鄰近印刷元素（如預印選項、方框列、文章上下文）（circle_select_one/many / single_check / multi_check / multi_choice / mark_in_text 用）.
+  - tight_answer: bbox 緊框答案空格本身，**不框題幹**（${isAnswerOnly ? 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，每子題各自一個 tight bbox' : 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，single_choice 約 25-35% 頁寬'}）.
 - TABLE POSITION RULE (HIGHEST PRIORITY — when tablePosition is present in the spec, this rule OVERRIDES ALL other bbox rules including ANCHOR RULE, TABLE COLUMN RULE, and ORDERING RULE. Skip them entirely.):
     When a question spec includes tablePosition (e.g. {"col": 3, "row": 3, "totalCols": 7, "totalRows": 3}), the answer is in a TABLE GRID.
 
@@ -2355,7 +2405,7 @@ Output:
       "questionId": "string",
       "visible": true,
       "questionType": "single_choice",
-      "bboxPolicyApplied": "question_context",
+      "bboxPolicyApplied": "tight_answer",
       "bboxGroupId": "optional",
       "drawType": "map_symbol",
       "questionBbox": { "x": 0.08, "y": 0.16, "w": 0.62, "h": 0.18 },
