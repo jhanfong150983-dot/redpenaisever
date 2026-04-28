@@ -1317,29 +1317,13 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       const groupId = resolveMatchingGroupId(question)
       if (groupId) spec.bboxGroupId = groupId
     }
-    // answerBboxHint: pass answer key's bbox as a Y-coordinate reference for classify.
-    // Only the Y position is reliable (same exam layout), X may differ due to scan alignment.
-    // For single_choice: helps classify locate the bracket row (prevents reading option row instead).
-    // For other types: provides a spatial anchor to improve bbox accuracy.
-    const akAnswerBbox = normalizeBboxRef(question?.answerBbox)
-    // fill_blank 子題不傳 answerBboxHint（答案卷可能是拍照，y 座標會污染 classify 判斷）
-    const isFillBlankSubQ = questionId.split('-').length >= 3 && expectedType === 'fill_blank'
-    const skipHintForSubQ = isFillBlankSubQ
-    if (akAnswerBbox && !skipHintForSubQ) {
-      spec.answerBboxHint = {
-        x: +akAnswerBbox.x.toFixed(4),
-        y: +akAnswerBbox.y.toFixed(4),
-        w: +akAnswerBbox.w.toFixed(4),
-        h: +akAnswerBbox.h.toFixed(4)
-      }
-    }
     // anchorHint only helps for multi_fill and fill_blank sub-questions (3+ ID segments, e.g. "1-2-1").
     // For single_choice / single_check / etc., the hint describes the answer key's circled option, which
     // causes classify to narrow the bbox onto just that option text — shifting it upward.
+    const isFillBlankSubQ = questionId.split('-').length >= 3 && expectedType === 'fill_blank'
     const anchorHintUsefulTypes = new Set(['multi_fill', 'fill_blank'])
     const isSubQuestion = questionId.split('-').length >= 3
     const akAnchorHint = ensureString(question?.anchorHint, '').trim()
-    // fill_blank 子題不傳 anchorHint — 測試純 classify 定位
     const skipAnchorForFillBlankSubQ = isFillBlankSubQ
     if (akAnchorHint && anchorHintUsefulTypes.has(expectedType) && (expectedType !== 'fill_blank' || isSubQuestion) && !skipAnchorForFillBlankSubQ) {
       spec.anchorHint = akAnchorHint
@@ -1619,7 +1603,7 @@ function normalizeClassifyResult(parsed, questionIds) {
       drawType,
       questionBbox: normalizeBboxRef(row?.questionBbox ?? row?.question_bbox),
       answerBbox: normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox),
-      bracketBbox: (questionType === 'single_choice') ? normalizeBboxRef(row?.bracketBbox) : undefined,
+      bracketBbox: (questionType === 'circle_select_one' || questionType === 'circle_select_many') ? normalizeBboxRef(row?.bracketBbox) : undefined,
       tablePositionReasoning: typeof row?.tablePositionReasoning === 'string' ? row.tablePositionReasoning : undefined
     })
     if (!visible) unmappedQuestionIds.push(questionId)
@@ -1692,13 +1676,6 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       : ensureString(row?.questionType, '').trim().toLowerCase() || 'other'
     let questionBbox = normalizeBboxRef(row?.questionBbox ?? row?.question_bbox)
     let answerBbox = normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox)
-    // readBbox: tight answer-only crop for fill_blank single-blank questions
-    // Sub-question fill_blank (3+ segments, e.g. "1-2-1") uses answerBbox directly — no readBbox needed
-    const isSubQuestionFillBlank = questionType === 'fill_blank' &&
-      questionId.split('-').length >= 3
-    const readBbox = (questionType === 'fill_blank' && !isSubQuestionFillBlank)
-      ? normalizeBboxRef(row?.readBbox ?? row?.read_bbox) ?? null
-      : null
 
     if (bboxPolicy === 'full_page') {
       questionBbox = fullImageBbox
@@ -1722,9 +1699,8 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       bboxGroupId: bboxGroupId || undefined,
       questionBbox,
       answerBbox,
-      readBbox: readBbox || undefined,
       bracketBbox:
-        questionType === 'single_choice' ? normalizeBboxRef(row?.bracketBbox) : undefined
+        (questionType === 'circle_select_one' || questionType === 'circle_select_many') ? normalizeBboxRef(row?.bracketBbox) : undefined
     }
   })
 
@@ -2359,30 +2335,65 @@ Rules:
     bbox 的位置由座標決定，與格內是否有內容完全無關。
 
     8. Output tablePositionReasoning (MANDATORY): format: "detected V-lines=[x1,x2,...]. Target col=N → V(N)=x, V(N+1)=x2. refBbox.x=X (verify). bbox=[x,y,w,h]"
-- For visible=true questions with question_context/group_context, output answerBbox that frames the FULL QUESTION CONTEXT so a teacher can see the entire question at a glance:
-  - ${isAnswerOnly ? 'Include the question number and the student\'s answer blank area within the bbox. There is no question stem text on answer-only sheets.' : 'Include the question number, question stem text, AND the student\'s answer area all within the bbox.'}
-  - For map_draw, diagram_draw, and diagram_color: frame the entire diagram/map/grid area plus any visible question stem above it.
-  - For word_problem and calculation: frame from the question stem down through all formula lines and the final answer. If the calculation question has a table cell (student fills a value in a table) AND a work/formula area elsewhere on the page, the answerBbox must cover BOTH the table cell AND the work area — do NOT crop just the table cell alone.
-  - For fill_blank sub-questions (questionId has 3+ segments, e.g. "1-2-1", "1-2-2", "1-2-3"): each sub-question maps to ONE specific blank box. answerBbox must frame the student's handwritten answer inside that blank.
-    BLANK BBOX RULE: Fill-in-the-blank questions have blanks embedded in printed sentences, marked by ( ), □, or ___. The student writes their answer INSIDE these marks.
-    ORDINAL RULE (MANDATORY when blankOrdinal is present): When the spec includes blankOrdinal and blankTotal, this line contains MULTIPLE blanks. You MUST count the blanks from LEFT to RIGHT on the same printed line, and frame the Nth blank (where N = blankOrdinal). Example: if blankOrdinal=1, blankTotal=2, the line has 2 blanks — frame the FIRST (leftmost) blank. If blankOrdinal=2, frame the SECOND blank. Do NOT be attracted to handwriting in adjacent blanks.
-    ROW RULE (MANDATORY when blankRow is present): When the spec includes blankRow and blankRowTotal, this question group has MULTIPLE printed lines. You MUST find the correct printed line by counting from TOP to BOTTOM within this question group — blankRow=1 is the FIRST (topmost) line, blankRow=2 is the SECOND line, etc. First locate the correct ROW, then apply ORDINAL RULE within that row. Do NOT let the Y position drift to adjacent rows.
-    Examples:
-    - Parentheses: 印刷文字「答案是(　　　)元」→ student wrote "150" inside ( ) → frame "150", NOT the printed text around it
-    - Square box: 印刷文字「2½ □ (4.73 □ 2.73)」→ student wrote "×" inside □ → frame "×"
-    - Underline: 印刷文字「___公尺」→ student wrote "25" on the line → frame "25" ANCHOR RULE (MANDATORY — takes priority): if the spec includes anchorHint, it is the AUTHORITATIVE locator for this question's cell. You MUST locate the exact cell described by the anchorHint and place the bbox precisely on that cell. TABLE COLUMN RULE: when the anchorHint references a column header (e.g. "標題『建功國中』正下方"), find that column header's horizontal position, then trace STRAIGHT DOWN to the target row. The answerBbox left and right edges MUST NOT extend beyond that column's boundaries — content from adjacent columns is FORBIDDEN. Each anchorHint uniquely identifies one cell; if your bbox could plausibly contain content from a neighboring column, it is WRONG — shrink it. Only fall back to ORDERING RULE when no anchorHint is provided. ORDERING RULE (fallback only): assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). Do NOT re-order based on content — position is the only criterion. readBbox is NOT needed for sub-question fill_blank (answerBbox is already tight).
-  - For fill_blank with a single blank (questionId has 1–2 segments, e.g. "3", "1-2"): frame the blank and surrounding question text for answerBbox. Additionally output readBbox: a TIGHT crop of ONLY the blank writing area, excluding the question stem text.
-  - For single_choice / true_false: answerBbox must frame the student's answer area — the parentheses ( ) or bracket where the student writes their answer, plus a small margin on each side for tolerance. The bbox should be wide enough to fully capture the parentheses even if slightly misaligned, but should NOT extend to include the full question stem text or option content rows. Aim for roughly 25-35% of page width centered on the answer area.
-  - For multi_choice / single_check / multi_check / multi_check_other: include the option rows where the student marks their selection (checkboxes, circles). Do NOT include the question stem text above the options.
-  - For multi_fill: each sub-question maps to ONE specific blank box in the diagram. answerBbox must be a TIGHT crop of ONLY that single box — do NOT include neighboring boxes. Sub-question bboxes MUST NOT overlap each other. If boxes are small and close together, make the bbox smaller rather than let it overlap an adjacent box.
-    ANCHOR RULE (MANDATORY — takes priority): if the spec includes anchorHint, it is the AUTHORITATIVE locator for this question's cell. You MUST locate the exact cell described by the anchorHint and place the bbox precisely on that cell. Do NOT place the bbox ON the landmark text itself; the landmark is a reference point to navigate to the correct answer cell. TABLE COLUMN RULE: when the anchorHint references a column header (e.g. "標題『建功國中』正下方"), find that column header's horizontal position, then trace STRAIGHT DOWN to the target row. The answerBbox left and right edges MUST NOT extend beyond that column's boundaries — content from adjacent columns is FORBIDDEN. Each anchorHint uniquely identifies one cell; if your bbox could plausibly contain content from a neighboring column, it is WRONG — shrink it. Only fall back to ORDERING RULE when no anchorHint is provided.
-    ORDERING RULE (fallback only): When multi_fill boxes have no printed question numbers, assign sub-question IDs in strict TOP-TO-BOTTOM order (primary), LEFT-TO-RIGHT within the same row (secondary). The sub-question with the smallest id suffix (e.g. "2-1-1") MUST map to the topmost box; the next id ("2-1-2") to the next box below; and so on. Do NOT re-order based on visual importance or content — position is the only criterion.
-  - For matching(group_context): include the entire left column + right column + connecting lines of the whole group.
-  - The bbox must be ACCURATE and TIGHT (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
+- For visible=true questions, output answerBbox per the type-specific rules below. Each rule specifies what to include (視覺+動作), what to frame, what to exclude (禁止), and any sub-rules.
+  - ${isAnswerOnly ? 'ANSWER-ONLY MODE: bbox includes question number + answer area only; no question stem text exists on this sheet.' : 'Default principle: bbox should include question number + relevant printed elements + student\'s answer area, per the per-type rule.'}
+
+  ── tight_answer 群組（緊框答案空格，不含題幹）──
+  - For fill_blank 子題（questionId 含 3+ segments，如 "1-2-1"）：每個子題對應題幹中的一個空白標記（( )、□、___），學生在標記內寫值（含單位則一併寫）。answerBbox 緊框該空白標記區（含學生手寫），不含題幹。不可漂移到相鄰子題的空白、不可跨行。
+    子規則（依優先級）：
+    1. ANCHOR RULE（spec 帶 anchorHint）：以 anchorHint 描述為權威定位，最高優先。anchorHint 描述的是答案格本身，不要把 bbox 放在 landmark 文字上。
+    2. TABLE COLUMN RULE（anchorHint 指欄標題時）：找到欄標題水平位置，bbox 左右邊**不可超出該欄邊界**；若可能含到鄰欄內容，必須縮小。
+    3. ROW RULE（spec 帶 blankRow + blankRowTotal）：先由上至下數，找到第 blankRow 行，再進入該行。
+    4. ORDINAL RULE（spec 帶 blankOrdinal + blankTotal）：在對的行內，從左到右數第 blankOrdinal 個空白。
+    5. ORDERING RULE（無任何 hint）：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應。
+    範例：
+    - 括號型：「答案是(　　　)元」→ 框 (　　　) 這個括號內部
+    - 方框型：「2½ □ (4.73 □ 2.73)」→ 框該 □ 格本身
+    - 底線型：「___公尺」→ 框 ___ 這個底線區
+  - For fill_blank 單一空格（questionId 1-2 segments，如 "3"、"1-2"）：題目可能含 1 個或多個空白標記，整題只有一個 questionId（不分子題）。answerBbox 緊框該題所有空白標記（含學生手寫），不含題幹。不可漂移到鄰題的空白。
+  - For fill_variants：規則同 fill_blank（容多元說法是 Read 階段的判斷，classify 階段處理方式相同）。
+  - For single_choice / multi_choice / true_false：學生在空括號 (   ) 內寫代號或符號（A/B/C/甲/乙/①/②、○/✗ 等）。single_choice / true_false 寫 1 個；multi_choice 寫多個（如 "A,C"）。answerBbox 緊框該空括號，左右各加少許邊距以容忍對齊誤差。不可含題幹文字、不可延伸到下方選項清單行。寬度約占頁寬 25-35%，以括號為中心。
+  - For multi_fill：圖中有多個固定位置的空白格（地圖標記、表格儲存格、圖片標籤等），每個子題對應一格。answerBbox 緊框該子題對應的單一空白格（含學生手寫），不含題幹。不可含到鄰格、不可跨格、不可重疊到其他子題的 bbox；若格子很小且擁擠，bbox 寧可縮小也不要重疊。
+    子規則（依優先級）：
+    1. ANCHOR RULE（spec 帶 anchorHint）：以 anchorHint 描述為權威定位，最高優先。anchorHint 描述的是答案格本身，不要把 bbox 放在 landmark 文字上。
+    2. TABLE COLUMN RULE（anchorHint 指欄標題時）：bbox 左右邊不可超出該欄邊界。
+    3. ORDERING RULE（無任何 hint）：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應；最小 ID 對應最上方的格。
+
+  ── answer_with_context 群組（答案區 + 鄰近印刷脈絡）──
+  - For circle_select_one / circle_select_many：括號內預印多個選項（如「(同意／不同意)」），學生用筆跡圈/劃選其中一個或多個。answerBbox 必須完整框住該括號列（含全部預印選項文字 + 學生筆跡），左右各加少許邊距。不可只框圈圈本身、不可遺漏任何預印選項。
+  - For single_check / multi_check：題目給一列選項，每個選項前面有 □（方形勾選框），學生在某個（些）□ 內打勾。answerBbox 涵蓋整列方框（含所有 □ + 對應選項文字 + 學生勾選筆跡）。不可只框被勾的那個 □、不可漏掉未勾的選項（Read 階段需看全列才能判斷學生選了哪個）。不可含題幹文字。
+  - For mark_in_text（圈詞題）：題目是一段印刷文章，學生在文章內某些字詞上圈、底線、或標記。answerBbox 涵蓋題幹指示語（如「圈出文中表示時間的詞」）+ 整段文章區（含全部印刷文字 + 學生圈選筆跡），可框稍大以保留上下文。不可只框被圈的字詞（Read 階段需看全文才能判斷哪些被圈，所以 bbox 必須含未被圈的字）。
+
+  ── group_shared 群組（同組共用同一 bbox）──
+  - For matching：policy=group_shared。同一 bboxGroupId 的所有子題必須回傳**完全相同**的 questionBbox/answerBbox。answerBbox 涵蓋整組連連看（左欄全部項目 + 右欄全部選項 + 學生連線），讓老師能完整檢視該組配對狀況。不可只框單一連線、單一項目、或漏掉其中一欄。
+
+  ── full_page 群組（整張圖）──
+  - For map_fill：policy=full_page。answerBbox 與 questionBbox 都必須是 {x:0, y:0, w:1, h:1}（整張圖）。地圖填圖題的答案散布全圖各處，無法精確切割，整頁即一題。
+
+  ── large_visual_area 群組（題幹 + 大答題區）──
+  - For calculation / word_problem：題幹下方有大工作區，學生寫算式 + 最終答案。calculation 的最終答案在題幹「(    ) =」括號內；word_problem 的最終答案在工作區末尾的「答：」行。answerBbox 從題幹起，向下涵蓋所有算式行、直式、最終答案/答句。若 calculation 同時有「表格內最終答案格」+「另處工作區」，bbox 必須**同時涵蓋兩者**。不可只框最終答案格、不可漏掉學生在邊緣補寫的計算。
+  - For short_answer（簡答題）：題目給一個大空白區，學生寫文字段落自由說明。answerBbox 涵蓋題幹 + 整個答題區（含學生所有手寫文字段落）。不可只框第一行；學生若補寫到旁白或邊緣，bbox 應略放寬以涵蓋。
+  - For ordering（排序題）：題目給一列待排序項目，學生在每項旁邊或內部寫上 1, 2, 3, 4… 序號。answerBbox 涵蓋題幹 + 所有待排序項目區（含全部項目印刷文字 + 學生寫的所有序號）。不可只框單一序號、不可漏掉部分項目。
+  - For map_draw / diagram_draw / diagram_color：題目給一張預印的地圖、長條圖、圓餅圖、或塗色區，學生在上面繪製、標記、或塗色。answerBbox 涵蓋題幹 + 整個視覺區（地圖/圖表/塗色區 + 學生所有筆跡）。學生繪製/塗色可能延伸到圖外，bbox 應略放寬以涵蓋；不可只框已繪製的區段、不可漏掉題幹（老師需要看到題目要求）。
+
+  ── compound_linked 群組（複合題，必須完整框住所有部分）──
+  - For compound_circle_with_explain / compound_check_with_explain / compound_writein_with_explain / compound_judge_with_correction / compound_judge_with_explain（5 個複合說明題）：policy=compound_linked。整題分**兩部分**：
+    - 答案部分：依 type 不同
+      · compound_circle_with_explain：括號內預印選項 + 學生圈選
+      · compound_check_with_explain：□ 列 + 學生打勾
+      · compound_writein_with_explain：空括號 + 學生寫代號
+      · compound_judge_with_correction：括號內 ○/✗ + 下方改正空白
+      · compound_judge_with_explain：括號內 ○/✗ + 下方說明區
+    - 說明/改正部分：學生寫文字理由、正確改寫、或開放式說明
+    answerBbox 必須**同時涵蓋兩部分**（含題幹、答案區、說明/改正區、以及兩部分之間的空白）。**禁止只框其一** — 只框答案 → 老師看不到說明；只框說明 → 老師看不到答案。
+  - For multi_check_other（複選含其他題）：policy=compound_linked。一列方框中最後一個 □ 是「其他：___」開放欄。answerBbox 涵蓋題幹 + 整列方框 + 最後的「其他」開放欄（含學生在該欄手寫的文字）。不可只框前面方框、不可漏掉「其他」欄的學生手寫。
+  - For compound_chain_table（表格連動題）：policy=compound_linked。題目是一個表格，學生在多個格內填值，前後格有依賴關係（前格答案影響後格判斷）。answerBbox 涵蓋題幹 + 整個表格區（含所有填寫格 + 表格欄/列標題）。不可只框單一格、不可只框學生填寫的格而漏掉表格標題（老師需看到欄位脈絡才能判斷對錯）。
+
+  ── 通用要求 ──
+  - The bbox must be ACCURATE and TIGHT to the rule (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
   Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
   If the question region cannot be determined, omit answerBbox.
-- answerBboxHint (Y-coordinate reference from answer key): When a question spec includes answerBboxHint { y, h }, it tells you the approximate Y position and height of this question's answer area on the answer key (same exam layout). Use this as a vertical anchor: your answerBbox.y should be CLOSE to the hint's y value. If your bbox is more than 0.02 away from the hint's y, double-check your positioning. This is especially important for single_choice FORMAT A (empty parentheses) — the hint's y points to the bracket row, not the option rows below it.
-- For single_choice questions ONLY: also output bracketBbox that frames ONLY the printed bracket row "（option1，option2）" and the student's mark inside it — do NOT include the question stem text. This should be a very tight crop of just that one bracket line. Omit bracketBbox if this is FORMAT A (empty parentheses where student writes a symbol) or if the bracket row cannot be located precisely.
+- For circle_select_one / circle_select_many questions: also output bracketBbox that frames ONLY the printed bracket row "（option1／option2…）" and the student's circle/mark inside it — do NOT include the question stem text. This should be a very tight crop of just that one bracket line, used by the focused bracket re-read stage. Omit bracketBbox if the bracket row cannot be located precisely.
 - Return strict JSON only.
 ${Array.isArray(classifyCorrections) && classifyCorrections.length > 0 ? `
 ⚠️ BBOX POSITIONING REMINDER:
@@ -2410,7 +2421,6 @@ Output:
       "drawType": "map_symbol",
       "questionBbox": { "x": 0.08, "y": 0.16, "w": 0.62, "h": 0.18 },
       "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 },
-      "readBbox": { "x": 0.35, "y": 0.22, "w": 0.25, "h": 0.05 },
       "bracketBbox": { "x": 0.1, "y": 0.26, "w": 0.25, "h": 0.025 },
       "tablePositionReasoning": "table found at x=0.04-0.49. col1=比率(row label), col2=光武國中, col3=建功國中, col4=實驗中學... Target col=3 → 建功國中. bbox=[0.18,0.07,0.06,0.01]"
     }
@@ -4791,7 +4801,6 @@ export async function runStagedGradingPhaseA({
         questionType: akQ ? resolveExpectedQuestionType(akQ) : 'fill_blank',
         visible: true,
         answerBbox: override?.answerBbox || null,
-        readBbox: override?.readBbox || null,
         bboxCorrected: override?.corrected || false
       }
     }), coverage: 1 }
@@ -4938,7 +4947,6 @@ export async function runStagedGradingPhaseA({
         for (const q of norm.alignedQuestions) {
           if (q.answerBbox) q.answerBbox = remapBboxToFullImage(q.answerBbox, pageStartY, pageEndY)
           if (q.questionBbox) q.questionBbox = remapBboxToFullImage(q.questionBbox, pageStartY, pageEndY)
-          if (q.readBbox) q.readBbox = remapBboxToFullImage(q.readBbox, pageStartY, pageEndY)
           if (q.bracketBbox) q.bracketBbox = remapBboxToFullImage(q.bracketBbox, pageStartY, pageEndY)
         }
         return norm
@@ -5088,7 +5096,6 @@ export async function runStagedGradingPhaseA({
               for (const q of norm.alignedQuestions) {
                 if (q.answerBbox) q.answerBbox = remapBboxToFullImage(q.answerBbox, pageStartY, pageEndY)
                 if (q.questionBbox) q.questionBbox = remapBboxToFullImage(q.questionBbox, pageStartY, pageEndY)
-                if (q.readBbox) q.readBbox = remapBboxToFullImage(q.readBbox, pageStartY, pageEndY)
                 if (q.bracketBbox) q.bracketBbox = remapBboxToFullImage(q.bracketBbox, pageStartY, pageEndY)
               }
             }
@@ -5135,8 +5142,7 @@ export async function runStagedGradingPhaseA({
       .map((q) => ({
         questionId: q.questionId,
         questionType: q.questionType,
-        answerBbox: q.answerBbox || null,
-        readBbox: q.readBbox || null
+        answerBbox: q.answerBbox || null
       }))
     logStaged(pipelineRunId, 'basic', 'classifyOnly → return bbox', { count: bboxResults.length })
     return { classifyOnly: true, bboxResults, stageResponses }
@@ -5174,8 +5180,7 @@ export async function runStagedGradingPhaseA({
 
   // ── Pre-AI1: Crop ALL visible non-checkbox questions with answerBbox ─────────
   // These crops are used by AI1 (detail read) and later for teacher review.
-  // For fill_blank: use readBbox (tight, answer-area-only) if available, else fall back to answerBbox.
-  // readBbox excludes the question stem text so AI1/AI2 cannot read adjacent questions.
+  // answerBbox is now tight for all fill_blank (single + sub-question) — no separate readBbox.
   const allQuestionCropMap = new Map()  // questionId → { data, mimeType }
   const ai1CropCandidates = classifyAligned.filter(
     (q) => q.visible && q.answerBbox && q.questionType !== 'map_fill'
@@ -5185,7 +5190,7 @@ export async function runStagedGradingPhaseA({
     const inlineImage = inlineImages[0]
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
-        const bboxToUse = (q.questionType === 'fill_blank' && q.readBbox) ? q.readBbox : q.answerBbox
+        const bboxToUse = q.answerBbox
         // fill_blank 子題（括號型）用小 padding，避免裁切到上下相鄰的括號
         const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
           && !classifyAligned.find(cq => cq.questionId === q.questionId && cq.tablePositionReasoning)
@@ -5360,9 +5365,9 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, stagedLogLevel, 'reReadAnswer per-question', toReadAnswerSchemaPreview(reReadAnswerParsed))
   }
 
-  // ── A3b: Focused bracket read for single_choice questions (crop-based, context-free) ──
+  // ── A3b: Focused bracket read for circle_select_one/many questions (crop-based, context-free) ──
   const bracketQuestions = classifyAligned.filter(
-    (q) => q.visible && q.questionType === 'single_choice' && q.bracketBbox
+    (q) => q.visible && (q.questionType === 'circle_select_one' || q.questionType === 'circle_select_many') && q.bracketBbox
   )
   if (bracketQuestions.length > 0) {
     const inlineImage = inlineImages[0]
