@@ -3170,59 +3170,10 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     .map((q) => q.questionId)
   const mapDrawIds = [...mapDrawSymbolIds, ...mapDrawGridIds, ...mapDrawConnectIds]
 
-  // SINGLE-CHOICE merged note (covers single_choice + single_check, 3 forms unified).
-  // Output is constrained by the per-form rules; numericChoiceNote removed (output limit + human review handle digit ambiguity).
-  const singleChoiceNote = effectiveSingleChoiceIds.length > 0
-    ? `\nSINGLE-CHOICE questions (3 forms — write-in / circle / checkbox; pick ONE answer): ${JSON.stringify(effectiveSingleChoiceIds)}`
-    : ''
-  const trueFalseNote = trueFalseIds.length > 0
-    ? `\nTRUE-FALSE questions (output ○ or ✗ only): ${JSON.stringify(trueFalseIds)}`
-    : ''
-  const mapFillNote = mapFillIds.length > 0
-    ? `\nMAP-FILL questions (地圖填圖題): ${JSON.stringify(mapFillIds)}`
-    : ''
-  const multiFillNote = multiFillIds.length > 0
-    ? `\nMULTI-FILL questions (多項填入題): ${JSON.stringify(multiFillIds)}`
-    : ''
-  const mapDrawSymbolNote = mapDrawSymbolIds.length > 0
-    ? `\nMAP-DRAW (map_symbol) questions: ${JSON.stringify(mapDrawSymbolIds)}`
-    : ''
-  const mapDrawGridNote = mapDrawGridIds.length > 0
-    ? `\nMAP-DRAW (grid_geometry) questions: ${JSON.stringify(mapDrawGridIds)}`
-    : ''
-  const mapDrawConnectNote = mapDrawConnectIds.length > 0
-    ? `\nMAP-DRAW (connect_dots) questions: ${JSON.stringify(mapDrawConnectIds)}`
-    : ''
-  // MULTI-CHOICE merged note (covers multi_choice + multi_check + multi_check_other, 3 forms unified).
-  const multiChoiceNote = effectiveMultiChoiceIds.length > 0
-    ? `\nMULTI-CHOICE questions (3 forms — write-in / circle / checkbox; pick ALL applicable, missing one = penalty): ${JSON.stringify(effectiveMultiChoiceIds)}`
-    : ''
-  const fillBlankNote = fillBlankIds.length > 0
-    ? `\nFILL-BLANK questions (填空題, output comma-separated blank contents): ${JSON.stringify(fillBlankIds)}`
-    : ''
-  const calculationNote = calculationIds.length > 0
-    ? `\nCALCULATION questions (計算題, read entire work area): ${JSON.stringify(calculationIds)}`
-    : ''
-  const wordProblemNote = wordProblemIds.length > 0
-    ? `\nWORD-PROBLEM questions (應用題, read entire work area including proportion tables): ${JSON.stringify(wordProblemIds)}`
-    : ''
-  const diagramDrawNote = diagramDrawIds.length > 0
-    ? `\nDIAGRAM-DRAW questions (圖表繪製題, describe drawn chart with label-value pairs): ${JSON.stringify(diagramDrawIds)}`
-    : ''
-  const diagramColorNote = diagramColorIds.length > 0
-    ? `\nDIAGRAM-COLOR questions (塗色題, describe coloring regions and proportions): ${JSON.stringify(diagramColorIds)}`
-    : ''
-  const matchingNote = matchingIds.length > 0
-    ? `\nMATCHING questions (連連看, read ALL pairs as a group): ${JSON.stringify(matchingIds)}`
-    : ''
+  // ── Per-type questionIds 清單已移除（每張裁切圖標籤已標註 type，清單純冗餘）──
+  // ── bboxHintNote 已移除（裁切圖無關全圖座標，AI 看不到全圖無法用 normalized 座標）──
 
-  // Per-question answer bbox hints (from classify + answer key): help AI locate each answer area
-  const questionsWithBbox = visibleQuestions.filter((q) => q.answerBbox)
-  const bboxHintNote = questionsWithBbox.length > 0
-    ? `\n\n== ANSWER AREA LOCATION HINTS ==\nFor the following questions, the answer area is approximately at these normalized coordinates (x/y=top-left, w/h=width/height, all 0-1):\n${questionsWithBbox.map((q) => `- "${q.questionId}": x=${q.answerBbox.x.toFixed(3)}, y=${q.answerBbox.y.toFixed(3)}, w=${q.answerBbox.w.toFixed(3)}, h=${q.answerBbox.h.toFixed(3)}`).join('\n')}\nUse these as a guide to locate the student's answer space, but always verify by looking at the image.`
-    : ''
-
-  // Table cell column hints: tell ReadAnswer which column header each table question belongs to
+  // Table cell column hints: 條件式 fallback — 若 bbox 意外含到欄標題，可作為驗證
   const akQuestionMap = options?.answerKeyQuestions
     ? mapByQuestionId(options.answerKeyQuestions, (item) => item?.id)
     : new Map()
@@ -3233,10 +3184,10 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     })
     .map((q) => {
       const akQ = akQuestionMap.get(q.questionId)
-      return `- "${q.questionId}": 此格位於表格 col=${akQ.tablePosition.col}。${akQ.anchorHint}。若裁切圖頂部可見欄標題文字，請確認標題與此描述一致。若看到的標題是其他欄位名稱，代表裁切圖偏移，格線內側若無手寫內容則回報 blank。`
+      return `- "${q.questionId}"（表格 col=${akQ.tablePosition.col}）：${akQ.anchorHint}`
     })
   const tableCellHintNote = tableCellHints.length > 0
-    ? `\n\n== TABLE CELL COLUMN HINTS ==\n以下題目是表格中的格子，裁切圖可能包含欄標題和格線。請用欄標題確認你讀的是正確的格子：\n${tableCellHints.join('\n')}`
+    ? `\n\n== TABLE CELL FALLBACK HINTS ==\n以下題目是表格內的格子。裁切圖通常只含該格本身，但若意外含到欄標題或鄰格內容，可用以下描述驗證讀取的是正確的格子（若標題不符可能 bbox 偏移，回報 blank 較安全）：\n${tableCellHints.join('\n')}`
     : ''
 
   // ── Layered prompt assembly: Layer 2 (domain) + Layer 3 (components) ──
@@ -3566,8 +3517,7 @@ Rules for all formats:
 Your job is to report what the student physically wrote or drew in each question's designated answer space.
 
 Visible question IDs on this image:
-${JSON.stringify(visibleIds)}
-${singleChoiceNote}${numericChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}${tableCellHintNote}
+${JSON.stringify(visibleIds)}${tableCellHintNote}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You may ONLY output what is physically, visibly written by the student's own hand.
@@ -3647,7 +3597,7 @@ REQUIRED:
 - Empty answer space → status="blank", studentAnswerRaw="未作答"
 - Student wrote "A: 6.12 cm²" → output "A: 6.12 cm²", status="read"
 - Single-choice: student marked "②" in answer blank → output "②", status="read"
-${mapFillNote ? `
+${mapFillIds.length > 0 ? `
 MAP-FILL RULE (地圖填圖題):
 - For question IDs in MAP-FILL list, scan the ENTIRE image.
 - Find ALL handwritten labels/text the student wrote on the map/diagram.
@@ -3658,7 +3608,7 @@ MAP-FILL RULE (地圖填圖題):
 - Include ALL student-written text, even if misspelled.
 - status="read" if any handwritten text found, status="blank" if none.
 ` : ''}
-${multiFillNote ? `
+${multiFillIds.length > 0 ? `
 MULTI-FILL RULE (多項填入題):
 - For question IDs in MULTI-FILL list, each question is ONE specific blank box in a diagram/map.
 - The answer bbox for each question points to that specific box — read ONLY what is written inside that box.
@@ -3701,7 +3651,7 @@ Example: "連線：1→2→3→4→5，形成圖形：Z字形"
 If no student connection marks found → status="blank"
 ` : ''}
 ` : ''}
-${diagramDrawNote ? `
+${diagramDrawIds.length > 0 ? `
 DIAGRAM-DRAW RULE (圖表繪製題):
 For question IDs in DIAGRAM-DRAW list, the student drew a chart (bar chart, pie chart, etc.) with labels and values.
 - Read ALL label-value pairs the student drew or wrote on the chart.
@@ -3716,7 +3666,7 @@ For question IDs in DIAGRAM-DRAW list, the student drew a chart (bar chart, pie 
 - Text or numbers NOT inside or near the pie chart (e.g. scratch calculations in blank space nearby, data tables above/below the chart) do NOT belong to this question's answer. Do NOT transcribe them.
 - The answer for a pie chart question is ONLY what the student drew/wrote on the chart itself.
 ` : ''}
-${diagramColorNote ? `
+${diagramColorIds.length > 0 ? `
 DIAGRAM-COLOR RULE (塗色題):
 For question IDs in DIAGRAM-COLOR list, describe ONLY fresh student coloring/shading marks on pre-printed figures.
 - Report only what the student colored — do NOT describe uncolored regions unless needed for context.
