@@ -2298,8 +2298,8 @@ Rules:
     ⑥ tablePositionReasoning（MANDATORY 輸出）：
        純文字格式：detected V-lines=[x1,x2,...]. Target col=N → V(N)=x, V(N+1)=x2. refBbox.x=X (verify). bbox=[x,y,w,h]
        若走 Fallback 路徑：fallback: refBbox-based, V-lines unclear due to [reason]. bbox=[x,y,w,h]
-- For visible=true questions, output answerBbox per the type-specific rules below. Each rule specifies what to include (視覺+動作), what to frame, what to exclude (禁止), and any sub-rules.
-  - ${isAnswerOnly ? 'ANSWER-ONLY MODE: bbox includes question number + answer area only; no question stem text exists on this sheet.' : 'Default principle: bbox should include question number + relevant printed elements + student\'s answer area, per the per-type rule.'}
+- For visible=true questions, output answerBbox per the type-specific rules below. **每個 type 的規則決定 bbox 該含什麼/不含什麼**，沒有「預設要含題幹脈絡」這回事 — 一切以 per-type rule 為準。
+  - ${isAnswerOnly ? 'ANSWER-ONLY MODE: bbox 含題號 + 答案區（純答案卷無題幹文字可框）。' : '⚠️ 沒有 default 含題幹規則：tight_answer 群組 ≠ 含題幹；large_visual_area 群組才含題幹。請依 per-type rule 判斷。'}
 
   ── tight_answer 群組（緊框答案空格，不含題幹）──
   - For fill_blank 子題（questionId 含 3+ segments，如 "1-2-1"）：每個子題對應題幹中的一個空白標記（( )、□、___），學生在標記內寫值（含單位則一併寫）。answerBbox 緊框該空白標記區（含學生手寫），不含題幹。不可漂移到相鄰子題的空白、不可跨行。
