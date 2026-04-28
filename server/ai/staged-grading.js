@@ -59,35 +59,74 @@ function logStageEnd(pipelineRunId, stageName, stageResponse) {
   }
 }
 
-// questionCategory → internal type 1/2/3 (backward compat)
-const CATEGORY_TO_TYPE = {
-  single_choice: 1,
-  multi_choice: 2,
-  single_check: 1,
-  true_false: 1,
-  fill_blank: 1,
-  fill_variants: 2,
-  multi_check: 2,
-  multi_check_other: 2,
-  calculation: 3,
-  word_problem: 3,
-  short_answer: 3,
-  map_fill: 2,
-  multi_fill: 1,
-  map_draw: 3,
-  diagram_draw: 3,
-  diagram_color: 3,
-  matching: 1,
+// questionCategory → bucket 'A'|'B'|'C'|'D' (single source of truth, mirrors db.ts QUESTION_CATEGORY_TO_BUCKET)
+// Server cannot import from client, so this is a parallel definition. Must stay in sync with db.ts.
+const QUESTION_CATEGORY_TO_BUCKET = {
+  // Bucket A — 標準答案 + 精確比對
+  single_choice: 'A',
+  multi_choice: 'A',
+  circle_select_one: 'A',
+  circle_select_many: 'A',
+  single_check: 'A',
+  multi_check: 'A',
+  true_false: 'A',
+  fill_blank: 'A',
+  multi_fill: 'A',
+  matching: 'A',
+  ordering: 'A',
+  mark_in_text: 'A',
+  // Bucket B — 標準答案 + 容多元
+  fill_variants: 'B',
+  map_fill: 'B',
+  // Bucket C — Rubric 給分
+  short_answer: 'C',
+  calculation: 'C',
+  word_problem: 'C',
+  map_draw: 'C',
+  diagram_draw: 'C',
+  diagram_color: 'C',
+  // Bucket D — 複合題（標準答案 + Rubric 並存）
+  compound_circle_with_explain: 'D',
+  compound_check_with_explain: 'D',
+  compound_writein_with_explain: 'D',
+  multi_check_other: 'D',
+  compound_judge_with_correction: 'D',
 }
 
-// Resolve effective type from question (prefer questionCategory, fallback to numeric type)
-function resolveQuestionType(question) {
-  if (question?.questionCategory && CATEGORY_TO_TYPE[question.questionCategory] !== undefined) {
-    return CATEGORY_TO_TYPE[question.questionCategory]
+// Bucket → 舊 internal type 1/2/3 (向後相容用，新代碼應直接使用 bucket)
+const BUCKET_TO_LEGACY_TYPE = { A: 1, B: 2, C: 3, D: 3 }
+
+/**
+ * Resolve bucket from question (preferred). Falls back to legacy `type` for old data.
+ */
+function resolveQuestionBucket(question) {
+  if (question?.bucket) return question.bucket
+  if (question?.questionCategory && QUESTION_CATEGORY_TO_BUCKET[question.questionCategory]) {
+    return QUESTION_CATEGORY_TO_BUCKET[question.questionCategory]
   }
+  // Fallback: derive from legacy type 1|2|3
   const t = Number(question?.type)
-  return t === 1 || t === 2 || t === 3 ? t : 1
+  if (t === 1) return 'A'
+  if (t === 2) return 'B'
+  if (t === 3) return 'C'
+  return 'A' // default
 }
+
+/**
+ * @deprecated 改用 resolveQuestionBucket()
+ * Resolve effective type 1|2|3 from question. Kept for backward compat with old grading logic.
+ */
+function resolveQuestionType(question) {
+  return BUCKET_TO_LEGACY_TYPE[resolveQuestionBucket(question)] || 1
+}
+
+/**
+ * @deprecated 改用 QUESTION_CATEGORY_TO_BUCKET
+ * 舊 questionCategory → type 1|2|3 映射（保留以避免直接讀取的下游 break）
+ */
+const CATEGORY_TO_TYPE = Object.fromEntries(
+  Object.entries(QUESTION_CATEGORY_TO_BUCKET).map(([cat, bucket]) => [cat, BUCKET_TO_LEGACY_TYPE[bucket]])
+)
 
 function toFiniteNumber(value) {
   const parsed = Number(value)
@@ -374,8 +413,10 @@ function toReadAnswerSchemaPreview(parsed) {
         status: ensureString(item?.status, ''),
         studentAnswerRaw
       }
-      if (item?.formatBReasoning) {
-        entry.formatBReasoning = ensureString(item.formatBReasoning, '')
+      // readingReasoning: AI's reasoning trace (理解 → 抄錄 → 輸出); accepts legacy formatBReasoning as fallback.
+      const reasoning = item?.readingReasoning || item?.formatBReasoning
+      if (reasoning) {
+        entry.readingReasoning = ensureString(reasoning, '')
       }
       if (rawSpelling) {
         entry.rawSpelling = rawSpelling
@@ -2373,7 +2414,7 @@ Your task: identify which pre-printed option word the student circled/underlined
 
 Question ID: "${questionId}"
 
-Steps (write each step into formatBReasoning):
+Steps (write each step into readingReasoning):
 1. Read the two pre-printed option words: OPTION_LEFT = the word before the comma, OPTION_RIGHT = the word after the comma.
 2. Locate the student's handwritten circle, underline, or mark.
 3. Determine whether the CENTER of that mark is to the LEFT or RIGHT of the comma character.
@@ -2387,7 +2428,7 @@ Return strict JSON:
       "questionId": "${questionId}",
       "studentAnswerRaw": "exact option text the student marked",
       "status": "read|blank|unreadable",
-      "formatBReasoning": "OPTION_LEFT=[word], OPTION_RIGHT=[word]. I see a [circle/underline]. Its center is to the [LEFT/RIGHT] of the comma. Therefore I output [word]."
+      "readingReasoning": "理解：括號內預印兩選項 [LEFT] / [RIGHT]，學生用 [圈/底線/劃掉] 標記。抄錄：以「，」為錨點，標記中心在 [LEFT/RIGHT] 側。輸出：[word]。"
     }
   ]
 }`.trim()
@@ -2602,7 +2643,362 @@ Return strict JSON:
 }`.trim()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Layered prompt components (used by buildReadAnswerPrompt / buildReviewReadPrompt)
+// Layer 1 = global, Layer 2 = domain, Layer 2-1 = type×domain,
+// Layer 3 = reusable cross-type components, Layer 0 = role wrapper
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Layer 1: 印刷物 vs 手寫筆跡 — universal rule preventing template contamination
+const MARKUP_VS_HANDWRITING_RULE = `
+== MARKUP-VS-HANDWRITING RULE（印刷物 vs 手寫筆跡）==
+A test paper has TWO kinds of marks. You MUST distinguish them.
+
+1. PRINTED CONTENT (印刷物 — NEVER the student's answer):
+   - Question stem, instructions, option labels (A/B/C/D, ①②③④, 甲乙丙丁)
+   - Pre-printed options inside parentheses, e.g. (同意／不同意), (大於／小於／等於)
+   - Underlines ___ , empty parentheses ( ), checkboxes □, table grids
+   - Question numbers, page numbers, watermarks
+   - Visual cues (⚠️ COLOR is UNRELIABLE — focus on these instead):
+     • UNIFORM stroke thickness (machine-typeset, no ink-pressure variation)
+     • PERFECT alignment with baseline (no drift, no tilt)
+     • GEOMETRIC regularity (perfect circles, straight lines, even spacing)
+     • REPEATED identical glyphs across the page (same character looks pixel-identical)
+
+2. HANDWRITING (手寫筆跡 — IS the student's answer):
+   - See INK COLOR RULE above for ink color identification.
+   - Visual cues (these matter MORE than color):
+     • IRREGULAR stroke thickness (hand pressure varies along the stroke)
+     • DRIFTS from baseline, slight tilt or curl
+     • ORGANIC, non-geometric shapes (no two strokes look pixel-identical)
+     • Marks may overlap, cross, or sit beside printed content
+   - Includes the student's circles, underlines, cross-outs, and written words/numbers.
+
+🚨 ABSOLUTE RULE: studentAnswerRaw reflects ONLY what the student physically did,
+NEVER what is pre-printed. The "／" or "/" symbol between option words is a telltale
+sign of PRINTED template — students very rarely draw "／" by hand.
+
+Generic example:
+  Page shows printed: 我（同意／不同意），因為
+  Student's mark:    a circle drawn around 同意
+  ✅ Correct output: 我（同意），因為...
+  ❌ Wrong output:   我（同意／不同意），因為...   ← copied the printed template
+`.trim()
+
+// Layer 2: 社會領域共通段
+const SOCIAL_DOMAIN_SECTION = `
+== DOMAIN: 社會（Social Studies）==
+Output language: 繁體中文.
+
+Content type patterns (descriptive only — DO NOT enumerate examples, DO NOT prime
+specific answers. The actual answers vary by exam and grade level):
+- 專有名詞 (proper nouns): names of people, places, dynasties, historical events.
+  These are typically the ANSWERS — never assume, never guess.
+- 抽象概念 (abstract concepts): social, political, institutional phenomena.
+
+Common question structures (structural patterns, not content):
+- 結論+理由：「我認為（X），因為...」 — student picks stance from printed options + reason
+- 史實簡答 — specific names, dates, events as answers
+- 圖表閱讀 — handled in diagram_* types
+
+Reading discipline (社會 specific):
+- ⚠️ NEVER substitute synonyms or "more correct"-sounding alternatives.
+  In 社會, similar-looking terms often refer to DIFFERENT concepts, periods, or regions.
+  One character difference can completely change the meaning.
+- The exact characters the student wrote ARE the answer of record — preserve faithfully,
+  even if a more famous-looking variant exists with similar shape.
+- For unclear handwriting, prefer "?" over guessing based on "what would make sense historically".
+- ⚠️ Do NOT use general historical knowledge to bias your reading. The student's grade level,
+  textbook, and curriculum determine the correct vocabulary — and you don't know any of these.
+`.trim()
+
+// Layer 2-1: word_problem × 社會 — SELF-CONTAINED replacement for generic WORD-PROBLEM rules.
+// When this specialization is active, the generic rules are NOT also sent.
+const SOCIAL_WORD_PROBLEM_FULL = `
+WORD-PROBLEM × 社會 (questions in WORD-PROBLEM list — 社會 specialization, replaces generic):
+
+Common pattern: the question stem typically has PRE-PRINTED options inside parentheses
+(separated by "／", "/", or "，") followed by a free-form reason area:
+   "我認為（X／Y），因為..."   or   "我（X／Y），因為..."
+
+Students pick ONE option (by mark) AND write a reason after.
+
+READING PROCEDURE:
+
+A. PARENTHESES (printed options + student mark):
+   Apply FORMAT_B_CIRCLE_IN_PARENS (component defined separately above).
+   Output: parens containing ONLY the chosen option.
+   🚫 NEVER output the full template "(X／Y)" verbatim — the "／" indicates printed text.
+
+B. REASON TEXT (the free-form text after the parentheses):
+   - LINE-BY-LINE: scan top to bottom. Each PHYSICAL LINE of handwriting → ONE output line.
+     Separate output lines with "\\n".
+   - The number of output lines MUST MATCH the number of physical handwritten lines visible.
+   - DO NOT merge lines. DO NOT split lines. DO NOT reorder.
+   - DO NOT insert content the student did not write.
+   - SELF-CORRECTION (student crossed out with blue/black ink): SKIP the crossed-out line,
+     keep the final intended version.
+
+C. COMBINE: "[whatever prefix the student wrote](chosen option)[reason text]"
+   Whatever the student physically wrote at the start — copy it as-is.
+
+D. BLANK / UNREADABLE handling:
+   - Both parens unmarked AND reason area empty → status="blank", studentAnswerRaw="未作答".
+   - Parens marked but reason area empty → output "(chosen)" only, status="read".
+   - Parens unclear but reason clear → "(?)，[reason]" with status="unreadable",
+     readingReasoning explains why parens are unclear.
+   - Reason has scattered illegible characters → use "?" for individual unclear chars
+     within otherwise-readable text. Do NOT mark the whole answer unreadable.
+`.trim()
+
+// Layer 2-1 registry: lookup table for (type, domain) → specialization.
+// When a (type, domain) pair has an entry here, the specialization REPLACES the generic
+// type rule entirely (mode B). Add new specializations by adding entries below.
+const TYPE_DOMAIN_OVERRIDES = {
+  word_problem: {
+    '社會': SOCIAL_WORD_PROBLEM_FULL
+  }
+  // Future: e.g. fill_blank: { '英語': ENGLISH_FILL_BLANK_FULL }
+}
+
+// Layer 3: FORMAT_B_CIRCLE_IN_PARENS reusable component
+const FORMAT_B_CIRCLE_IN_PARENS_COMPONENT = `
+== COMPONENT: FORMAT_B_CIRCLE_IN_PARENS ==
+[Reusable — used by single_choice (FORMAT B), word_problem×社會, fill_blank×國語/社會, etc.]
+
+DETECTION:
+Activates when you see PRE-PRINTED parentheses containing 2+ option words separated
+by "／", "/", or "，".
+
+Pattern examples (structural, not answer content):
+- (X／Y)             ← binary, slash separator
+- (X，Y，Z)          ← ternary, comma separator
+- ( yes / no )       ← English binary
+
+The separator between options is your TELL — students rarely write "／" by hand.
+
+STUDENT MARK TYPES (any one of):
+  A. CIRCLE (圈起來) around one option
+  B. CROSS-OUT (劃掉) on the unwanted option(s) — un-crossed = chosen
+  C. UNDERLINE (底線) below one option
+  D. CHECK (✓) next to or above one option
+  E. WRITE-IN (寫字) beside the parens — overrides any mark inside
+
+MANDATORY REASONING (fill readingReasoning field, follow 理解 → 抄錄 → 輸出 format):
+  理解: identify printed options "OPTION_LEFT=[word], OPTION_RIGHT=[word]" and student mark type
+  抄錄: spatial location of mark center relative to "／" / "，" separator
+  輸出: which option the student chose
+
+OUTPUT:
+- studentAnswerRaw = original parens shape with ONLY the chosen option inside.
+  - "(X／Y)" + circle on Y → "(Y)"
+- If no mark anywhere on the parens → "(?)", status="unreadable".
+- Multi-mark (multi-select context) → comma-join chosen options inside the parens.
+
+🚫 ABSOLUTELY FORBIDDEN:
+- Outputting the full template "(X／Y)" verbatim.
+- Choosing by logic/meaning ("which option sounds right historically").
+- (AI2) Using the correct answer hint to decide which option was marked.
+
+✅ Choice is determined ONLY by the student's physical mark, not by meaning.
+`.trim()
+
+// Layer 0 (AI2 only): Anti-Bias Framework — replaces older DIGIT-1 SPECIAL CASE
+const AI2_ANTI_BIAS_FRAMEWORK = `
+== ANTI-BIAS FRAMEWORK (ABF) — AI2 ONLY ==
+You see the correct answer in each question label. This creates COGNITIVE BIAS RISK.
+You MUST recognize and resist the following four biases.
+
+BIAS 1 — CONFIRMATION（確認偏誤）:
+  Symptom: Correct answer is "150" → you "see" digits in a blank that aren't really there.
+  Defense: Output ONLY physically visible handwriting. Empty → blank, even when answer is known.
+
+BIAS 2 — OVER-CORRECTION（過度矯正）:
+  Symptom: Knowing about Bias 1, you over-compensate by rejecting legitimate but minimal
+           handwriting (e.g. dismissing a clear single vertical stroke as "noise" instead of "1").
+  Defense: Minimal-but-clear strokes ARE real handwriting.
+  Confirmed exceptions (always read as handwriting, never as noise):
+    • DIGIT-1: a single vertical stroke in an answer space IS the digit "1".
+      "1" 本來就只是一豎，這就是它的正常樣貌。
+
+BIAS 3 — TEMPLATE CONTAMINATION（模板汙染）⭐:
+  Symptom: Correct answer template includes "(同意／不同意)" and you see printed
+           "(同意／不同意)" on the page. You output the template verbatim, thinking
+           it matches.
+  Defense: Printed template ≠ student answer. Apply MARKUP-VS-HANDWRITING.
+           Only the student's circle/cross-out/written addition counts.
+           "／" between options = printed; rarely handwritten.
+
+BIAS 4 — COMPLETION（補完偏誤）:
+  Symptom: Student wrote half a sentence; you mentally complete it to match the
+           correct answer's full version.
+  Defense: Student wrote what they wrote. Halfway → halfway.
+
+MANDATORY WORKFLOW:
+  1. Read the crop FIRST without looking at the correct answer.
+  2. Form your initial reading.
+  3. THEN consult the correct answer:
+     - Matches → confirm and output.
+     - Differs → re-examine carefully for missed strokes (Bias 2 defense),
+       BUT only adjust if you genuinely see them.
+  4. After re-examination, your reading still differs → report what you actually see.
+     The student may genuinely have written something different.
+`.trim()
+
+// Layer 3: FORMAT_A_WRITE_IN — single-choice empty parens, student writes one symbol
+const FORMAT_A_WRITE_IN_COMPONENT = `
+== COMPONENT: FORMAT_A_WRITE_IN ==
+[Reusable — used when student writes a SINGLE option identifier inside empty parentheses.]
+
+Pattern: The parens "( )" are EMPTY in print; the student writes ONE symbol inside.
+Valid symbols: A/B/C/D, 甲/乙/丙/丁, ①/②/③/④, or numeric digits (1/2/3/4) when the question uses numeric options.
+Output exactly the written identifier. Example: student wrote "B" → output "B".
+If parens are empty → blank. If symbol is unrecognizable → unreadable.
+`.trim()
+
+// Layer 3: INSERTION_MARK_HANDLING — student uses ∧ to insert text into a sentence
+const INSERTION_MARK_HANDLING_COMPONENT = `
+== COMPONENT: INSERTION_MARK_HANDLING ==
+[Reusable — applies anywhere student wrote free-form text.]
+
+If the student uses a handwritten ∧ or 入-shape symbol to indicate a text insertion:
+- The tip of the symbol points to the insertion position in the original text.
+- The inserted text is written above the symbol (between the symbol and the line above).
+- Merge the inserted text into the original sentence at exactly that position.
+- Output the COMPLETE merged result as if the insertion was always there. Do NOT mention the symbol.
+- Follow the student's intent faithfully even if the merged result sounds grammatically odd.
+- Example: student wrote "小明走路∧上學" with "快速" written above the ∧ → output "小明走路快速上學"
+- Example: student wrote "答：速率為60∧" with "公尺" above the ∧ → output "答：速率為60公尺"
+`.trim()
+
+// Layer 3: VERTICAL_TO_HORIZONTAL — convert vertical (直式) arithmetic to horizontal equation
+const VERTICAL_TO_HORIZONTAL_COMPONENT = `
+== COMPONENT: VERTICAL_TO_HORIZONTAL ==
+[Reusable — used by calculation and math word_problem when student writes 直式.]
+
+If the student uses a vertical layout (直式加/減/乘/除), convert to a horizontal equation for output.
+This counts as ONE output line. Copy the student's written numbers EXACTLY — do NOT recalculate or correct.
+- 直式除法: identify dividend (被除數), divisor (除數), quotient (商), remainder (餘數 if any).
+  Output as "[dividend]÷[divisor]=[quotient]" or "[dividend]÷[divisor]=[quotient]…[remainder]".
+- 直式乘法: identify multiplicand, multiplier, product. Output as "[multiplicand]×[multiplier]=[product]".
+- 直式加法/減法: output as "[top]±[bottom]=[result]".
+- CRITICAL: Copy the student's written numbers as-is. If the student wrote a wrong quotient
+  (e.g. 25 instead of 26), output 25. NEVER verify or correct the arithmetic.
+`.trim()
+
+// Layer 3: PROPORTION_TABLE_FORMATS — Taiwan-style ratio-scaling layouts
+const PROPORTION_TABLE_FORMATS_COMPONENT = `
+== COMPONENT: PROPORTION_TABLE_FORMATS ==
+[Reusable — used by math word_problem and calculation.]
+
+Students in Taiwan write ratio-scaling in several visual layouts. ALL count as valid 列式:
+
+FORMAT A — Arrow style (×N↙↘×N):
+       0.048 : 0.2
+  ×1000↙         ↘×1000
+       48    : ( )
+  Output as: "0.048:0.2 ×1000 → 48:200"
+
+FORMAT B — Divisor annotated between rows (÷N written on both sides or center):
+       210 : 60
+    ÷60        ÷60
+     =3.5 :  1
+  Output as: "210:60 ÷60 → 3.5:1"
+
+FORMAT C — Bracket with divisor outside:
+       260( 210 : 60 )÷60
+            =3.5 : 1
+  Output as: "210:60 ÷60 → 3.5:1"
+
+Rules for all formats:
+- Read BOTH rows completely, including the operator annotation (×N or ÷N) wherever it appears.
+- The ÷N or ×N annotation IS part of the calculation — do NOT skip it even if small or at the edge.
+- This two-row structure counts as valid 列式. Treat it the same as writing an explicit equation.
+`.trim()
+
+// Layer 2: 國語領域共通段
+const MANDARIN_DOMAIN_SECTION = `
+== DOMAIN: 國語（Mandarin Chinese）==
+Output language: 繁體中文.
+
+Content type patterns (descriptive only):
+- 字詞 (vocabulary): characters, idioms, ci-yu (詞語), measure words.
+- 句型 (sentence patterns): grammar, particle usage.
+- 短文/閱讀理解 (short reading comprehension): student answers in their own words.
+
+Reading discipline (國語 specific):
+- ⚠️ NEVER substitute homophones or look-alike characters even if the swap "makes more sense".
+  - 它/他/她, 在/再, 心裡/心理, 的/得/地 — each carries different meaning. Preserve the student's exact choice.
+- 注音符號 (Bopomofo) may appear in young students' answers. Read each symbol exactly.
+- Punctuation marks (。、，：；！？) are part of the answer when explicitly written.
+- For 國語 fill_blank, the answer is usually 1–4 Chinese characters; longer continuous text suggests short_answer.
+`.trim()
+
+// Layer 2: 數學領域共通段
+const MATH_DOMAIN_SECTION = `
+== DOMAIN: 數學（Mathematics）==
+Output language: 繁體中文 for narrative; preserve original symbols (×÷−=) verbatim.
+
+Content type patterns (descriptive only):
+- 數字運算 (arithmetic): integers, decimals, fractions.
+- 比例/比 (ratios), 單位換算 (unit conversion).
+- 幾何/圖形 (geometry).
+- 應用題 (word problems with calculation).
+
+Reading discipline (數學 specific):
+- ⚠️ NEVER normalize symbols: × stays ×, ÷ stays ÷, − stays − (do NOT convert to *, /, -).
+- Copy wrong calculations exactly. "6+3=8" stays "6+3=8". Never correct arithmetic.
+- Copy the student's written digits exactly, even if a calculation was performed wrong.
+- Numbers matter: every digit position is significant. Watch for missed digits at edges (e.g. "1" at start of "150").
+- Auxiliary scratch work (輔助計算) near a fill-blank answer is NOT part of the answer — only what is INSIDE the blank counts.
+`.trim()
+
+// Layer 2: 自然領域共通段
+const SCIENCE_DOMAIN_SECTION = `
+== DOMAIN: 自然（Natural Sciences）==
+Output language: 繁體中文.
+
+Content type patterns (descriptive only):
+- 科學名詞: 物理/化學/生物/地科 terminology.
+- 化學式/單位: H₂O, CO₂, ml, kg, J/s — preserve subscripts/superscripts and units exactly.
+- 數值 + 單位 (value + unit): always paired.
+
+Reading discipline (自然 specific):
+- ⚠️ NEVER substitute units: 公分 ≠ 公尺, ml ≠ L, g ≠ kg. Each unit changes the magnitude.
+- Numbers AND units must both be transcribed. Missing the unit changes the meaning.
+- Preserve subscripts and superscripts as written (H₂O, m²). If you cannot tell if a digit is subscript, output it inline.
+- For experimental observations, copy the student's wording faithfully even if scientifically imprecise.
+`.trim()
+
+// Layer 2: 英語領域共通段
+const ENGLISH_DOMAIN_SECTION = `
+== DOMAIN: 英語（English）==
+Output language: ENGLISH (do NOT translate to Chinese; do NOT output 繁體中文 for the answer body).
+
+Content type patterns (descriptive only):
+- 單字 (vocabulary): individual English words.
+- 句子 (sentences): full English sentences.
+- 文法填空 (grammar fill-in): student picks a word form.
+
+Reading discipline (英語 specific):
+- ⚠️ DO NOT auto-correct spelling. Copy each letter EXACTLY as the student wrote it.
+  - "dinng" stays "dinng" (NOT "dining"). "kitchan" stays "kitchan" (NOT "kitchen").
+- ⚠️ DO NOT interpret unfamiliar shapes as Bopomofo. English handwriting can resemble 注音 — always interpret as English letters.
+- Preserve case exactly as written: capital letters stay capital, lowercase stays lowercase.
+- Output a "rawSpelling" field on EVERY English answer: spell out every letter separated by dashes,
+  with spaces between words. Example: "dinng room" → rawSpelling: "d-i-n-n-g r-o-o-m".
+  This forces letter-by-letter examination. If rawSpelling disagrees with studentAnswerRaw, rawSpelling is authoritative.
+- Punctuation (. , ? !) is part of the answer when written.
+`.trim()
+
 function buildReadAnswerPrompt(classifyResult, options = {}) {
+  const domainHint = ensureString(options?.domainHint, '').trim()
+  const isMandarin = domainHint === '國語'
+  const isMath = domainHint === '數學'
+  const isSocial = domainHint === '社會'
+  const isScience = domainHint === '自然'
+  const isEnglish = domainHint === '英語'
+  const hasAnyDomain = Boolean(domainHint)
   const includedIds = new Set(
     Array.isArray(options?.includeQuestionIds)
       ? options.includeQuestionIds.map((id) => ensureString(id, '').trim()).filter(Boolean)
@@ -2647,6 +3043,14 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
   const singleCheckIds = visibleQuestions
     .filter((q) => q.questionType === 'single_check')
     .map((q) => q.questionId)
+  // ── Merged effective ID lists for prompt purposes ──
+  // single_choice + single_check are 3 forms of the same logical "single choice" type.
+  // multi_choice + multi_check + multi_check_other are 3 forms of the same logical "multi choice" type.
+  // The merged list drives the unified 3-form rule. classify still tags each visible question
+  // with its native type — that tag is preserved for downstream logic; the prompt just describes
+  // 3 forms and lets AI identify visually.
+  const effectiveSingleChoiceIds = [...singleChoiceIds, ...singleCheckIds]
+  const effectiveMultiChoiceIds = [...multiChoiceIds, ...multiCheckIds, ...multiCheckOtherIds]
   const fillBlankIds = visibleQuestions
     .filter((q) => q.questionType === 'fill_blank')
     .map((q) => q.questionId)
@@ -2679,28 +3083,10 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     .filter((q) => q.questionType === 'map_draw')
     .map((q) => q.questionId)
 
-  const singleChoiceNote = singleChoiceIds.length > 0
-    ? `\nSINGLE-CHOICE questions (output ONE option only): ${JSON.stringify(singleChoiceIds)}`
-    : ''
-  // 數字選項提示：正確答案是數字的選擇題，提示 AI 不要把數字讀成注音
-  const akMap = options?.answerKeyQuestions
-    ? mapByQuestionId(options.answerKeyQuestions, (item) => item?.id)
-    : new Map()
-  const numericChoiceIds = singleChoiceIds.filter((qId) => {
-    const akQ = akMap.get(qId)
-    const answer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
-    return /^\d+$/.test(answer)
-  })
-  const numericChoiceNote = numericChoiceIds.length > 0
-    ? `\n⚠️ NUMERIC OPTION HINT: The following single-choice questions use NUMERIC options (1, 2, 3, 4...), NOT Bopomofo symbols. If you see handwriting that could be either a digit or a Bopomofo symbol (e.g. "3" vs "ㄋ", "1" vs "ㄌ"), always interpret it as a DIGIT: ${JSON.stringify(numericChoiceIds)}
-⚠️ DIGIT STROKE VERIFICATION (for numeric single-choice ONLY):
-When reading a handwritten digit inside parentheses ( ), FIRST describe the stroke features you see, THEN decide which digit it is. Do NOT guess based on what answer would be "correct".
-Commonly confused digit pairs:
-- 1: single vertical stroke | 7: horizontal top stroke + diagonal down-stroke
-- 2: top curve bending RIGHT, flat horizontal bottom stroke | 3: TWO right-facing bumps (upper + lower), NO flat bottom stroke
-- 5: top horizontal + vertical drop + bottom curve | 6: top curve descending left, closed loop at bottom
-- 9: closed loop at top + descending stroke | 0: closed oval
-Report your stroke observation in the "digitStrokeNote" field (1 sentence). Example: { "studentAnswerRaw": "3", "digitStrokeNote": "I see two right-facing curves stacked vertically, consistent with digit 3" }`
+  // SINGLE-CHOICE merged note (covers single_choice + single_check, 3 forms unified).
+  // Output is constrained by the per-form rules; numericChoiceNote removed (output limit + human review handle digit ambiguity).
+  const singleChoiceNote = effectiveSingleChoiceIds.length > 0
+    ? `\nSINGLE-CHOICE questions (3 forms — write-in / circle / checkbox; pick ONE answer): ${JSON.stringify(effectiveSingleChoiceIds)}`
     : ''
   const trueFalseNote = trueFalseIds.length > 0
     ? `\nTRUE-FALSE questions (output ○ or ✗ only): ${JSON.stringify(trueFalseIds)}`
@@ -2720,17 +3106,9 @@ Report your stroke observation in the "digitStrokeNote" field (1 sentence). Exam
   const mapDrawConnectNote = mapDrawConnectIds.length > 0
     ? `\nMAP-DRAW (connect_dots) questions: ${JSON.stringify(mapDrawConnectIds)}`
     : ''
-  const multiCheckNote = multiCheckIds.length > 0
-    ? `\nMULTI-CHECK questions (多選勾選, output comma-separated 1-based position numbers of checked boxes — NEVER output label text or option content): ${JSON.stringify(multiCheckIds)}`
-    : ''
-  const multiCheckOtherNote = multiCheckOtherIds.length > 0
-    ? `\nMULTI-CHECK-OTHER questions (多選勾選含其他, same as MULTI-CHECK but LAST option is open-ended "其他：___"; output 1-based position numbers; if 其他 is checked AND has written text, append "：[text]" to that number, e.g. "1,3,4：轉為文風鼎盛的社會"): ${JSON.stringify(multiCheckOtherIds)}`
-    : ''
-  const multiChoiceNote = multiChoiceIds.length > 0
-    ? `\nMULTI-CHOICE questions (多選選擇, output comma-separated option symbols written inside parentheses; e.g. "A,C" or "①,③"): ${JSON.stringify(multiChoiceIds)}`
-    : ''
-  const singleCheckNote = singleCheckIds.length > 0
-    ? `\nSINGLE-CHECK questions (單選勾選, output the 1-based position number of the checked box: "1" for the 1st box, "2" for the 2nd, etc. — NEVER output label text or option content): ${JSON.stringify(singleCheckIds)}`
+  // MULTI-CHOICE merged note (covers multi_choice + multi_check + multi_check_other, 3 forms unified).
+  const multiChoiceNote = effectiveMultiChoiceIds.length > 0
+    ? `\nMULTI-CHOICE questions (3 forms — write-in / circle / checkbox; pick ALL applicable, missing one = penalty): ${JSON.stringify(effectiveMultiChoiceIds)}`
     : ''
   const fillBlankNote = fillBlankIds.length > 0
     ? `\nFILL-BLANK questions (填空題, output comma-separated blank contents): ${JSON.stringify(fillBlankIds)}`
@@ -2774,162 +3152,237 @@ Report your stroke observation in the "digitStrokeNote" field (1 sentence). Exam
     ? `\n\n== TABLE CELL COLUMN HINTS ==\n以下題目是表格中的格子，裁切圖可能包含欄標題和格線。請用欄標題確認你讀的是正確的格子：\n${tableCellHints.join('\n')}`
     : ''
 
-  return `
-Your job is to report what the student physically wrote or drew in each question's designated answer space.
+  // ── Layered prompt assembly: Layer 2 (domain) + Layer 3 (components) ──
+  // Layer 2-1 (type×domain specializations) are NOT injected as separate blocks here —
+  // they REPLACE the corresponding generic type rule via TYPE_DOMAIN_OVERRIDES lookup
+  // when the per-type rule variables (e.g. wordProblemRules) are computed below.
+  let domainSectionBlock = ''
+  if (isMandarin) domainSectionBlock = `\n\n${MANDARIN_DOMAIN_SECTION}`
+  else if (isMath) domainSectionBlock = `\n\n${MATH_DOMAIN_SECTION}`
+  else if (isSocial) domainSectionBlock = `\n\n${SOCIAL_DOMAIN_SECTION}`
+  else if (isScience) domainSectionBlock = `\n\n${SCIENCE_DOMAIN_SECTION}`
+  else if (isEnglish) domainSectionBlock = `\n\n${ENGLISH_DOMAIN_SECTION}`
 
-Visible question IDs on this image:
-${JSON.stringify(visibleIds)}
-${singleChoiceNote}${numericChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}${tableCellHintNote}
+  // Layer 3 component emission: include when an active rule references it.
+  // FORMAT_B_CIRCLE_IN_PARENS is referenced by SOCIAL_WORD_PROBLEM_FULL.
+  const referencesFormatB = (isSocial && wordProblemIds.length > 0)
+  const formatBComponentBlock = referencesFormatB
+    ? `\n\n${FORMAT_B_CIRCLE_IN_PARENS_COMPONENT}`
+    : ''
 
-== ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
-You may ONLY output what is physically, visibly written by the student's own hand.
-NEVER output content that does not exist as physical handwriting in the image.
-NEVER output an answer based on:
-- answers you see in neighboring questions
-- printed option labels (A B C D 甲乙丙丁) that the student did NOT mark
-- data from charts, graphs, pie charts, tables, or diagrams visible in the image
-- mathematical calculation or inference from other visible information
-If the answer space is empty → blank. There are NO exceptions.
-🚨 CRITICAL: Even if you can SEE data (e.g. angles on a pie chart, values in a table header) that would let you CALCULATE what the answer should be, you MUST NOT do so. You are an OCR reader, not a calculator. If the student did not physically write an answer in the designated space, output blank — regardless of what you could infer from surrounding visual information.
-
-== INK COLOR RULE (critical) ==
-The student writes in BLUE or BLACK ink (pencil). The teacher corrects in RED ink.
-- ONLY read the student's BLUE/BLACK ink marks. This is the student's original answer.
-- IGNORE all RED ink marks — these are the teacher's corrections/marks added AFTER the student submitted.
-- If you see both red and blue/black writing in the same area, ONLY report the blue/black writing.
-- Common red ink marks to ignore: circled correct answers, check marks (✓/✗), score numbers, correction notes.
-- If the student's blue/black answer is crossed out by the student (self-correction with blue/black ink), read the final version the student intended.
-
-== BLANK FIRST RULE ==
-Before reading each question, ask yourself: "Is there fresh handwriting in this question's answer space?"
-- Answer space = the designated writing area: ( ), ___, □, or the answer line after "答:" "A:" "Ans:", or the entire work area for calculation/drawing questions.
-- If no fresh handwriting is present → status="blank", studentAnswerRaw="未作答". STOP. Do not read further.
-- Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count.
-- Only FRESH student BLUE/BLACK pen/pencil marks count. RED ink is the teacher's, not the student's.
-
-🚨 TABLE CELL EDGE RULE (applies to fill_blank questions in tables):
-When reading a tightly-cropped table cell, look for VERTICAL GRID LINES (直線) inside the crop image.
-- If you see a vertical grid line: that line is the cell boundary. Content on the OTHER SIDE of that line belongs to an adjacent cell — do NOT read it.
-  - Vertical line near the LEFT edge: only read content to the RIGHT of that line.
-  - Vertical line near the RIGHT edge: only read content to the LEFT of that line.
-  - Vertical lines on BOTH sides: only read content BETWEEN the two lines.
-- If the area between the grid lines (or in the center of the crop if no lines are visible) is empty → status="blank", studentAnswerRaw="未作答".
-- Numbers or text visible beyond a grid line are the NEIGHBOR's answer, not this question's. Reading them would cause cascading errors across all table questions.
-
+  // Pseudo-global rule gating (fix for previously leaked rules)
+  // DIGIT-ONE: relevant for math/science answers and for unknown-domain (backward compat).
+  // Skip for 國語/社會/英語 where digit "1" handwriting is rarely the issue.
+  const digitOneRuleBlock = (isMath || isScience || !hasAnyDomain) ? `
 == DIGIT-ONE RULE ==
 When reading a number, if you see a single vertical stroke (一豎) BETWEEN two clearly written digits, it is the digit "1". Do NOT skip it.
 Example: if you see 4|0 (a "4", then a vertical stroke, then a "0"), read it as "410" — the vertical stroke between the two digits is the handwritten "1".
 This rule ONLY applies when the stroke is between two digits. A vertical stroke at the edge (before the first digit or after the last digit) is NOT "1".
+` : ''
 
-== COPY RULES (only when non-blank) ==
-You are an OCR scanner. Your ONLY job is to copy exactly what the student wrote. You have NO language ability, NO grammar knowledge, and NO understanding of meaning.
+  // COPY 7 (output language): default 繁中, except 英語 keeps English.
+  const outputLanguageRule = isEnglish
+    ? '7. LANGUAGE: Output English answer body in English; do NOT translate to Chinese.'
+    : '7. LANGUAGE: Always output in Traditional Chinese (繁體中文).'
 
-1. Copy every character the student wrote, in the exact order written. Do NOT rearrange, reorder, or restructure.
+  // Math-specific COPY rules (calc accuracy, symbol preservation)
+  const mathSymbolPreserveRules = (isMath || !hasAnyDomain) ? `
 2. Copy wrong calculations exactly: "6+3=8" → output "6+3=8". Never correct.
-3. Do NOT normalize symbols: × stays ×, ÷ stays ÷, − stays −.
-4. Copy grammatically wrong or nonsensical sentences exactly as written:
-   - Student wrote "你那麼高興，既然多吃一點" → output "你那麼高興，既然多吃一點" (do NOT reorder to fix grammar)
-   - Student wrote "既然你 ? 麼高" → output "既然你 ? 麼高" (copy the ? as written)
-5. Single unreadable character → replace with "?" and continue copying the rest. Do NOT mark the whole answer as unreadable just because one character is unclear.
-   - Example: student wrote "既然你[unclear]麼高興" → output "既然你?麼高興"
-6. Entire answer completely unreadable (cannot make out any characters) → status="unreadable", studentAnswerRaw="無法辨識".
-7. LANGUAGE: Always output in Traditional Chinese (繁體中文).
-8. ABSOLUTELY FORBIDDEN — Character substitution:
-   Do NOT replace a written character with one that looks similar, sounds similar, or "makes more sense" in context.
-   Output exactly what is physically written, even if:
-   - It appears to be a typo (e.g. student wrote 它們 → output 它們, do NOT change to 他們)
-   - It seems grammatically wrong (e.g. student wrote 心裡 → output 心裡, do NOT change to 心理)
-   - A different character would be more "correct" (e.g. student wrote 仇恨 → output 仇恨, do NOT change to 仇視)
-   Your job is to report what the student physically wrote, not what they should have written.
-9. INSERTION MARK (插入符號 ∧ or 入-shape):
-   If the student uses a handwritten ∧ or 入-shaped symbol to indicate a text insertion:
-   - The tip of the symbol points to the insertion position in the original text.
-   - The inserted text is written above the symbol (between the symbol and the line above).
-   - Merge the inserted text into the original sentence at exactly that position.
-   - Output the COMPLETE merged result as if the insertion was always there. Do NOT mention the symbol.
-   - Follow the student's intent faithfully even if the merged result sounds grammatically odd.
-   - Example: student wrote "小明走路∧上學" with "快速" written above the ∧ → output "小明走路快速上學"
-   - Example: student wrote "答：速率為60∧" with "公尺" above the ∧ → output "答：速率為60公尺"
+3. Do NOT normalize symbols: × stays ×, ÷ stays ÷, − stays −.` : ''
 
-== QUESTION TYPE RULES ==
-SINGLE-CHOICE (questions in SINGLE-CHOICE list):
-TWO formats exist — identify which format this question uses, then apply ONLY that format's rule:
-
-FORMAT A — WRITE-IN (student writes a symbol in an empty blank):
-- The parentheses ( ) are empty; the student writes ONE option identifier inside: A/B/C/D or 甲/乙/丙/丁 or ①/②/③/④.
-- Output exactly that written identifier. Example: student wrote "B" → output "B".
-
-FORMAT B — CIRCLE-IN-PARENS 圈圈看 (both options pre-printed inside parens):
-- Both options are pre-printed inside the same parentheses, e.g. "（可以，不可以）" or "（會，不會）" or "（大於，小於，等於）".
-- The student circles, underlines, or otherwise marks ONE of the pre-printed words.
-- ❌ FORBIDDEN: outputting an answer just because one option "sounds right" or "makes sense" given the question context.
-- You MUST determine the answer by the physical position of the student's mark (circle/underline), NOT by logic or knowledge.
-- REQUIRED: For every FORMAT B question, you MUST fill in the "formatBReasoning" field before deciding the answer. Follow these steps IN ORDER and write each step into formatBReasoning:
-  Step 1 — Identify options: "OPTION_LEFT=[first word before the comma], OPTION_RIGHT=[second word after the comma]"
-  Step 2 — Describe the mark: "I see a [circle/underline/cross-out] drawn by the student."
-  Step 3 — Locate relative to comma: "The center of the mark is to the [LEFT/RIGHT] of the comma separator."
-  Step 4 — Conclude: "Therefore I output [OPTION_LEFT value / OPTION_RIGHT value]."
-- The comma (，or ,) printed between the two options is your ANCHOR POINT. Use it as the dividing line — not the bracket edges, not the midpoint of the text.
-- After completing formatBReasoning, set studentAnswerRaw to the concluded option text.
-- If Step 3 cannot be determined → status="unreadable", studentAnswerRaw="無法辨識", formatBReasoning must still explain why.
-- If no mark at all → blank.
-
-BOTH formats:
-- A mark beside option rows or next to a neighboring question does NOT count for this question.
-- SELF-CHECK: "Did the student mark in THIS question's answer blank?" If no → blank.
-
-MULTI-CHOICE (questions in MULTI-CHOICE list):
-- Answer space is PARENTHESES ( ) — output comma-separated option identifiers for ALL marked options (e.g. "A,C" or "①,③").
-- No spaces around commas. If only one option is marked, output just that one (e.g. "B").
-- Valid only if the student wrote symbols inside the parentheses ( ) for this question.
-- SELF-CHECK: "Did the student mark in THIS question's answer blank?" If no → blank.
-
-TRUE-FALSE (questions in TRUE-FALSE list):
-- Output ONLY the symbol or word the student wrote in the answer space.
-- Valid outputs: "○", "✗", "對", "錯", "是", "否", or the exact character written.
-- Do NOT append any explanatory text (e.g. output "○" NOT "○ 正確").
-
-SINGLE-CHECK (questions in SINGLE-CHECK list):
-- Answer space is CHECKBOX □ — output the 1-based position number of the single checked box.
-- Count boxes in reading order (left-to-right, top-to-bottom). Output "1" for the 1st box, "2" for the 2nd, etc.
-- ABSOLUTELY FORBIDDEN: outputting any label text, printed symbols, or option content. Output ONLY the number.
-- If no box is marked → blank.
-
-MULTI-CHECK (questions in MULTI-CHECK list):
-- Answer space is CHECKBOXES □ — output comma-separated 1-based position numbers of the checked boxes, in reading order (left-to-right, top-to-bottom).
-- Output "1" for the 1st box, "2" for the 2nd, etc. Example: "1,3" if 1st and 3rd are checked.
-- ABSOLUTELY FORBIDDEN: outputting any label text, printed symbols, or option content. Output ONLY numbers.
-
-MULTI-CHECK-OTHER (questions in MULTI-CHECK-OTHER list):
-- Same as MULTI-CHECK but the LAST checkbox option is an open-ended "其他：___" field.
-- For regular options: output their 1-based position number normally.
-- For the 其他 (last) option:
-  - If checked AND student wrote text next to it: output "N：[text]" (e.g. "4：轉為文風鼎盛的社會").
-  - If checked but no text written: output just the number (e.g. "4").
-  - If not checked: omit it.
-- Example: "1,3,4：轉為文風鼎盛的社會" (1st and 3rd regular options + 其他 with text).
-
-FILL-BLANK (questions in FILL-BLANK list):
-- Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
-- Empty blank → "_". Unreadable blank → "?". All blanks empty → status="blank".
-- FORBIDDEN: surrounding printed text ("答", underline markers).
-- 🚨 MATH FILL-BLANK RULE (數學填充題):
-  For math fill-in-the-blank questions, students often write auxiliary calculations (輔助計算/草稿) next to or near the blank — such as vertical arithmetic (直式), scratch formulas, or intermediate steps.
-  IGNORE all auxiliary calculations. Read ONLY the final answer written INSIDE the parentheses ( ) or blank line ___.
-  The auxiliary work is the student's scratch process and is NOT part of the answer.
-  Example: student wrote "25×4=100" as scratch work nearby, and filled "100" inside the ( ) → output "100" only.
-- 🚨 MULTIPLE BLANKS IN CROP (裁切圖包含多個括號):
-  If the cropped image shows content from MULTIPLE blanks or lines (e.g., you see two different ( ) with different answers), identify which blank is closest to the CENTER of the crop image — that is your target blank.
-  - Content near the EDGES (top, bottom, left, right) of the crop that belongs to a DIFFERENT blank — do NOT read it.
-  - Once you identify the target blank, read ALL handwriting inside it COMPLETELY — including faint, small, or offset characters. Do NOT skip any visible strokes within the target blank.
-- 🚨 ENGLISH SPELLING RULE (for English domain fill_blank):
+  // ENGLISH SPELLING rule for fill_blank (gated to 英語)
+  const englishSpellingRuleBlock = (isEnglish && fillBlankIds.length > 0) ? `
+- 🚨 ENGLISH SPELLING RULE (for English fill_blank):
   DO NOT auto-correct spelling. Copy each letter EXACTLY as the student wrote it.
   "dinng" stays "dinng" (NOT "dining"). "kitchan" stays "kitchan" (NOT "kitchen").
   You are an OCR scanner with ZERO language knowledge — you cannot recognize English words.
   Additionally, output a "rawSpelling" field: spell out every letter separated by dashes.
   Example: student wrote "dinng room" → studentAnswerRaw="dinng room", rawSpelling="d-i-n-n-g r-o-o-m".
-  This forces you to examine each letter individually. If rawSpelling disagrees with studentAnswerRaw, rawSpelling is authoritative.
+  This forces you to examine each letter individually. If rawSpelling disagrees with studentAnswerRaw, rawSpelling is authoritative.` : ''
 
+  // MATH FILL-BLANK rule (gated to 數學 or unknown domain)
+  const mathFillBlankRuleBlock = ((isMath || !hasAnyDomain) && fillBlankIds.length > 0) ? `
+- 🚨 MATH FILL-BLANK RULE (數學填充題):
+  For math fill-in-the-blank questions, students often write auxiliary calculations (輔助計算/草稿) next to or near the blank — such as vertical arithmetic (直式), scratch formulas, or intermediate steps.
+  IGNORE all auxiliary calculations. Read ONLY the final answer written INSIDE the parentheses ( ) or blank line ___.
+  The auxiliary work is the student's scratch process and is NOT part of the answer.
+  Example: student wrote "25×4=100" as scratch work nearby, and filled "100" inside the ( ) → output "100" only.` : ''
+
+  // ── Per-type rule blocks: only emit when the test paper actually has that type ──
+  // ── SINGLE-CHOICE unified rule (covers single_choice + single_check, 3 forms) ──
+  const singleChoiceRules = effectiveSingleChoiceIds.length > 0 ? `
+SINGLE-CHOICE (questions in SINGLE-CHOICE list):
+單選題：從預設選項中挑選「唯一」一個答案。視覺上有 3 種形式。
+先識別形式，再依該形式三步驟（理解 → 抄錄 → 輸出）處理。
+
+⚠️ 必填欄位 readingReasoning：
+   每題必須填寫推理過程，依「理解 / 抄錄 / 輸出」三段書寫。
+   不可跳步驟、不可只給結論。
+
+═══════════════════════════════════════════════════════════
+FORM 1 — 代號選擇題 (CODE-WRITE-IN)
+特徵：題號前有空白括號 "(        )1. 題目敘述..."；括號外有 A/B/C/D 等選項清單。
+
+① 理解：學生在空括號內寫了一個代號
+② 抄錄：找到 "(        )" → 抄寫括號內的手寫筆跡
+③ 輸出：僅輸出單一代號
+       允許：A/B/C/D | 甲/乙/丙/丁 | 1/2/3/4 | ①/②/③/④
+       不可輸出選項內容文字
+
+readingReasoning 範例：
+   "理解：括號內手寫一個英文字母 B。抄錄：直接抄寫該代號。輸出：B。"
+
+邊界：
+- 括號完全空白 → blank
+- 字跡無法辨識為任何代號 → unreadable
+- 看到多個代號（理論上不該出現於單選）→ unreadable
+
+═══════════════════════════════════════════════════════════
+FORM 2 — 圈選題 (CIRCLE-IN-OPTIONS)
+特徵：括號內預印 2+ 個選項，以 ／、/、，分隔。
+       例：(同意／不同意)、(大於／等於／小於)、(小熊, 大熊, 中熊)
+
+① 理解：學生用筆跡（圈/底線/劃掉）標記其中一個選項
+② 抄錄：
+   Step 1：識別括號內所有預印選項
+   Step 2：找出學生筆跡覆蓋的選項位置
+   Step 3：用分隔符（／、,）當錨點，確認標記中心在哪一側
+③ 輸出：僅輸出被標記的選項文字
+       不含括號、不含分隔符、不含其他選項
+
+readingReasoning 範例：
+   "理解：括號內預印「同意／不同意」兩個選項，學生用圓圈包住右側。
+    抄錄：以「／」為錨點，圓圈中心在右側。輸出：不同意。"
+
+邊界：
+- 沒有任何標記 → blank
+- 多個選項都被標記 → unreadable（單選不能多選）
+- 標記中心模糊（卡在分隔符上）→ unreadable
+- 劃掉式：所有選項都沒劃掉 → blank；剩唯一一個沒劃掉 → 輸出那個
+
+═══════════════════════════════════════════════════════════
+FORM 3 — 勾選題 (CHECKBOX)
+特徵：每個選項前面有 □（方形勾選框）。
+       例：□ 父親  □ 母親  □ 祖父  □ 祖母
+
+① 理解：學生在某個 □ 內畫上 ✓/✗/●/X 等標記
+② 抄錄：
+   Step 1：識別所有 □ 與其對應的選項文字（依閱讀順序：左→右、上→下編號）
+   Step 2：找出有標記的 □（畫勾、塗黑、打叉等）
+   Step 3：判定該 □ 是第幾個（1-based）
+③ 輸出：被打勾 □ 的 1-based 位置編號
+       例如「1」表示第 1 個 □、「2」表示第 2 個...
+       純數字。不含 □、不含勾號 ✓、不含選項文字
+
+readingReasoning 範例：
+   "理解：四個 □ 對應「父親、母親、祖父、祖母」，第二個 □（母親前）被打勾。
+    抄錄：標記在第 2 個位置。輸出：2。"
+
+邊界：
+- 沒有 □ 被標記 → blank
+- 多個 □ 被標記 → unreadable（單選不能多選）
+- 標記跨越兩個 □（位置模糊）→ unreadable
+
+═══════════════════════════════════════════════════════════
+ALL FORMS — 統一禁止：
+- ❌ 不可依「哪個答案聽起來合理」決定 → 只看實際筆跡位置
+- ❌ 不可從相鄰題目推斷
+- ❌ AI2：不可用正確答案 hint 反推學生選擇
+- ✅ SELF-CHECK：「學生有在『這題』的答案區做標記嗎？」沒有 → blank
+` : ''
+
+  // ── MULTI-CHOICE unified rule (covers multi_choice + multi_check + multi_check_other, 3 forms) ──
+  const multiChoiceRules = effectiveMultiChoiceIds.length > 0 ? `
+MULTI-CHOICE (questions in MULTI-CHOICE list):
+多選題：從預設選項中挑選「所有」正確或符合的答案，少一個依規定扣分。
+視覺上有 3 種形式。先識別形式，再依該形式三步驟（理解 → 抄錄 → 輸出）處理。
+
+⚠️ 必填欄位 readingReasoning：
+   每題必須填寫推理過程，依「理解 / 抄錄 / 輸出」三段書寫。
+
+═══════════════════════════════════════════════════════════
+FORM 1 — 代號選擇題（多選版） (CODE-WRITE-IN)
+特徵：題號前有空白括號；括號外有 A/B/C/D 等選項清單。
+
+① 理解：學生在空括號內寫了多個代號
+② 抄錄：找到 "(        )" → 抄寫括號內所有代號（依寫的順序）
+③ 輸出：用「,」連接多個代號（無空格）
+       例：A,C 或 ①,③；單個代號則只輸出該代號
+
+readingReasoning 範例：
+   "理解：括號內手寫「A、C」。抄錄：兩個代號 A 與 C。輸出：A,C。"
+
+═══════════════════════════════════════════════════════════
+FORM 2 — 圈選題（多選版） (CIRCLE-IN-OPTIONS)
+特徵：括號內預印多個選項，以 ／、/、，分隔。
+
+① 理解：學生用筆跡標記了一個或多個選項
+② 抄錄：
+   Step 1：識別括號內所有預印選項
+   Step 2：找出所有有筆跡覆蓋的選項
+③ 輸出：用「,」連接被標記的選項文字
+       例：同意,大於
+
+readingReasoning 範例：
+   "理解：括號內預印「同意,不同意,中立」三個選項，學生圈了「同意」與「中立」。
+    抄錄：兩個選項被圈。輸出：同意,中立。"
+
+═══════════════════════════════════════════════════════════
+FORM 3 — 勾選題（多選版） (CHECKBOX)
+特徵：每個選項前面有 □。
+
+① 理解：學生在多個 □ 內畫上標記
+② 抄錄：
+   Step 1：識別所有 □ 與其對應的選項文字（依閱讀順序：左→右、上→下編號）
+   Step 2：找出所有有標記的 □
+   Step 3：紀錄各被標記 □ 的 1-based 位置
+③ 輸出：用「,」連接所有位置編號
+       例：1,3 表示第 1 與第 3 個 □ 被標記
+
+子情境：MULTI-CHECK-OTHER（最後一個 □ 是「其他：___」開放欄位）：
+   - 若該 □ 被打勾且學生寫了文字 → 輸出 "N：[文字]"
+     例：「4：轉為文風鼎盛的社會」
+   - 若該 □ 被打勾但沒寫文字 → 只輸出位置編號（如 "4"）
+   - 若該 □ 沒打勾 → 忽略
+   組合範例：「1,3,4：轉為文風鼎盛的社會」（第 1、3 普通選項 + 第 4 其他含文字）
+
+readingReasoning 範例：
+   "理解：四個 □ 中，第 1 和第 4 個（其他：___）被打勾，其他欄位寫了「轉為文風鼎盛的社會」。
+    抄錄：位置 1 + 位置 4 含文字。輸出：1,4：轉為文風鼎盛的社會。"
+
+═══════════════════════════════════════════════════════════
+ALL FORMS — 統一禁止：
+- ❌ 不可依語意/邏輯決定 → 只看實際筆跡位置
+- ❌ 不可從相鄰題目推斷
+- ❌ AI2：不可用正確答案 hint 反推學生選擇
+- ✅ SELF-CHECK：學生有在『這題』的答案區做標記嗎？沒有 → blank
+- 注意：多選若所有選項都被標記，仍照樣輸出（非 unreadable，與單選不同）
+` : ''
+
+  const trueFalseRules = trueFalseIds.length > 0 ? `
+TRUE-FALSE (questions in TRUE-FALSE list):
+- Output ONLY the symbol or word the student wrote in the answer space.
+- Valid outputs: "○", "✗", "對", "錯", "是", "否", or the exact character written.
+- Do NOT append any explanatory text (e.g. output "○" NOT "○ 正確").
+` : ''
+
+  // single_check / multi_check / multi_check_other 規則已併入 single/multi-choice 統一規則 (3 forms)
+  const singleCheckRules = ''
+  const multiCheckRules = ''
+  const multiCheckOtherRules = ''
+
+  const fillBlankRules = fillBlankIds.length > 0 ? `
+FILL-BLANK (questions in FILL-BLANK list):
+- Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
+- Empty blank → "_". Unreadable blank → "?". All blanks empty → status="blank".
+- FORBIDDEN: surrounding printed text ("答", underline markers).${mathFillBlankRuleBlock}
+- 🚨 MULTIPLE BLANKS IN CROP (裁切圖包含多個括號):
+  If the cropped image shows content from MULTIPLE blanks or lines (e.g., you see two different ( ) with different answers), identify which blank is closest to the CENTER of the crop image — that is your target blank.
+  - Content near the EDGES (top, bottom, left, right) of the crop that belongs to a DIFFERENT blank — do NOT read it.
+  - Once you identify the target blank, read ALL handwriting inside it COMPLETELY — including faint, small, or offset characters. Do NOT skip any visible strokes within the target blank.${englishSpellingRuleBlock}
+` : ''
+
+  const calculationRules = calculationIds.length > 0 ? `
 CALCULATION (questions in CALCULATION list):
 - 🚨 CALCULATION QUESTION STRUCTURE:
   A calculation question has TWO parts:
@@ -2970,14 +3423,28 @@ CALCULATION (questions in CALCULATION list):
     =1
   Output: studentAnswerRaw = "1/2×2/3+2/3\\n=3/3\\n=1" (3 lines, matching 3 physical lines)
   WRONG output: "1/2×2/3+2/3 = 1/3+2/3 = 1" (merged into 1 line, inserted a step "1/3+2/3" that student never wrote)
+` : ''
 
+  // word_problem rules: if (domain, word_problem) has a specialization, use it (replaces generic).
+  // Otherwise emit the generic rule. Generic includes math-flavored bits (答: prefix, 直式)
+  // that apply when domain is 數學 or unspecified.
+  const wordProblemRules = (() => {
+    if (wordProblemIds.length === 0) return ''
+    const override = TYPE_DOMAIN_OVERRIDES.word_problem?.[domainHint]
+    if (override) return `\n${override}\n`
+    return `
 WORD-PROBLEM (questions in WORD-PROBLEM list):
 - 🚨 LINE-BY-LINE TRANSCRIPTION: Same rule as CALCULATION — scan top to bottom, one output line per physical handwritten line, separated by "\\n". Output line count must match physical line count.
 - FORBIDDEN: inserting steps, merging lines, or reorganizing the student's work.
 - Include the final answer sentence if present (e.g. "答: 小明走了120公尺").
 - If the work area is blank (no fresh marks) → status="blank".
 - VERTICAL FORMAT (直式): Same conversion rule as CALCULATION above — convert 直式 to horizontal equation (counts as one line), copy student's numbers faithfully without correction.
+`
+  })()
 
+  // PROPORTION TABLE: only emit when has math word_problem/calculation
+  const hasMathProcedural = (calculationIds.length > 0 || wordProblemIds.length > 0)
+  const proportionTableRules = (hasMathProcedural && (isMath || !hasAnyDomain)) ? `
 PROPORTION TABLE FORMAT (比例式格式) — applies to WORD-PROBLEM and CALCULATION questions:
 Students in Taiwan write ratio-scaling in several visual layouts. ALL of the following count as valid 列式:
 
@@ -3006,7 +3473,83 @@ Rules for all formats:
 - The ÷N or ×N annotation IS part of the calculation — do NOT skip it even if small or at the edge.
 - This two-row structure counts as valid 列式. Treat it the same as writing an explicit equation.
 - The operator may appear as: "×1000", "÷60", "÷10", "×5", etc.
+` : ''
 
+  return `
+Your job is to report what the student physically wrote or drew in each question's designated answer space.
+
+Visible question IDs on this image:
+${JSON.stringify(visibleIds)}
+${singleChoiceNote}${numericChoiceNote}${trueFalseNote}${multiCheckNote}${multiCheckOtherNote}${multiChoiceNote}${singleCheckNote}${fillBlankNote}${calculationNote}${wordProblemNote}${diagramDrawNote}${diagramColorNote}${matchingNote}${mapDrawSymbolNote}${mapDrawGridNote}${mapDrawConnectNote}${bboxHintNote}${tableCellHintNote}
+
+== ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
+You may ONLY output what is physically, visibly written by the student's own hand.
+NEVER output content that does not exist as physical handwriting in the image.
+NEVER output an answer based on:
+- answers you see in neighboring questions
+- printed option labels (A B C D 甲乙丙丁) that the student did NOT mark
+- data from charts, graphs, pie charts, tables, or diagrams visible in the image
+- mathematical calculation or inference from other visible information
+If the answer space is empty → blank. There are NO exceptions.
+🚨 CRITICAL: Even if you can SEE data (e.g. angles on a pie chart, values in a table header) that would let you CALCULATE what the answer should be, you MUST NOT do so. You are an OCR reader, not a calculator. If the student did not physically write an answer in the designated space, output blank — regardless of what you could infer from surrounding visual information.
+
+== INK COLOR RULE (critical) ==
+The student writes in BLUE or BLACK ink (pencil). The teacher corrects in RED ink.
+- ONLY read the student's BLUE/BLACK ink marks. This is the student's original answer.
+- IGNORE all RED ink marks — these are the teacher's corrections/marks added AFTER the student submitted.
+- If you see both red and blue/black writing in the same area, ONLY report the blue/black writing.
+- Common red ink marks to ignore: circled correct answers, check marks (✓/✗), score numbers, correction notes.
+- If the student's blue/black answer is crossed out by the student (self-correction with blue/black ink), read the final version the student intended.
+
+${MARKUP_VS_HANDWRITING_RULE}
+
+== BLANK FIRST RULE ==
+Before reading each question, ask yourself: "Is there fresh handwriting in this question's answer space?"
+- Answer space = the designated writing area: ( ), ___, □, or the answer line after "答:" "A:" "Ans:", or the entire work area for calculation/drawing questions.
+- If no fresh handwriting is present → status="blank", studentAnswerRaw="未作答". STOP. Do not read further.
+- Pre-printed content (labels, underlines, boxes, option letters A/B/C/D, artwork) does NOT count.
+- Only FRESH student BLUE/BLACK pen/pencil marks count. RED ink is the teacher's, not the student's.
+
+🚨 TABLE CELL EDGE RULE (applies to fill_blank questions in tables):
+When reading a tightly-cropped table cell, look for VERTICAL GRID LINES (直線) inside the crop image.
+- If you see a vertical grid line: that line is the cell boundary. Content on the OTHER SIDE of that line belongs to an adjacent cell — do NOT read it.
+  - Vertical line near the LEFT edge: only read content to the RIGHT of that line.
+  - Vertical line near the RIGHT edge: only read content to the LEFT of that line.
+  - Vertical lines on BOTH sides: only read content BETWEEN the two lines.
+- If the area between the grid lines (or in the center of the crop if no lines are visible) is empty → status="blank", studentAnswerRaw="未作答".
+- Numbers or text visible beyond a grid line are the NEIGHBOR's answer, not this question's. Reading them would cause cascading errors across all table questions.
+
+${digitOneRuleBlock}
+== COPY RULES (only when non-blank) ==
+You are an OCR scanner. Your ONLY job is to copy exactly what the student wrote. You have NO language ability, NO grammar knowledge, and NO understanding of meaning.
+
+1. Copy every character the student wrote, in the exact order written. Do NOT rearrange, reorder, or restructure.${mathSymbolPreserveRules}
+4. Copy grammatically wrong or nonsensical sentences exactly as written:
+   - Student wrote "你那麼高興，既然多吃一點" → output "你那麼高興，既然多吃一點" (do NOT reorder to fix grammar)
+   - Student wrote "既然你 ? 麼高" → output "既然你 ? 麼高" (copy the ? as written)
+5. Single unreadable character → replace with "?" and continue copying the rest. Do NOT mark the whole answer as unreadable just because one character is unclear.
+   - Example: student wrote "既然你[unclear]麼高興" → output "既然你?麼高興"
+6. Entire answer completely unreadable (cannot make out any characters) → status="unreadable", studentAnswerRaw="無法辨識".
+${outputLanguageRule}
+8. ABSOLUTELY FORBIDDEN — Character substitution:
+   Do NOT replace a written character with one that looks similar, sounds similar, or "makes more sense" in context.
+   Output exactly what is physically written, even if:
+   - It appears to be a typo (e.g. student wrote 它們 → output 它們, do NOT change to 他們)
+   - It seems grammatically wrong (e.g. student wrote 心裡 → output 心裡, do NOT change to 心理)
+   - A different character would be more "correct" (e.g. student wrote 仇恨 → output 仇恨, do NOT change to 仇視)
+   Your job is to report what the student physically wrote, not what they should have written.
+9. INSERTION MARK (插入符號 ∧ or 入-shape):
+   If the student uses a handwritten ∧ or 入-shaped symbol to indicate a text insertion:
+   - The tip of the symbol points to the insertion position in the original text.
+   - The inserted text is written above the symbol (between the symbol and the line above).
+   - Merge the inserted text into the original sentence at exactly that position.
+   - Output the COMPLETE merged result as if the insertion was always there. Do NOT mention the symbol.
+   - Follow the student's intent faithfully even if the merged result sounds grammatically odd.
+   - Example: student wrote "小明走路∧上學" with "快速" written above the ∧ → output "小明走路快速上學"
+   - Example: student wrote "答：速率為60∧" with "公尺" above the ∧ → output "答：速率為60公尺"
+${domainSectionBlock}${formatBComponentBlock}
+
+== QUESTION TYPE RULES ==${singleChoiceRules}${multiChoiceRules}${trueFalseRules}${singleCheckRules}${multiCheckRules}${multiCheckOtherRules}${fillBlankRules}${calculationRules}${wordProblemRules}${proportionTableRules}
 FORBIDDEN:
 - Guessing or inferring what the student meant to write
 - Outputting any answer for a question with an empty answer space
@@ -3121,7 +3664,7 @@ Return:
       "questionId": "string",
       "studentAnswerRaw": "exact text as written",
       "status": "read|blank|unreadable",
-      "formatBReasoning": "only for FORMAT B questions: step-by-step spatial reasoning (omit for all other question types)",
+      "readingReasoning": "理解 → 抄錄 → 輸出 三段推理 (REQUIRED for SINGLE-CHOICE / MULTI-CHOICE; future types may also require it)",
       "rawSpelling": "d-i-n-n-g r-o-o-m (English fill_blank only: spell out every letter with dashes, spaces between words)"
     }
   ]
@@ -3165,12 +3708,7 @@ STRICT RULES:
 - If the answer space is empty → status='blank', even if you know the correct answer.
 - The correct answer only helps you LOOK MORE CAREFULLY — it does NOT change what you report.
 
-⚠️ DIGIT-1 SPECIAL CASE (重要例外):
-The handwritten digit "1" is, by its nature, just a single vertical stroke (一豎). This is its NORMAL appearance — not noise, not a stray mark, not a hallucination.
-- If you see a single vertical stroke inside the answer space, it IS a valid handwritten "1". Output "1", status="read".
-- Do NOT dismiss it as blank just because the stroke looks minimal or because you are worried about confirming the correct answer.
-- This applies regardless of whether the correct answer is "1" or not. A vertical stroke is a "1" based on its physical shape, not based on the answer hint.
-- Anti-confirmation bias does NOT mean you should reject legitimate minimal strokes. "1" really does look like just one line — that is the truth of the digit, not a trick.
+${AI2_ANTI_BIAS_FRAMEWORK}
 
 ${basePrompt}`
 }
@@ -4628,7 +5166,8 @@ export async function runStagedGradingPhaseA({
   const ai1IncludeIds = Array.from(allQuestionCropMap.keys())
   const ai1TextPrompt = buildDetailReadPrompt(classifyResult, {
     includeQuestionIds: ai1IncludeIds.length > 0 ? ai1IncludeIds : undefined,
-    answerKeyQuestions: answerKeyQuestions
+    answerKeyQuestions: answerKeyQuestions,
+    domainHint: internalContext?.domainHint
   })
   const ai1Parts = [{ text: ai1TextPrompt }]
   for (const q of classifyAligned) {
@@ -4647,7 +5186,10 @@ export async function runStagedGradingPhaseA({
   // AI2 uses buildReviewReadPrompt: same rules as AI1, but knows correct answers (review role).
   // Labels include correct answer so AI2 can use it as a verification hint.
   const akMapForAi2 = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
-  const globalReadPrompt = buildReviewReadPrompt(classifyResult, { answerKeyQuestions })
+  const globalReadPrompt = buildReviewReadPrompt(classifyResult, {
+    answerKeyQuestions,
+    domainHint: internalContext?.domainHint
+  })
   const ai2Parts = [{ text: globalReadPrompt }]
   for (const q of classifyAligned) {
     if (!q.visible) continue
@@ -4806,7 +5348,7 @@ export async function runStagedGradingPhaseA({
           logStaged(pipelineRunId, stagedLogLevel, `bracket-read result qid=${q.questionId}`, {
             studentAnswerRaw: answer.studentAnswerRaw,
             status: answer.status,
-            formatBReasoning: answer.formatBReasoning
+            readingReasoning: answer.readingReasoning || answer.formatBReasoning
           })
         }
         return answer ? { questionId: q.questionId, answer } : null
@@ -4883,7 +5425,8 @@ export async function runStagedGradingPhaseA({
         questionIds: missingFocusedIds
       })
       const fallbackPrompt = buildReadAnswerPrompt(classifyResult, {
-        includeQuestionIds: missingFocusedIds
+        includeQuestionIds: missingFocusedIds,
+        domainHint: internalContext?.domainHint
       })
       const fallbackResponse = await executeStage({
         apiKey,
