@@ -2313,26 +2313,40 @@ Rules:
   - compound_linked: bbox 必須涵蓋整題所有部分（含理由/改正/開放欄/連動 cell）。**禁止只框其一**（compound_circle/check/writein_with_explain / compound_judge_with_correction/explain / multi_check_other / compound_chain_table 用）.
   - answer_with_context: bbox 涵蓋答案區 + 鄰近印刷元素（如預印選項、方框列、文章上下文）（circle_select_one/many / single_check / multi_check / multi_choice / mark_in_text 用）.
   - tight_answer: bbox 緊框答案空格本身，**不框題幹**（${isAnswerOnly ? 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，每子題各自一個 tight bbox' : 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，single_choice 約 25-35% 頁寬'}）.
-- TABLE POSITION RULE (HIGHEST PRIORITY — when tablePosition is present in the spec, this rule OVERRIDES ALL other bbox rules including ANCHOR RULE, TABLE COLUMN RULE, and ORDERING RULE. Skip them entirely.):
-    When a question spec includes tablePosition (e.g. {"col": 3, "row": 3, "totalCols": 7, "totalRows": 3}), the answer is in a TABLE GRID.
+- TABLE POSITION RULE (HIGHEST PRIORITY — when tablePosition is in spec, this overrides ANCHOR / TABLE_COLUMN / ORDERING rules):
+    觸發：spec 帶 tablePosition (e.g. { col, row, totalCols, totalRows, colspan?, rowspan?, refBbox? })
 
-    【格線偵測法】（唯一定位方法 — 必須在學生卷圖片上實際偵測格線）
-    步驟：
-    1. 在 STUDENT_SUBMISSION 圖片上找到表格的外框邊界（最外圍的格線）
-    2. 數垂直格線（含左右外框）：從左到右依序編號 V1, V2, V3, ..., V(N+1)。N+1 條垂直線 = N 欄
-    3. 數水平格線（含上下外框）：從上到下依序編號 H1, H2, H3, ..., H(M+1)。M+1 條水平線 = M 列
-    4. 第 C 欄 = V(C) 與 V(C+1) 之間的空間。第 R 列 = H(R) 與 H(R+1) 之間的空間
-    5. 驗證：totalCols（spec 給的）應等於你數的垂直線數 - 1。若不符，重新計數
-    6. 目標格 bbox: x = V(col) 的 x 座標, y = H(row) 的 y 座標, w = V(col+1) - V(col), h = H(row+1) - H(row)
-    ⚠️ 重要：你必須在學生卷圖片上實際找到格線位置。不要直接複製 refBbox 的座標 — refBbox 來自答案卷，可能因掃描對齊差異而有水平偏移。
-    refBbox 僅供驗證用：如果你偵測到的 x 與 refBbox.x 差距超過 0.08，代表格線計數可能有誤，請重新計數。
+    【規則優先順序】
 
-    🚨 空白格防漂移規則（最高優先）：
-    當目標格內沒有任何學生手寫內容（空白格）時，你仍然必須將 answerBbox 放在該空白格的正確位置上。
-    嚴禁因為目標格是空白的，就把 bbox 漂移到相鄰的有內容的格子。
-    bbox 的位置由座標決定，與格內是否有內容完全無關。
+    ① 空白格防漂移（最高優先 — bbox 位置由座標決定）：
+       目標格內是否有學生手寫**完全不影響** bbox 位置。
+       嚴禁因為目標格空白就把 bbox 漂移到相鄰有內容的格子。
 
-    8. Output tablePositionReasoning (MANDATORY): format: "detected V-lines=[x1,x2,...]. Target col=N → V(N)=x, V(N+1)=x2. refBbox.x=X (verify). bbox=[x,y,w,h]"
+    ② 格線偵測法（首選定位方法 — 必須在 STUDENT_SUBMISSION 上實際數格線）：
+       1. 找到表格的外框邊界（最外圍的格線）
+       2. 數垂直格線（含左右外框）：從左到右依序 V1, V2, V3, ..., V(N+1)。N+1 條 = N 欄
+       3. 數水平格線（含上下外框）：從上到下依序 H1, H2, H3, ..., H(M+1)。M+1 條 = M 列
+       4. 第 C 欄 = V(C) 與 V(C+1) 之間；第 R 列 = H(R) 與 H(R+1) 之間
+       5. 驗證 totalCols：spec 給的 totalCols 應 = 你數的垂直線數 − 1。若不符，重新計數
+       6. 目標格 bbox：x = V(col)，y = H(row)，w = V(col+1) − V(col)，h = H(row+1) − H(row)
+
+    ③ 合併格處理（spec 帶 colspan / rowspan 時）：
+       - colspan = K：bbox 寬度改為 V(col+K) − V(col)（橫跨 K 欄）
+       - rowspan = K：bbox 高度改為 H(row+K) − H(row)（縱跨 K 列）
+
+    ④ Fallback（格線不清時，例如被學生筆跡覆蓋、掃描品質差、表格無完整外框）：
+       若無法清晰偵測格線，使用 spec.tablePosition.refBbox 作為座標起點。
+       refBbox 是答案卷對應格座標，但水平可有最多 0.08（8% 頁寬）的掃描偏移。
+       Fallback 時應以 refBbox 為基準，再用目視確認該格的水平範圍做小幅修正。
+
+    ⑤ refBbox 一致性驗證（②路徑完成後執行）：
+       將你算出的 bbox.x 與 refBbox.x 比對。
+       差距 > 0.08（8% 頁寬）→ 強烈暗示格線計數有誤，請重新計數（回 ②.5）。
+       y 值可信度高（同份試卷垂直 layout 一致），可作為 row 定位的初步驗證。
+
+    ⑥ tablePositionReasoning（MANDATORY 輸出）：
+       純文字格式：detected V-lines=[x1,x2,...]. Target col=N → V(N)=x, V(N+1)=x2. refBbox.x=X (verify). bbox=[x,y,w,h]
+       若走 Fallback 路徑：fallback: refBbox-based, V-lines unclear due to [reason]. bbox=[x,y,w,h]
 - For visible=true questions, output answerBbox per the type-specific rules below. Each rule specifies what to include (視覺+動作), what to frame, what to exclude (禁止), and any sub-rules.
   - ${isAnswerOnly ? 'ANSWER-ONLY MODE: bbox includes question number + answer area only; no question stem text exists on this sheet.' : 'Default principle: bbox should include question number + relevant printed elements + student\'s answer area, per the per-type rule.'}
 
