@@ -85,12 +85,13 @@ const QUESTION_CATEGORY_TO_BUCKET = {
   map_draw: 'C',
   diagram_draw: 'C',
   diagram_color: 'C',
-  // Bucket D — 複合題（標準答案 + Rubric 並存）
+  // Bucket D — 複合題（多部分有依存關係，必須一起評分）
   compound_circle_with_explain: 'D',
   compound_check_with_explain: 'D',
   compound_writein_with_explain: 'D',
   multi_check_other: 'D',
   compound_judge_with_correction: 'D',
+  compound_chain_table: 'D',
 }
 
 // Bucket → 舊 internal type 1/2/3 (向後相容用，新代碼應直接使用 bucket)
