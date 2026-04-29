@@ -2208,18 +2208,9 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
       })()
     : ''
 
-  const imageReferenceSection = answerKeyPageCount > 0
-    ? (() => {
-        if (answerKeyPageCount === 1) {
-          return `\nIMAGE ORDER:\n- Image 1: ANSWER_KEY_REFERENCE — the teacher's correct answers are marked in red ink. Use ONLY as spatial reference to find answer area positions (do NOT read answers from this image).\n- Image 2: STUDENT_SUBMISSION — the student's paper. Locate the same answer areas as shown in the reference.\n`
-        }
-        const refLines = Array.from({ length: answerKeyPageCount }, (_, i) =>
-          `- Image ${i + 1}: ANSWER_KEY_REFERENCE page ${i + 1} — question IDs with prefix "${i + 1}-" are located on this page. Use ONLY as spatial reference to find answer area positions (do NOT read answers from this image).`
-        ).join('\n')
-        const submissionNote = `- Image ${answerKeyPageCount + 1}: STUDENT_SUBMISSION — all student pages merged into one image vertically. Use PAGE BOUNDARIES below to determine which part of this image corresponds to each page prefix.`
-        return `\nIMAGE ORDER:\n${refLines}\n${submissionNote}\n`
-      })()
-    : ''
+  // 答案卷圖片不再傳給 classify — 完全獨立於老師的答案卷找 bbox
+  // 兩者可能尺寸/角度/狀態不同，用答案卷推學生卷位置不可靠
+  const imageReferenceSection = ''
 
   const isAnswerOnly = answerSheetMode === 'answer_only'
 
@@ -2252,9 +2243,7 @@ Rules:
 - Use only the allowed question IDs above.
 - For each questionId, questionType MUST exactly match Question Specs.
 - Never re-classify question type based on visual guess.
-- If ANSWER_KEY_REFERENCE image(s) are provided, follow this two-step process for each question:
-  STEP 1 — Find the answer area on ANSWER_KEY_REFERENCE: The teacher's correct answers are written in red ink directly inside each answer area. Locate the red handwritten text for this question. That red text region is the answer area. Ignore any pre-printed example content (範例/例) — only red handwritten ink marks the real answer area.
-  STEP 2 — Map to STUDENT_SUBMISSION: The student paper has the same printed layout. Use the position found in Step 1 to locate the corresponding area on STUDENT_SUBMISSION. Output that region as answerBbox. The student will have written their answer in that same area.
+- ⚠️ 你只看到一張圖：學生卷（STUDENT_SUBMISSION）。沒有答案卷可參考。bbox 必須**完全從學生卷的視覺特徵**找出（印刷的底線/括號/方框/題號 + 學生手寫筆跡）。
 - visible=true if you can see the question and its answer area on this image.
 - visible=false if the question is absent, cut off, or not on this image.
 - bboxPolicy MUST follow Question Specs（6 種策略，依 type 行為決定 bbox 範圍）:
@@ -4902,12 +4891,11 @@ export async function runStagedGradingPhaseA({
     // Single page (or all questions share one page) — one call
     const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
     const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-    const akPageCount = answerKeyImageParts.length > 0 ? answerKeyImageParts.length : 0
-    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, akPageCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
     const classifyResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-      stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...answerKeyImageParts, ...submissionImageParts] }]
+      stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...submissionImageParts] }]
     })
     logStageEnd(pipelineRunId, 'classify-p1', classifyResponse)
     stageResponses.push(classifyResponse)
@@ -4941,17 +4929,13 @@ export async function runStagedGradingPhaseA({
         splitPages: splitPages?.length, pageEntries: pageEntries.length, pageBreaksLength: pageBreaks.length
       })
       const classifyResponses = await Promise.all(
-        pageEntries.map(([pageNum, ids]) => {
+        pageEntries.map(([, ids]) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-          // Per-page: pass matching answer key page image (pageNum is 1-indexed, array is 0-indexed)
-          const akPage = answerKeyImageParts[pageNum - 1]
-          const akParts = akPage ? [akPage] : []
-          const akCount = akPage ? 1 : 0
-          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...akParts, ...submissionImageParts] }]
+            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...submissionImageParts] }]
           })
         })
       )
@@ -4984,19 +4968,15 @@ export async function runStagedGradingPhaseA({
         pages: splitPages.map((p, i) => ({ page: pageEntries[i][0], startY: +p.pageStartY.toFixed(3), endY: +p.pageEndY.toFixed(3) }))
       })
       const classifyResponses = await Promise.all(
-        pageEntries.map(([pageNum, ids], i) => {
+        pageEntries.map(([, ids], i) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-          // Per-page: pass matching answer key page image (1 answer key page + 1 student page)
-          const akPage = answerKeyImageParts[pageNum - 1]
-          const akParts = akPage ? [akPage] : []
-          const akCount = akPage ? 1 : 0
           // No pageBreaks — single-page image, AI outputs bbox in 0~1 relative to this page
-          const prompt = buildClassifyPrompt(ids, specs, [], akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+          const prompt = buildClassifyPrompt(ids, specs, [], 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           const pageImagePart = { inlineData: splitPages[i].inlineData }
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...akParts, pageImagePart] }]
+            stageContents: [{ role: 'user', parts: [{ text: prompt }, pageImagePart] }]
           })
         })
       )
@@ -5124,12 +5104,11 @@ export async function runStagedGradingPhaseA({
     if (pageEntries.length <= 1) {
       const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
       const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-      const akPageCount = answerKeyImageParts.length > 0 ? answerKeyImageParts.length : 0
-      const retryPrompt = buildClassifyPrompt(ids, specs, pageBreaks, akPageCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+      const retryPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
       const retryResp = await executeStage({
         apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-        stageContents: [{ role: 'user', parts: [{ text: retryPrompt }, ...answerKeyImageParts, ...submissionImageParts] }]
+        stageContents: [{ role: 'user', parts: [{ text: retryPrompt }, ...submissionImageParts] }]
       })
       logStageEnd(pipelineRunId, 'classify-retry', retryResp)
       stageResponses.push(retryResp)
@@ -5149,17 +5128,14 @@ export async function runStagedGradingPhaseA({
       const splitPages = await splitSubmissionImageByPageBreaks(submissionImg.data, submissionImg.mimeType, pageBreaks)
       const useSplit = splitPages && splitPages.length === pageEntries.length
       const retryResponses = await Promise.all(
-        pageEntries.map(([pageNum, ids], i) => {
+        pageEntries.map(([, ids], i) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-          const akPage = answerKeyImageParts[pageNum - 1]
-          const akParts = akPage ? [akPage] : []
-          const akCount = akPage ? 1 : 0
-          const prompt = buildClassifyPrompt(ids, specs, useSplit ? [] : pageBreaks, akCount, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+          const prompt = buildClassifyPrompt(ids, specs, useSplit ? [] : pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           const imgPart = useSplit ? { inlineData: splitPages[i].inlineData } : submissionImageParts[0]
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
-            stageContents: [{ role: 'user', parts: [{ text: prompt }, ...akParts, imgPart] }]
+            stageContents: [{ role: 'user', parts: [{ text: prompt }, imgPart] }]
           })
         })
       )
