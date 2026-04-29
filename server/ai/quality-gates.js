@@ -832,9 +832,23 @@ const VALID_QUESTION_CATEGORIES = new Set([
 ])
 
 // Categories that MUST have a non-empty answer or referenceAnswer
+// 跟 redpenai/src/lib/gemini.ts 的 AK_ANSWER_REQUIRED 同步
 const ANSWER_REQUIRED_CATEGORIES = new Set([
-  'fill_blank', 'single_choice', 'true_false', 'multi_check', 'multi_choice',
-  'multi_check_other', 'single_check', 'fill_variants'
+  // Bucket A
+  'single_choice', 'multi_choice', 'circle_select_one', 'circle_select_many',
+  'single_check', 'multi_check', 'true_false', 'fill_blank', 'multi_fill',
+  'matching', 'ordering', 'mark_in_text',
+  'calculation', 'word_problem',
+  // Bucket B
+  'fill_variants',
+  // Bucket C（referenceAnswer + rubricsDimensions）
+  'short_answer',
+  'map_symbol', 'grid_geometry', 'connect_dots',
+  'diagram_draw', 'diagram_color',
+  // Bucket D（compound_chain_table 例外，純 rubric）
+  'compound_circle_with_explain', 'compound_check_with_explain',
+  'compound_writein_with_explain', 'multi_check_other',
+  'compound_judge_with_correction', 'compound_judge_with_explain'
 ])
 
 /**
