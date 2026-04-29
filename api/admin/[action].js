@@ -1593,9 +1593,22 @@ async function handleUserStats(req, res, supabaseAdmin) {
       fetchAllRows((from, to) => supabaseAdmin.from('students').select('auth_user_id').not('auth_user_id', 'is', null).range(from, to)),
     ])
 
-    // 建立學生帳號 Set，用於過濾掉學生（profiles.id 出現在 students.auth_user_id 中的就是學生）
+    // 建立學生帳號 Set
     const studentAuthUserIds = new Set(studentAuthUserData.map(s => s.auth_user_id))
-    const users = allProfiles.filter(u => !studentAuthUserIds.has(u.id))
+
+    // 建立「有教師活動」Set：有建班級或作業，或為 advanced tier，視為老師
+    const teacherActivityIds = new Set()
+    classroomStatsData.forEach(row => { if (row.owner_id) teacherActivityIds.add(row.owner_id) })
+    assignmentStatsData.forEach(row => { if (row.owner_id) teacherActivityIds.add(row.owner_id) })
+
+    // 只過濾「純學生」：在 students.auth_user_id 中、且沒任何教師訊號
+    // 雙重身份（老師＋學生）保留顯示
+    const users = allProfiles.filter(u => {
+      if (!studentAuthUserIds.has(u.id)) return true
+      if (teacherActivityIds.has(u.id)) return true
+      if (u.permission_tier === 'advanced') return true
+      return false
+    })
 
     // 班級數
     const classroomCountMap = {}
@@ -1684,6 +1697,7 @@ async function handleUserStats(req, res, supabaseAdmin) {
           lastActiveAt: user.updated_at,
           students,
           status,
+          isAlsoStudent: studentAuthUserIds.has(user.id),
         }
       })
 
@@ -1829,7 +1843,7 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       recentInkLedgerResult,
       studentAuthUserData,
     ] = await Promise.all([
-      fetchAllRows((from, to) => supabaseAdmin.from('profiles').select('id, email, name, avatar_url, ink_balance, created_at').neq('role', 'admin').order('created_at', { ascending: false }).range(from, to)),
+      fetchAllRows((from, to) => supabaseAdmin.from('profiles').select('id, email, name, avatar_url, ink_balance, permission_tier, created_at').neq('role', 'admin').order('created_at', { ascending: false }).range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('id, name, owner_id').range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('students').select('id, name, owner_id, classroom_id').range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('submissions').select('student_id, owner_id, graded_at, created_at').range(from, to)),
@@ -1843,9 +1857,18 @@ async function handleAnalytics(req, res, supabaseAdmin) {
       fetchAllRows((from, to) => supabaseAdmin.from('students').select('auth_user_id').not('auth_user_id', 'is', null).range(from, to)),
     ])
 
-    // 過濾掉學生帳號，只保留教師
+    // 只過濾「純學生」：在 students.auth_user_id 中、且沒任何教師訊號
+    // 雙重身份（老師＋學生）保留為老師統計
     const studentAuthUserIds = new Set(studentAuthUserData.map(s => s.auth_user_id))
-    const allTeachers = allProfiles.filter(p => !studentAuthUserIds.has(p.id))
+    const teacherActivityIds = new Set()
+    allClassrooms.forEach(c => { if (c.owner_id) teacherActivityIds.add(c.owner_id) })
+    allSubmissions.forEach(s => { if (s.owner_id) teacherActivityIds.add(s.owner_id) })
+    const allTeachers = allProfiles.filter(p => {
+      if (!studentAuthUserIds.has(p.id)) return true
+      if (teacherActivityIds.has(p.id)) return true
+      if (p.permission_tier === 'advanced') return true
+      return false
+    })
 
     // ── 基礎 map ─────────────────────────────────────────────────────────────
     const teacherNameMap = {}
