@@ -145,6 +145,20 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
     if (uploadError) { res.status(500).json({ error: `Upload failed for page ${i}: ${uploadError.message}` }); return }
     paths.push(storagePath)
   }
+
+  // 直接持久化到 assignments 對應欄位
+  const updatePayload = prefix === 'answer-sheets'
+    ? { answer_sheet_image_paths: paths }
+    : { question_booklet_image_paths: paths }
+  const { error: updateError } = await supabaseDb
+    .from('assignments')
+    .update(updatePayload)
+    .eq('id', assignmentId)
+    .eq('owner_id', user.id)
+  if (updateError) {
+    console.warn(`[${prefix}] paths uploaded to Storage but failed to persist column for ${assignmentId}: ${updateError.message}`)
+  }
+
   res.status(200).json({ paths })
 }
 

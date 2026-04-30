@@ -2994,6 +2994,9 @@ async function handleSync(req, res) {
             answerKeyTemplateId: row.answer_key_template_id ?? undefined,
             conceptTags: row.concept_tags ?? undefined,
             studentUploadEnabled: row.student_upload_enabled ?? undefined,
+            answerSheetImagePaths: row.answer_sheet_image_paths ?? undefined,
+            questionBookletImagePaths: row.question_booklet_image_paths ?? undefined,
+            answerSheetMode: row.answer_sheet_mode ?? undefined,
             updatedAt: toMillis(row.updated_at) ?? undefined
           })
         )
@@ -3522,6 +3525,9 @@ async function handleSync(req, res) {
             answer_key_template_id: a.answerKeyTemplateId ?? a.answer_key_template_id ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
             student_upload_enabled: a.studentUploadEnabled ?? a.student_upload_enabled ?? undefined,
+            answer_sheet_image_paths: a.answerSheetImagePaths ?? a.answer_sheet_image_paths ?? undefined,
+            question_booklet_image_paths: a.questionBookletImagePaths ?? a.question_booklet_image_paths ?? undefined,
+            answer_sheet_mode: a.answerSheetMode ?? a.answer_sheet_mode ?? undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(a.updatedAt ?? a.updated_at) ?? nowIso
           })
