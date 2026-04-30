@@ -86,6 +86,19 @@ async function verifyAssignmentOwnership(supabaseDb, assignmentId, userId) {
   return { ok: true, assignment }
 }
 
+async function verifyTemplateOwnership(supabaseDb, templateId, userId) {
+  const { data: template, error } = await supabaseDb
+    .from('answer_key_templates')
+    .select('id, owner_id')
+    .eq('id', templateId)
+    .maybeSingle()
+  if (error) return { ok: false, status: 500, error: error.message }
+  if (template && template.owner_id !== userId) {
+    return { ok: false, status: 403, error: 'Forbidden' }
+  }
+  return { ok: true, template }
+}
+
 async function handleAnswerSheetDownload(req, res, user, supabaseDb) {
   const assignmentId = Array.isArray(req.query?.assignmentId)
     ? req.query.assignmentId[0] : req.query?.assignmentId
@@ -111,24 +124,63 @@ async function handleAnswerSheetDownload(req, res, user, supabaseDb) {
   res.status(200).send(buffer)
 }
 
+async function handleTemplateAnswerSheetDownload(req, res, user, supabaseDb) {
+  const templateId = Array.isArray(req.query?.templateId)
+    ? req.query.templateId[0] : req.query?.templateId
+  const pageIndexRaw = Array.isArray(req.query?.pageIndex)
+    ? req.query.pageIndex[0] : req.query?.pageIndex
+
+  if (!templateId) { res.status(400).json({ error: 'Missing templateId' }); return }
+  const pageIndex = pageIndexRaw !== undefined ? parseInt(pageIndexRaw, 10) : 0
+  if (isNaN(pageIndex) || pageIndex < 0) { res.status(400).json({ error: 'Invalid pageIndex' }); return }
+
+  const own = await verifyTemplateOwnership(supabaseDb, templateId, user.id)
+  if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+  if (!own.template) { res.status(404).json({ error: 'Template not found' }); return }
+
+  const storagePath = `template-answer-sheets/${templateId}/page-${pageIndex}.webp`
+  const { data, error: downloadError } = await supabaseDb.storage
+    .from('homework-images').download(storagePath)
+  if (downloadError || !data) { res.status(404).json({ error: 'Image not found' }); return }
+
+  const buffer = Buffer.from(await data.arrayBuffer())
+  res.setHeader('Content-Type', 'image/webp')
+  res.setHeader('Content-Length', buffer.length)
+  res.setHeader('Cache-Control', 'private, max-age=3600')
+  res.status(200).send(buffer)
+}
+
 async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
-  const { assignmentId, imagesBase64, storagePrefix } = req.body ?? {}
-  if (!assignmentId || typeof assignmentId !== 'string') {
-    res.status(400).json({ error: 'Missing assignmentId' }); return
+  const { assignmentId, templateId, imagesBase64, storagePrefix } = req.body ?? {}
+  const isTemplate = !assignmentId && typeof templateId === 'string' && templateId.length > 0
+  if (!isTemplate && (!assignmentId || typeof assignmentId !== 'string')) {
+    res.status(400).json({ error: 'Missing assignmentId or templateId' }); return
   }
   if (!Array.isArray(imagesBase64) || imagesBase64.length === 0) {
     res.status(400).json({ error: 'Missing imagesBase64 array' }); return
   }
-  // 允許 answer-sheets（預設）和 question-booklets 兩種前綴
-  const allowedPrefixes = ['answer-sheets', 'question-booklets']
-  const prefix = allowedPrefixes.includes(storagePrefix) ? storagePrefix : 'answer-sheets'
+  // 允許 answer-sheets / question-booklets / template-answer-sheets 三種前綴
+  const allowedPrefixes = ['answer-sheets', 'question-booklets', 'template-answer-sheets']
+  let prefix
+  if (isTemplate) {
+    // 模板：強制使用 template-answer-sheets 前綴（題本圖目前沿用 question-booklets/{templateId}/...）
+    prefix = storagePrefix === 'question-booklets' ? 'question-booklets' : 'template-answer-sheets'
+  } else {
+    prefix = allowedPrefixes.includes(storagePrefix) ? storagePrefix : 'answer-sheets'
+  }
   const maxPages = prefix === 'question-booklets' ? 20 : MAX_ANSWER_SHEET_PAGES
   if (imagesBase64.length > maxPages) {
     res.status(400).json({ error: `Too many pages (max ${maxPages})` }); return
   }
 
-  const own = await verifyAssignmentOwnership(supabaseDb, assignmentId, user.id)
-  if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+  const ownerEntityId = isTemplate ? templateId : assignmentId
+  if (isTemplate) {
+    const own = await verifyTemplateOwnership(supabaseDb, templateId, user.id)
+    if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+  } else {
+    const own = await verifyAssignmentOwnership(supabaseDb, assignmentId, user.id)
+    if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+  }
 
   const paths = []
   for (let i = 0; i < imagesBase64.length; i++) {
@@ -138,7 +190,7 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
     if (buffer.length > MAX_ANSWER_SHEET_IMAGE_SIZE) {
       res.status(400).json({ error: `Page ${i} exceeds max size of 2 MB` }); return
     }
-    const storagePath = `${prefix}/${assignmentId}/page-${i}.webp`
+    const storagePath = `${prefix}/${ownerEntityId}/page-${i}.webp`
     const { error: uploadError } = await supabaseDb.storage
       .from('homework-images')
       .upload(storagePath, buffer, { contentType: 'image/webp', upsert: true })
@@ -146,17 +198,31 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
     paths.push(storagePath)
   }
 
-  // 直接持久化到 assignments 對應欄位
-  const updatePayload = prefix === 'answer-sheets'
-    ? { answer_sheet_image_paths: paths }
-    : { question_booklet_image_paths: paths }
-  const { error: updateError } = await supabaseDb
-    .from('assignments')
-    .update(updatePayload)
-    .eq('id', assignmentId)
-    .eq('owner_id', user.id)
+  // 持久化到對應表的對應欄位
+  let updateError
+  if (isTemplate) {
+    const updatePayload = prefix === 'question-booklets'
+      ? { question_booklet_image_paths: paths }
+      : { answer_sheet_image_paths: paths }
+    const result = await supabaseDb
+      .from('answer_key_templates')
+      .update(updatePayload)
+      .eq('id', templateId)
+      .eq('owner_id', user.id)
+    updateError = result.error
+  } else {
+    const updatePayload = prefix === 'answer-sheets'
+      ? { answer_sheet_image_paths: paths }
+      : { question_booklet_image_paths: paths }
+    const result = await supabaseDb
+      .from('assignments')
+      .update(updatePayload)
+      .eq('id', assignmentId)
+      .eq('owner_id', user.id)
+    updateError = result.error
+  }
   if (updateError) {
-    console.warn(`[${prefix}] paths uploaded to Storage but failed to persist column for ${assignmentId}: ${updateError.message}`)
+    console.warn(`[${prefix}] paths uploaded to Storage but failed to persist column for ${ownerEntityId}: ${updateError.message}`)
   }
 
   res.status(200).json({ paths })
@@ -253,6 +319,13 @@ export default async function handler(req, res) {
     }
 
     const supabaseDb = getSupabaseAdmin()
+
+    // GET with templateId → template answer sheet download
+    const templateIdParam = req.query?.templateId
+    if (templateIdParam) {
+      await handleTemplateAnswerSheetDownload(req, res, user, supabaseDb)
+      return
+    }
 
     // GET with assignmentId → answer sheet or crop download
     const assignmentIdParam = req.query?.assignmentId

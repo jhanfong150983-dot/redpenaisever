@@ -3188,6 +3188,7 @@ async function handleSync(req, res) {
           shareCode: row.share_code ?? undefined,
           pageOrientations: row.page_orientations ?? undefined,
           answerSheetMode: row.answer_sheet_mode ?? undefined,
+          answerSheetImagePaths: row.answer_sheet_image_paths ?? undefined,
           questionBookletImagePaths: row.question_booklet_image_paths ?? undefined,
           version: row.version ?? 1,
           updatedAt: toMillis(row.updated_at) ?? undefined
@@ -3566,6 +3567,7 @@ async function handleSync(req, res) {
           share_code: t.shareCode ?? t.share_code ?? ('AK-' + Math.random().toString(36).substring(2, 8).toUpperCase()),
           page_orientations: t.pageOrientations ?? t.page_orientations ?? undefined,
           answer_sheet_mode: t.answerSheetMode ?? t.answer_sheet_mode ?? undefined,
+          answer_sheet_image_paths: t.answerSheetImagePaths ?? t.answer_sheet_image_paths ?? undefined,
           question_booklet_image_paths: t.questionBookletImagePaths ?? t.question_booklet_image_paths ?? undefined,
           version: t.version ?? 1,
           updated_at: toIsoTimestamp(t.updatedAt ?? t.updated_at) ?? nowIso
