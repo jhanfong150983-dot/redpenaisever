@@ -676,7 +676,7 @@ async function handleOAuthInitiate(req, res) {
       client_id: clientId,
       response_type: 'code',
       redirect_uri: callbackUrl,
-      scope: 'User.Mail,jasmine,jasmine.contact',
+      scope: 'User.Mail,User.BasicInfo',
       state: stateB64
     }).toString()
 
