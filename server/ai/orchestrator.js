@@ -506,7 +506,10 @@ export async function runAiPipeline({
           return typeof q.maxScore === 'number' && Math.abs(dimSum - q.maxScore) > 0.5
         }).length
         console.log(`${logPrefix} [answer_key.extract] result: ${questions.length} questions, totalScore=${parsed.totalScore}, categories=${JSON.stringify(catCounts)}, withBbox=${hasBboxCount}, withAnswer=${hasAnswerCount}${dimMismatch > 0 ? `, dimScoreMismatch=${dimMismatch}` : ''}`)
-        console.log(`${logPrefix} [answer_key.extract] _layoutDetected=${parsed._layoutDetected ?? '(missing)'}`)
+        const layoutSummary = Array.isArray(parsed._layoutDetected)
+          ? parsed._layoutDetected.map(p => `photo${p?.photo ?? '?'}=${p?.layout ?? '?'}`).join(', ')
+          : (parsed._layoutDetected ?? '(missing)')
+        console.log(`${logPrefix} [answer_key.extract] _layoutDetected: ${layoutSummary}`)
         // Log questions with potential issues
         const issues = questions.filter(q => !(q.id || '').trim() || (q.maxScore == null) || q.maxScore <= 0)
         if (issues.length > 0) {
