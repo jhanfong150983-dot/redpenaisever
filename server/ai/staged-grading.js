@@ -4415,7 +4415,8 @@ function buildExplainPrompt(
   accessorResult,
   explainQuestionIds,
   domainHint,
-  answerSheetMode = 'with_questions'
+  answerSheetMode = 'with_questions',
+  hasBooklet = true
 ) {
   const explainSet = new Set(explainQuestionIds)
   const keyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
@@ -4426,6 +4427,79 @@ function buildExplainPrompt(
   const wrongScores = Array.isArray(accessorResult?.scores)
     ? accessorResult.scores.filter((s) => explainSet.has(ensureString(s?.questionId).trim()))
     : []
+
+  // 答案卷模式 + 無題本：只能產通用引導，不可編造題目內容
+  const isAnswerOnlyNoBooklet = answerSheetMode === 'answer_only' && !hasBooklet
+
+  if (isAnswerOnlyNoBooklet) {
+    return `
+You are stage Explain (ANSWER-ONLY mode WITHOUT question booklet).
+
+⚠️ CRITICAL CONSTRAINT — you DO NOT have access to the actual question text.
+The teacher uploaded a pure answer card (no question booklet). You can see only:
+- The question's questionCategory (single_choice / multi_choice / fill_blank / short_answer)
+- The student's answer
+- The correct answer
+- The mistake type / scoring reason
+
+You MUST NOT:
+- Invent or assume what the question is asking about (e.g., DO NOT say "this question is about magnetic field" or "this question asks for the area of a triangle").
+- Reference specific concepts, formulas, or topics from the (unseen) question stem.
+- Pretend to read the question text — there is no question text to read.
+
+You MUST:
+- Output broad, generic correction prompts based ONLY on questionCategory + mistakeType + answer comparison.
+- Stay neutral about the topic. Use phrases like "本題", "這道題", "你寫的答案" without naming the subject matter.
+
+== Generic guidance templates (use these as patterns; customize wording slightly) ==
+
+| questionCategory | mistakeType | studentGuidance template |
+|---|---|---|
+| any | blank | 此題未作答，請補寫作答。 |
+| single_choice | concept / wrong_choice | 答案選擇有誤，請複習相關概念再思考一次。 |
+| multi_choice | concept (漏選) | 漏選了部分正確選項，請逐項確認每個選項的對錯。 |
+| multi_choice | concept (多選) | 多選了不正確的選項，請對每個選項逐一判斷。 |
+| fill_blank | calculation / careless | 計算過程有誤，請重新驗算一次。 |
+| fill_blank | concept | 答案不正確，請複習相關概念再思考。 |
+| short_answer | concept / partial | 答題未完整或方向不正確，請重新組織答案。 |
+| any | unreadable | 老師無法辨識你的字跡，請寫得清楚一些。 |
+
+== Tone ==
+Traditional Chinese (繁體中文). Warm but neutral. 1–2 short sentences per guidance.
+
+Domain: ${JSON.stringify(domainHint || null)}
+Wrong question IDs to process: ${JSON.stringify(explainQuestionIds)}
+
+AnswerKey (wrong questions only — questionCategory + maxScore + correct answer):
+${JSON.stringify(wrongAnswerKey)}
+
+Student answers (wrong questions only):
+${JSON.stringify(wrongReadAnswers)}
+
+Scoring analysis (wrong questions only):
+${JSON.stringify(wrongScores)}
+
+== weaknesses / suggestions in this mode ==
+- weaknesses: 1~2 generic statements (e.g. "對部分題型的概念掌握不夠完整")。禁止指名具體章節或公式。
+- suggestions: 1~2 generic actions (e.g. "建議與老師討論本次測驗中錯誤類型集中的題型")。禁止給具體內容。
+
+Return strict JSON only. No markdown.
+
+Output:
+{
+  "details": [
+    {
+      "questionId": "string",
+      "studentGuidance": "通用引導（1-2 句，不得編造題目內容）",
+      "mistakeType": "concept|calculation|condition|blank|unreadable",
+      "mistakeTypeCodes": ["concept"]
+    }
+  ],
+  "weaknesses": ["..."],
+  "suggestions": ["..."]
+}
+`.trim()
+  }
 
   return `
 You are stage Explain. Your job is to write STUDENT-FACING correction guidance for each wrong question.
@@ -6483,8 +6557,12 @@ export async function runStagedGradingPhaseB({
   const questionBookletImageParts = rawBookletImages.map(img => ({
     inlineData: { mimeType: img.mimeType || 'image/webp', data: img.data }
   }))
-  const explainImageParts = answerSheetMode === 'answer_only' && questionBookletImageParts.length > 0
-    ? questionBookletImageParts
+  const hasBooklet = answerSheetMode === 'answer_only' && questionBookletImageParts.length > 0
+  // answer_only + 無題本：不附任何圖（buildExplainPrompt 走通用引導分支，禁止 AI 編造題目）
+  // answer_only + 有題本：附題本圖
+  // with_questions：附學生卷（既有行為）
+  const explainImageParts = answerSheetMode === 'answer_only'
+    ? (hasBooklet ? questionBookletImageParts : [])
     : submissionImageParts
 
   const phaseBStartedAt = Date.now()
@@ -6743,8 +6821,12 @@ export async function runStagedGradingPhaseB({
       accessorResult,
       explainQuestionIds,
       internalContext?.domainHint,
-      answerSheetMode
+      answerSheetMode,
+      hasBooklet
     )
+    if (answerSheetMode === 'answer_only' && !hasBooklet) {
+      logStaged(pipelineRunId, stagedLogLevel, 'explain mode=answer_only_no_booklet → 通用引導，不附圖')
+    }
     logStageStart(pipelineRunId, 'explain')
     const explainResponse = await executeStage({
       apiKey,
