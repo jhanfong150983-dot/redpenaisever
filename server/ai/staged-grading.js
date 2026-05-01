@@ -2222,19 +2222,33 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
       })()
     : ''
 
-  // 答案卷圖片不再傳給 classify — 完全獨立於老師的答案卷找 bbox
-  // 兩者可能尺寸/角度/狀態不同，用答案卷推學生卷位置不可靠
-  const imageReferenceSection = ''
-
   const isAnswerOnly = answerSheetMode === 'answer_only'
 
-  const answerOnlySection = isAnswerOnly
-    ? `\nANSWER-ONLY SHEET MODE — 統一視為 fill_blank box 格式
-這是「純答題卡」，畫面只有題號與答案格子（box），沒有題幹文字。
+  // ── ANSWER-ONLY 精簡 prompt：跳過 25-type 規則，只用 box 格式 ──
+  if (isAnswerOnly) {
+    const correctionsSection = Array.isArray(classifyCorrections) && classifyCorrections.length > 0
+      ? `\n⚠️ BBOX POSITIONING REMINDER:\n前一輪 Read 結果偵測到下列題目可能有 bbox 定位問題，請特別注意：\n${classifyCorrections.map((c) => {
+          if (c.type === 'neighbor_match') {
+            return `- 題目 ${c.questionId}：此題學生答案恰好等於相鄰題目 ${c.neighborId} 的正解，bbox 可能飄移到鄰題格。請仔細區分這兩格的邊界。`
+          }
+          if (c.type === 'consecutive_blank') {
+            return `- 題目 ${c.questionId}：此題與其他題目連續被讀為 blank/unreadable。請確認 answerBbox 確實對齊到該格（不是漂移到鄰格或 header）。若 bbox 正確且學生確實留空，blank 是合理結論。`
+          }
+          return ''
+        }).filter(Boolean).join('\n')}\n`
+      : ''
 
-【核心心智模型】
+    return `
+You are stage CLASSIFY (ANSWER-ONLY MODE).
+Task: identify which question numbers are visible on this answer card and locate each visible question's answerBbox.
+
+The card contains ONLY question numbers and answer cells (boxes) arranged in section tables — there is NO question stem text printed on this sheet.
+Do NOT infer question type. Question type is fixed by specs.${pageBoundarySection}
+
+═══════════════ 核心心智模型 ═══════════════
+
 不論題目實際的 questionType 是什麼（single_choice / multi_choice / fill_blank / short_answer），
-**bbox 規則一律照 fill_blank 的「box（方框型）」格式處理**：
+**bbox 規則一律照 fill_blank 的「box（方框型）」格式處理**。
 
 ▸ box 方框型 bbox 規則
   - bbox 框 □ 整個邊界 + 內部填寫的學生筆跡（含算式中的 ×/+/− 等運算符）
@@ -2246,23 +2260,69 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
   → bbox.x = 0.36, bbox.y = 0.18
   → bbox.w = 0.16, bbox.h = 0.12
 
-【共通規則】
+═══════════════ 共通規則 ═══════════════
+
+- visible=true 即使該格學生沒寫（空格）— 仍依格子位置定 bbox
+- visible=false 只在該題完全不在這張圖上時（被裁掉、不存在）
 - 印刷的題號 header（表格第一列「1, 2, 3, ...」）必須在 bbox **之外**
 - 鄰格的內容必須在 bbox **之外**
 - 同一 section 同 row 的 bbox 高度應該一致
-- visible=true 即使該格學生沒寫（空格）— 仍依格子位置定 bbox
 
-【若有 spec.tablePosition.refBbox】
-- refBbox 是答案卷對應格的座標，可能與學生卷有 0~8% 頁寬的掃描偏移
-- 若視覺上難以區分某格邊界，可直接用 refBbox 的尺寸（server 會做中位數 offset 校正）
+═══════════════ 若 spec 帶 tablePosition.refBbox ═══════════════
 
-❌ 嚴禁的常見錯誤：
+refBbox 是答案卷對應格的座標。學生卷與答案卷可能有 **0~8% 頁寬**的掃描偏移（角度、縮放、平移）。
+
+定位策略（依優先級）：
+1. **空白格防漂移**（最高優先）：目標格內是否有學生手寫**完全不影響** bbox 位置。嚴禁因為目標格空白就把 bbox 漂移到相鄰有內容的格子。
+2. **目視 □ 邊界 + 外推 3-5%**：照核心規則框格。
+3. **Fallback**（格線不清 / 表格無完整外框 / 學生筆跡覆蓋格線）：直接用 spec.tablePosition.refBbox 的座標。server 會在後處理階段做中位數 offset 校正，你不需要自己估算 offset。
+
+═══════════════ ❌ 嚴禁錯誤 ═══════════════
+
 - bbox 高度 < 0.02 → 你切到格線本身了，重新框
 - bbox 含到題號 header row → 切錯題
 - bbox 跨進鄰格 → 切到別人的答案
-- 用「一般選擇題 25-35% 頁寬」這種規則 → 完全不對，本模式只用 box 格式
-`
-    : ''
+- 用「一般選擇題 25-35% 頁寬」這種規則 → 完全不對
+- 因為某格空白就把 bbox 偏到鄰格找筆跡 → 嚴禁
+
+═══════════════ 輸入資料 ═══════════════
+
+Allowed question IDs:
+${JSON.stringify(questionIds)}
+
+Question Specs (source of truth from AnswerKey — 注意 tablePosition.refBbox 給定參考座標):
+${JSON.stringify(specs)}
+${correctionsSection}
+═══════════════ 輸出格式 ═══════════════
+
+Return strict JSON only:
+{
+  "alignedQuestions": [
+    {
+      "questionId": "1-2",
+      "visible": true,
+      "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.08, "h": 0.05 }
+    }
+  ]
+}
+
+Required:
+- questionId: 必須是 Allowed IDs 之一
+- visible: true / false
+- answerBbox: visible=true 時必填；visible=false 時 omit
+
+Do NOT output:
+- questionType: 由 spec 決定，不要自己 classify
+- questionBbox: 已不使用，answerBbox 即可
+- 任何 single_choice / multi_choice / parens / underline 等 per-type 細分規則的計算（本模式統一用 box）
+`.trim()
+  }
+
+  // ── 一般模式：原本的 25-type 完整 prompt ──
+  // 答案卷圖片不再傳給 classify — 完全獨立於老師的答案卷找 bbox
+  // 兩者可能尺寸/角度/狀態不同，用答案卷推學生卷位置不可靠
+  const imageReferenceSection = ''
+  const answerOnlySection = ''
 
   return `
 You are stage CLASSIFY.
