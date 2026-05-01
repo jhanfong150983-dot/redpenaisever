@@ -449,6 +449,8 @@ export default async function handler(req, res) {
     routeKey,
     gradingMode: requestedGradingMode,
     readAnswerSplitMode: requestedReadAnswerSplitMode,
+    // 內部 routing flag — 拿出來當作 internalContext 的一部分，不可再 forward 到 Gemini
+    answerSheetMode: requestedAnswerSheetMode,
     ...payload
   } = body || {}
   const normalizedAnswerKeyPayload = normalizeAnswerKeyPayload(answerKey, logPrefix)
@@ -599,7 +601,7 @@ export default async function handler(req, res) {
   }
 
   // ── 題本圖（Phase B explain 使用，answer_only 模式下需要題本圖來讀題目）────
-  const answerSheetMode = payload?.answerSheetMode || 'with_questions'
+  const answerSheetMode = requestedAnswerSheetMode || 'with_questions'
   let questionBookletImages = []
   if (routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId) {
     questionBookletImages = await fetchQuestionBookletImages(
