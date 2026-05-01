@@ -2229,25 +2229,38 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
   const isAnswerOnly = answerSheetMode === 'answer_only'
 
   const answerOnlySection = isAnswerOnly
-    ? `\nANSWER-ONLY SHEET MODE:
-This student submission is a PURE ANSWER CARD — it contains ONLY question numbers and answer cells/boxes arranged in a grid. There is NO question stem text printed on this sheet.
+    ? `\nANSWER-ONLY SHEET MODE — 統一視為 fill_blank box 格式
+這是「純答題卡」，畫面只有題號與答案格子（box），沒有題幹文字。
 
-【LAYOUT EXPECTATION (CRITICAL FOR BBOX HEIGHT)】
-The answer card is divided into multiple SECTION TABLES (typically 2~4 sections like 「一、單選題」「二、多重選擇題」「三、非選題」「四、混合題」). Each section table follows this pattern:
+【核心心智模型】
+不論題目實際的 questionType 是什麼（single_choice / multi_choice / fill_blank / short_answer），
+**bbox 規則一律照 fill_blank 的「box（方框型）」格式處理**：
 
-  Row 1: HEADER (question numbers like 1, 2, 3, ..., 12)
-  Row 2: ANSWER CELLS (where students write their answers — THIS IS WHERE bbox MUST LAND)
+▸ box 方框型 bbox 規則
+  - bbox 框 □ 整個邊界 + 內部填寫的學生筆跡（含算式中的 ×/+/− 等運算符）
+  - 🚨 邊距：bbox **不要緊貼 □**，四邊各向外推 3-5% 頁寬，避免切到 □ 邊框或筆跡尾巴
+  - short_answer 多行作答：bbox 縱向加大涵蓋整個寫字區塊
 
-Some sections (like 三、非選題) may have additional sub-rows; in those cases the answer is in the LAST ROW (row = totalRows in spec.tablePosition).
+範例（單格）：
+  □ 邊界 x=0.40~0.48, y=0.20~0.28
+  → bbox.x = 0.36, bbox.y = 0.18
+  → bbox.w = 0.16, bbox.h = 0.12
 
-【RULES — must obey】
-- For each visible question, locate its ANSWER CELL — NOT the header row, NOT the dividing border line.
-- bbox HEIGHT must equal the actual cell height. In a typical 「12 cells × 2 rows」 table, the answer cell takes about 1/2 of the table's vertical span (often 0.04 ~ 0.10 of the full image height).
-- ⚠️ DO NOT pick the cell border (1 pixel line) as the bbox — that produces h ≈ 0 and grading will fail.
-- ⚠️ DO NOT pick the header row — that contains numbers, not the student's answer.
-- ⚠️ If you cannot reliably distinguish the answer cell from neighbors, fall back to spec.tablePosition.refBbox dimensions; the server will apply scan-offset correction.
-- visible=true even if the cell is blank (student didn't fill in) — locate it by row 2 of the corresponding section.
-- For fill_blank sub-questions inside multi-cell groups: each cell is a separate sub-question. Use TOP-TO-BOTTOM, LEFT-TO-RIGHT ordering.
+【共通規則】
+- 印刷的題號 header（表格第一列「1, 2, 3, ...」）必須在 bbox **之外**
+- 鄰格的內容必須在 bbox **之外**
+- 同一 section 同 row 的 bbox 高度應該一致
+- visible=true 即使該格學生沒寫（空格）— 仍依格子位置定 bbox
+
+【若有 spec.tablePosition.refBbox】
+- refBbox 是答案卷對應格的座標，可能與學生卷有 0~8% 頁寬的掃描偏移
+- 若視覺上難以區分某格邊界，可直接用 refBbox 的尺寸（server 會做中位數 offset 校正）
+
+❌ 嚴禁的常見錯誤：
+- bbox 高度 < 0.02 → 你切到格線本身了，重新框
+- bbox 含到題號 header row → 切錯題
+- bbox 跨進鄰格 → 切到別人的答案
+- 用「一般選擇題 25-35% 頁寬」這種規則 → 完全不對，本模式只用 box 格式
 `
     : ''
 
