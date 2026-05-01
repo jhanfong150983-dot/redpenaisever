@@ -52,6 +52,10 @@ const PIPELINE_REGISTRY = new Map([
     createPipeline(AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT, 'answer-key-extract-pipeline')
   ],
   [
+    AI_ROUTE_KEYS.ANSWER_KEY_LOCATE,
+    createPipeline(AI_ROUTE_KEYS.ANSWER_KEY_LOCATE, 'answer-key-locate-pipeline')
+  ],
+  [
     AI_ROUTE_KEYS.ANSWER_KEY_REANALYZE,
     createPipeline(AI_ROUTE_KEYS.ANSWER_KEY_REANALYZE, 'answer-key-reanalyze-pipeline')
   ],

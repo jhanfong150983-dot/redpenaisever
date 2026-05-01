@@ -13,6 +13,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_RECHECK: 'grading.recheck',
   GRADING_CONSISTENCY_JUDGE: 'grading.consistency_judge',
   ANSWER_KEY_EXTRACT: 'answer_key.extract',
+  ANSWER_KEY_LOCATE: 'answer_key.locate',
   ANSWER_KEY_REANALYZE: 'answer_key.reanalyze',
   ANSWER_KEY_TAG_CONCEPTS: 'answer_key.tag_concepts',
   REPORT_TEACHER_SUMMARY: 'report.teacher_summary',
