@@ -1713,17 +1713,33 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       ? offsets[Math.floor(offsets.length / 2)]
       : (offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2
 
-    // 計算目標列的最大高度：refBbox.h（per-page）轉 full-image，給 1.5 倍餘量
+    // 計算目標列的高度：以 refBbox.h（per-page）轉 full-image 為基準
     const refHFullImage = (members[0].refH || 0.02) * pageScale
     const maxH = Math.max(refHFullImage * 1.5, 0.005)
+    // 下限：低於 refH * 0.4 視為 AI 把 bbox 縮到表格底線那條（已知 bug pattern），
+    // 直接 fallback 到 refH。此安全網對所有 table-position 題目生效，但對
+    // answer_only 模式特別重要（學生卷的表格高度與答案卷不一致時 AI 易誤判）。
+    const minH = Math.max(refHFullImage * 0.4, 0.015)
+
+    /**
+     * 把 AI 算出的 h 套上下限：太小視為 bug（用 refH），太大視為超界（用 maxH）。
+     */
+    const safeHeight = (rawH) => {
+      if (typeof rawH !== 'number' || !Number.isFinite(rawH) || rawH < minH) {
+        if (typeof rawH === 'number' && Number.isFinite(rawH)) {
+          console.warn(`[applyClassifyQuestionSpecs] bbox h suspicious (${rawH.toFixed(4)} < minH=${minH.toFixed(4)}, refH=${refHFullImage.toFixed(4)}); falling back to refH`)
+        }
+        return refHFullImage
+      }
+      return Math.min(rawH, maxH)
+    }
 
     if (members.length < 2) {
       // 單格：用 refBbox.x + offset，用 refBbox.w，限制 h
       const m = members[0]
       const q = alignedQuestions[m.index]
       if (q.answerBbox) {
-        const cappedH = Math.min(q.answerBbox.h, maxH)
-        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +(m.refX + medianOffset).toFixed(4), w: m.refW, h: +cappedH.toFixed(4) } }
+        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +(m.refX + medianOffset).toFixed(4), w: m.refW, h: +safeHeight(q.answerBbox.h).toFixed(4) } }
       }
       continue
     }
@@ -1742,9 +1758,7 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       const safeX = correctedX + xShift
       const q = alignedQuestions[m.index]
       if (q.answerBbox) {
-        // 限制 h：只裁切目標列，不包含表頭和人數列
-        const cappedH = Math.min(q.answerBbox.h, maxH)
-        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +safeX.toFixed(4), w: +safeW.toFixed(4), h: +cappedH.toFixed(4) } }
+        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +safeX.toFixed(4), w: +safeW.toFixed(4), h: +safeHeight(q.answerBbox.h).toFixed(4) } }
       }
     }
   }
@@ -2216,12 +2230,24 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
 
   const answerOnlySection = isAnswerOnly
     ? `\nANSWER-ONLY SHEET MODE:
-This student submission is a PURE ANSWER SHEET — it contains ONLY question numbers and answer blanks/boxes. There is NO question stem text printed on this sheet.
-- Locate questions by their printed question NUMBERS only (e.g. "1", "2", "3" or "一", "二", "三").
-- The answer area is the blank space/box/line next to or below each question number.
-- Do NOT expect to see question stem text on the student sheet.
-- answerBbox should frame "question number + answer blank area" only.
-- For fill_blank sub-questions: each blank box is a separate sub-question. Use the same ordering rules (TOP-TO-BOTTOM, LEFT-TO-RIGHT).
+This student submission is a PURE ANSWER CARD — it contains ONLY question numbers and answer cells/boxes arranged in a grid. There is NO question stem text printed on this sheet.
+
+【LAYOUT EXPECTATION (CRITICAL FOR BBOX HEIGHT)】
+The answer card is divided into multiple SECTION TABLES (typically 2~4 sections like 「一、單選題」「二、多重選擇題」「三、非選題」「四、混合題」). Each section table follows this pattern:
+
+  Row 1: HEADER (question numbers like 1, 2, 3, ..., 12)
+  Row 2: ANSWER CELLS (where students write their answers — THIS IS WHERE bbox MUST LAND)
+
+Some sections (like 三、非選題) may have additional sub-rows; in those cases the answer is in the LAST ROW (row = totalRows in spec.tablePosition).
+
+【RULES — must obey】
+- For each visible question, locate its ANSWER CELL — NOT the header row, NOT the dividing border line.
+- bbox HEIGHT must equal the actual cell height. In a typical 「12 cells × 2 rows」 table, the answer cell takes about 1/2 of the table's vertical span (often 0.04 ~ 0.10 of the full image height).
+- ⚠️ DO NOT pick the cell border (1 pixel line) as the bbox — that produces h ≈ 0 and grading will fail.
+- ⚠️ DO NOT pick the header row — that contains numbers, not the student's answer.
+- ⚠️ If you cannot reliably distinguish the answer cell from neighbors, fall back to spec.tablePosition.refBbox dimensions; the server will apply scan-offset correction.
+- visible=true even if the cell is blank (student didn't fill in) — locate it by row 2 of the corresponding section.
+- For fill_blank sub-questions inside multi-cell groups: each cell is a separate sub-question. Use TOP-TO-BOTTOM, LEFT-TO-RIGHT ordering.
 `
     : ''
 
