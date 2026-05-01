@@ -267,7 +267,7 @@ async function fetchQuestionBookletImages(supabaseAdmin, userId, assignmentId) {
   try {
     const { data: assignment } = await supabaseAdmin
       .from('assignments')
-      .select('id, owner_id')
+      .select('id, owner_id, answer_key_template_id')
       .eq('id', assignmentId)
       .maybeSingle()
     if (!assignment || assignment.owner_id !== userId) return []
@@ -275,33 +275,50 @@ async function fetchQuestionBookletImages(supabaseAdmin, userId, assignmentId) {
     const startMs = Date.now()
     const bucket = supabaseAdmin.storage.from('homework-images')
 
-    // 先試 page-0，不存在就直接返回（避免白打 19 個 404）
-    const { data: first, error: firstErr } = await bucket.download(`question-booklets/${assignmentId}/page-0.webp`)
-    if (firstErr || !first) {
-      console.log(`[QuestionBooklet] page-0 不存在，跳過，耗時 ${Date.now() - startMs}ms`)
-      return []
-    }
-    const firstBuffer = Buffer.from(await first.arrayBuffer())
-    const firstImage = { mimeType: 'image/webp', data: firstBuffer.toString('base64') }
+    // 嘗試指定 prefix 下載 page-0 → 19，回傳找到的圖片陣列
+    async function downloadFromPrefix(prefix) {
+      const { data: first, error: firstErr } = await bucket.download(`${prefix}/page-0.webp`)
+      if (firstErr || !first) return null
+      const firstBuffer = Buffer.from(await first.arrayBuffer())
+      const firstImage = { mimeType: 'image/webp', data: firstBuffer.toString('base64') }
 
-    // page-0 存在，並行下載 page-1 ~ page-19
-    const results = await Promise.allSettled(
-      Array.from({ length: 19 }, (_, i) => i + 1).map(async (i) => {
-        const { data, error } = await bucket.download(`question-booklets/${assignmentId}/page-${i}.webp`)
-        if (error || !data) return null
-        const buffer = Buffer.from(await data.arrayBuffer())
-        return { mimeType: 'image/webp', data: buffer.toString('base64') }
-      })
-    )
+      const results = await Promise.allSettled(
+        Array.from({ length: 19 }, (_, i) => i + 1).map(async (i) => {
+          const { data, error } = await bucket.download(`${prefix}/page-${i}.webp`)
+          if (error || !data) return null
+          const buffer = Buffer.from(await data.arrayBuffer())
+          return { mimeType: 'image/webp', data: buffer.toString('base64') }
+        })
+      )
 
-    const images = [firstImage]
-    for (const r of results) {
-      const val = r.status === 'fulfilled' ? r.value : null
-      if (!val) break
-      images.push(val)
+      const images = [firstImage]
+      for (const r of results) {
+        const val = r.status === 'fulfilled' ? r.value : null
+        if (!val) break
+        images.push(val)
+      }
+      return images
     }
-    console.log(`[QuestionBooklet] 並行下載 ${images.length} 張圖片，耗時 ${Date.now() - startMs}ms`)
-    return images
+
+    // 1) assignment-level（建作業時當下上傳）
+    const assignmentLevel = await downloadFromPrefix(`question-booklets/${assignmentId}`)
+    if (assignmentLevel) {
+      console.log(`[QuestionBooklet] assignment-level ${assignmentLevel.length} 頁，耗時 ${Date.now() - startMs}ms`)
+      return assignmentLevel
+    }
+
+    // 2) template-level fallback（透過模板共用、後補上傳）
+    const templateId = assignment.answer_key_template_id
+    if (templateId) {
+      const templateLevel = await downloadFromPrefix(`question-booklets/${templateId}`)
+      if (templateLevel) {
+        console.log(`[QuestionBooklet] template-level fallback ${templateLevel.length} 頁，耗時 ${Date.now() - startMs}ms`)
+        return templateLevel
+      }
+    }
+
+    console.log(`[QuestionBooklet] 找不到題本（assignment 或 template），耗時 ${Date.now() - startMs}ms`)
+    return []
   } catch (err) {
     console.warn('[QuestionBooklet] fetchQuestionBookletImages failed:', err?.message || err)
     return []
