@@ -89,11 +89,16 @@ export async function runAiPipeline({
   const isPhaseA = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A
   const isPhaseB = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B
 
+  // answer_sheet_mode 對 extract / classify / explain pipeline 的分支都重要，log 到 orchestrator 入口便於追蹤
+  const dispatchedAnswerSheetMode = internalContext?.answerSheetMode || 'with_questions'
   console.log(
     `${logPrefix} start requestedRoute=${
       normalizedRequestedRouteKey || 'none'
-    } resolvedRoute=${resolvedRouteKey} model=${model} staged=${shouldRunStagedGrading}`
+    } resolvedRoute=${resolvedRouteKey} model=${model} staged=${shouldRunStagedGrading} answerSheetMode=${dispatchedAnswerSheetMode}`
   )
+  if (dispatchedAnswerSheetMode === 'answer_only') {
+    console.log(`${logPrefix} [answer_only] dispatched route=${resolvedRouteKey}`)
+  }
 
   if (isPhaseA) {
     console.log(`${logPrefix} phase-a route=${resolvedRouteKey}`)
