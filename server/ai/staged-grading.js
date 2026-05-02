@@ -541,7 +541,11 @@ function remapBboxToFullImage(bbox, pageStartY, pageEndY) {
 }
 
 const CHECKBOX_EQUIVALENT_TYPES = new Set(['single_check', 'multi_check', 'multi_choice', 'multi_check_other'])
-const CHECKBOX_FOCUSED_READ_TYPES = new Set(['single_check', 'multi_check', 'multi_choice', 'multi_check_other'])
+// multi_choice 故意不放進來：multi_choice 是「學生在格子裡寫字母代號（A,C）」，不是 checkbox
+// 格式（□ A □ B □ C 學生勾框）。focused checkbox prompt 會要求輸出位置數字，套到
+// multi_choice 上 AI 看到 "BC" 會輸出 "2,3"（B=2nd, C=3rd），錯。
+// multi_choice 應該走主 read prompt 的 multiChoiceRules 輸出字母。
+const CHECKBOX_FOCUSED_READ_TYPES = new Set(['single_check', 'multi_check', 'multi_check_other'])
 // 位置型勾選題：答案是順序數字（①③ / 第一個 / (1)），統一顯示為純數字（1,3）
 const POSITION_SELECTION_TYPES = new Set(['single_check', 'multi_check', 'multi_check_other'])
 
