@@ -6541,17 +6541,28 @@ async function handleGetAssignmentSummary(req, res) {
     return
   }
   const supabaseDb = getSupabaseAdmin()
-  const { data, error } = await supabaseDb
-    .from('assignment_summaries')
-    .select('status, class_summary, class_suggestion, minority_summary, minority_suggestion, student_summaries, error_groups, sample_count, updated_at, error_message')
-    .eq('owner_id', user.id)
-    .eq('assignment_id', assignmentId)
-    .maybeSingle()
+  const [{ data, error }, { data: latestSubRow }] = await Promise.all([
+    supabaseDb
+      .from('assignment_summaries')
+      .select('status, class_summary, class_suggestion, minority_summary, minority_suggestion, student_summaries, error_groups, sample_count, updated_at, error_message')
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .maybeSingle(),
+    supabaseDb
+      .from('submissions')
+      .select('updated_at')
+      .eq('assignment_id', assignmentId)
+      .eq('owner_id', user.id)
+      .in('status', ['graded', 'correction_passed', 'correction_pending_review'])
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+  ])
   if (error) {
     res.status(500).json({ error: error.message })
     return
   }
-  res.status(200).json({ summary: data ?? null })
+  res.status(200).json({ summary: data ?? null, latestGradedAt: latestSubRow?.updated_at ?? null })
 }
 
 // ─────────────────────────────────────────────────────────
