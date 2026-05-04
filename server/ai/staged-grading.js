@@ -1638,7 +1638,7 @@ function buildBboxUnion(bboxes) {
   }
 }
 
-function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 1) {
+function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 1, useTableMedianCorrection = false) {
   const alignedRaw = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
   if (alignedRaw.length === 0) return classifyResult
 
@@ -1710,24 +1710,10 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
     })
   }
   for (const members of tableGroups.values()) {
-    // 計算掃描偏移量：classify.x 與 refBbox.x 的中位數差距
-    const offsets = members.map((m) => m.classifyX - m.refX)
-    offsets.sort((a, b) => a - b)
-    const medianOffset = offsets.length % 2 === 1
-      ? offsets[Math.floor(offsets.length / 2)]
-      : (offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2
-
-    // 計算目標列的高度：以 refBbox.h（per-page）轉 full-image 為基準
+    // 通用：safeHeight 防 0.0095 bug（與 source 無關，永遠套用）
     const refHFullImage = (members[0].refH || 0.02) * pageScale
     const maxH = Math.max(refHFullImage * 1.5, 0.005)
-    // 下限：低於 refH * 0.4 視為 AI 把 bbox 縮到表格底線那條（已知 bug pattern），
-    // 直接 fallback 到 refH。此安全網對所有 table-position 題目生效，但對
-    // answer_only 模式特別重要（學生卷的表格高度與答案卷不一致時 AI 易誤判）。
     const minH = Math.max(refHFullImage * 0.4, 0.015)
-
-    /**
-     * 把 AI 算出的 h 套上下限：太小視為 bug（用 refH），太大視為超界（用 maxH）。
-     */
     const safeHeight = (rawH) => {
       if (typeof rawH !== 'number' || !Number.isFinite(rawH) || rawH < minH) {
         if (typeof rawH === 'number' && Number.isFinite(rawH)) {
@@ -1737,6 +1723,27 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       }
       return Math.min(rawH, maxH)
     }
+
+    if (!useTableMedianCorrection) {
+      // 非 teacher_scan（含 student_upload, student_correction, teacher_camera 等單一作業來源）：
+      // 保留 classify 原始 x/y/w，只 clamp h。
+      // refBbox 與該張照片的紙張位置不對應，套 median + colWidth 反而把對的拉成錯的。
+      for (const m of members) {
+        const q = alignedQuestions[m.index]
+        if (q.answerBbox) {
+          alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, h: +safeHeight(q.answerBbox.h).toFixed(4) } }
+        }
+      }
+      continue
+    }
+
+    // teacher_scan: 同一台掃描器多頁、紙張位置一致 → 中位數校正才有意義
+    // 計算掃描偏移量：classify.x 與 refBbox.x 的中位數差距
+    const offsets = members.map((m) => m.classifyX - m.refX)
+    offsets.sort((a, b) => a - b)
+    const medianOffset = offsets.length % 2 === 1
+      ? offsets[Math.floor(offsets.length / 2)]
+      : (offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2
 
     if (members.length < 2) {
       // 單格：用 refBbox.x + offset，用 refBbox.w，限制 h
@@ -5079,7 +5086,12 @@ export async function runStagedGradingPhaseA({
     inlineData: { mimeType: img.mimeType || 'image/webp', data: img.data }
   }))
   const answerSheetMode = internalContext?.answerSheetMode || 'with_questions'
-  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length} answerSheetMode=${answerSheetMode}`)
+  // bbox 中位數策略：只有 teacher_scan（同一台掃描器、多頁對齊）才用 median+colWidth 覆蓋；
+  // 其他來源（含 student_upload/student_correction/teacher_camera 或未指定）視為單一作業，
+  // refBbox 與該張照片不對應，median 反而把對的拉成錯的 → 走 raw classify
+  const submissionSource = payload?.submissionSource || internalContext?.submissionSource || null
+  const useTableMedianCorrection = submissionSource === 'teacher_scan'
+  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length} answerSheetMode=${answerSheetMode} submissionSource=${submissionSource || 'unset'} useTableMedianCorrection=${useTableMedianCorrection}`)
 
   const stageResponses = []
   const stageWarnings = []
@@ -5189,7 +5201,7 @@ export async function runStagedGradingPhaseA({
     if (classifyResponse.warnings.length > 0) stageWarnings.push(...classifyResponse.warnings.map((w) => `[classify-p1] ${w}`))
     const classifyParsed = parseCandidateJson(classifyResponse.data)
     if (!classifyParsed || typeof classifyParsed !== 'object') throw new Error('PhaseA classify parse failed')
-    classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs, pageEntries.length || 1)
+    classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
   } else {
     // Multi-page: split merged image into individual pages, one classify call per page (parallel).
     // Each call gets ONLY its page's image → AI outputs bbox in single-page coords (0~1)
@@ -5242,7 +5254,7 @@ export async function runStagedGradingPhaseA({
         coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-      }, classifyQuestionSpecs, pageEntries.length || 1)
+      }, classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
     } else {
       // Success: each page gets its own cropped image — no pageBreaks needed in prompt
       logStaged(pipelineRunId, stagedLogLevel, 'classify split success', {
@@ -5305,7 +5317,7 @@ export async function runStagedGradingPhaseA({
         coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-      }, classifyQuestionSpecs, pageEntries.length || 1)
+      }, classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
     }
   }
   } // end else (skip classify when bboxOverrides)
@@ -5396,7 +5408,7 @@ export async function runStagedGradingPhaseA({
       if (retryResp.ok) {
         const retryParsed = parseCandidateJson(retryResp.data)
         if (retryParsed && typeof retryParsed === 'object') {
-          classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs, pageEntries.length || 1)
+          classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
           const retryQG = validateClassifyQuality(classifyResult, questionIds)
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: retryQG.severity, warnings: retryQG.warnings
@@ -5446,7 +5458,7 @@ export async function runStagedGradingPhaseA({
             coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
             unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
             pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-          }, classifyQuestionSpecs, pageEntries.length || 1)
+          }, classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
           const retryQG = validateClassifyQuality(classifyResult, questionIds)
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: retryQG.severity, warnings: retryQG.warnings
