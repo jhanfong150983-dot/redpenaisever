@@ -3597,6 +3597,27 @@ async function handleSync(req, res) {
           console.error('[SYNC] answer_key_templates upsert failed:', tplResult.error.message)
         } else {
           console.log(`✅ [SYNC] 同步了 ${templateRows.length} 個答案卷模板`)
+          // 模板被編輯後，把所有引用此模板的 assignment.total_pages 同步成模板實際頁數，
+          // 避免「老師縮頁編輯後 assignment.total_pages 仍是舊值，學生被要求拍多餘頁數」的 bug。
+          // 以 page_orientations / answer_sheet_image_paths 中較大者為準（兩者通常相等，
+          // 取 max 是為了在資料半殘時偏向「不少傳」）。若兩者皆為空就不動 assignment，
+          // 避免老師只改答案內容（沒帶頁數欄位）就把 total_pages 重置成 1。
+          for (const t of incomingTemplates) {
+            const orientationsCount = Array.isArray(t.pageOrientations) ? t.pageOrientations.length : 0
+            const imagePathsCount = Array.isArray(t.answerSheetImagePaths) ? t.answerSheetImagePaths.length : 0
+            const candidatePages = Math.max(orientationsCount, imagePathsCount)
+            if (candidatePages <= 0) continue
+            const { error: updErr, count } = await supabaseDb
+              .from('assignments')
+              .update({ total_pages: candidatePages, updated_at: nowIso }, { count: 'exact' })
+              .eq('owner_id', user.id)
+              .eq('answer_key_template_id', t.id)
+            if (updErr) {
+              console.error(`[SYNC] sync total_pages for template ${t.id} failed:`, updErr.message)
+            } else if (count) {
+              console.log(`✅ [SYNC] template ${t.id} 縮頁同步 → ${count} 份 assignment 改 total_pages=${candidatePages}`)
+            }
+          }
         }
       }
 
@@ -4744,14 +4765,22 @@ async function handleStudentOverview(req, res) {
           }, null)
           const gradingFailed = (!gradingPending && latestCorrectionSub?.status === 'grading_failed') || undefined
 
+          // 防呆：以 template.page_orientations.length 為主，assignment.total_pages 退為 fallback。
+          // 老師編輯模板縮頁但 assignment.total_pages 沒同步時（舊 sync push 不會更新），
+          // 至少前端讀到的張數會跟模板一致，避免要求學生多拍頁。
+          const tplOrientations = templateOrientationsMap.get(assignment.answer_key_template_id)
+          const tplPagesFromOrientations = Array.isArray(tplOrientations) ? tplOrientations.length : 0
+          const effectiveTotalPages =
+            tplPagesFromOrientations > 0 ? tplPagesFromOrientations : assignment.total_pages
+
           return compactObject({
             id: assignment.id,
             classroomName,
             classroomKey,
             title: assignment.title,
-            totalPages: assignment.total_pages,
+            totalPages: effectiveTotalPages,
             studentUploadEnabled: assignment.student_upload_enabled ?? true,
-            pageOrientations: templateOrientationsMap.get(assignment.answer_key_template_id) || undefined,
+            pageOrientations: tplOrientations || undefined,
             status,
             gradingPending: gradingPending || undefined,
             gradingQueuePosition: gradingPending ? gradingQueuePosition : undefined,
