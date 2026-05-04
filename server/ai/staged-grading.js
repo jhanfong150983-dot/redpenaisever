@@ -4321,14 +4321,32 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
       .filter((q) => ['multi_check', 'multi_choice', 'multi_check_other'].includes(q.questionCategory))
       .map((q) => q.questionId)
   )
+  // calc/word_problem 過程文字常因 OCR 不準誤導 accessor → 砍掉 process 文字、只送 finalAnswer，
+  // 強制 accessor 用學生作答圖判斷過程（accessor 收到時這些 questionId 會帶 processOmitted=true 旗標）
+  const calcOrWordProblemIds = new Set(
+    (compactAnswerKey.questions || [])
+      .filter((q) => q.questionCategory === 'calculation' || q.questionCategory === 'word_problem')
+      .map((q) => q.questionId)
+  )
   const trimmedAnswers = Array.isArray(readAnswerResult?.answers)
-    ? readAnswerResult.answers.map((a) => ({
-        questionId: a.questionId,
-        status: a.status,
-        studentAnswerRaw: multiSelectIds.has(a.questionId) && typeof a.studentAnswerRaw === 'string'
-          ? a.studentAnswerRaw.replace(/[，、；;｜|]/g, ',')
-          : a.studentAnswerRaw
-      }))
+    ? readAnswerResult.answers.map((a) => {
+        if (calcOrWordProblemIds.has(a.questionId) && a.status === 'read') {
+          const finalOnly = extractFinalAnswerCandidate(a.studentAnswerRaw) || a.studentAnswerRaw
+          return {
+            questionId: a.questionId,
+            status: a.status,
+            studentAnswerRaw: finalOnly,
+            processOmitted: true
+          }
+        }
+        return {
+          questionId: a.questionId,
+          status: a.status,
+          studentAnswerRaw: multiSelectIds.has(a.questionId) && typeof a.studentAnswerRaw === 'string'
+            ? a.studentAnswerRaw.replace(/[，、；;｜|]/g, ',')
+            : a.studentAnswerRaw
+        }
+      })
     : []
 
   return `
@@ -4406,25 +4424,35 @@ ${isHighSchool
   - isCorrect = (score === maxScore).
   - errorType: same as multi_check (based on non-其他 tokens only).
 - word_problem: Standard-answer question type with FIXED DEDUCTION scoring (not multi-dimension rubric).
-  SPLIT RULE: The line starting with "答：", "A:", or "Ans:" is the 答句; everything above is the 列式計算 (process). If no such line exists, treat the entire answer as process only (答句 = blank).
-  VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached (labelled "學生作答圖"), use the IMAGE as the primary source. The text transcription may be inaccurate for fractions, subscripts, and multi-line calculations.
+  ⚠️ studentAnswerRaw 只含學生寫的「最終答句」(已從 OCR 過程文字中萃取)，processOmitted=true 表示 process 文字**故意未提供**。
+  ⚠️ 你**必須完全從學生作答圖判斷算式過程**，禁止假裝你看到任何 process 文字、禁止從 studentAnswerRaw 推論 process。
   🚨 FIXED DEDUCTION SCORING (word_problem — must follow strictly):
   Start with score = maxScore, then apply deductions in order:
-  STEP 1 — 答句數值: If the numeric value is WRONG → score = 0. STOP.
+  STEP 1 — 答句數值: If the numeric value (from studentAnswerRaw) is WRONG → score = 0. STOP. **不需檢查 process**。
   STEP 2 — 答句單位: If referenceAnswer has a unit but student OMITTED it → deduct 1. If student wrote a WRONG unit (not in UNIT EQUIVALENCE TABLE) → score = 0. STOP.
-  STEP 3 — 列式計算: If process contains a clear mathematical ERROR (wrong formula, wrong operation) → deduct 1. If process is missing entirely (only 答句, no steps) → deduct 1. Abbreviated or skipped trivial steps = NO deduction.
+  STEP 3 — 列式計算 (僅看學生作答圖):
+    - 必要條件：STEP 1 通過（答句正確），才進此 step。
+    - 從圖片直接讀過程，禁止依賴任何文字 transcription。
+    - 只有當圖片**清楚顯示**過程有嚴重數學錯誤（如錯公式/錯運算且根本無法導出正確答案）→ deduct 1。
+    - 圖片不清楚 / 無法判斷 → DO NOT deduct（答句既然對，過程理應對，OCR 不準不是學生的錯）。
+    - 完全沒寫過程（圖片只有答句、沒任何算式）→ deduct 1。
+    - 簡寫 / 跳步驟 → NO deduction。
   Final score = max(0, score after deductions). Each deficiency deducts exactly 1 point, never more.
-  When in doubt on STEP 3, do NOT deduct. Stability > strictness.
 - calculation: Standard-answer question type with FIXED DEDUCTION scoring (not multi-dimension rubric).
-  SPLIT RULE: If studentAnswerRaw starts with the parentheses answer (the value the student wrote inside "=( )"), that is the 最終答案. The remaining lines are the 算式過程 (process). If no parentheses answer is present, use the last standalone "= X" result as the 最終答案.
   HARD RULE: NEVER require "答：", "A:", or "Ans:" prefix. NO unit checking — students do NOT need to write units.
-  VISUAL PROCESS CHECK: If an image of the student's handwritten work is attached (labelled "學生作答圖"), use the IMAGE as the primary source for judging 算式過程.
+  ⚠️ studentAnswerRaw 只含學生寫的「最終答案」(已從 OCR 過程文字中萃取)，processOmitted=true 表示 process 文字**故意未提供**。
+  ⚠️ 你**必須完全從學生作答圖判斷算式過程**，禁止假裝你看到任何 process 文字、禁止從 studentAnswerRaw 推論 process。
   🚨 FIXED DEDUCTION SCORING (calculation — must follow strictly):
   Start with score = maxScore, then apply deductions in order:
-  STEP 1 — 最終答案: If the final numeric value is WRONG → score = 0. STOP.
-  STEP 2 — 算式過程: If process contains a clear mathematical ERROR (wrong formula, wrong operation) → deduct 1. If process is missing entirely (only final answer, no steps) → deduct 1. Abbreviated or skipped trivial steps = NO deduction.
+  STEP 1 — 最終答案: If the final numeric value (from studentAnswerRaw) is WRONG → score = 0. STOP. **不需檢查 process**。
+  STEP 2 — 算式過程 (僅看學生作答圖):
+    - 必要條件：STEP 1 通過（最終答案正確），才進此 step。
+    - 從圖片直接讀過程，禁止依賴任何文字 transcription。
+    - 只有當圖片**清楚顯示**過程有嚴重數學錯誤（如錯公式/錯運算且根本無法導出最終答案）→ deduct 1。
+    - 圖片不清楚 / 無法判斷 → DO NOT deduct（最終答案既然對，過程理應對，OCR 不準不是學生的錯）。
+    - 完全沒寫過程（圖片只有最終答案、沒任何算式）→ deduct 1。
+    - 簡寫 / 跳步驟 → NO deduction。
   Final score = max(0, score after deductions). Each deficiency deducts exactly 1 point, never more.
-  When in doubt, do NOT deduct. Stability > strictness.
   LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score regardless of process.
 - short_answer: Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback. No unit checking required.
   - ⚠️ OPEN-CHOICE DIMENSION RULE: When a dimension's criteria says "完成選擇即可，無對錯" (or similar), award full marks for that dimension as long as the student made any choice — regardless of WHICH option they chose. This applies to "承上題" follow-up questions where students choose one aspect from the previous question and explain it. Do NOT deduct points for choosing 休閒娛樂 vs 文化傳承 vs 教育 etc. — all valid options from the preceding question are equally acceptable.
