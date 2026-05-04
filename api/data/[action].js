@@ -4032,13 +4032,20 @@ async function handleSubmission(req, res) {
       imageBase64,
       contentType,
       thumbBase64,
-      thumbContentType
+      thumbContentType,
+      source: rawSource
     } = body || {}
 
     if (!submissionId || !assignmentId || !studentId || !createdAt || !imageBase64) {
       res.status(400).json({ error: 'Missing required fields' })
       return
     }
+
+    // 教師端 source：teacher_scan（PDF 匯入）/ teacher_camera（相機拍攝）
+    // 用於決定 bbox median 校正策略：只有 teacher_scan 啟用，相機照片各自獨立
+    // 舊 client 沒帶 source → fallback 到 teacher_scan 維持向下相容
+    const allowedTeacherSources = ['teacher_scan', 'teacher_camera']
+    const submissionSource = allowedTeacherSources.includes(rawSource) ? rawSource : 'teacher_scan'
 
     const tombstoneCheck = await supabaseDb
       .from('deleted_records')
@@ -4203,7 +4210,7 @@ async function handleSubmission(req, res) {
           image_url: filePath,
           thumb_url: thumbFilePath ?? undefined,
           status: 'synced',
-          source: 'teacher_scan',
+          source: submissionSource,
           round: 0,
           actor_user_id: user.id,
           created_at: timestamp,
