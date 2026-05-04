@@ -4263,18 +4263,14 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - correct = tokens in student_tokens ∩ answer_tokens
   - wrong = tokens in student_tokens − answer_tokens
   - missing = tokens in answer_tokens − student_tokens
-${strictness === 'strict'
-  ? `  - 嚴格模式（對齊大考中心）: wrongCount = |wrong| + |missing|（漏選 1 個 + 多選 1 個 = 2 個錯位）
-  - score = max(0, maxScore − 2 × wrongCount)
-  - 範例（5 分題、正確 ACE）：學生 ACB（漏 E、多 B）→ wrongCount=2 → score=1；學生 ABCDE（多 BD）→ wrongCount=2 → score=1`
-  : `  - extraWrong = max(0, |wrong| − |missing|)   ← only penalize wrong tokens that EXCEED the missing count (substitution = 1 error, not 2)
-  - score = max(0, round((|correct| − |extraWrong|) / |answer_tokens| × maxScore))`}
+  - extraWrong = max(0, |wrong| − |missing|)   ← only penalize wrong tokens that EXCEED the missing count (substitution = 1 error, not 2)
+  - score = max(0, round((|correct| − |extraWrong|) / |answer_tokens| × maxScore))
   - isCorrect = (score === maxScore)
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
 - multi_check_other: Same as multi_check BUT the LAST checkbox option is an open-ended "其他：___" field.
   - STEP 1 — Parse studentAnswerRaw: split into tokens. If the 其他 token has text appended (format "token：text", e.g. "(4)：轉為文風鼎盛的社會"), extract and store the text separately, then strip it from the token.
   - STEP 2 — Identify and REMOVE the 其他 token: the highest-numbered token in student_tokens ∪ answer_tokens. ALWAYS remove it from student_tokens. It is NEVER counted in the correct/wrong formula.
-  - STEP 3 — Score the remaining tokens using the same multi_check formula defined above (依 strictness 分支：strict 用 wrongCount=|wrong|+|missing| 並套 maxScore−2×wrongCount；其他 mode 用 extraWrong 比例公式).
+  - STEP 3 — Score the remaining tokens using the standard multi_check formula (correct − extraWrong).
     - ⚠️ EMPTY REFERENCE GUARD: If referenceAnswer is empty/null/blank (teacher did not specify correct fixed options), treat ALL fixed-option tokens as neither correct nor wrong → score = maxScore (full marks for fixed-option portion). Do NOT penalize any fixed option when reference is absent.
   - STEP 4 — Evaluate 其他 text (only if student checked 其他 AND text is non-empty):
     - Use the question context visible in the image and the answer key referenceAnswer (if provided) to judge whether the text is a reasonable/valid answer for this question.
