@@ -4135,8 +4135,10 @@ function applyForensicDecision(forensic, ai1Answer, ai2Answer) {
   return { arbiterStatus: 'needs_review' }
 }
 
-function buildAccessorPrompt(answerKey, readAnswerResult, domainHint) {
+function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
   const strictness = answerKey?.strictness || 'standard'
+  // gradeBand: 'high' (10-12) → 多選用大考中心固定扣分；其他 (含 NULL/k9) → 現行 substitution-discount 公式
+  const isHighSchool = gradeBand === 'high'
   const strictnessRule =
     strictness === 'strict'
       ? 'GRADING STRICTNESS: STRICT — For objective categories (single_choice, true_false, fill_blank, fill_variants, single_check, multi_check, multi_choice), enforce exact correctness per category rules. For rubric categories (short_answer, map_symbol, grid_geometry, connect_dots, diagram_draw, diagram_color), judge by rubric dimensions and visual/concept correctness; do NOT require literal format matching unless the category rule explicitly requires it.'
@@ -4263,14 +4265,18 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - correct = tokens in student_tokens ∩ answer_tokens
   - wrong = tokens in student_tokens − answer_tokens
   - missing = tokens in answer_tokens − student_tokens
-  - extraWrong = max(0, |wrong| − |missing|)   ← only penalize wrong tokens that EXCEED the missing count (substitution = 1 error, not 2)
-  - score = max(0, round((|correct| − |extraWrong|) / |answer_tokens| × maxScore))
+${isHighSchool
+  ? `  - 高中模式（大考中心）: 每個選項獨立判定，wrongCount = |wrong| + |missing|（多選 + 漏選都各算 1 錯，無 substitution 折扣）
+  - score = max(0, maxScore − 2 × wrongCount)
+  - 範例（5 分題、正確 ACE）：學生 ACB（漏 E、多 B）→ wrongCount=2 → 1 分；學生 ABCDE（多 BD）→ wrongCount=2 → 1 分；學生 BD（漏 ACE 多 BD）→ wrongCount=5 → 0 分`
+  : `  - extraWrong = max(0, |wrong| − |missing|)   ← only penalize wrong tokens that EXCEED the missing count (substitution = 1 error, not 2)
+  - score = max(0, round((|correct| − |extraWrong|) / |answer_tokens| × maxScore))`}
   - isCorrect = (score === maxScore)
   - errorType: if student has wrong extra tokens → 'concept'; if student missed tokens → 'concept'; if blank → 'blank'.
 - multi_check_other: Same as multi_check BUT the LAST checkbox option is an open-ended "其他：___" field.
   - STEP 1 — Parse studentAnswerRaw: split into tokens. If the 其他 token has text appended (format "token：text", e.g. "(4)：轉為文風鼎盛的社會"), extract and store the text separately, then strip it from the token.
   - STEP 2 — Identify and REMOVE the 其他 token: the highest-numbered token in student_tokens ∪ answer_tokens. ALWAYS remove it from student_tokens. It is NEVER counted in the correct/wrong formula.
-  - STEP 3 — Score the remaining tokens using the standard multi_check formula (correct − extraWrong).
+  - STEP 3 — Score the remaining tokens using the same multi_check formula defined above (依 gradeBand 分支：高中用 wrongCount=|wrong|+|missing| 並套 maxScore−2×wrongCount；其他用 extraWrong 比例公式).
     - ⚠️ EMPTY REFERENCE GUARD: If referenceAnswer is empty/null/blank (teacher did not specify correct fixed options), treat ALL fixed-option tokens as neither correct nor wrong → score = maxScore (full marks for fixed-option portion). Do NOT penalize any fixed option when reference is absent.
   - STEP 4 — Evaluate 其他 text (only if student checked 其他 AND text is non-empty):
     - Use the question context visible in the image and the answer key referenceAnswer (if provided) to judge whether the text is a reasonable/valid answer for this question.
@@ -6654,6 +6660,11 @@ export async function runStagedGradingPhaseB({
   const stageResponses = Array.isArray(_inheritedStageResponses) ? [..._inheritedStageResponses] : []
   const stageWarnings = Array.isArray(_inheritedStageWarnings) ? [..._inheritedStageWarnings] : []
 
+  // gradeBand: 'high' (年級 10-12) → 多選用大考中心扣分公式；其他（含 NULL/k9）→ 現行公式
+  // 由 client 從 assignment.classroomId → classroom.grade 推算後傳入；server 不主動查 DB
+  const gradeBand = payload?.gradeBand === 'high' ? 'high' : 'k9'
+  logStaged(pipelineRunId, stagedLogLevel, `PhaseB begin gradeBand=${gradeBand} (multi_choice 公式: ${gradeBand === 'high' ? '大考中心 -2/錯' : 'K-9 比例'})`)
+
   const inlineImages = extractInlineImages(contents)
   const submissionImageParts = inlineImages.length > 0 ? [inlineImages[0]] : []
 
@@ -6744,8 +6755,8 @@ export async function runStagedGradingPhaseB({
     logStageStart(pipelineRunId, 'Accessor-p1')
     logStageStart(pipelineRunId, 'Accessor-p2')
     const [accessorResp1, accessorResp2] = await Promise.all([
-      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint), [...p1Ids], calcCropMap) }] }),
-      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint), [...p2Ids], calcCropMap) }] })
+      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] }),
+      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
     ])
     logStageEnd(pipelineRunId, 'Accessor-p1', accessorResp1)
     logStageEnd(pipelineRunId, 'Accessor-p2', accessorResp2)
@@ -6772,7 +6783,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed1 || typeof parsed1 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p1-retry')
-      const retryResp1 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint), [...p1Ids], calcCropMap) }] })
+      const retryResp1 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-p1-retry', retryResp1)
       stageResponses.push(retryResp1)
       parsed1 = retryResp1.ok ? parseCandidateJson(retryResp1.data) : null
@@ -6794,7 +6805,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed2 || typeof parsed2 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p2-retry')
-      const retryResp2 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint), [...p2Ids], calcCropMap) }] })
+      const retryResp2 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-p2-retry', retryResp2)
       stageResponses.push(retryResp2)
       parsed2 = retryResp2.ok ? parseCandidateJson(retryResp2.data) : null
@@ -6817,7 +6828,7 @@ export async function runStagedGradingPhaseB({
     const result2 = normalizeAccessorResult(parsed2, ak2, rar2.answers, internalContext?.domainHint)
     accessorResult = { scores: [...(result1.scores || []), ...(result2.scores || [])] }
   } else {
-    const accessorPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint)
+    const accessorPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint, gradeBand)
     logStageStart(pipelineRunId, 'Accessor')
     const accessorResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
@@ -6876,7 +6887,7 @@ export async function runStagedGradingPhaseB({
   if (accessorQG.severity === QG_SEVERITY.FAIL && !accessorResult._retried) {
     logStaged(pipelineRunId, stagedLogLevel, 'accessor quality FAIL → retry (1/1)')
     // Re-run accessor using single-page prompt (full question set)
-    const retryPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint)
+    const retryPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint, gradeBand)
     const retryContents = [{ role: 'user', parts: buildAccessorParts(retryPrompt, allAnswerIds, calcCropMap) }]
     logStageStart(pipelineRunId, 'Accessor-qg-retry')
     const retryAccessorResp = await executeStage({
