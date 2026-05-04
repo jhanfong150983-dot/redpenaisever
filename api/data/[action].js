@@ -23,6 +23,16 @@ const TAG_QUIET_MINUTES = 5
 const DEFAULT_CORRECTION_ATTEMPT_LIMIT = 3
 const CORRECTION_UNLOCK_INCREMENT = 3
 const MAX_CORRECTION_ATTEMPT_LIMIT = 10
+
+// 允許的 submission source 白名單（保護 sync upsert 不被 client 寫入意外值）
+// teacher_student_upload 為 legacy（UnifiedImportPage 舊行為），保留供既有資料 upsert 時通過
+const ALLOWED_SUBMISSION_SOURCES = new Set([
+  'teacher_scan',
+  'teacher_camera',
+  'teacher_student_upload',
+  'student_upload',
+  'student_correction'
+])
 const HOMEWORK_IMAGES_BUCKET = 'homework-images'
 const STUDENT_CORRECTION_MODEL =
   getEnvValue('STUDENT_CORRECTION_MODEL') ||
@@ -3819,7 +3829,10 @@ async function handleSync(req, res) {
             })(),
             image_url: imageUrl,
             thumb_url: thumbUrl,
-            source: s.source ?? undefined,
+            // source whitelist：避免 client 寫入意外值。
+            // teacher_student_upload 為 legacy（UnifiedImportPage 舊行為），保留向下相容；
+            // 新上傳一律走 teacher_scan / teacher_camera 區分 PDF / 相機。
+            source: ALLOWED_SUBMISSION_SOURCES.has(s.source) ? s.source : undefined,
             round: normalizedRound,
             parent_submission_id: s.parentSubmissionId ?? s.parent_submission_id ?? undefined,
             actor_user_id: s.actorUserId ?? s.actor_user_id ?? undefined,
@@ -3832,9 +3845,44 @@ async function handleSync(req, res) {
         )
       }
 
+      // 防 silent data loss：upsert 前驗證 NEW row 的 image 真的在 storage 裡。
+      // 若 handleSubmission upload 失敗但後續 sync 仍 push metadata，DB 會多一筆指向不存在
+      // 檔案的 row，導致換裝置/學生看到破圖。新 row 找不到對應 storage 物件 → 整 row 跳過。
+      let skippedSubmissionMissingStorageCount = 0
+      if (submissionRows.length > 0) {
+        const newRowImagePaths = []
+        for (const row of submissionRows) {
+          if (!existingSubmissionMap.has(row.id) && row.image_url) {
+            newRowImagePaths.push(row.image_url)
+          }
+        }
+        if (newRowImagePaths.length > 0) {
+          const { data: storageRows, error: storageQueryErr } = await supabaseDb
+            .schema('storage')
+            .from('objects')
+            .select('name')
+            .eq('bucket_id', 'homework-images')
+            .in('name', newRowImagePaths)
+          if (storageQueryErr) {
+            console.warn('[sync] storage existence check failed (skip drop):', storageQueryErr.message)
+          } else {
+            const storageSet = new Set((storageRows || []).map((r) => r.name))
+            for (let i = submissionRows.length - 1; i >= 0; i -= 1) {
+              const row = submissionRows[i]
+              const isNew = !existingSubmissionMap.has(row.id)
+              if (isNew && row.image_url && !storageSet.has(row.image_url)) {
+                console.warn(`[sync-no-storage] dropped NEW submission ${row.id} (image ${row.image_url} not in storage; client should retry upload)`)
+                submissionRows.splice(i, 1)
+                skippedSubmissionMissingStorageCount += 1
+              }
+            }
+          }
+        }
+      }
+
       if (incomingSubmissions.length > 0) {
         console.log(
-          `📝 [sync] upsert submissions count=${submissionRows.length} (incoming=${incomingSubmissions.length} stale=${skippedSubmissionStaleCount} deleted=${skippedSubmissionDeletedCount})`
+          `📝 [sync] upsert submissions count=${submissionRows.length} (incoming=${incomingSubmissions.length} stale=${skippedSubmissionStaleCount} deleted=${skippedSubmissionDeletedCount} missing-storage=${skippedSubmissionMissingStorageCount})`
         )
       }
 
