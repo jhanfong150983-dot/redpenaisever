@@ -1,6 +1,5 @@
 import crypto from 'crypto'
 import {
-  getSupabaseAdmin,
   getSupabaseServiceRoleKey,
   getSupabaseUrl
 } from './_supabase.js'
@@ -226,6 +225,59 @@ export async function exchangeCodeForSession(code, verifier) {
   return data
 }
 
+// 直接打 Supabase Auth REST API，避免使用 supabase-js 的 auth helper。
+// 後者會把使用者 session 寫進 client 記憶體，污染共用的 cached admin client，
+// 導致後續 .from() 查詢以使用者身分而非 service_role 跑、被 RLS 擋下。
+async function fetchAuthUserViaRest(supabaseUrl, serviceRoleKey, accessToken) {
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      method: 'GET',
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+    if (!response.ok) return { user: null, ok: false }
+    const user = await response.json()
+    if (!user?.id) return { user: null, ok: false }
+    return { user, ok: true }
+  } catch {
+    return { user: null, ok: false }
+  }
+}
+
+async function refreshSessionViaRest(supabaseUrl, serviceRoleKey, refreshToken) {
+  try {
+    const response = await fetch(
+      `${supabaseUrl}/auth/v1/token?grant_type=refresh_token`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: serviceRoleKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ refresh_token: refreshToken })
+      }
+    )
+    if (!response.ok) return { session: null, user: null, ok: false }
+    const data = await response.json()
+    if (!data?.access_token || !data?.refresh_token || !data?.user) {
+      return { session: null, user: null, ok: false }
+    }
+    return {
+      session: {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        expires_in: data.expires_in ?? 3600
+      },
+      user: data.user,
+      ok: true
+    }
+  } catch {
+    return { session: null, user: null, ok: false }
+  }
+}
+
 export async function getAuthUser(req, res) {
   const cookies = parseCookies(req)
   const accessToken = cookies[ACCESS_COOKIE]
@@ -233,30 +285,36 @@ export async function getAuthUser(req, res) {
 
   if (!accessToken && !refreshToken) return { user: null, accessToken: null }
 
-  const supabaseAdmin = getSupabaseAdmin()
+  const supabaseUrl = getSupabaseUrl()
+  const serviceRoleKey = getSupabaseServiceRoleKey()
+  if (!supabaseUrl || !serviceRoleKey) {
+    throw new Error('Supabase server credentials are missing')
+  }
 
   if (accessToken) {
-    const { data, error } = await supabaseAdmin.auth.getUser(accessToken)
-    if (!error && data?.user) {
-      return { user: data.user, session: null, accessToken }
+    const { user, ok } = await fetchAuthUserViaRest(supabaseUrl, serviceRoleKey, accessToken)
+    if (ok && user) {
+      return { user, session: null, accessToken }
     }
   }
 
   if (refreshToken) {
-    const { data, error } = await supabaseAdmin.auth.refreshSession({
-      refresh_token: refreshToken
-    })
+    const { session, user, ok } = await refreshSessionViaRest(
+      supabaseUrl,
+      serviceRoleKey,
+      refreshToken
+    )
 
-    if (error || !data?.session || !data.user) {
+    if (!ok || !session || !user) {
       clearAuthCookies(res, isSecureRequest(req), req)
       return { user: null, accessToken: null }
     }
 
-    setAuthCookies(res, data.session, isSecureRequest(req), req)
+    setAuthCookies(res, session, isSecureRequest(req), req)
     return {
-      user: data.user,
-      session: data.session,
-      accessToken: data.session.access_token
+      user,
+      session,
+      accessToken: session.access_token
     }
   }
 
