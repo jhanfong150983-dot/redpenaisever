@@ -27,10 +27,7 @@ export function extractPhaseALogData({
   const classifyAligned = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
   const classify = {
     coverage: classifyResult?.coverage,
-    visibleCount: classifyAligned.filter(q => q.visible).length,
-    tablePositionReasoning: classifyAligned.filter(q => q.tablePositionReasoning).map(q => ({
-      id: q.questionId, reasoning: q.tablePositionReasoning
-    }))
+    visibleCount: classifyAligned.filter(q => q.visible).length
   }
 
   // read answers (只存 questionId + status + answer)

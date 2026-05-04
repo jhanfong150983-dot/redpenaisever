@@ -1273,7 +1273,6 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     const q = byQuestionId.get(qId)
     const expectedType = q ? resolveExpectedQuestionType(q) : 'fill_blank'
     if (expectedType !== 'fill_blank') continue
-    if (q?.tablePosition) continue
     const parentId = parts.slice(0, -1).join('-')
     if (!parentGroups.has(parentId)) parentGroups.set(parentId, [])
     parentGroups.get(parentId).push(qId)
@@ -1318,17 +1317,10 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       const groupId = resolveMatchingGroupId(question)
       if (groupId) spec.bboxGroupId = groupId
     }
-    // anchorHint only helps for multi_fill and fill_blank sub-questions (3+ ID segments, e.g. "1-2-1").
-    // For single_choice / single_check / etc., the hint describes the answer key's circled option, which
-    // causes classify to narrow the bbox onto just that option text — shifting it upward.
-    const isFillBlankSubQ = questionId.split('-').length >= 3 && expectedType === 'fill_blank'
-    const anchorHintUsefulTypes = new Set(['multi_fill', 'fill_blank'])
-    const isSubQuestion = questionId.split('-').length >= 3
-    const akAnchorHint = ensureString(question?.anchorHint, '').trim()
-    const skipAnchorForFillBlankSubQ = isFillBlankSubQ
-    if (akAnchorHint && anchorHintUsefulTypes.has(expectedType) && (expectedType !== 'fill_blank' || isSubQuestion) && !skipAnchorForFillBlankSubQ) {
-      spec.anchorHint = akAnchorHint
-    }
+    // anchorHint 已完全停用：實證上 multi_fill 收到 anchorHint 後 bbox 中心會被 landmark
+    // 文字拉走（同 row 兩個空格的 drift 差到 11x：multi_fill +0.044 vs fill_blank sub-q +0.004）。
+    // 既然 single_choice / fill_blank sub-q 早就不送，multi_fill 也一併停掉。
+    // spec.anchorHint 不再產生；prompt 內的 ANCHOR RULE 規則因此變成 dead branch（無害）。
     // fill_blank 子題加上 ordinal（同一行第幾個填空）
     const ordinalInfo = fillBlankOrdinalMap.get(questionId)
     if (ordinalInfo) {
@@ -1340,7 +1332,6 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
       }
     }
     // table_cell 群組批改題型：傳 tableMeta + 整表 refBbox 給 classify AI
-    // table_cell 跟 tablePosition 互斥（normalize 已強制 tablePosition=undefined），不會走下方 tablePosition 分支
     if (expectedType === 'table_cell' && question?.tableMeta) {
       spec.tableMeta = {
         rowHeaders: Array.isArray(question.tableMeta.rowHeaders) ? question.tableMeta.rowHeaders : [],
@@ -1364,27 +1355,7 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
         }
       }
     }
-    // 表格座標定位（優先於 anchorHint） — legacy fill_blank+tablePosition path
-    if (question?.tablePosition && typeof question.tablePosition.col === 'number' && typeof question.tablePosition.row === 'number') {
-      spec.tablePosition = {
-        col: question.tablePosition.col,
-        row: question.tablePosition.row,
-        totalCols: question.tablePosition.totalCols,
-        totalRows: question.tablePosition.totalRows
-      }
-      if (question.tablePosition.colspan > 1) spec.tablePosition.colspan = question.tablePosition.colspan
-      if (question.tablePosition.rowspan > 1) spec.tablePosition.rowspan = question.tablePosition.rowspan
-      // 附帶答案卷的 answerBbox 作為定位參考（答案卷圖片清晰，座標較精確）
-      const akBbox = question?.answerBbox
-      if (akBbox && typeof akBbox.x === 'number' && typeof akBbox.y === 'number') {
-        spec.tablePosition.refBbox = {
-          x: +akBbox.x.toFixed(3),
-          y: +akBbox.y.toFixed(3),
-          w: +(akBbox.w || akBbox.width || 0).toFixed(3),
-          h: +(akBbox.h || akBbox.height || 0).toFixed(3)
-        }
-      }
-    }
+    // legacy fill_blank+tablePosition 已停用：表格題改走 table_cell type（整表 1 bbox + cellValues read）
     return spec
   })
 }
@@ -1620,8 +1591,7 @@ function normalizeClassifyResult(parsed, questionIds) {
       questionType,
       questionBbox: normalizeBboxRef(row?.questionBbox ?? row?.question_bbox),
       answerBbox: normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox),
-      bracketBbox: (questionType === 'circle_select_one' || questionType === 'circle_select_many') ? normalizeBboxRef(row?.bracketBbox) : undefined,
-      tablePositionReasoning: typeof row?.tablePositionReasoning === 'string' ? row.tablePositionReasoning : undefined
+      bracketBbox: (questionType === 'circle_select_one' || questionType === 'circle_select_many') ? normalizeBboxRef(row?.bracketBbox) : undefined
     })
     if (!visible) unmappedQuestionIds.push(questionId)
   }
@@ -1674,7 +1644,7 @@ function buildBboxUnion(bboxes) {
   }
 }
 
-function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 1, useTableMedianCorrection = false) {
+function applyClassifyQuestionSpecs(classifyResult, questionSpecs) {
   const alignedRaw = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
   if (alignedRaw.length === 0) return classifyResult
 
@@ -1702,13 +1672,6 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
       if (!answerBbox && questionBbox) answerBbox = questionBbox
     }
 
-    // 表格題：不在第一輪強制 x，保留 classify 原始偵測值，第二輪統一修正
-
-    // 括號型 fill_blank 子題：第一輪只標記，第三輪統一修正 y
-    // 表格型填空有 tablePosition → 跳過
-    const isSubQ = questionType === 'fill_blank' && questionId.split('-').length >= 3
-    const isParenSubQ = isSubQ && !spec?.tablePosition
-
     return {
       ...row,
       questionType,
@@ -1721,100 +1684,8 @@ function applyClassifyQuestionSpecs(classifyResult, questionSpecs, totalPages = 
     }
   })
 
-  // 表格題第二輪：混合定位 — refBbox 提供相對間距，classify 提供絕對位置校準
-  // 1. 收集每格的 classify.x 和 refBbox.x
-  // 2. 計算中位數 offset（掃描水平偏移量）
-  // 3. 所有格子 x = refBbox.x + offset（保持精確相對間距，修正掃描偏移）
-  // 4. w = 欄間距 - padding（避免看到鄰格）
-  const TABLE_CELL_PADDING = 0.008
-  const pageScale = 1 / (totalPages || 1) // per-page coords → full-image coords 的比例
-  const tableGroups = new Map() // key = "row-totalCols-totalRows" → [{index, col, classifyX, refX, refW, refH}]
-  for (let i = 0; i < alignedQuestions.length; i += 1) {
-    const q = alignedQuestions[i]
-    const spec = specByQuestionId.get(q.questionId)
-    const tp = spec?.tablePosition
-    if (!tp || !tp.refBbox || typeof tp.refBbox.x !== 'number') continue
-    const groupKey = `${tp.row}-${tp.totalCols}-${tp.totalRows}`
-    if (!tableGroups.has(groupKey)) tableGroups.set(groupKey, [])
-    tableGroups.get(groupKey).push({
-      index: i,
-      col: tp.col,
-      classifyX: q.answerBbox?.x ?? tp.refBbox.x,
-      refX: tp.refBbox.x,
-      refW: tp.refBbox.w || 0,
-      refH: tp.refBbox.h || 0
-    })
-  }
-  for (const members of tableGroups.values()) {
-    // 通用：safeHeight 防 0.0095 bug（與 source 無關，永遠套用）
-    const refHFullImage = (members[0].refH || 0.02) * pageScale
-    const maxH = Math.max(refHFullImage * 1.5, 0.005)
-    const minH = Math.max(refHFullImage * 0.4, 0.015)
-    const safeHeight = (rawH) => {
-      if (typeof rawH !== 'number' || !Number.isFinite(rawH) || rawH < minH) {
-        if (typeof rawH === 'number' && Number.isFinite(rawH)) {
-          console.warn(`[applyClassifyQuestionSpecs] bbox h suspicious (${rawH.toFixed(4)} < minH=${minH.toFixed(4)}, refH=${refHFullImage.toFixed(4)}); falling back to refH`)
-        }
-        return refHFullImage
-      }
-      return Math.min(rawH, maxH)
-    }
-
-    if (!useTableMedianCorrection) {
-      // 非 teacher_scan（含 student_upload, student_correction, teacher_camera 等單一作業來源）：
-      // 保留 classify 原始 x/y/w，只 clamp h。
-      // refBbox 與該張照片的紙張位置不對應，套 median + colWidth 反而把對的拉成錯的。
-      for (const m of members) {
-        const q = alignedQuestions[m.index]
-        if (q.answerBbox) {
-          alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, h: +safeHeight(q.answerBbox.h).toFixed(4) } }
-        }
-      }
-      continue
-    }
-
-    // teacher_scan: 同一台掃描器多頁、紙張位置一致 → 中位數校正才有意義
-    // 計算掃描偏移量：classify.x 與 refBbox.x 的中位數差距
-    const offsets = members.map((m) => m.classifyX - m.refX)
-    offsets.sort((a, b) => a - b)
-    const medianOffset = offsets.length % 2 === 1
-      ? offsets[Math.floor(offsets.length / 2)]
-      : (offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2
-
-    if (members.length < 2) {
-      // 單格：用 refBbox.x + offset，用 refBbox.w，限制 h
-      const m = members[0]
-      const q = alignedQuestions[m.index]
-      if (q.answerBbox) {
-        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +(m.refX + medianOffset).toFixed(4), w: m.refW, h: +safeHeight(q.answerBbox.h).toFixed(4) } }
-      }
-      continue
-    }
-    members.sort((a, b) => a.col - b.col)
-    for (let j = 0; j < members.length; j += 1) {
-      const m = members[j]
-      // x = refBbox.x + 掃描偏移量（保持 refBbox 的精確相對間距）
-      const correctedX = m.refX + medianOffset
-      // 計算實際欄寬：refBbox 的欄間距（比 classify 更準確）
-      const colWidth = j < members.length - 1
-        ? members[j + 1].refX - m.refX
-        : (j > 0 ? m.refX - members[j - 1].refX : m.refW)
-      // 內縮 padding，居中
-      const safeW = Math.max(colWidth - TABLE_CELL_PADDING, m.refW, 0.02)
-      const xShift = (colWidth - safeW) / 2
-      const safeX = correctedX + xShift
-      const q = alignedQuestions[m.index]
-      if (q.answerBbox) {
-        alignedQuestions[m.index] = { ...q, answerBbox: { ...q.answerBbox, x: +safeX.toFixed(4), w: +safeW.toFixed(4), h: +safeHeight(q.answerBbox.h).toFixed(4) } }
-      }
-    }
-  }
-
-  // 註：括號型 fill_blank 子題的「中心對稱擴寬 + 固定 h」後處理已移除。
-  // 原本是為了避免中文數學「12 → 只框到 2」場景，但會把英文同行多空的 bbox
-  // 往左推（手寫從底線左對齊往右溢出，中心對稱擴寬反而切到右側）。
-  // 改由 classify prompt 的 UNDERLINE ANCHOR RULE 處理：bbox 右邊 = 底線最右端
-  // OR 學生手寫右端，取較右者，自然涵蓋兩種場景。
+  // legacy fill_blank+tablePosition 的 median 校正路徑已移除：表格題改走 table_cell type
+  // （整表 1 bbox + cellValues read），不再需要逐格中位數校正、refBbox 推算。
 
   // matching group_context: same group shares one union bbox.
   const groupMeta = new Map()
@@ -2434,7 +2305,7 @@ Rules:
   - tight_answer: bbox 緊框答案空格本身，**不框題幹**（${isAnswerOnly ? 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，每子題各自一個 tight bbox' : 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，single_choice 約 25-35% 頁寬'}）.
 - TABLE_CELL RULE (when spec.tableMeta exists — questionCategory='table_cell'):
     觸發：spec 帶 tableMeta { rowHeaders, colHeaders, totalRows, totalCols } + tableRefBbox
-    這是「整張表合成 1 題」的群組批改題型，與舊 fill_blank+tablePosition 完全不同。
+    「整張表合成 1 題」的群組批改題型。
 
     bbox 規則：
     - answerBbox 必須框**整張表格的外輪廓**（從最上格線到最下格線、最左到最右）
@@ -2451,40 +2322,6 @@ Rules:
 
     輸出：1 個 question = 1 個 answerBbox（整表）+ visible=true。**不要回 cell 級 bbox**。
 
-- TABLE POSITION RULE (HIGHEST PRIORITY — when tablePosition is in spec, this overrides ANCHOR / TABLE_COLUMN / ORDERING rules):
-    觸發：spec 帶 tablePosition (e.g. { col, row, totalCols, totalRows, colspan?, rowspan?, refBbox? })
-
-    【規則優先順序】
-
-    ① 空白格防漂移（最高優先 — bbox 位置由座標決定）：
-       目標格內是否有學生手寫**完全不影響** bbox 位置。
-       嚴禁因為目標格空白就把 bbox 漂移到相鄰有內容的格子。
-
-    ② 格線偵測法（首選定位方法 — 必須在 STUDENT_SUBMISSION 上實際數格線）：
-       1. 找到表格的外框邊界（最外圍的格線）
-       2. 數垂直格線（含左右外框）：從左到右依序 V1, V2, V3, ..., V(N+1)。N+1 條 = N 欄
-       3. 數水平格線（含上下外框）：從上到下依序 H1, H2, H3, ..., H(M+1)。M+1 條 = M 列
-       4. 第 C 欄 = V(C) 與 V(C+1) 之間；第 R 列 = H(R) 與 H(R+1) 之間
-       5. 驗證 totalCols：spec 給的 totalCols 應 = 你數的垂直線數 − 1。若不符，重新計數
-       6. 目標格 bbox：x = V(col)，y = H(row)，w = V(col+1) − V(col)，h = H(row+1) − H(row)
-
-    ③ 合併格處理（spec 帶 colspan / rowspan 時）：
-       - colspan = K：bbox 寬度改為 V(col+K) − V(col)（橫跨 K 欄）
-       - rowspan = K：bbox 高度改為 H(row+K) − H(row)（縱跨 K 列）
-
-    ④ Fallback（格線不清時，例如被學生筆跡覆蓋、掃描品質差、表格無完整外框）：
-       若無法清晰偵測格線，使用 spec.tablePosition.refBbox 作為座標起點。
-       refBbox 是答案卷對應格座標，但水平可有最多 0.08（8% 頁寬）的掃描偏移。
-       Fallback 時應以 refBbox 為基準，再用目視確認該格的水平範圍做小幅修正。
-
-    ⑤ refBbox 一致性驗證（②路徑完成後執行）：
-       將你算出的 bbox.x 與 refBbox.x 比對。
-       差距 > 0.08（8% 頁寬）→ 強烈暗示格線計數有誤，請重新計數（回 ②.5）。
-       y 值可信度高（同份試卷垂直 layout 一致），可作為 row 定位的初步驗證。
-
-    ⑥ tablePositionReasoning（MANDATORY 輸出）：
-       純文字格式：detected V-lines=[x1,x2,...]. Target col=N → V(N)=x, V(N+1)=x2. refBbox.x=X (verify). bbox=[x,y,w,h]
-       若走 Fallback 路徑：fallback: refBbox-based, V-lines unclear due to [reason]. bbox=[x,y,w,h]
 - For visible=true questions, output answerBbox per the type-specific rules below. **每個 type 的規則決定 bbox 該含什麼/不含什麼**，沒有「預設要含題幹脈絡」這回事 — 一切以 per-type rule 為準。
   - ${isAnswerOnly ? 'ANSWER-ONLY MODE: bbox 含題號 + 答案區（純答案卷無題幹文字可框）。' : '⚠️ 沒有 default 含題幹規則：tight_answer 群組 ≠ 含題幹；large_visual_area 群組才含題幹。請依 per-type rule 判斷。'}
 
@@ -2495,11 +2332,9 @@ Rules:
 
     【階段 A：識別 WHICH — 先確定「目標空白是這行的第幾個」】
     依下列子規則優先級走：
-    1. ANCHOR RULE（spec 帶 anchorHint）：以 anchorHint 描述為權威識別目標空白。anchorHint 是用來**找到目標空白**，不是 bbox 的起點座標。
-    2. TABLE COLUMN RULE（anchorHint 指欄標題時）：bbox 左右邊**不可超出該欄邊界**；若可能含到鄰欄內容，必須縮小。
-    3. ROW RULE（spec 帶 blankRow + blankRowTotal）：先由上至下數，找到第 blankRow 行，再進入該行。
-    4. ORDINAL RULE（spec 帶 blankOrdinal + blankTotal）：在對的行內，從左到右數，目標 = 第 blankOrdinal 個空白。
-    5. ORDERING RULE（無任何 hint）：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應。
+    1. ROW RULE（spec 帶 blankRow + blankRowTotal）：先由上至下數，找到第 blankRow 行，再進入該行。
+    2. ORDINAL RULE（spec 帶 blankOrdinal + blankTotal）：在對的行內，從左到右數，目標 = 第 blankOrdinal 個空白。
+    3. ORDERING RULE（無任何 hint）：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應。
 
     【階段 B：定位 WHERE — 依 blankFormat 用不同策略算 bbox.x】
 
@@ -2620,10 +2455,7 @@ Rules:
   - For fill_variants：規則同 fill_blank（容多元說法是 Read 階段的判斷，classify 階段處理方式相同）。
   - For single_choice / multi_choice / true_false：學生在空括號 (   ) 內寫代號或符號（A/B/C/甲/乙/①/②、○/✗ 等）。single_choice / true_false 寫 1 個；multi_choice 寫多個（如 "A,C"）。answerBbox 緊框該空括號，左右各加少許邊距以容忍對齊誤差。不可含題幹文字、不可延伸到下方選項清單行。寬度約占頁寬 25-35%，以括號為中心。
   - For multi_fill：圖中有多個固定位置的空白格（地圖標記、表格儲存格、圖片標籤等），每個子題對應一格。answerBbox 緊框該子題對應的單一空白格（含學生手寫），不含題幹。不可含到鄰格、不可跨格、不可重疊到其他子題的 bbox；若格子很小且擁擠，bbox 寧可縮小也不要重疊。
-    子規則（依優先級）：
-    1. ANCHOR RULE（spec 帶 anchorHint）：以 anchorHint 描述為權威定位，最高優先。anchorHint 描述的是答案格本身，不要把 bbox 放在 landmark 文字上。
-    2. TABLE COLUMN RULE（anchorHint 指欄標題時）：bbox 左右邊不可超出該欄邊界。
-    3. ORDERING RULE（無任何 hint）：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應；最小 ID 對應最上方的格。
+    子規則：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應；最小 ID 對應最上方的格。
 
   ── answer_with_context 群組（答案區 + 鄰近印刷脈絡）──
   - For circle_select_one / circle_select_many：括號內預印多個選項（如「(同意／不同意)」），學生用筆跡圈/劃選其中一個或多個。answerBbox 必須完整框住該括號列（含全部預印選項文字 + 學生筆跡），左右各加少許邊距。不可只框圈圈本身、不可遺漏任何預印選項。
@@ -2696,8 +2528,6 @@ Required fields:
 Conditional fields (output ONLY when applicable; omit otherwise):
 - bracketBbox: only for circle_select_one / circle_select_many.
   Format: { "x": ..., "y": ..., "w": ..., "h": ... }
-- tablePositionReasoning: MANDATORY when spec includes tablePosition; otherwise omit.
-  Format: "detected V-lines=[x1,x2,...]. Target col=N → V(N)=x. bbox=[x,y,w,h]"
 - bboxGroupId: only for matching (echo from spec).
 
 Do NOT output:
@@ -3424,22 +3254,7 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
   // ── Per-type questionIds 清單已移除（每張裁切圖標籤已標註 type，清單純冗餘）──
   // ── bboxHintNote 已移除（裁切圖無關全圖座標，AI 看不到全圖無法用 normalized 座標）──
 
-  // Table cell column hints: 條件式 fallback — 若 bbox 意外含到欄標題，可作為驗證
-  const akQuestionMap = options?.answerKeyQuestions
-    ? mapByQuestionId(options.answerKeyQuestions, (item) => item?.id)
-    : new Map()
-  const tableCellHints = visibleQuestions
-    .filter((q) => {
-      const akQ = akQuestionMap.get(q.questionId)
-      return akQ?.tablePosition && akQ?.anchorHint
-    })
-    .map((q) => {
-      const akQ = akQuestionMap.get(q.questionId)
-      return `- "${q.questionId}"（表格 col=${akQ.tablePosition.col}）：${akQ.anchorHint}`
-    })
-  const tableCellHintNote = tableCellHints.length > 0
-    ? `\n\n== TABLE CELL FALLBACK HINTS ==\n以下題目是表格內的格子。裁切圖通常只含該格本身，但若意外含到欄標題或鄰格內容，可用以下描述驗證讀取的是正確的格子（若標題不符可能 bbox 偏移，回報 blank 較安全）：\n${tableCellHints.join('\n')}`
-    : ''
+  // Table cell column hints 已移除：tablePosition / anchorHint 已停用（新的 table_cell type 整表批改取代逐格定位）
 
   // ── Layered prompt assembly: Layer 2 (domain) + Layer 3 (components) ──
   // Layer 2-1 (type×domain specializations) are NOT injected as separate blocks here —
@@ -3986,7 +3801,7 @@ COMPOUND-CHAIN-TABLE (compound_chain_table 題)：表格內多 cell 有依賴關
 Your job is to report what the student physically wrote or drew in each question's designated answer space.
 
 Visible question IDs on this image:
-${JSON.stringify(visibleIds)}${tableCellHintNote}
+${JSON.stringify(visibleIds)}
 
 == ANTI-HALLUCINATION (absolute rule, cannot be overridden) ==
 You may ONLY output what is physically, visibly written by the student's own hand.
@@ -5242,12 +5057,8 @@ export async function runStagedGradingPhaseA({
     inlineData: { mimeType: img.mimeType || 'image/webp', data: img.data }
   }))
   const answerSheetMode = internalContext?.answerSheetMode || 'with_questions'
-  // bbox 中位數策略：只有 teacher_scan（同一台掃描器、多頁對齊）才用 median+colWidth 覆蓋；
-  // 其他來源（含 student_upload/student_correction/teacher_camera 或未指定）視為單一作業，
-  // refBbox 與該張照片不對應，median 反而把對的拉成錯的 → 走 raw classify
   const submissionSource = payload?.submissionSource || internalContext?.submissionSource || null
-  const useTableMedianCorrection = submissionSource === 'teacher_scan'
-  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length} answerSheetMode=${answerSheetMode} submissionSource=${submissionSource || 'unset'} useTableMedianCorrection=${useTableMedianCorrection}`)
+  logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length} answerSheetMode=${answerSheetMode} submissionSource=${submissionSource || 'unset'}`)
 
   const stageResponses = []
   const stageWarnings = []
@@ -5278,16 +5089,6 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, stagedLogLevel, 'classify corrections received', classifyCorrections)
   }
   const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
-  // Log anchorHint specs so we can verify hints are correct before trusting them
-  const specsWithAnchor = classifyQuestionSpecs.filter((s) => s.anchorHint)
-  if (specsWithAnchor.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'classify anchorHint specs', specsWithAnchor.map((s) => ({ id: s.questionId, anchorHint: s.anchorHint })))
-  }
-  // Log tablePosition specs for debugging table cell targeting
-  const specsWithTable = classifyQuestionSpecs.filter((s) => s.tablePosition)
-  if (specsWithTable.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'classify tablePosition specs', specsWithTable.map((s) => ({ id: s.questionId, tablePosition: s.tablePosition })))
-  }
 
   // Build per-page question groups（classify 和 bboxOverrides 都需要）
   const pageQuestionsMap = new Map()
@@ -5357,7 +5158,7 @@ export async function runStagedGradingPhaseA({
     if (classifyResponse.warnings.length > 0) stageWarnings.push(...classifyResponse.warnings.map((w) => `[classify-p1] ${w}`))
     const classifyParsed = parseCandidateJson(classifyResponse.data)
     if (!classifyParsed || typeof classifyParsed !== 'object') throw new Error('PhaseA classify parse failed')
-    classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
+    classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs)
   } else {
     // Multi-page: split merged image into individual pages, one classify call per page (parallel).
     // Each call gets ONLY its page's image → AI outputs bbox in single-page coords (0~1)
@@ -5410,7 +5211,7 @@ export async function runStagedGradingPhaseA({
         coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-      }, classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
+      }, classifyQuestionSpecs)
     } else {
       // Success: each page gets its own cropped image — no pageBreaks needed in prompt
       logStaged(pipelineRunId, stagedLogLevel, 'classify split success', {
@@ -5473,7 +5274,7 @@ export async function runStagedGradingPhaseA({
         coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-      }, classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
+      }, classifyQuestionSpecs)
     }
   }
   } // end else (skip classify when bboxOverrides)
@@ -5527,13 +5328,6 @@ export async function runStagedGradingPhaseA({
       }
     })
   )
-  // Log tablePosition reasoning for debugging table cell targeting
-  const tableReasoningDebug = classifyAligned
-    .filter((q) => q.tablePositionReasoning)
-    .map((q) => ({ id: q.questionId, reasoning: q.tablePositionReasoning }))
-  if (tableReasoningDebug.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'classify tablePosition reasoning', tableReasoningDebug)
-  }
   const multiFillBboxDebug = classifyAligned
     .filter((q) => q.visible && q.questionType === 'multi_fill')
     .map((q) => ({ questionId: q.questionId, answerBbox: q.answerBbox }))
@@ -5564,7 +5358,7 @@ export async function runStagedGradingPhaseA({
       if (retryResp.ok) {
         const retryParsed = parseCandidateJson(retryResp.data)
         if (retryParsed && typeof retryParsed === 'object') {
-          classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
+          classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs)
           const retryQG = validateClassifyQuality(classifyResult, questionIds)
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: retryQG.severity, warnings: retryQG.warnings
@@ -5614,7 +5408,7 @@ export async function runStagedGradingPhaseA({
             coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
             unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
             pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
-          }, classifyQuestionSpecs, pageEntries.length || 1, useTableMedianCorrection)
+          }, classifyQuestionSpecs)
           const retryQG = validateClassifyQuality(classifyResult, questionIds)
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: retryQG.severity, warnings: retryQG.warnings
@@ -5699,7 +5493,6 @@ export async function runStagedGradingPhaseA({
         const bboxToUse = q.answerBbox
         // fill_blank 子題（括號型）用小 padding，避免裁切到上下相鄰的括號
         const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
-          && !classifyAligned.find(cq => cq.questionId === q.questionId && cq.tablePositionReasoning)
         const cropPad = isParenSubQ ? +(0.01 / totalPages).toFixed(4)
           : dynamicPad
         const cropData = await cropInlineImageByBbox(
@@ -6648,58 +6441,8 @@ Return JSON:
     })
   logStaged(pipelineRunId, 'basic', 'per-question summary', '\n' + perQuestionLog.join('\n'))
 
-  // ── Table edge leak detection: flag suspicious table cell readings for teacher review ──
-  // If a table cell's final answer matches the adjacent left cell's known value,
-  // it's likely reading leaked content from the neighbor. Flag as needs_review.
-  const akQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
-  const akByQuestionId = mapByQuestionId(akQuestions, (item) => item?.id)
-  const tableLeakFlagged = []
-  for (const qr of questionResults) {
-    const akQ = akByQuestionId.get(qr.questionId)
-    if (!akQ?.tablePosition || !qr.arbiterResult?.finalAnswer) continue
-    if (qr.arbiterResult.arbiterStatus === 'needs_review') continue // already flagged
-    // true_false 跳過：○/✗ 答案天然重複率高，相鄰格相同不代表讀錯
-    if (qr.questionType === 'true_false') continue
-
-    const col = akQ.tablePosition.col
-    if (col <= 1) continue // no left neighbor
-
-    // Find the answer key question at col-1 in the same table (same row, same totalCols)
-    const leftNeighborAk = akQuestions.find((q) =>
-      q.tablePosition &&
-      q.tablePosition.col === col - 1 &&
-      q.tablePosition.row === akQ.tablePosition.row &&
-      q.tablePosition.totalCols === akQ.tablePosition.totalCols
-    )
-    // Check against left neighbor's answer key value OR left neighbor's read value
-    const leftAkAnswer = leftNeighborAk?.answer ?? ''
-    const leftReadQr = leftNeighborAk ? questionResults.find((r) => r.questionId === leftNeighborAk.id) : null
-    const leftReadAnswer = leftReadQr?.arbiterResult?.finalAnswer ?? ''
-
-    const finalAnswer = ensureString(qr.arbiterResult.finalAnswer, '').trim()
-    const normFinal = finalAnswer.replace(/\s+/g, '')
-    const normLeftAk = leftAkAnswer.replace(/\s+/g, '')
-    const normLeftRead = leftReadAnswer.replace(/\s+/g, '')
-
-    if (normFinal && (normFinal === normLeftAk || normFinal === normLeftRead)) {
-      // Suspicious: this cell's reading matches its left neighbor → likely edge leak
-      qr.arbiterResult = {
-        ...qr.arbiterResult,
-        arbiterStatus: 'needs_review',
-        tableLeakSuspected: true,
-        tableLeakReason: `讀到的「${finalAnswer}」與左方相鄰格（col=${col - 1}）的值相同，可能是裁切邊緣洩漏`
-      }
-      // Ensure crop image is attached for teacher review
-      const cropData = allQuestionCropMap.get(qr.questionId)
-      if (cropData) {
-        qr.answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
-      }
-      tableLeakFlagged.push(qr.questionId)
-    }
-  }
-  if (tableLeakFlagged.length > 0) {
-    logStaged(pipelineRunId, stagedLogLevel, 'table edge leak flagged for review', tableLeakFlagged)
-  }
+  // ── Table edge leak detection 已移除：依賴 legacy tablePosition.col/row 元數據，
+  //    新 table_cell type 走整表批改（cellValues 在 read 階段已能對齊每 cell），不需此檢查。
 
   // ── English spacing review: force needs_review for questions flagged with spacing differences ──
   const spacingReviewFlagged = []
