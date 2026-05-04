@@ -3356,7 +3356,7 @@ async function handleSync(req, res) {
             }
 
             if ((remainingRows || []).length === 0) {
-              const [assignmentExistsResult, studentExistsResult] = await Promise.all([
+              const [assignmentExistsResult, studentExistsResult, currentStateResult] = await Promise.all([
                 supabaseDb
                   .from('assignments')
                   .select('id')
@@ -3368,7 +3368,14 @@ async function handleSync(req, res) {
                   .select('id')
                   .eq('owner_id', user.id)
                   .eq('id', row.student_id)
-                  .limit(1)
+                  .limit(1),
+                supabaseDb
+                  .from('assignment_student_state')
+                  .select('status')
+                  .eq('owner_id', user.id)
+                  .eq('assignment_id', row.assignment_id)
+                  .eq('student_id', row.student_id)
+                  .maybeSingle()
               ])
 
               if (assignmentExistsResult.error) {
@@ -3377,10 +3384,21 @@ async function handleSync(req, res) {
               if (studentExistsResult.error) {
                 throw new Error(studentExistsResult.error.message)
               }
+              if (currentStateResult.error) {
+                throw new Error(currentStateResult.error.message)
+              }
 
               const assignmentExists = Array.isArray(assignmentExistsResult.data) && assignmentExistsResult.data.length > 0
               const studentExists = Array.isArray(studentExistsResult.data) && studentExistsResult.data.length > 0
               if (!assignmentExists || !studentExists) {
+                continue
+              }
+
+              // 防呆：若當前 state 已是 graded（例如老師剛剛手動批改），
+              // 不要因為刪掉舊 submission 就把 graded 狀態 reset 回 not_uploaded。
+              // 這會造成「退回 → 立刻手動批改」的 race condition：
+              // sync-delete 比 manual-grade 晚抵達時會把 graded 蓋掉，學生又被要求上傳。
+              if (currentStateResult.data?.status === 'graded') {
                 continue
               }
 
