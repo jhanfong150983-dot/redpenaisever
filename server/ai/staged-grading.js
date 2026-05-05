@@ -28,6 +28,18 @@ const READ_ANSWER_GENERATION_CONFIG = {
   }
 }
 
+// Classify must be MAXIMALLY deterministic: bbox 跨次必須一致，否則
+// 老師對系統失去信任。temperature=0 讓 Gemini 走最保守路徑，最大化跨次一致性。
+// thinking_level=MINIMAL: 同上。
+const CLASSIFY_GENERATION_CONFIG = {
+  generationConfig: {
+    temperature: 0,
+    thinkingConfig: {
+      thinking_level: 'MINIMAL'
+    }
+  }
+}
+
 function createPipelineRunId(requestId = '') {
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const normalizedRequestId =
@@ -5149,7 +5161,7 @@ export async function runStagedGradingPhaseA({
     const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
     const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
     const classifyResponse = await executeStage({
-      apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+      apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
       stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...submissionImageParts] }]
     })
@@ -5189,7 +5201,7 @@ export async function runStagedGradingPhaseA({
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
           const prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           return executeStage({
-            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+            apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
             stageContents: [{ role: 'user', parts: [{ text: prompt }, ...submissionImageParts] }]
           })
@@ -5230,7 +5242,7 @@ export async function runStagedGradingPhaseA({
           const prompt = buildClassifyPrompt(ids, specs, [], 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           const pageImagePart = { inlineData: splitPages[i].inlineData }
           return executeStage({
-            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+            apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
             stageContents: [{ role: 'user', parts: [{ text: prompt }, pageImagePart] }]
           })
@@ -5355,7 +5367,7 @@ export async function runStagedGradingPhaseA({
       const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
       const retryPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
       const retryResp = await executeStage({
-        apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+        apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
         stageContents: [{ role: 'user', parts: [{ text: retryPrompt }, ...submissionImageParts] }]
       })
@@ -5382,7 +5394,7 @@ export async function runStagedGradingPhaseA({
           const prompt = buildClassifyPrompt(ids, specs, useSplit ? [] : pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           const imgPart = useSplit ? { inlineData: splitPages[i].inlineData } : submissionImageParts[0]
           return executeStage({
-            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+            apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
             stageContents: [{ role: 'user', parts: [{ text: prompt }, imgPart] }]
           })
