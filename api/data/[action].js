@@ -2299,11 +2299,13 @@ async function handleManualGrade(req, res) {
       .eq('owner_id', user.id)
       .maybeSingle()
 
+    let stubSubmissionId = existing?.id ?? null
     if (!existing) {
       // 建一筆 stub submission，讓 sync 能把 graded 狀態帶回前端
       const { randomUUID } = await import('node:crypto')
+      stubSubmissionId = randomUUID()
       const { error: insertErr } = await supabaseDb.from('submissions').insert({
-        id: randomUUID(),
+        id: stubSubmissionId,
         assignment_id: assignmentId,
         student_id: studentId,
         owner_id: user.id,
@@ -2317,12 +2319,16 @@ async function handleManualGrade(req, res) {
       if (insertErr) throw new Error(insertErr.message)
     }
 
-    await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
+    // 把 stub submission_id 寫進 state，讓 sync-delete 的孤兒守門能正確識別。
+    // 沒這欄位 → state 會被誤判為 graded 卻無 submission 連結，學生端被 upload_locked 擋掉。
+    await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, compactObject({
       status: 'graded',
+      current_submission_id: stubSubmissionId ?? undefined,
+      last_graded_submission_id: stubSubmissionId ?? undefined,
       graded_once: true,
       upload_locked: true,
       last_status_reason: '教師手動批改成績'
-    })
+    }))
     res.status(200).json({ success: true, newStatus: 'graded' })
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : '手動標記失敗' })
@@ -3381,7 +3387,7 @@ async function handleSync(req, res) {
                   .limit(1),
                 supabaseDb
                   .from('assignment_student_state')
-                  .select('status')
+                  .select('status, current_submission_id, last_graded_submission_id')
                   .eq('owner_id', user.id)
                   .eq('assignment_id', row.assignment_id)
                   .eq('student_id', row.student_id)
@@ -3404,11 +3410,18 @@ async function handleSync(req, res) {
                 continue
               }
 
-              // 防呆：若當前 state 已是 graded（例如老師剛剛手動批改），
-              // 不要因為刪掉舊 submission 就把 graded 狀態 reset 回 not_uploaded。
-              // 這會造成「退回 → 立刻手動批改」的 race condition：
-              // sync-delete 比 manual-grade 晚抵達時會把 graded 蓋掉，學生又被要求上傳。
-              if (currentStateResult.data?.status === 'graded') {
+              // 防呆：若當前 state 已是 graded 且仍有有效 submission 連結
+              // （例如老師剛剛手動批改建了 stub），不要 reset 回 not_uploaded。
+              // 這會造成「退回 → 立刻手動批改」的 race condition。
+              //
+              // 但若 graded 的兩個 submission 連結都是 null（FK ON DELETE SET NULL
+              // 把它們清掉了），表示這是「批改後刪 submission 沒重新批改」的孤兒
+              // 狀態 — 必須 reset，否則學生被 upload_locked 永久擋住。
+              const stateRow = currentStateResult.data
+              const hasLiveSubmissionLink = Boolean(
+                stateRow?.current_submission_id || stateRow?.last_graded_submission_id
+              )
+              if (stateRow?.status === 'graded' && hasLiveSubmissionLink) {
                 continue
               }
 
