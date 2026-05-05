@@ -2146,17 +2146,25 @@ function normalizeLocateResult(parsed, questionIds) {
 // 設計原則：bbox 邊界 = 視覺找到的「印刷特徵像素」+ padding；不用學生手寫位置作 anchor
 const CLASSIFY_TYPE_RULES = {
   choice: `▸ single_choice / multi_choice / true_false
-  Anchor: 印刷括號「( )」/「（ ）」像素
-  CORE Step C 套用：
+  【階段 1: 識別】印刷 + 手寫雙訊號
+    印刷: 「( )」/「（ ）」括號
+    手寫: 括號內部或正下方有學生筆跡（A/B/C/甲/乙/○/✗ 等）
+    → **內含手寫**的印刷括號就是答案括號
+    學生留空: 選位於題幹文字（「...是」「...為」等）之後的空括號
+    🚨 跳過: 印刷題號 (1)(2)(3) 和圖表標號 (1)(2)(3) — 那些不是答案括號
+  【階段 2: 定 bbox 邊界】(印刷邊界)
     bbox.x      = 左括號像素 - 3-5%
     bbox.x + w  = 右括號像素 + 3-5%
     bbox.y / y+h = 該行 y 範圍 ± 0.005（從 Step A）
-  bbox 不延伸到下方選項清單行
-  括號像素太淡找不到時，仍須輸出 bbox（盡量定位到正確位置）`,
+  bbox 不延伸到下方選項清單行`,
 
   multi_fill: `▸ multi_fill
-  Anchor: 印刷方框「□」邊界 或 table cell 格線
-  CORE Step C 套用：
+  【階段 1: 識別】印刷 + 手寫雙訊號
+    印刷: 「□」方框 / table cell 格線
+    手寫: 方框/格線內部有學生筆跡
+    → **內含手寫**的方框/格線就是答案格
+    學生留空: 依該行所有方框 cohort 順序對映
+  【階段 2: 定 bbox 邊界】(印刷邊界)
     bbox.x      = 方框/格線左邊 - 3%
     bbox.x + w  = 方框/格線右邊 + 3%
     bbox.y / y+h = 該行 y 範圍 ± 0.005（從 Step A）
@@ -2164,14 +2172,18 @@ const CLASSIFY_TYPE_RULES = {
 
   fill_blank: `▸ fill_blank / fill_variants（單格 + 子題共用）
   視覺 pattern 多型，先目視識別:
-    parens「( )」/「（ ）」→ anchor = 括號像素
-    underline「___」/「_____」→ anchor = 底線像素
-    box「□」/「☐」→ anchor = 方框像素
-  CORE Step C 套用：
+    parens「( )」/「（ ）」→ 印刷 = 括號
+    underline「___」/「_____」→ 印刷 = 底線
+    box「□」/「☐」→ 印刷 = 方框
+  【階段 1: 識別】印刷 + 手寫雙訊號
+    手寫: 印刷 pattern 內或正上方有學生筆跡
+    → **內含/上方有手寫**的印刷區就是答案
+    學生留空: 用題幹後空格 layout 判斷
+    🚨 禁止: 把鄰字（is / the / 的 / 是）當 anchor
+  【階段 2: 定 bbox 邊界】(印刷邊界)
     bbox.x      = anchor 左邊 - 3-5%
     bbox.x + w  = anchor 右邊 + 3-5%
     bbox.y / y+h = 該行 y 範圍 ± 0.005（從 Step A）
-  禁止: 把鄰字（is / the / 的 / 是）當 anchor
   同行多空時必須先 cohort 列出所有 N 格再對映`,
 
   table_cell: `▸ table_cell
@@ -2188,40 +2200,58 @@ const CLASSIFY_TYPE_RULES = {
 
   matching: `▸ matching
   OVERRIDE: 不走 CORE
-  Anchor: 整組左欄項目 + 右欄選項 + 學生連線範圍 4 邊界
-  bbox.x      = 左欄最左邊項目 像素 - 0.01
-  bbox.x + w  = 右欄最右邊選項 像素 + 0.01
-  bbox.y      = 第 1 個項目上邊 - 0.01
-  bbox.y + h  = 最後 1 個項目下邊 + 0.01
+  【階段 1: 識別】印刷 + 手寫雙訊號
+    印刷: 整組左欄項目 + 右欄選項
+    手寫: 學生連線（可能跨整組）
+    → 含學生連線的整組區域就是答案區
+  【階段 2: 定 bbox 邊界】(印刷邊界 + 含連線範圍)
+    bbox.x      = 左欄最左邊項目像素 - 0.01
+    bbox.x + w  = 右欄最右邊選項像素 + 0.01
+    bbox.y      = 第 1 個項目上邊 - 0.01
+    bbox.y + h  = 最後 1 個項目下邊 + 0.01
   同 bboxGroupId 共用同一 bbox（不可只框單一連線）
   echo bboxGroupId from spec`,
 
   answer_with_context: `▸ circle_select_one / circle_select_many / single_check / multi_check / mark_in_text
   OVERRIDE: 不走 CORE
-  Anchor: 整列預印選項文字 + 學生筆跡 4 邊界
-  bbox.x      = 第 1 個選項/方框左邊 - 0.01
-  bbox.x + w  = 最後選項/方框右邊 + 0.01（mark_in_text: 整段文章右邊）
-  bbox.y      = 該列上邊 - 0.005
-  bbox.y + h  = 該列下邊 + 學生筆跡超出量 + 0.005
+  【階段 1: 識別】印刷 + 手寫雙訊號
+    印刷: 整列預印選項 / 方框 / 文章
+    手寫: 學生圈選 / 打勾 / 標記筆跡
+    → **含學生筆跡**的列就是該題答案區
+    學生留空: 看完整列預印選項位置
+  【階段 2: 定 bbox 邊界】(印刷邊界)
+    bbox.x      = 第 1 個選項/方框左邊像素 - 0.01
+    bbox.x + w  = 最後選項/方框右邊像素 + 0.01（mark_in_text: 整段文章右邊）
+    bbox.y      = 該列上邊 - 0.005
+    bbox.y + h  = 該列下邊 + 學生筆跡超出量 + 0.005
   · circle_select_*: 額外輸出 bracketBbox（緊框「(option1／option2…)」括號列）
   · mark_in_text: bbox.y/h 涵蓋整段文章區`,
 
   large_visual_area: `▸ calculation / word_problem / short_answer / ordering / map_symbol / grid_geometry / connect_dots / diagram_draw / diagram_color
   OVERRIDE: 不走 CORE
-  Anchor: 題幹印刷區 + 工作區印刷邊界 4 邊界
-  bbox.x      = 題幹/工作區最左印刷邊 - 0.01
-  bbox.x + w  = 題幹/工作區最右印刷邊 + 學生筆跡超出量 + 0.01
-  bbox.y      = 題幹上邊 - 0.005
-  bbox.y + h  = 工作區下邊（或最後一行學生筆跡）+ 0.01
+  【階段 1: 識別】印刷 + 手寫雙訊號
+    印刷: 題幹邊界 + 工作區印刷邊界（如格線、邊框、預印圖）
+    手寫: 學生算式 / 答案 / 圖案 / 序號筆跡
+    → 涵蓋兩者的 bounding box 就是答案區
+    學生留空: 用題幹和工作區印刷邊界判斷
+  【階段 2: 定 bbox 邊界】(印刷邊界 + 含學生筆跡延伸)
+    bbox.x      = 題幹/工作區最左印刷邊 - 0.01
+    bbox.x + w  = max(題幹/工作區最右印刷邊, 學生筆跡最右) + 0.01
+    bbox.y      = 題幹上邊 - 0.005
+    bbox.y + h  = max(工作區下邊, 最後一行學生筆跡) + 0.01
   short_answer 多行：bbox.h 必須涵蓋整個寫字區塊（不要只框第 1 行）`,
 
   compound: `▸ compound_circle_with_explain / compound_check_with_explain / compound_writein_with_explain / compound_judge_with_correction / compound_judge_with_explain / multi_check_other / compound_chain_table
   OVERRIDE: 不走 CORE
-  Anchor: 答案區印刷邊界 + 說明/改正區印刷邊界 → 取兩者外輪廓
-  bbox.x      = min(答案區左邊, 說明區左邊) - 0.01
-  bbox.x + w  = max(答案區右邊, 說明區右邊) + 0.01
-  bbox.y      = 答案區上邊 - 0.005（通常答案區在說明區上方）
-  bbox.y + h  = 說明/改正區下邊 + 學生筆跡超出量 + 0.01
+  【階段 1: 識別】印刷 + 手寫雙訊號
+    印刷: 答案區邊界 + 說明/改正區邊界
+    手寫: 答案區的圈選/打勾/代號 + 說明區的文字理由
+    → 含兩種手寫的兩部分組合就是答案區
+  【階段 2: 定 bbox 邊界】(印刷 + 含手寫延伸)
+    bbox.x      = min(答案區左邊, 說明區左邊) - 0.01
+    bbox.x + w  = max(答案區右邊, 說明區右邊, 學生筆跡最右) + 0.01
+    bbox.y      = 答案區上邊 - 0.005（通常答案區在說明區上方）
+    bbox.y + h  = 說明/改正區下邊 + 學生筆跡超出量 + 0.01
   禁止只框其一（答案 or 說明），必須兩部分都涵蓋`,
 
   map_fill: `▸ map_fill
@@ -2431,8 +2461,16 @@ ${pageBoundarySection}
 
 ═══════════════ 核心原則 ═══════════════
 
-⭐ bbox 邊界 = 視覺找到的「印刷特徵像素」+ padding
-   不用學生手寫位置作 anchor — 學生有沒有寫不影響 bbox 位置。
+⭐ 兩階段思考 — 分清楚「識別」和「定邊界」是不同的事:
+
+  【階段 1: 識別答案區】用 印刷+手寫 雙訊號合判
+    · 同一行可能有多個印刷特徵（題號 (1)、圖表標號 (1)、答案 (   ) ...）
+    · 「**內含學生手寫筆跡**」的印刷特徵就是答案區（最可靠線索）
+    · 學生留空時，用 layout 線索（題幹文字後接的空格、不是題號）
+
+  【階段 2: 定 bbox 邊界】只用印刷特徵像素，不用手寫位置
+    · bbox 邊界 = 已識別出的印刷特徵 4 邊像素 + padding
+    · 學生手寫位置變動 → 不影響 bbox 邊界座標
 
 ⭐ answer key 已驗證每題在圖上都存在 —
    即使印刷特徵看起來不明顯，仍須輸出 answerBbox（不要 omit）。
