@@ -1601,7 +1601,8 @@ function normalizeClassifyResult(parsed, questionIds) {
       questionType,
       questionBbox: normalizeBboxRef(row?.questionBbox ?? row?.question_bbox),
       answerBbox: normalizeBboxRef(row?.answerBbox ?? row?.answer_bbox),
-      bracketBbox: (questionType === 'circle_select_one' || questionType === 'circle_select_many') ? normalizeBboxRef(row?.bracketBbox) : undefined
+      bracketBbox: (questionType === 'circle_select_one' || questionType === 'circle_select_many') ? normalizeBboxRef(row?.bracketBbox) : undefined,
+      framingReason: typeof row?.framingReason === 'string' ? row.framingReason.trim() : undefined
     })
     if (!visible) unmappedQuestionIds.push(questionId)
   }
@@ -4864,6 +4865,11 @@ function buildFinalGradingResult({
       row.readAnswer1 = consistency.readAnswer1
       row.readAnswer2 = consistency.readAnswer2
       if (consistency.finalAnswerSource) row.finalAnswerSource = consistency.finalAnswerSource
+      if (consistency.framingReason) row.framingReason = consistency.framingReason
+    }
+    // Classify 推理摘要（v4.0 新增）— 即使沒走 phaseA 也要保留
+    if (!row.framingReason && classify?.framingReason) {
+      row.framingReason = classify.framingReason
     }
     // Explain 新增欄位
     if (explain?.mistakeTypeCodes) row.mistakeTypeCodes = explain.mistakeTypeCodes
@@ -6040,7 +6046,8 @@ export async function runStagedGradingPhaseA({
       },
       answerBbox: classifyRow?.answerBbox ?? null,
       bboxCorrected: classifyRow?.bboxCorrected || false,
-      calculationAnswerMismatch: read1?.calculationAnswerMismatch === true
+      calculationAnswerMismatch: read1?.calculationAnswerMismatch === true,
+      framingReason: classifyRow?.framingReason || undefined
     }
   })
 
