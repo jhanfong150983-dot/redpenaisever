@@ -2149,35 +2149,80 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
-// Classify type rules v4.0: 極簡 — 每個 type 只說「框多大」（CORE 演算法統一處理「怎麼找」）
+// Classify type rules v4.1: 每條規則包含「答題區視覺形式」+「bbox 公式」+「禁止」
 const CLASSIFY_TYPE_RULES = {
   tight_answer: `▸ tight_answer (single_choice / multi_choice / true_false / fill_blank / fill_variants / multi_fill)
-  bbox = 答案標記像素（括號/底線/方框） + 3-5% padding`,
+  答題區視覺形式（學生會在這裡寫答案）:
+    · 印刷括號「( )」/「（ ）」— 學生在括號內寫代號（A/B/C/甲乙/○✗/數字）
+    · 印刷底線「___」/「_____」— 學生在底線上寫字
+    · 印刷方框「□」/「☐」— 學生在方框內填值
+  bbox 公式:
+    bbox.x      = 印刷標記左端 - 3-5%
+    bbox.x + w  = 印刷標記右端 + 3-5%
+    bbox.y      = 該行頂部 - 0.005
+    bbox.y + h  = 該行底部 + 0.005
+  🚨 嚴禁:
+    · 框題幹文字（題目敘述）— 答題區一定在題幹「之後」
+    · 框題號標記「1.」「(1)」「①」— 那是題目編號不是答案
+    · 框學生畫記的選項列表 — 即使學生在 (A)(B)(C)(D) 選項上做記號，
+      那也不是答案 cell。答案 cell 是題號後的「(   )」括號`,
 
   table_cell: `▸ table_cell
-  bbox = 整張表外輪廓 + 0.005~0.01 邊距（涵蓋所有 header + 所有 cells）
-  bbox.h ≥ 0.05；用 spec.tableMeta.rowHeaders/colHeaders 定位
-  tableRefBbox 為 layout hint；輸出 1 question = 1 整表 bbox（不分 cell）`,
+  答題區視覺形式: 整張表格（多列 × 多欄、清晰格線）
+  bbox 公式:
+    bbox.x      = 表格最左格線 - 0.005
+    bbox.x + w  = 表格最右格線 + 0.005
+    bbox.y      = 表格最上格線 - 0.005
+    bbox.y + h  = 表格最下格線 + 0.005
+  bbox.h ≥ 0.05（整表高度通常 0.10-0.30）
+  用 spec.tableMeta.rowHeaders/colHeaders 找表頭定位；tableRefBbox 為 layout hint
+  🚨 嚴禁: 框單一 cell；輸出 1 question = 1 整表 bbox`,
 
   matching: `▸ matching
-  bbox = 整組（左欄全部項目 + 右欄全部選項 + 學生連線） + 0.01 邊距
-  同 bboxGroupId 共用一 bbox；echo bboxGroupId from spec`,
+  答題區視覺形式: 連連看（左欄項目 + 右欄選項 + 學生連線）
+  bbox 公式:
+    bbox.x      = 左欄最左項目 - 0.01
+    bbox.x + w  = 右欄最右選項 + 0.01
+    bbox.y      = 第 1 個項目上邊 - 0.01
+    bbox.y + h  = 最後 1 個項目下邊 + 0.01
+  同 bboxGroupId 共用一 bbox；echo bboxGroupId from spec
+  🚨 嚴禁: 只框單一連線；不可漏掉左欄或右欄`,
 
   answer_with_context: `▸ circle_select_one / circle_select_many / single_check / multi_check / mark_in_text
-  bbox = 整列預印選項或文字 + 學生筆跡延伸 + 0.01 邊距
-  · circle_select_*: 額外輸出 bracketBbox（緊框 (option1／option2…) 括號列）
-  · mark_in_text: 涵蓋整段文章 + 題幹指示語`,
+  答題區視覺形式:
+    · circle_select_*: 整列預印選項括號「(同意／不同意)」+ 學生圈選
+    · single/multi_check: 整列方框 □ + 對應選項文字 + 學生勾選
+    · mark_in_text: 整段印刷文章 + 學生圈詞/標記
+  bbox 公式:
+    bbox.x      = 第 1 個選項/方框/文章左邊 - 0.01
+    bbox.x + w  = 最後選項/方框/文章右邊 + 0.01
+    bbox.y      = 該列頂部 - 0.005
+    bbox.y + h  = 該列底部 + 學生筆跡延伸 + 0.005
+  · circle_select_*: 額外輸出 bracketBbox（緊框「(option1／option2…)」）
+  🚨 嚴禁: 只框被選中的選項；read 階段需看全列才能判斷學生選了哪個`,
 
   large_visual_area: `▸ calculation / word_problem / short_answer / ordering / map_symbol / grid_geometry / connect_dots / diagram_draw / diagram_color
-  bbox = 題幹 + 整個工作區（含學生所有筆跡）+ 0.01 邊距
-  short_answer 多行：縱向涵蓋整個寫字區塊（不只第 1 行）`,
+  答題區視覺形式: 題幹 + 大空白工作區（學生寫算式 / 段落 / 序號 / 圖案）
+  bbox 公式:
+    bbox.x      = 題幹/工作區最左印刷邊 - 0.01
+    bbox.x + w  = max(題幹/工作區最右印刷邊, 學生筆跡最右) + 0.01
+    bbox.y      = 題幹上邊 - 0.005
+    bbox.y + h  = max(工作區下邊, 最後學生筆跡) + 0.01
+  short_answer 多行: bbox.h 必須涵蓋整個寫字區塊
+  🚨 嚴禁: 只框第 1 行；漏掉題幹；漏掉學生補寫的部分`,
 
-  compound: `▸ compound_* / multi_check_other / compound_chain_table
-  bbox = 答案區 + 說明/改正區（**兩部分都涵蓋**）+ 0.01 邊距
-  禁止只框其一`,
+  compound: `▸ compound_circle/check/writein_with_explain / compound_judge_with_correction/explain / multi_check_other / compound_chain_table
+  答題區視覺形式: 兩部分組合 — 答案區（圈選/打勾/代號）+ 說明區（文字理由/改正）
+  bbox 公式:
+    bbox.x      = min(答案區左邊, 說明區左邊) - 0.01
+    bbox.x + w  = max(答案區右邊, 說明區右邊, 學生筆跡最右) + 0.01
+    bbox.y      = 答案區上邊 - 0.005
+    bbox.y + h  = 說明/改正區下邊 + 學生筆跡延伸 + 0.01
+  🚨 嚴禁: 只框其中一部分；必須兩部分都涵蓋`,
 
   map_fill: `▸ map_fill
-  bbox = {x:0, y:0, w:1, h:1}（整圖）`,
+  答題區視覺形式: 整張圖（地圖填圖題答案散布全圖）
+  bbox 公式: bbox = {x:0, y:0, w:1, h:1}`,
 }
 
 function buildClassifyTypeRulesSection(specs) {
@@ -2373,68 +2418,82 @@ Question Specs (source of truth from AnswerKey):
 ${JSON.stringify(specs)}
 ${pageBoundarySection}
 
-═══════════════ 核心原則 ═══════════════
+═══════════════ INPUT 你會拿到的 4 樣東西 ═══════════════
 
-⭐ 你被告知正確答案（spec.expectedAnswer）是為了**幫你找位置**：
-   · 你只需輸出 bbox，**不輸出答案文字**
-   · 下游 read 階段拿不到 expectedAnswer，會獨立讀學生筆跡
-   · 你框錯位置 → read 讀不到 → 自動進人工審查（這是 self-check）
+  1. 學生作業原圖（image）
+  2. spec.questionId — 知道這是第幾題（ID 結構：Section-Chapter-Question-SubQ）
+  3. spec.questionType — 知道題目類型，對應下方 TYPE RULE
+  4. spec.expectedAnswer — 知道答案應該長什麼形式（單字母 / 短答 / 圈選 / ...）
 
-⭐ bbox 對應「印刷答案區位置」，**與學生筆跡無關**：
-   · 學生答對：bbox 框印刷答案區（內含正確筆跡）
-   · 學生答錯：bbox 仍框印刷答案區（內含錯誤筆跡）
-   · 學生留空：bbox 仍框印刷答案區（內為空）
-   · expectedAnswer 是輔助確認位置，不是強制比對
+═══════════════ 硬性原則（不可違反） ═══════════════
 
+⭐ **必須**結合 4 樣 input 找答題區，不可只靠視覺猜。
+⭐ **必須**先看 type → 知道答題區形式（TYPE RULE 描述）→ 再找視覺位置。
+⭐ bbox 邊界依「TYPE RULE 的 bbox 公式」算，**禁止自由發揮**。
+⭐ expectedAnswer 是**確認你找對位置**，**禁止**用它走捷徑找視覺特徵。
+⭐ bbox 對應「印刷答題區」位置，**與學生筆跡無關**：
+   · 學生答對 / 答錯 / 留空 → bbox 都該框印刷答題區
 ⭐ answer key 已驗證每題都存在 — visible=false 僅當頁面被裁掉時用。
 
-═══════════════ CORE ALGORITHM (5 steps, 全 type 適用) ═══════════════
+═══════════════ CORE ALGORITHM (5 steps，必須照順序執行) ═══════════════
 
-對每個 questionId 執行：
+對每個 questionId，**依 1→2→3→4→5 順序**執行（禁止跳步）：
 
-【Step 1 — 找題目】用 questionId 結構對映到圖上位置
-  · ID "X-Y-Z-N" → Section X / 第 Y 大題 / 第 Z 小題 / 第 N 子題
-  · 找對應印刷題號 anchor（「X.」「(Y)」「Z.」「①②③」）
-  · 確認題目所在區塊
+【Step 1 — 看 questionType → 知道答題區「視覺形式」】
+  · 從 spec.questionType 對應下方 TYPE RULE
+  · TYPE RULE 告訴你答題區是括號 / 底線 / 方框 / 表格 / 整列選項 / ...
+  · 例：questionType=single_choice → 答題區是「印刷括號 (   )」
 
-【Step 2 — 讀題幹理解】
-  · 完整讀題幹文字（不只看 layout）
-  · 推理：答案應該以什麼**形式**出現？
-    （單字代號 / 短答 / 圈選符號 / 連線 / 表格填值 / 圖案 / ...）
-  · 推理：答案應該在**哪個位置**？
-    （題幹後括號 / 題幹下方工作區 / 整列選項 / 表格 cell / ...）
-  · 用 spec.expectedAnswer 確認這題的答案類型符合你的推理
+【Step 2 — 看 expectedAnswer → 知道答案應該長什麼】
+  · 例：expectedAnswer="D" → 答案是 1 個字母代號
+  · 例：expectedAnswer="A,B" → 答案是 2 個字母代號
+  · 例：expectedAnswer="欄牧，地狹人稠" → 答案是中文短句
+  · 用此資訊**確認你之後找的位置內含正確答案的格式**（不是用 expectedAnswer 找視覺特徵）
 
-【Step 3 — 視覺找答案區】
-  · 在 Step 2 推理出的位置，找對應印刷標記（括號/底線/方框/格線/選項列）
-  · 跟著閱讀流找，**不跳到無關區域**（如圖表標號 (1)(2)(3)）
-  · 同 row 多格時，先 cohort 列出所有格再對映（依 ID 順序 LEFT→RIGHT）
+【Step 3 — 看 questionId → 在圖上對映到第幾題】
+  · ID "X-Y-Z-N" → 找對應印刷題號 anchor（「X.」「(Y)」「Z.」「①②③」）
+  · 確認題目位置（哪一頁、哪一段）
 
-【Step 4 — expectedAnswer 確認】
-  · 該位置的學生筆跡是否與 expectedAnswer 大致相符？
-    · 大致符合 → 框對了
-    · 完全不符 → 可能框錯，重新看 Step 2/3
-    · 學生留空 → 仍框該位置（不影響 bbox 判斷）
-  · ⚠️ 注意：此確認只是「定位 sanity check」，不要根據 expectedAnswer 強制移動 bbox
+【Step 4 — 在圖上找答題區】
+  · 結合 Step 1（形式）+ Step 3（位置）找答題區的視覺位置
+  · 用 Step 2（expectedAnswer）確認你找對 cell（位置內應有可寫答案的空間）
+  · ⚠️ 嚴禁走捷徑：
+    · 看到圖上有「答案 pattern」就直接框 → ❌ 錯
+    · 看到學生在選項上畫記就框那個選項 → ❌ 錯（答案是「題號後括號」不是「畫記的選項」）
+    · 必須先過 Step 1-3，視覺定位後再用 Step 2 確認
 
-【Step 5 — 定 bbox 邊界 + 輸出 framingReason】
-  · bbox 邊界依下方 TYPE RULE 算
-  · framingReason: 一句話說明你怎麼找到這個位置（必填）
-    格式範例：「題幹『1.第一級產業是』後第 1 個 (   )，學生寫 D 符合 expectedAnswer」
+【Step 5 — 套 TYPE RULE 算 bbox + 輸出 framingReason】
+  · bbox.xywh 完全依 TYPE RULE 的「bbox 公式」算
+  · 禁止: 自己估計寬度（如「25-35% 頁寬」這種數字）
+  · framingReason 格式（**3 個元素缺一不可**）:
+    "questionId={...} 對應 [位置描述]; "
+    "type={...} 對應 [視覺形式]; "
+    "expectedAnswer={...} 確認 [內容描述]"
+  · 範例:
+    "questionId=1-3-1-1 第 1 大題第 3 小題第 1 子題（題幹『1.第一級產業是』後）; "
+    "type=single_choice 對應印刷括號 (   ); "
+    "expectedAnswer=D 確認框內含學生 D 筆跡。"
 
 ═══════════════ TYPE RULES (本批 spec 用到的，描述 bbox 框多大) ═══════════════
 
 ${typeRulesSection || '（本批無需動態 type rule）'}
 
-═══════════════ SELF-CHECK (output 前自我驗證) ═══════════════
+═══════════════ SELF-CHECK (output 前必過) ═══════════════
 
-對每個 bbox：
-  ① bbox 邊界對齊到視覺找到的印刷邊界？(不是估計值)
-  ② 不同 questionId 的 bbox 之間是否重疊？(若重疊 → 重抓邊界)
-  ③ bbox 高度 ≥ 0.018？(若不足 → 設 0.018)
-  ④ framingReason 真的說明了「為什麼框這裡」嗎？(空話/敷衍 → 重寫)
+對每個 bbox 嚴格驗證:
+  ① bbox 邊界**對齊到 TYPE RULE 描述的視覺形式**（括號/底線/方框/...）？
+     ❌ 框到題幹文字、學生畫記的選項列表、題號 — 重做
+  ② bbox 公式是否照 TYPE RULE 算（不是自己估計寬度）？
+  ③ 不同 questionId 的 bbox 是否重疊？（若重疊 → 重抓邊界）
+  ④ bbox 高度 ≥ 0.018？（若不足 → 設 0.018）
+  ⑤ framingReason 是否包含 3 個必填元素：
+     · questionId 對應的「位置」描述
+     · questionType 對應的「視覺形式」描述
+     · expectedAnswer 對應的「內容確認」描述
+     缺任一 → 重寫
+  ⑥ framingReason 是否誠實反映你框的位置（不是事後合理化）？
 
-任一項不通過 → 重新執行該題 Step 2-5。
+任一項失敗 → 重新執行 Step 1-5。
 
 ═══════════════ OUTPUT FORMAT ═══════════════
 
@@ -2454,7 +2513,11 @@ Required:
 - questionId: 必須在 Allowed IDs 之中
 - visible: true / false
 - answerBbox: visible=true 必填（top-left x/y + w/h，normalized [0,1]）
-- framingReason: visible=true 必填（一句話說明定位邏輯）
+- framingReason: visible=true 必填，**必須包含 3 元素**:
+  · questionId 對應的位置描述
+  · questionType 對應的視覺形式描述
+  · expectedAnswer 對應的內容確認描述
+  範例: "questionId=1-3-1-1 第 1 大題第 1 子題; type=single_choice 對應括號 (   ); expectedAnswer=D 確認框內含學生 D 筆跡"
 
 Conditional:
 - bracketBbox: 僅 circle_select_one / circle_select_many 輸出（緊框「(option1／option2…)」括號列）
