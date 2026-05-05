@@ -1133,7 +1133,9 @@ const CLASSIFY_ALLOWED_TYPES = new Set([
   'compound_circle_with_explain', 'compound_check_with_explain',
   'compound_writein_with_explain', 'multi_check_other',
   'compound_judge_with_correction', 'compound_judge_with_explain',
-  'compound_chain_table'
+  'compound_chain_table',
+  // 群組批改題型
+  'table_cell'
 ])
 
 function resolveExpectedQuestionType(question) {
@@ -1304,6 +1306,9 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     }
   }
 
+  // siblingIds 不在 server 端計算 — 不靠 answer key bbox 推導學生卷同行關係。
+  // classify AI 自己從學生卷視覺判斷哪些格在同行。
+
   return questionIds.map((questionId) => {
     const question = byQuestionId.get(questionId)
     const expectedType = question ? resolveExpectedQuestionType(question) : 'fill_blank'
@@ -1320,7 +1325,6 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     // anchorHint 已完全停用：實證上 multi_fill 收到 anchorHint 後 bbox 中心會被 landmark
     // 文字拉走（同 row 兩個空格的 drift 差到 11x：multi_fill +0.044 vs fill_blank sub-q +0.004）。
     // 既然 single_choice / fill_blank sub-q 早就不送，multi_fill 也一併停掉。
-    // spec.anchorHint 不再產生；prompt 內的 ANCHOR RULE 規則因此變成 dead branch（無害）。
     // fill_blank 子題加上 ordinal（同一行第幾個填空）
     const ordinalInfo = fillBlankOrdinalMap.get(questionId)
     if (ordinalInfo) {
@@ -2138,6 +2142,133 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
+// Classify type rules: per-type 規則，僅注入本批 spec 用到的
+// 設計原則：bbox 邊界 = 視覺找到的「印刷特徵像素」+ padding；不用學生手寫位置作 anchor
+const CLASSIFY_TYPE_RULES = {
+  choice: `▸ single_choice / multi_choice / true_false
+  Anchor: 印刷括號「( )」/「（ ）」像素
+  CORE Step C 套用：
+    bbox.x      = 左括號像素 - 3-5%
+    bbox.x + w  = 右括號像素 + 3-5%
+    bbox.y / y+h = 該行 y 範圍 ± 0.005（從 Step A）
+  bbox 不延伸到下方選項清單行
+  括號像素太淡找不到時，仍須輸出 bbox（盡量定位到正確位置）`,
+
+  multi_fill: `▸ multi_fill
+  Anchor: 印刷方框「□」邊界 或 table cell 格線
+  CORE Step C 套用：
+    bbox.x      = 方框/格線左邊 - 3%
+    bbox.x + w  = 方框/格線右邊 + 3%
+    bbox.y / y+h = 該行 y 範圍 ± 0.005（從 Step A）
+  必須先列出該行所有 N 格的視覺邊界，再對映`,
+
+  fill_blank: `▸ fill_blank / fill_variants（單格 + 子題共用）
+  視覺 pattern 多型，先目視識別:
+    parens「( )」/「（ ）」→ anchor = 括號像素
+    underline「___」/「_____」→ anchor = 底線像素
+    box「□」/「☐」→ anchor = 方框像素
+  CORE Step C 套用：
+    bbox.x      = anchor 左邊 - 3-5%
+    bbox.x + w  = anchor 右邊 + 3-5%
+    bbox.y / y+h = 該行 y 範圍 ± 0.005（從 Step A）
+  禁止: 把鄰字（is / the / 的 / 是）當 anchor
+  同行多空時必須先 cohort 列出所有 N 格再對映`,
+
+  table_cell: `▸ table_cell
+  OVERRIDE: 不走 CORE
+  Anchor: 表格 4 條最外格線
+  bbox.x      = 表格最左格線 - 0.005
+  bbox.x + w  = 表格最右格線 + 0.005
+  bbox.y      = 表格最上格線 - 0.005
+  bbox.y + h  = 表格最下格線 + 0.005
+  bbox.h ≥ 0.05（整表高度通常 0.10-0.30）
+  用 spec.tableMeta.rowHeaders/colHeaders 找表頭定位
+  tableRefBbox 是答案卷 hint，layout 接近時可直接用
+  輸出: 1 個 question = 1 個 answerBbox（整表），不回 cell 級 bbox`,
+
+  matching: `▸ matching
+  OVERRIDE: 不走 CORE
+  Anchor: 整組左欄項目 + 右欄選項 + 學生連線範圍 4 邊界
+  bbox.x      = 左欄最左邊項目 像素 - 0.01
+  bbox.x + w  = 右欄最右邊選項 像素 + 0.01
+  bbox.y      = 第 1 個項目上邊 - 0.01
+  bbox.y + h  = 最後 1 個項目下邊 + 0.01
+  同 bboxGroupId 共用同一 bbox（不可只框單一連線）
+  echo bboxGroupId from spec`,
+
+  answer_with_context: `▸ circle_select_one / circle_select_many / single_check / multi_check / mark_in_text
+  OVERRIDE: 不走 CORE
+  Anchor: 整列預印選項文字 + 學生筆跡 4 邊界
+  bbox.x      = 第 1 個選項/方框左邊 - 0.01
+  bbox.x + w  = 最後選項/方框右邊 + 0.01（mark_in_text: 整段文章右邊）
+  bbox.y      = 該列上邊 - 0.005
+  bbox.y + h  = 該列下邊 + 學生筆跡超出量 + 0.005
+  · circle_select_*: 額外輸出 bracketBbox（緊框「(option1／option2…)」括號列）
+  · mark_in_text: bbox.y/h 涵蓋整段文章區`,
+
+  large_visual_area: `▸ calculation / word_problem / short_answer / ordering / map_symbol / grid_geometry / connect_dots / diagram_draw / diagram_color
+  OVERRIDE: 不走 CORE
+  Anchor: 題幹印刷區 + 工作區印刷邊界 4 邊界
+  bbox.x      = 題幹/工作區最左印刷邊 - 0.01
+  bbox.x + w  = 題幹/工作區最右印刷邊 + 學生筆跡超出量 + 0.01
+  bbox.y      = 題幹上邊 - 0.005
+  bbox.y + h  = 工作區下邊（或最後一行學生筆跡）+ 0.01
+  short_answer 多行：bbox.h 必須涵蓋整個寫字區塊（不要只框第 1 行）`,
+
+  compound: `▸ compound_circle_with_explain / compound_check_with_explain / compound_writein_with_explain / compound_judge_with_correction / compound_judge_with_explain / multi_check_other / compound_chain_table
+  OVERRIDE: 不走 CORE
+  Anchor: 答案區印刷邊界 + 說明/改正區印刷邊界 → 取兩者外輪廓
+  bbox.x      = min(答案區左邊, 說明區左邊) - 0.01
+  bbox.x + w  = max(答案區右邊, 說明區右邊) + 0.01
+  bbox.y      = 答案區上邊 - 0.005（通常答案區在說明區上方）
+  bbox.y + h  = 說明/改正區下邊 + 學生筆跡超出量 + 0.01
+  禁止只框其一（答案 or 說明），必須兩部分都涵蓋`,
+
+  map_fill: `▸ map_fill
+  OVERRIDE: bbox = {x:0, y:0, w:1, h:1}（整圖）`,
+}
+
+function buildClassifyTypeRulesSection(specs) {
+  const typesUsed = new Set((specs || []).map((s) => s?.questionType).filter(Boolean))
+  const blocks = []
+
+  if (typesUsed.has('single_choice') || typesUsed.has('multi_choice') || typesUsed.has('true_false')) {
+    blocks.push(CLASSIFY_TYPE_RULES.choice)
+  }
+  if (typesUsed.has('multi_fill')) {
+    blocks.push(CLASSIFY_TYPE_RULES.multi_fill)
+  }
+  if (typesUsed.has('fill_blank') || typesUsed.has('fill_variants')) {
+    blocks.push(CLASSIFY_TYPE_RULES.fill_blank)
+  }
+  if (typesUsed.has('table_cell')) {
+    blocks.push(CLASSIFY_TYPE_RULES.table_cell)
+  }
+  if (typesUsed.has('matching')) {
+    blocks.push(CLASSIFY_TYPE_RULES.matching)
+  }
+  if (
+    typesUsed.has('circle_select_one') || typesUsed.has('circle_select_many') ||
+    typesUsed.has('single_check') || typesUsed.has('multi_check') ||
+    typesUsed.has('mark_in_text')
+  ) {
+    blocks.push(CLASSIFY_TYPE_RULES.answer_with_context)
+  }
+  const largeTypes = ['calculation', 'word_problem', 'short_answer', 'ordering', 'map_symbol', 'grid_geometry', 'connect_dots', 'diagram_draw', 'diagram_color']
+  if (largeTypes.some((t) => typesUsed.has(t))) {
+    blocks.push(CLASSIFY_TYPE_RULES.large_visual_area)
+  }
+  const compoundTypes = ['compound_circle_with_explain', 'compound_check_with_explain', 'compound_writein_with_explain', 'compound_judge_with_correction', 'compound_judge_with_explain', 'multi_check_other', 'compound_chain_table']
+  if (compoundTypes.some((t) => typesUsed.has(t))) {
+    blocks.push(CLASSIFY_TYPE_RULES.compound)
+  }
+  if (typesUsed.has('map_fill')) {
+    blocks.push(CLASSIFY_TYPE_RULES.map_fill)
+  }
+
+  return blocks.join('\n\n')
+}
+
 function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answerKeyPageCount = 0, classifyCorrections = [], answerSheetMode = 'with_questions') {
   const specs = Array.isArray(questionSpecs) ? questionSpecs : []
 
@@ -2269,19 +2400,28 @@ Do NOT output:
 `.trim()
   }
 
-  // ── 一般模式：原本的 25-type 完整 prompt ──
+  // ── 一般模式 v3.5：印刷特徵唯一 anchor + per-type 動態注入 ──
   // 答案卷圖片不再傳給 classify — 完全獨立於老師的答案卷找 bbox
-  // 兩者可能尺寸/角度/狀態不同，用答案卷推學生卷位置不可靠
-  const imageReferenceSection = ''
-  const answerOnlySection = ''
+  const typeRulesSection = buildClassifyTypeRulesSection(specs)
+  const correctionsSection = Array.isArray(classifyCorrections) && classifyCorrections.length > 0
+    ? `\n\n═══════════════ BBOX POSITIONING REMINDER ═══════════════\n前一輪 Read 偵測到下列題目可能有 bbox 定位問題：\n${classifyCorrections.map((c) => {
+        if (c.type === 'neighbor_match') {
+          return `- 題目 ${c.questionId}：學生答案恰好等於相鄰題目 ${c.neighborId} 的正解，bbox 可能飄移到鄰題格。請仔細區分邊界。`
+        }
+        if (c.type === 'consecutive_blank') {
+          return `- 題目 ${c.questionId}：與其他題連續被讀為 blank。確認 bbox 對齊到該題答案區。若 bbox 正確且學生確實留空，blank 是合理結論。`
+        }
+        return ''
+      }).filter(Boolean).join('\n')}`
+    : ''
 
   return `
 You are stage CLASSIFY.
-Task: ${isAnswerOnly
-    ? 'identify which question numbers are visible on this answer sheet, and locate each visible question\'s answer blank bbox. The sheet contains ONLY question numbers and answer blanks — there is NO question stem text.'
-    : 'identify which question IDs are visible on this student submission image, and locate each visible question\'s bbox.'}
-Do NOT infer question type. Question type is fixed by specs.
-${imageReferenceSection}${answerOnlySection}
+Task: 在學生卷圖上找出每個 question 的 answerBbox（學生答案的視覺位置）。
+Question type 由 spec 決定，不要自己分類。
+
+═══════════════ INPUT ═══════════════
+
 Allowed question IDs:
 ${JSON.stringify(questionIds)}
 
@@ -2289,252 +2429,69 @@ Question Specs (source of truth from AnswerKey):
 ${JSON.stringify(specs)}
 ${pageBoundarySection}
 
-Rules:
-- Use only the allowed question IDs above.
-- For each questionId, questionType MUST exactly match Question Specs.
-- Never re-classify question type based on visual guess.
-- ⚠️ 你只看到一張圖：學生卷（STUDENT_SUBMISSION）。沒有答案卷可參考。bbox 必須**完全從學生卷的視覺特徵**找出（印刷的底線/括號/方框/題號 + 學生手寫筆跡）。
-- visible=true if you can see the question and its answer area on this image.
-- visible=false if the question is absent, cut off, or not on this image.
-- bboxPolicy MUST follow Question Specs（6 種策略，依 type 行為決定 bbox 範圍）:
-  - full_page: questionBbox and answerBbox must both be {x:0,y:0,w:1,h:1}（map_fill 用，整張圖）.
-  - group_shared: questions in the same bboxGroupId MUST share the same questionBbox/answerBbox（matching 用）.
-  - large_visual_area: bbox 涵蓋整個視覺/工作區域（map_symbol / grid_geometry / connect_dots / diagram_draw / diagram_color / short_answer / ordering / calculation / word_problem 用，含題幹+大範圍答題區）.
-  - compound_linked: bbox 必須涵蓋整題所有部分（含理由/改正/開放欄/連動 cell）。**禁止只框其一**（compound_circle/check/writein_with_explain / compound_judge_with_correction/explain / multi_check_other / compound_chain_table 用）.
-  - answer_with_context: bbox 涵蓋答案區 + 鄰近印刷元素（如預印選項、方框列、文章上下文）（circle_select_one/many / single_check / multi_check / multi_choice / mark_in_text 用）.
-  - tight_answer: bbox 緊框答案空格本身，**不框題幹**（${isAnswerOnly ? 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，每子題各自一個 tight bbox' : 'single_choice / true_false / fill_blank / fill_variants / multi_fill 用，single_choice 約 25-35% 頁寬'}）.
-- TABLE_CELL RULE (when spec.tableMeta exists — questionCategory='table_cell'):
-    觸發：spec 帶 tableMeta { rowHeaders, colHeaders, totalRows, totalCols } + tableRefBbox
-    「整張表合成 1 題」的群組批改題型。
+═══════════════ 核心原則 ═══════════════
 
-    bbox 規則：
-    - answerBbox 必須框**整張表格的外輪廓**（從最上格線到最下格線、最左到最右）
-    - 必須涵蓋所有 header（列標題列、欄標題欄）+ 所有答案 cells
-    - 上下左右各加少許邊距（約 0.005~0.01）讓格線完整入框
-    - bbox.h 應該是「整表高度」，通常 0.10~0.30 之間，**絕對不會 < 0.05**
-    - **禁止只框某一 cell**，禁止用 cell 中位數推算（沒有 cell-level bbox 的概念）
+⭐ bbox 邊界 = 視覺找到的「印刷特徵像素」+ padding
+   不用學生手寫位置作 anchor — 學生有沒有寫不影響 bbox 位置。
 
-    定位方法：
-    1. 用 spec.tableMeta.rowHeaders / colHeaders 在學生照片上找到對應表頭文字位置
-    2. 沿表頭找到表格邊界
-    3. tableRefBbox 是答案卷上的整表位置 hint，學生照片如果跟答案卷 layout 接近可直接用
-    4. 若表格在學生照片上明顯位移／旋轉，以視覺找到的格線為準（不要硬套 tableRefBbox）
+⭐ answer key 已驗證每題在圖上都存在 —
+   即使印刷特徵看起來不明顯，仍須輸出 answerBbox（不要 omit）。
+   visible=false 僅用於：題目所在頁面被裁掉、不在這張圖上時。
 
-    輸出：1 個 question = 1 個 answerBbox（整表）+ visible=true。**不要回 cell 級 bbox**。
+═══════════════ CORE ALGORITHM (3 universal steps) ═══════════════
 
-- For visible=true questions, output answerBbox per the type-specific rules below. **每個 type 的規則決定 bbox 該含什麼/不含什麼**，沒有「預設要含題幹脈絡」這回事 — 一切以 per-type rule 為準。
-  - ${isAnswerOnly ? 'ANSWER-ONLY MODE: bbox 含題號 + 答案區（純答案卷無題幹文字可框）。' : '⚠️ 沒有 default 含題幹規則：tight_answer 群組 ≠ 含題幹；large_visual_area 群組才含題幹。請依 per-type rule 判斷。'}
+對每個 questionId 執行：
 
-  ── tight_answer 群組（緊框答案空格，不含題幹）──
-  - For fill_blank 子題（questionId 含 3+ segments，如 "1-2-1"）：每個子題對應題幹中的一個空白標記（( )、□、___），學生在標記內寫值（含單位則一併寫）。answerBbox 緊框該空白標記區（含學生手寫），不含題幹。不可漂移到相鄰子題的空白、不可跨行。
+【Step A — 找行】用題號 ID 結構定位
+  · ID "X-Y-Z-N" → Section X / 第 Y 大題 / 第 Z 小題 / 第 N 子題
+  · 在圖上找對應的印刷題號 anchor（「1.」「(1)」「①」等）
+  · 確認該行 y 範圍
 
-    ⚠️ 兩階段框架（識別 → 定位 — 兩階段不衝突）：
+【Step B — 找格】依下方 TYPE RULE 在該行找印刷答案邊界
+  · 視覺特徵（括號 / 底線 / 方框 / 格線）由 TYPE RULE 定義
+  · 同 row 多格時，先一起列出（cohort）所有格的視覺邊界，再對映
 
-    【階段 A：識別 WHICH — 先確定「目標空白是這行的第幾個」】
-    依下列子規則優先級走：
-    1. ROW RULE（spec 帶 blankRow + blankRowTotal）：先由上至下數，找到第 blankRow 行，再進入該行。
-    2. ORDINAL RULE（spec 帶 blankOrdinal + blankTotal）：在對的行內，從左到右數，目標 = 第 blankOrdinal 個空白。
-    3. ORDERING RULE（無任何 hint）：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應。
+【Step C — 對映 + 定 bbox】
+  · 對映優先序：blankOrdinal > ID 順序（TOP→BOTTOM、LEFT→RIGHT）
+  · bbox.x / bbox.x+w = 第 i 格的印刷邊界 + TYPE RULE padding
+  · bbox.y / bbox.y+h = 該行 y 範圍 ± 0.005
 
-    【階段 B：定位 WHERE — 依 blankFormat 用不同策略算 bbox.x】
+═══════════════ TYPE RULES (本批 spec 用到的 type 規則) ═══════════════
 
-    🚨 BBOX xy 計算策略（依 blankFormat 不同）：
+${typeRulesSection || '（本批無需動態 type rule）'}
 
-    Step 1：先識別 blankFormat
-    - "( )" / "（ ）" → "parens"
-    - "___" / "_____" → "underline"
-    - "□" / "☐" → "box"
+═══════════════ SELF-CHECK (output 前自我驗證) ═══════════════
 
-    Step 2：依 format 計算 bbox.x（注意：三種策略**根本不同**）
+對每個 bbox：
+  ① bbox 邊界對齊到視覺找到的印刷特徵像素？(不是估計值)
+  ② bbox 內含到鄰格內容、題幹文字、單位字？(若有 → 重抓邊界)
+  ③ bbox 高度 ≥ 0.018？(若不足 → 設 0.018)
+  ④ 不同 questionId 的 bbox 之間是否重疊？(若重疊 → 重抓邊界)
 
-    【underline 底線型】
-    視覺結構：學生手寫蓋**在**底線上，兩者**重疊**
-    策略：bbox.x = 手寫最左端像素 = 底線最左端像素（剛好相同）
-    範圍：x → x+w 涵蓋整個底線 + 手寫筆跡（含超出底線的尾巴）
+任一項不通過 → 重新執行該題 Step B-C。
 
-    【parens 括號型】
-    視覺結構：學生手寫在 ( ) **中央**，與印刷括號**分離**
-    ⚠️ 此格式下，「手寫位置」≠「答案區位置」
-    ⚠️ 不要試圖去視覺找 "(" 像素 — 印刷括號太淡你抓不到，會把 bbox 貼著手寫導致左/右半被切掉
-    策略：bbox.x 和 bbox.x+w 分別決定，依括號寬度自適應推 3-10% 頁寬
+═══════════════ OUTPUT FORMAT ═══════════════
 
-    決定 bbox.x（左邊界）：
-    - bbox.x = 手寫最左端 - left_pad
-    - left_pad：緊湊括號 \`(  數字  )\` 用 3-5%；寬括號 \`(        數字        )\` 用 6-10%
-    - 上限：不可跨進前一題
-
-    決定 bbox.x + w（右邊界）：
-    - bbox.x + w = 手寫最右端 + right_pad
-    - right_pad ≈ left_pad（學生通常寫在中央 → 兩側 gap 對等）
-    - 上限：不可包到單位字（元 / 公分 / 公克 / 個）
-
-    理由：印刷的 \`(\` \`)\` 雖然視覺上不顯著，但它們**一定**在手寫的左右兩側
-
-    範例計算（緊湊括號 \`(  410  )\`）：
-      - 手寫「410」最左端 x=0.55、最右端 x=0.62
-      - bbox.x = 0.55 - 0.04 = 0.51（涵蓋 \`(\`）
-      - bbox.x + w = 0.62 + 0.04 = 0.66（涵蓋 \`)\`，但不含「元」）
-      - bbox.w = 0.15
-
-    範例計算（寬括號 \`(        15        )\`）：
-      - 手寫「15」最左端 x=0.50、最右端 x=0.53
-      - bbox.x = 0.50 - 0.08 = 0.42（涵蓋遠處的 \`(\`）
-      - bbox.x + w = 0.53 + 0.08 = 0.61（涵蓋遠處的 \`)\`）
-      - bbox.w = 0.19
-
-    【box 方框型】
-    視覺結構：類似 parens，但 □ 邊界較明顯可目視
-    策略：可目視 □ 邊界，bbox 框 □ 含內部手寫（含學生寫的 ×/+/− 等運算符）
-    🚨 邊距：bbox 不要緊貼 □ 邊框，**四邊各向外推 3-5% 頁寬**，避免切到 □ 邊框本身或手寫筆跡的尾巴
-    範例計算：
-      - □ 邊界 x=0.40~0.48
-      - bbox.x = 0.40 - 0.04 = 0.36
-      - bbox.x + w = 0.48 + 0.04 = 0.52
-      - bbox.w = 0.16
-
-    🚨 共通規則：
-    - 上下 = 含學生手寫筆跡的高度，含一點上下邊距
-    - 兩空格之間的印刷字（in / the / is / 是 / 的）必須在 bbox 之外
-    - 印刷標記後的單位（元 / 公分 / 公克 / 個）也在 bbox 之外（除非單位寫在括號**內**）
-
-    🔍 自我檢查（每題必做）：
-    1. 我有先判斷 blankFormat（parens / underline / box）嗎？
-    2. parens 時：
-       a. bbox.x 與手寫最左端的距離應該 ≥ 0.03（頁寬），表示有向左推到 \`(\`
-       b. bbox.x + w 與手寫最右端的距離應該 ≥ 0.03（頁寬），表示有向右推到 \`)\`
-       c. 寬括號要推更多（≥ 0.06），不要固定 0.04
-       d. 左 pad 與右 pad 應該對稱（gap 大致相等）
-    3. underline 時，bbox.x 應該 = 手寫最左端（不需多推）
-    4. 框出的 bbox 內**不該**含到題幹文字、相鄰空格的內容、或末尾的單位
-
-    ❌ 常見 bug：
-
-    【Bug 1：parens 沒向左推 → 切到左半】
-    - 看到「(    150    ) 元」，bbox 直接貼著手寫「150」
-      → 印刷括號 "(" 在 bbox 外面 → 裁切結果只看到「)元」或「50    )元」
-    - ✅ 正確：bbox.x = 手寫最左端 - 0.04 以上
-
-    【Bug 2：parens 沒向右推 → 切到右半（寬括號常見）】
-    - 看到「(        15        )」，bbox.x+w 只到「15」右邊一點
-      → 印刷括號 ")" 在 bbox 外面 → 裁切結果只看到「(        15」
-    - ✅ 正確：bbox.x + w = 手寫最右端 + 0.04 以上（寬括號要 +0.08）
-
-    【Bug 3：parens 兩側推不對稱 → 切到一半】
-    - 左推 0.08 但右只 +0.02 → 寬括號的 \`)\` 被切
-    - ✅ 正確：左 pad ≈ 右 pad（學生寫在中央，兩側 gap 對等）
-
-    【Bug 4：parens 推太多 → 含到前一題或單位】
-    - bbox.x 向左推超過寬括號該有的距離 → 跨進鄰題
-    - bbox.x + w 向右推超過 \`)\` → 含到「元/公分」
-    - ✅ 緊湊括號控制 3-5%，寬括號控制 6-10%，依目視判斷
-
-    【Bug 5：underline 同行多空把鄰字當 anchor】
-    - 看到「Mom is _____ in the _____」，把 "is" / "the" 當推位置的依據
-      → bbox 起點落在 "is" / "in" → 還沒到底線就開始畫，切到鄰字
-    - ✅ 正確：直接從第 N 條底線最左端的像素起算（= 手寫最左端）
-
-    範例：
-    - 緊湊括號型（無單位）：「請填(  3  )」blankFormat=parens
-       手寫「3」x=0.40 → bbox.x = 0.36（推 0.04），bbox.x+w = 0.41+0.04 = 0.45
-    - 緊湊括號型（含單位）：「(    150    ) 元」blankFormat=parens
-       手寫「150」x=0.50~0.55 → bbox.x = 0.46，bbox.x+w = 0.59；不含「元」
-    - 寬括號型：「(        15        )」blankFormat=parens
-       手寫「15」x=0.50~0.53 → bbox.x = 0.42（推 0.08），bbox.x+w = 0.61
-    - 方框型：「2½ □ (4.73 □ 2.73)」blankFormat=box
-       目視 □ 邊界框格本身（含學生寫的 ×/+ 等）
-    - 底線型：「___ 公尺」blankFormat=underline
-       bbox.x = 底線左端 = 手寫左端；w 涵蓋整個底線 + 手寫尾巴；「公尺」在外面
-    - 同行多空（底線型）：「Mom is _____ in the _____.」blankTotal=2
-       ✅ ordinal=1 → bbox.x = 第 1 條底線左端
-       ✅ ordinal=2 → bbox.x = 第 2 條底線左端
-       ❌ 把 "is" / "in" 當 anchor 推位置
-    - 同行多空（括號型）：「(  3  ) + (  5  ) = (  8  )」blankTotal=3
-       ✅ ordinal=N → 找第 N 個手寫數字，左右各推 0.03-0.05（緊湊型）
-       ❌ bbox.x 直接貼著數字 → 切到 \`(\`
-  - For fill_blank 單一空格（questionId 1-2 segments，如 "3"、"1-2"）：題目可能含 1 個或多個空白標記，整題只有一個 questionId（不分子題）。answerBbox 緊框該題所有空白標記（含學生手寫），不含題幹。不可漂移到鄰題的空白。
-  - For fill_variants：規則同 fill_blank（容多元說法是 Read 階段的判斷，classify 階段處理方式相同）。
-  - For single_choice / multi_choice / true_false：學生在空括號 (   ) 內寫代號或符號（A/B/C/甲/乙/①/②、○/✗ 等）。single_choice / true_false 寫 1 個；multi_choice 寫多個（如 "A,C"）。answerBbox 緊框該空括號，左右各加少許邊距以容忍對齊誤差。不可含題幹文字、不可延伸到下方選項清單行。寬度約占頁寬 25-35%，以括號為中心。
-  - For multi_fill：圖中有多個固定位置的空白格（地圖標記、表格儲存格、圖片標籤等），每個子題對應一格。answerBbox 緊框該子題對應的單一空白格（含學生手寫），不含題幹。不可含到鄰格、不可跨格、不可重疊到其他子題的 bbox；若格子很小且擁擠，bbox 寧可縮小也不要重疊。
-    子規則：依子題 ID 順序，TOP→BOTTOM、LEFT→RIGHT 對應；最小 ID 對應最上方的格。
-
-  ── answer_with_context 群組（答案區 + 鄰近印刷脈絡）──
-  - For circle_select_one / circle_select_many：括號內預印多個選項（如「(同意／不同意)」），學生用筆跡圈/劃選其中一個或多個。answerBbox 必須完整框住該括號列（含全部預印選項文字 + 學生筆跡），左右各加少許邊距。不可只框圈圈本身、不可遺漏任何預印選項。
-  - For single_check / multi_check：題目給一列選項，每個選項前面有 □（方形勾選框），學生在某個（些）□ 內打勾。answerBbox 涵蓋整列方框（含所有 □ + 對應選項文字 + 學生勾選筆跡）。不可只框被勾的那個 □、不可漏掉未勾的選項（Read 階段需看全列才能判斷學生選了哪個）。不可含題幹文字。
-  - For mark_in_text（圈詞題）：題目是一段印刷文章，學生在文章內某些字詞上圈、底線、或標記。answerBbox 涵蓋題幹指示語（如「圈出文中表示時間的詞」）+ 整段文章區（含全部印刷文字 + 學生圈選筆跡），可框稍大以保留上下文。不可只框被圈的字詞（Read 階段需看全文才能判斷哪些被圈，所以 bbox 必須含未被圈的字）。
-
-  ── group_shared 群組（同組共用同一 bbox）──
-  - For matching：policy=group_shared。同一 bboxGroupId 的所有子題必須回傳**完全相同**的 questionBbox/answerBbox。answerBbox 涵蓋整組連連看（左欄全部項目 + 右欄全部選項 + 學生連線），讓老師能完整檢視該組配對狀況。不可只框單一連線、單一項目、或漏掉其中一欄。
-
-  ── full_page 群組（整張圖）──
-  - For map_fill：policy=full_page。answerBbox 與 questionBbox 都必須是 {x:0, y:0, w:1, h:1}（整張圖）。地圖填圖題的答案散布全圖各處，無法精確切割，整頁即一題。
-
-  ── large_visual_area 群組（題幹 + 大答題區）──
-  - For calculation / word_problem：題幹下方有大工作區，學生寫算式 + 最終答案。calculation 的最終答案在題幹「(    ) =」括號內；word_problem 的最終答案在工作區末尾的「答：」行。answerBbox 從題幹起，向下涵蓋所有算式行、直式、最終答案/答句。若 calculation 同時有「表格內最終答案格」+「另處工作區」，bbox 必須**同時涵蓋兩者**。不可只框最終答案格、不可漏掉學生在邊緣補寫的計算。
-  - For short_answer（簡答題）：題目給一個大空白區，學生寫文字段落自由說明。answerBbox 涵蓋題幹 + 整個答題區（含學生所有手寫文字段落）。不可只框第一行；學生若補寫到旁白或邊緣，bbox 應略放寬以涵蓋。
-  - For ordering（排序題）：題目給一列待排序項目，學生在每項旁邊或內部寫上 1, 2, 3, 4… 序號。answerBbox 涵蓋題幹 + 所有待排序項目區（含全部項目印刷文字 + 學生寫的所有序號）。不可只框單一序號、不可漏掉部分項目。
-  - For map_symbol（地圖符號標記題）：題目給一張預印地圖，學生在某位置畫符號（▲/★/●）。answerBbox 涵蓋題幹 + 整張地圖 + 學生符號筆跡，bbox 略放寬以容忍符號落點。不可只框符號本身、不可漏掉地圖其他區（老師需看全圖判斷位置正確性）。
-  - For grid_geometry（格線幾何繪製題）：題目給一張格線紙，學生依條件繪製幾何圖形（三角形、平行四邊形等）。answerBbox 涵蓋題幹 + 整個格線區 + 學生繪製的線條/弧線。學生線條可能延伸到格線邊緣，bbox 應略放寬。不可只框已繪製部分、不可漏掉空白格線區（老師需看完整格網判斷邊長/角度）。
-  - For connect_dots（連點繪圖題）：題目給一個點陣，學生把指定點連起來形成圖形。answerBbox 涵蓋題幹 + 整個點陣區 + 學生連線。不可只框連線部分、不可漏掉未連的點（老師需看全部點才能判斷連線正確性）。
-  - For diagram_draw / diagram_color：題目給一張預印的長條圖/圓餅圖/塗色區，學生繪製或塗色。answerBbox 涵蓋題幹 + 整個視覺區 + 學生筆跡，學生筆跡可能延伸到圖外，bbox 應略放寬以涵蓋；不可只框已繪製/塗色的區段、不可漏掉題幹。
-
-  ── compound_linked 群組（複合題，必須完整框住所有部分）──
-  - For compound_circle_with_explain / compound_check_with_explain / compound_writein_with_explain / compound_judge_with_correction / compound_judge_with_explain（5 個複合說明題）：policy=compound_linked。整題分**兩部分**：
-    - 答案部分：依 type 不同
-      · compound_circle_with_explain：括號內預印選項 + 學生圈選
-      · compound_check_with_explain：□ 列 + 學生打勾
-      · compound_writein_with_explain：空括號 + 學生寫代號
-      · compound_judge_with_correction：括號內 ○/✗ + 下方改正空白
-      · compound_judge_with_explain：括號內 ○/✗ + 下方說明區
-    - 說明/改正部分：學生寫文字理由、正確改寫、或開放式說明
-    answerBbox 必須**同時涵蓋兩部分**（含題幹、答案區、說明/改正區、以及兩部分之間的空白）。**禁止只框其一** — 只框答案 → 老師看不到說明；只框說明 → 老師看不到答案。
-  - For multi_check_other（複選含其他題）：policy=compound_linked。一列方框中最後一個 □ 是「其他：___」開放欄。answerBbox 涵蓋題幹 + 整列方框 + 最後的「其他」開放欄（含學生在該欄手寫的文字）。不可只框前面方框、不可漏掉「其他」欄的學生手寫。
-  - For compound_chain_table（表格連動題）：policy=compound_linked。題目是一個表格，學生在多個格內填值，前後格有依賴關係（前格答案影響後格判斷）。answerBbox 涵蓋題幹 + 整個表格區（含所有填寫格 + 表格欄/列標題）。不可只框單一格、不可只框學生填寫的格而漏掉表格標題（老師需看到欄位脈絡才能判斷對錯）。
-
-  ── 通用要求 ──
-  - The bbox must be ACCURATE and TIGHT to the rule (top-left corner = (x,y), width = w, height = h) using actual pixel proportions — do NOT output placeholder sizes.
-  Format: { "x": 0.12, "y": 0.34, "w": 0.20, "h": 0.08 } where (x,y)=top-left corner, w=width, h=height, all normalized to [0,1].
-  If the question region cannot be determined, omit answerBbox.
-- For circle_select_one / circle_select_many questions: also output bracketBbox that frames ONLY the printed bracket row "（option1／option2…）" and the student's circle/mark inside it — do NOT include the question stem text. This should be a very tight crop of just that one bracket line, used by the focused bracket re-read stage. Omit bracketBbox if the bracket row cannot be located precisely.
-- Return strict JSON only.
-${Array.isArray(classifyCorrections) && classifyCorrections.length > 0 ? `
-⚠️ BBOX POSITIONING REMINDER:
-前一輪 Read 結果偵測到下列題目可能有 bbox 定位問題，請特別注意：
-${classifyCorrections.map((c) => {
-  if (c.type === 'neighbor_match') {
-    return `- 題目 ${c.questionId}：此題學生答案恰好等於相鄰題目 ${c.neighborId} 的正解，bbox 可能飄移到鄰題空格。請仔細區分這兩題的空格邊界，確保各題框選到各自正確的空格。`
-  }
-  if (c.type === 'consecutive_blank') {
-    return `- 題目 ${c.questionId}：此題與其他題目連續被讀為 blank/unreadable。請確認 answerBbox 確實對齊到該題的書寫區（不是漂移到題幹/空白區）。若 bbox 正確且學生確實留空，blank 是合理結論——不要為了「找筆跡」而誤把雜訊讀成內容。`
-  }
-  return ''
-}).filter(Boolean).join('\n')}
-` : ''}
-Output schema:
+Return strict JSON only:
 {
   "alignedQuestions": [
-    {
-      "questionId": "1-2",
-      "visible": true,
-      "answerBbox": { "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.08 }
-    }
+    { "questionId": "...", "visible": true,
+      "answerBbox": { "x": 0.x, "y": 0.x, "w": 0.x, "h": 0.x } }
   ]
 }
 
-Required fields:
-- questionId: must match an Allowed question ID.
-- visible: true/false.
-- answerBbox: required when visible=true; omit if region cannot be determined.
+Required:
+- questionId: 必須在 Allowed IDs 之中
+- visible: true / false
+- answerBbox: visible=true 必填（top-left x/y + w/h，normalized [0,1]）
 
-Conditional fields (output ONLY when applicable; omit otherwise):
-- bracketBbox: only for circle_select_one / circle_select_many.
-  Format: { "x": ..., "y": ..., "w": ..., "h": ... }
-- bboxGroupId: only for matching (echo from spec).
+Conditional:
+- bracketBbox: 僅 circle_select_one / circle_select_many 輸出（緊框「(option1／option2…)」括號列）
+- bboxGroupId: 僅 matching 輸出（從 spec echo）
 
-Do NOT output:
-- questionType: fixed by spec, do not infer or echo.
-- questionBbox: deprecated; answerBbox already covers the per-type framing.
+Do NOT output: questionType, questionBbox
 
-When visible=false, omit all bbox fields.
+When visible=false: 省略所有 bbox 欄位${correctionsSection}
 `.trim()
 }
 
