@@ -6528,11 +6528,6 @@ Return JSON:
   for (const page of ocrAssistMeta.perPage) {
     for (const qid of Object.keys(page.candidates || {})) ocrAssistedQids.add(qid)
   }
-  // Build expected answer lookup
-  const expectedByQid = new Map()
-  for (const q of answerKeyQuestions) {
-    if (q?.id) expectedByQid.set(q.id, ensureString(q.answer ?? q.referenceAnswer, ''))
-  }
 
   // Build final questionResults with arbiterResult attached
   const ocrBlankOverrides = []
@@ -6557,28 +6552,26 @@ Return JSON:
       arbiterResult = { ...arbiterResult, finalAnswer: qr.containmentPreferredRaw }
     }
 
-    // 🆕 OCR-anchored blank override：
+    // 🆕 未作答（blank）vs 未讀取（unreadable）區分：
     // 當 OCR-assist 已確認 bbox 對齊到答題行（high confidence position）+
-    // AI 一方說 blank、另一方讀短亂碼（不在 expected 答案內）→
-    // 強烈訊號是 hallucination、學生實際沒寫 → 改成 stable blank、不送老師審查
+    // 任一 AI 判讀為 blank（status='blank'）→
+    // 視為「學生未作答」、改成 stable 不送老師審查（finalAnswer='' → frontend 顯示「未作答」）
+    //
+    // 與「未讀取」的差別：
+    //   - blank（未作答）：AI 看到完全空白 / 「未作答」字樣 → 學生明確沒寫
+    //   - unreadable（未讀取）：AI 看到字但讀不出來 → 仍需老師審查
+    //
+    // OCR-assist 用過 → bbox 位置可信、blank 判讀也跟著可信 → 不再因為另一 AI hallucinate
+    // 短亂碼就觸發 needs_review。
     if (arbiterResult.arbiterStatus === 'needs_review' && ocrAssistedQids.has(qr.questionId)) {
-      const r1 = qr.readAnswer1
-      const r2 = qr.readAnswer2
-      const r1Ans = ensureString(r1?.studentAnswer, '').trim()
-      const r2Ans = ensureString(r2?.studentAnswer, '').trim()
-      const expected = expectedByQid.get(qr.questionId) || ''
-      // 用「字符出現在 expected 內」當「不是亂碼」的判斷（normalize 標點）
-      const cleanExpected = expected.replace(/[，。：、；！？\s]/g, '')
-      const looksLikeHallucination = (text) => {
-        if (!text || text.length === 0 || text.length > 4) return false
-        // 文字短（≤4 字）且任何一字都不在 expected 內 → 高機率亂碼
-        for (const ch of text) if (cleanExpected.includes(ch)) return false
-        return true
-      }
-      // Pattern: AI2 blank + AI1 短亂碼  或  AI1 blank + AI2 短亂碼
-      if ((r2?.status === 'blank' && r1?.status === 'read' && looksLikeHallucination(r1Ans)) ||
-          (r1?.status === 'blank' && r2?.status === 'read' && looksLikeHallucination(r2Ans))) {
-        ocrBlankOverrides.push({ questionId: qr.questionId, r1: r1Ans || '(blank)', r2: r2Ans || '(blank)', expected })
+      const r1Status = qr.readAnswer1?.status
+      const r2Status = qr.readAnswer2?.status
+      if (r1Status === 'blank' || r2Status === 'blank') {
+        ocrBlankOverrides.push({
+          questionId: qr.questionId,
+          r1: r1Status === 'blank' ? '(blank)' : ensureString(qr.readAnswer1?.studentAnswer, ''),
+          r2: r2Status === 'blank' ? '(blank)' : ensureString(qr.readAnswer2?.studentAnswer, ''),
+        })
         arbiterResult = { arbiterStatus: 'arbitrated_agree', finalAnswer: '', ocrBlankOverride: true }
       }
     }
