@@ -13,6 +13,7 @@ import {
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
 import { isOcrAssistEnabled, prepareOcrHintsForClassify } from './ocr-client.js'
+import { buildOcrHintsSection } from './bbox-anchor-match.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -5277,24 +5278,13 @@ export async function runStagedGradingPhaseA({
         pageEntries.map(([, ids]) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
           let prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
-          // 每頁 filter 自己的 questions、整張圖 OCR 共用
-          if (fallbackOcrAssistFull?.candidatesByQid) {
+          // 每頁 filter 自己的 questions、整張圖 OCR 共用、用 buildOcrHintsSection 統一渲染（含 padding）
+          if (fallbackOcrAssistFull?.candidatesByQid && fallbackOcrAssistFull?.ocrResult) {
             const pageHints = {}
             for (const qid of ids) if (fallbackOcrAssistFull.candidatesByQid[qid]) pageHints[qid] = fallbackOcrAssistFull.candidatesByQid[qid]
-            if (Object.keys(pageHints).length > 0 && fallbackOcrAssistFull.ocrResult) {
-              // 現場渲染該頁的 hints section（reuse buildOcrHintsSection）— 直接從 helper 來避免循環依賴
-              const lines = ['', '═══ OCR HINTS (僅對 inline answer 題型提供) ═══', '']
-              lines.push('OCR-matched candidates（bbox 為 normalized [0..1]，整張圖座標）：')
-              for (const [qid, cands] of Object.entries(pageHints)) {
-                lines.push(`Q ${qid}:`)
-                cands.forEach((c, i) => {
-                  const [iw, ih] = fallbackOcrAssistFull.ocrResult.image_size
-                  const [x1, y1, x2, y2] = c.bbox
-                  const nb = { x: +(x1/iw).toFixed(3), y: +(y1/ih).toFixed(3), w: +((x2-x1)/iw).toFixed(3), h: +((y2-y1)/ih).toFixed(3) }
-                  lines.push(`  c${i+1} score=${c.score.toFixed(2)} text="${(c.text||'').slice(0,40)}" bbox=${JSON.stringify(nb)}`)
-                })
-              }
-              prompt = `${prompt}\n\n${lines.join('\n')}`
+            if (Object.keys(pageHints).length > 0) {
+              const hintsSection = buildOcrHintsSection(pageHints, fallbackOcrAssistFull.ocrResult.image_size)
+              if (hintsSection) prompt = `${prompt}\n\n${hintsSection}`
             }
           }
           return executeStage({
