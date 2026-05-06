@@ -6523,7 +6523,19 @@ Return JSON:
     }
   }
 
+  // 🆕 Build set of OCR-assisted question IDs（用於下方 blank-override 邏輯）
+  const ocrAssistedQids = new Set()
+  for (const page of ocrAssistMeta.perPage) {
+    for (const qid of Object.keys(page.candidates || {})) ocrAssistedQids.add(qid)
+  }
+  // Build expected answer lookup
+  const expectedByQid = new Map()
+  for (const q of answerKeyQuestions) {
+    if (q?.id) expectedByQid.set(q.id, ensureString(q.answer ?? q.referenceAnswer, ''))
+  }
+
   // Build final questionResults with arbiterResult attached
+  const ocrBlankOverrides = []
   const questionResults = questionResultsRaw.map((qr) => {
     let arbiterResult = arbiterByQuestionId.get(qr.questionId) ?? (() => {
       // Auto-determine for questions not processed by AI3
@@ -6543,6 +6555,32 @@ Return JSON:
     // 包含關係覆寫：AI2 較短時，用 AI2 答案取代 AI1（更精確，避免多讀鄰近內容）
     if (arbiterResult.arbiterStatus === 'arbitrated_agree' && qr.containmentPreferredRaw) {
       arbiterResult = { ...arbiterResult, finalAnswer: qr.containmentPreferredRaw }
+    }
+
+    // 🆕 OCR-anchored blank override：
+    // 當 OCR-assist 已確認 bbox 對齊到答題行（high confidence position）+
+    // AI 一方說 blank、另一方讀短亂碼（不在 expected 答案內）→
+    // 強烈訊號是 hallucination、學生實際沒寫 → 改成 stable blank、不送老師審查
+    if (arbiterResult.arbiterStatus === 'needs_review' && ocrAssistedQids.has(qr.questionId)) {
+      const r1 = qr.readAnswer1
+      const r2 = qr.readAnswer2
+      const r1Ans = ensureString(r1?.studentAnswer, '').trim()
+      const r2Ans = ensureString(r2?.studentAnswer, '').trim()
+      const expected = expectedByQid.get(qr.questionId) || ''
+      // 用「字符出現在 expected 內」當「不是亂碼」的判斷（normalize 標點）
+      const cleanExpected = expected.replace(/[，。：、；！？\s]/g, '')
+      const looksLikeHallucination = (text) => {
+        if (!text || text.length === 0 || text.length > 4) return false
+        // 文字短（≤4 字）且任何一字都不在 expected 內 → 高機率亂碼
+        for (const ch of text) if (cleanExpected.includes(ch)) return false
+        return true
+      }
+      // Pattern: AI2 blank + AI1 短亂碼  或  AI1 blank + AI2 短亂碼
+      if ((r2?.status === 'blank' && r1?.status === 'read' && looksLikeHallucination(r1Ans)) ||
+          (r1?.status === 'blank' && r2?.status === 'read' && looksLikeHallucination(r2Ans))) {
+        ocrBlankOverrides.push({ questionId: qr.questionId, r1: r1Ans || '(blank)', r2: r2Ans || '(blank)', expected })
+        arbiterResult = { arbiterStatus: 'arbitrated_agree', finalAnswer: '', ocrBlankOverride: true }
+      }
     }
 
     // Attach crop image URL only for needs_review questions (for teacher review UI)
@@ -6578,6 +6616,11 @@ Return JSON:
 
   // ── Table edge leak detection 已移除：依賴 legacy tablePosition.col/row 元數據，
   //    新 table_cell type 走整表批改（cellValues 在 read 階段已能對齊每 cell），不需此檢查。
+
+  // 🆕 Log OCR-anchored blank overrides
+  if (ocrBlankOverrides.length > 0) {
+    logStaged(pipelineRunId, stagedLogLevel, 'OCR-anchored blank override', ocrBlankOverrides)
+  }
 
   // ── English spacing review: force needs_review for questions flagged with spacing differences ──
   const spacingReviewFlagged = []
