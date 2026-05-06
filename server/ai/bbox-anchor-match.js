@@ -158,6 +158,66 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
 }
 
 /**
+ * Post-classify override：當 classify 對 inline 題目輸出的 bbox 比 OCR candidate 窄太多（或 x 嚴重右偏）
+ * → 用 padded candidate bbox 覆寫。
+ *
+ * 經驗（2026-05-07）：classify 在 prompt 強制規則下仍會按 TYPE RULE「冒號後接空白」公式縮到只框
+ * 學生筆跡可見部分，導致老師看 review crop 時 bbox 太窄、無法判斷。
+ *
+ * 觸發條件（任一即覆寫）：
+ * - bbox.w < candidate.w * minWidthRatio（預設 0.5、即縮到一半以下）
+ * - bbox.x > candidate.x + xMisalignTolerance（預設 0.05、即 x 比 candidate.x 右偏超過 5%）
+ *
+ * @param {Array} alignedQuestions - classify 輸出的 [{questionId, visible, answerBbox, ...}]
+ * @param {Object} candidatesByQid - { qid → [{idx, bbox, score, text}, ...] }；bbox 是 [x1,y1,x2,y2] pixel
+ * @param {Array} imageSize - [imgW, imgH]
+ * @param {Object} opts - { xPadFraction, yPadFraction, minWidthRatio, xMisalignTolerance }
+ * @returns {Object} { alignedQuestions: 新陣列, overrides: [{questionId, before, after, reason}] }
+ */
+export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSize, opts = {}) {
+  const xPad = typeof opts.xPadFraction === 'number' ? opts.xPadFraction : 0.04
+  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0.005
+  const minWidthRatio = typeof opts.minWidthRatio === 'number' ? opts.minWidthRatio : 0.5
+  const xTol = typeof opts.xMisalignTolerance === 'number' ? opts.xMisalignTolerance : 0.05
+  const [imgW, imgH] = imageSize || [1, 1]
+  const overrides = []
+
+  const out = (alignedQuestions || []).map((q) => {
+    const cands = candidatesByQid?.[q.questionId]
+    if (!cands || cands.length === 0) return q
+    if (!q.answerBbox || typeof q.answerBbox.x !== 'number') return q
+    const cand = cands[0]
+    const candX = cand.bbox[0] / imgW
+    const candY = cand.bbox[1] / imgH
+    const candW = (cand.bbox[2] - cand.bbox[0]) / imgW
+    const candH = (cand.bbox[3] - cand.bbox[1]) / imgH
+
+    const aiX = q.answerBbox.x
+    const aiW = q.answerBbox.w
+    const tooNarrow = aiW < candW * minWidthRatio
+    const xRightShifted = aiX > candX + xTol
+
+    if (!tooNarrow && !xRightShifted) return q
+
+    // padded candidate 覆寫
+    const newX = Math.max(0, candX - xPad)
+    const newY = Math.max(0, candY - yPad)
+    const newW = Math.min(1 - newX, candW + 2 * xPad)
+    const newH = Math.min(1 - newY, candH + 2 * yPad)
+    const newBbox = { x: +newX.toFixed(3), y: +newY.toFixed(3), w: +newW.toFixed(3), h: +newH.toFixed(3) }
+    overrides.push({
+      questionId: q.questionId,
+      before: { x: +aiX.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +aiW.toFixed(3), h: +q.answerBbox.h.toFixed(3) },
+      after: newBbox,
+      reason: tooNarrow && xRightShifted ? 'narrow+xshift' : (tooNarrow ? 'narrow' : 'xshift')
+    })
+    return { ...q, answerBbox: newBbox, bboxOverriddenByOcr: true }
+  })
+
+  return { alignedQuestions: out, overrides }
+}
+
+/**
  * 把 candidates 渲染成 prompt 可注入的「OCR HINTS」section 字串。
  * 若沒任何 candidate 回空字串（classify prompt 不會多 token）。
  *

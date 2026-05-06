@@ -13,7 +13,7 @@ import {
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
 import { isOcrAssistEnabled, prepareOcrHintsForClassify } from './ocr-client.js'
-import { buildOcrHintsSection } from './bbox-anchor-match.js'
+import { buildOcrHintsSection, applyOcrBboxOverride } from './bbox-anchor-match.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -5207,8 +5207,8 @@ export async function runStagedGradingPhaseA({
         })
         if (ocrAssist.extraSection) classifyPrompt = `${classifyPrompt}\n\n${ocrAssist.extraSection}`
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist', ocrAssist.stats)
-        // 🆕 收進 stage_logs metadata
-        ocrAssistMeta.perPage.push({ page: 1, stats: ocrAssist.stats, candidates: ocrAssist.candidatesByQid })
+        // 🆕 收進 stage_logs metadata（含 imageSize 供 post-classify override 使用）
+        ocrAssistMeta.perPage.push({ page: 1, stats: ocrAssist.stats, candidates: ocrAssist.candidatesByQid, imageSize: ocrAssist.ocrResult?.image_size })
       } catch (ocrErr) {
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist error → fallback', { error: ocrErr?.message })
         ocrAssistMeta.perPage.push({ page: 1, stats: { error: ocrErr?.message } })
@@ -5231,6 +5231,19 @@ export async function runStagedGradingPhaseA({
     const classifyParsed = parseCandidateJson(classifyResponse.data)
     if (!classifyParsed || typeof classifyParsed !== 'object') throw new Error('PhaseA classify parse failed')
     classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs)
+    // 🆕 Post-classify OCR bbox override（單頁 path）：narrow / x-shifted bbox 用 padded candidate 覆寫
+    if (ocrAssistMeta.perPage[0]?.candidates && Object.keys(ocrAssistMeta.perPage[0].candidates).length > 0) {
+      const ocrSize = ocrAssistMeta.perPage[0].imageSize || [inlineImages[0].inlineData.width || 1, inlineImages[0].inlineData.height || 1]
+      const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
+        classifyResult.alignedQuestions,
+        ocrAssistMeta.perPage[0].candidates,
+        ocrSize
+      )
+      if (overrides.length > 0) {
+        classifyResult = { ...classifyResult, alignedQuestions: overriddenQs }
+        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (single-page)', { count: overrides.length, samples: overrides.slice(0, 5) })
+      }
+    }
   } else {
     // Multi-page: split merged image into individual pages, one classify call per page (parallel).
     // Each call gets ONLY its page's image → AI outputs bbox in single-page coords (0~1)
@@ -5264,11 +5277,12 @@ export async function runStagedGradingPhaseA({
         : null
       if (fallbackOcrAssistFull) {
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist (fallback full image)', fallbackOcrAssistFull.stats)
-        // 🆕 收進 stage_logs metadata
+        // 🆕 收進 stage_logs metadata（含 imageSize）
         ocrAssistMeta.perPage.push({
           page: 0, // 0 表示「整張圖」
           stats: fallbackOcrAssistFull.stats || {},
-          candidates: fallbackOcrAssistFull.candidatesByQid || {}
+          candidates: fallbackOcrAssistFull.candidatesByQid || {},
+          imageSize: fallbackOcrAssistFull.ocrResult?.image_size
         })
       }
       const classifyResponses = await Promise.all(
@@ -5314,6 +5328,17 @@ export async function runStagedGradingPhaseA({
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
       }, classifyQuestionSpecs)
+      // 🆕 Post-classify OCR bbox override（multi-page fallback path、整張圖座標）
+      const fallbackMeta = ocrAssistMeta.perPage.find(p => p.page === 0)
+      if (fallbackMeta?.candidates && Object.keys(fallbackMeta.candidates).length > 0 && fallbackMeta.imageSize) {
+        const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
+          classifyResult.alignedQuestions, fallbackMeta.candidates, fallbackMeta.imageSize
+        )
+        if (overrides.length > 0) {
+          classifyResult = { ...classifyResult, alignedQuestions: overriddenQs }
+          logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (multi-page fallback)', { count: overrides.length, samples: overrides.slice(0, 5) })
+        }
+      }
     } else {
       // Success: each page gets its own cropped image — no pageBreaks needed in prompt
       logStaged(pipelineRunId, stagedLogLevel, 'classify split success', {
@@ -5340,11 +5365,12 @@ export async function runStagedGradingPhaseA({
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist per-page', {
           pages: pageOcrAssists.map((a, i) => ({ page: pageEntries[i][0], ...a.stats }))
         })
-        // 🆕 收進 stage_logs metadata
+        // 🆕 收進 stage_logs metadata（含 imageSize 供 post-classify override 使用）
         pageOcrAssists.forEach((a, i) => ocrAssistMeta.perPage.push({
           page: pageEntries[i][0],
           stats: a?.stats || {},
-          candidates: a?.candidatesByQid || {}
+          candidates: a?.candidatesByQid || {},
+          imageSize: a?.ocrResult?.image_size
         }))
       }
       const classifyResponses = await Promise.all(
@@ -5382,9 +5408,21 @@ export async function runStagedGradingPhaseA({
         throw new Error('PhaseA classify parse failed (per-page split)')
       }
 
-      // Normalize then remap bboxes from per-page coords → full-image coords
+      // Normalize, apply OCR override (per-page coords), then remap bboxes from per-page coords → full-image coords
+      const allOverrides = []
       const normalizedResults = pageEntries.map(([, ids], i) => {
-        const norm = normalizeClassifyResult(parsedResults[i], ids)
+        let norm = normalizeClassifyResult(parsedResults[i], ids)
+        // 🆕 Post-classify OCR bbox override（在 per-page coords 階段做、再 remap）
+        const pageMeta = ocrAssistMeta.perPage.find(p => p.page === pageEntries[i][0])
+        if (pageMeta?.candidates && Object.keys(pageMeta.candidates).length > 0 && pageMeta.imageSize) {
+          const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
+            norm.alignedQuestions, pageMeta.candidates, pageMeta.imageSize
+          )
+          if (overrides.length > 0) {
+            norm = { ...norm, alignedQuestions: overriddenQs }
+            allOverrides.push(...overrides.map(o => ({ ...o, page: pageEntries[i][0] })))
+          }
+        }
         const { pageStartY, pageEndY } = splitPages[i]
         for (const q of norm.alignedQuestions) {
           if (q.answerBbox) q.answerBbox = remapBboxToFullImage(q.answerBbox, pageStartY, pageEndY)
@@ -5393,6 +5431,9 @@ export async function runStagedGradingPhaseA({
         }
         return norm
       })
+      if (allOverrides.length > 0) {
+        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (multi-page split)', { count: allOverrides.length, samples: allOverrides.slice(0, 5) })
+      }
 
       const byId = new Map(
         normalizedResults.flatMap((n) => n.alignedQuestions).map((q) => [q.questionId, q])
