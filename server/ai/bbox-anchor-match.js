@@ -119,19 +119,29 @@ export function findTopMatches(phrases, ocrDetections, opts = {}) {
 /**
  * 對 answerKey 的所有 inline-type questions 找 OCR candidates。
  *
+ * 採 greedy unique assignment：
+ *   1. 算所有 (qid, ocrIdx, score) 上門檻的 pairs
+ *   2. 依 score 由高到低排序
+ *   3. 由高分往下逐一指派、若 qid 或 ocrIdx 已被指派就跳過
+ *   4. 結果：每題最多 1 條 OCR row、每條 OCR row 最多被 1 題綁
+ *
+ * 解決多題共用 bbox 問題（如國語注釋 1-1-4 vs 1-1-5 都配到 row 5 的情況）。
+ *
  * @param {Array} answerKeyQuestions - answerKey.questions
  * @param {Array} ocrDetections - OCR /ocr endpoint 回傳的 detections
- * @param {Object} opts - { topN, minScore, inlineTypes }
+ * @param {Object} opts - { minScore, minLcs, inlineTypes }
  * @returns {Object} { candidatesByQid, stats }
- *   candidatesByQid: { qid → [ {idx, text, bbox, score}, ... ] }
- *   stats: { totalQuestions, inlineCount, matchedCount }
+ *   candidatesByQid: { qid → [{idx, text, bbox, score}] }（每題最多 1 entry）
  */
 export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = {}) {
   const inlineTypes = opts.inlineTypes || INLINE_ANSWER_TYPES
-  const candidatesByQid = {}
-  let inlineCount = 0
-  let matchedCount = 0
+  const minScore = typeof opts.minScore === 'number' ? opts.minScore : 0.4
+  const minLcs = typeof opts.minLcs === 'number' ? opts.minLcs : 3
 
+  // Step 1：計算所有 (qid, ocrIdx, score) pair
+  const allPairs = []
+  let inlineCount = 0
+  let collisions = 0
   for (const q of answerKeyQuestions || []) {
     const qid = q?.id
     if (!qid) continue
@@ -139,11 +149,46 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
     inlineCount++
     const phrases = extractSearchPhrases(q.anchorHint)
     if (phrases.length === 0) continue
-    const matches = findTopMatches(phrases, ocrDetections || [], opts)
-    if (matches.length > 0) {
-      candidatesByQid[qid] = matches
-      matchedCount++
+    let pairsForThisQ = 0
+    for (let i = 0; i < (ocrDetections || []).length; i++) {
+      const text = normalize(ocrDetections[i].rec_text || '')
+      let bestForPair = 0
+      for (const phrase of phrases) {
+        const np = normalize(phrase)
+        if (np.length < 3) continue
+        const lcs = lcsLength(text, np)
+        if (lcs < minLcs) continue
+        const dice = (2 * lcs) / (np.length + text.length)
+        if (dice > bestForPair) bestForPair = dice
+      }
+      if (bestForPair >= minScore) {
+        allPairs.push({ qid, ocrIdx: i, score: bestForPair, ocrItem: ocrDetections[i] })
+        pairsForThisQ++
+      }
     }
+    if (pairsForThisQ > 1) collisions++
+  }
+
+  // Step 2：greedy 指派 — 每 qid + 每 ocrIdx 只用一次
+  allPairs.sort((a, b) => b.score - a.score)
+  const usedQids = new Set()
+  const usedRows = new Set()
+  const candidatesByQid = {}
+  const lostToCollision = []  // qid 因 row 已被高分搶先而沒拿到 → audit
+  for (const p of allPairs) {
+    if (usedQids.has(p.qid)) continue
+    if (usedRows.has(p.ocrIdx)) {
+      lostToCollision.push({ qid: p.qid, ocrIdx: p.ocrIdx, score: +p.score.toFixed(3) })
+      continue
+    }
+    candidatesByQid[p.qid] = [{
+      idx: p.ocrIdx,
+      text: p.ocrItem.rec_text,
+      bbox: p.ocrItem.bbox,
+      score: p.score
+    }]
+    usedQids.add(p.qid)
+    usedRows.add(p.ocrIdx)
   }
 
   return {
@@ -151,18 +196,24 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
     stats: {
       totalQuestions: (answerKeyQuestions || []).length,
       inlineCount,
-      matchedCount,
-      matchRate: inlineCount ? matchedCount / inlineCount : 0
+      matchedCount: Object.keys(candidatesByQid).length,
+      matchRate: inlineCount ? Object.keys(candidatesByQid).length / inlineCount : 0,
+      assignmentMethod: 'greedy_unique',
+      collisionsResolved: lostToCollision.length,
+      collisionSamples: lostToCollision.slice(0, 5)
     }
   }
 }
 
 /**
  * Post-classify override：當 classify 對 inline 題目輸出的 bbox 比 OCR candidate 窄太多（或 x 嚴重右偏）
- * → 用 padded candidate bbox 覆寫。
+ * → 用 candidate bbox 覆寫（x 加 padding、y/h 不延伸）。
  *
  * 經驗（2026-05-07）：classify 在 prompt 強制規則下仍會按 TYPE RULE「冒號後接空白」公式縮到只框
  * 學生筆跡可見部分，導致老師看 review crop 時 bbox 太窄、無法判斷。
+ *
+ * y padding 預設 0：行距通常只有 ~0.04（normalized），y 延伸 0.005 就會碰到鄰題、read 階段 crop
+ * 含下一題印刷字、AI1/AI2 讀錯。
  *
  * 觸發條件（任一即覆寫）：
  * - bbox.w < candidate.w * minWidthRatio（預設 0.5、即縮到一半以下）
@@ -176,7 +227,7 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
  */
 export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSize, opts = {}) {
   const xPad = typeof opts.xPadFraction === 'number' ? opts.xPadFraction : 0.04
-  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0.005
+  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0  // ⚠️ 預設 0：行距太窄、避免碰鄰題
   const minWidthRatio = typeof opts.minWidthRatio === 'number' ? opts.minWidthRatio : 0.5
   const xTol = typeof opts.xMisalignTolerance === 'number' ? opts.xMisalignTolerance : 0.05
   const [imgW, imgH] = imageSize || [1, 1]
@@ -199,7 +250,7 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
 
     if (!tooNarrow && !xRightShifted) return q
 
-    // padded candidate 覆寫
+    // 覆寫：x 加 padding、y/h 直接用 candidate 不延伸
     const newX = Math.max(0, candX - xPad)
     const newY = Math.max(0, candY - yPad)
     const newW = Math.min(1 - newX, candW + 2 * xPad)
@@ -229,23 +280,25 @@ export function buildOcrHintsSection(candidatesByQid, imageSize, opts = {}) {
   const entries = Object.entries(candidatesByQid || {}).filter(([, cands]) => cands && cands.length > 0)
   if (entries.length === 0) return ''
   const [imgW, imgH] = imageSize || [1, 1]
-  // OCR 偵測常切到學生手寫的最邊緣字 → 渲染時往外延伸一點點當「保守的位置 anchor」
+  // x 軸往外延伸（學生手寫常溢出 OCR 偵測邊界）；y 軸**不延伸**（行距太窄、避免碰鄰題 read 讀錯）
   const xPad = typeof opts.xPadFraction === 'number' ? opts.xPadFraction : 0.04
-  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0.005
+  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0
   const lines = ['', '═══ OCR HINTS (僅對 inline answer 題型提供) ═══', '']
   lines.push('我們對學生作業圖跑過 OCR、根據 anchorHint 配對到「答案就在該行內」的 candidate row。')
+  lines.push('（每條 OCR row 只會配給一個題目，避免相鄰題目共用 bbox）')
   lines.push('')
-  lines.push('🚨 OCR HINT 使用規則（覆寫 TYPE RULE 對應 inline 題型 x 公式，y 公式不變）：')
+  lines.push('🚨 OCR HINT 使用規則（覆寫 TYPE RULE 對應 inline 題型 x 公式）：')
   lines.push('')
   lines.push('  1. answerBbox.x **必須 ≤ candidate.x**（不得比 candidate 起點更靠右）')
   lines.push('  2. answerBbox.x + answerBbox.w **必須 ≥ candidate.x + candidate.w**（不得比 candidate 終點更靠左）')
-  lines.push('  3. 你可以**往左/右擴**（學生筆跡常超出 OCR 偵測邊界、特別是行末延伸）')
-  lines.push('  4. 你可以**自行調整 y/h**（含學生筆跡上下緣 + 完整字高）')
-  lines.push('  5. 🚨 **嚴禁將 bbox 縮窄到只框「學生筆跡可見部分」** — 那會切到字尾延伸、AI1/AI2 看到不同字段、變 needs_review')
+  lines.push('  3. 你可以**往左/右擴 x**（學生筆跡常超出 OCR 偵測邊界、特別是行末延伸）')
+  lines.push('  4. ⚠️ **y/h 不要延伸到鄰題**：行距通常只有 0.04（normalized），h 加大 0.005 就碰到下一題、read 階段 crop 含下一題印刷字')
+  lines.push('     → bbox.y 維持 candidate.y、bbox.h 維持 candidate.h（OCR row 高度已涵蓋筆跡）')
+  lines.push('     → 若必須調 y/h，控制在 ±0.002 以內，絕對不要 ≥ 0.005')
+  lines.push('  5. 🚨 **嚴禁將 bbox x 縮窄到只框「學生筆跡可見部分」** — 那會切到字尾延伸、AI1/AI2 看到不同字段、變 needs_review')
   lines.push('  6. 即使學生留空白未作答，bbox 仍維持 candidate 完整 x/w 範圍（不縮）')
   lines.push('')
-  lines.push(`📐 candidate bbox 已含 ±${(xPad*100).toFixed(0)}% x padding 和 ±${(yPad*100).toFixed(0)}% y padding（即 candidate.x 已往左移 ${(xPad*100).toFixed(0)}%）。`)
-  lines.push('   你輸出的 bbox 必須**完整涵蓋此 padded 範圍 + 視覺延伸**。')
+  lines.push(`📐 candidate bbox 已含 ±${(xPad*100).toFixed(0)}% x padding（y 不 pad 以保持行高）。`)
   lines.push('')
   lines.push('（其他題型如 word_problem / single_check 等沒列出 hint，請走純視覺判斷）')
   lines.push('')
