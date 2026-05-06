@@ -12,6 +12,7 @@ import {
   validateReadAccessorConsistency
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
+import { isOcrAssistEnabled, prepareOcrHintsForClassify } from './ocr-client.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -5191,7 +5192,23 @@ export async function runStagedGradingPhaseA({
     // Single page (or all questions share one page) — one call
     const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
     const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-    const classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+    let classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+    // ── OCR-assisted classify (feature-flagged) ──
+    // 對 inline answer types (fill_blank/multi_fill/...) 注入 OCR-matched candidate bbox 當 anchor。
+    // 失敗 graceful：OCR 掛 / 超時 / 無 candidate → extraSection 為空、走純視覺 classify。
+    if (isOcrAssistEnabled()) {
+      try {
+        const ocrAssist = await prepareOcrHintsForClassify({
+          imageBytes: Buffer.from(inlineImages[0].inlineData.data, 'base64'),
+          mimeType: inlineImages[0].inlineData.mimeType,
+          answerKeyQuestions: answerKeyQuestions.filter(q => ids.includes(q?.id))
+        })
+        if (ocrAssist.extraSection) classifyPrompt = `${classifyPrompt}\n\n${ocrAssist.extraSection}`
+        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist', ocrAssist.stats)
+      } catch (ocrErr) {
+        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist error → fallback', { error: ocrErr?.message })
+      }
+    }
     const classifyResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
@@ -5228,10 +5245,45 @@ export async function runStagedGradingPhaseA({
       logStaged(pipelineRunId, stagedLogLevel, 'classify split failed, fallback to full image', {
         splitPages: splitPages?.length, pageEntries: pageEntries.length, pageBreaksLength: pageBreaks.length
       })
+      // ── OCR-assisted classify (feature-flagged) — 整張圖 OCR 一次、每 page 獨立 filter candidates ──
+      // 注意：split 失敗時整張圖可能超過 4000px，OCR 解析度會降，但仍可作位置 anchor。
+      const fallbackOcrAssistFull = isOcrAssistEnabled()
+        ? await prepareOcrHintsForClassify({
+            imageBytes: Buffer.from(inlineImages[0].inlineData.data, 'base64'),
+            mimeType: inlineImages[0].inlineData.mimeType,
+            answerKeyQuestions: answerKeyQuestions
+          }).catch(e => {
+            logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist (fallback path) error', { error: e?.message })
+            return { extraSection: '', stats: { error: e?.message } }
+          })
+        : null
+      if (fallbackOcrAssistFull) {
+        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist (fallback full image)', fallbackOcrAssistFull.stats)
+      }
       const classifyResponses = await Promise.all(
         pageEntries.map(([, ids]) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
-          const prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+          let prompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+          // 每頁 filter 自己的 questions、整張圖 OCR 共用
+          if (fallbackOcrAssistFull?.candidatesByQid) {
+            const pageHints = {}
+            for (const qid of ids) if (fallbackOcrAssistFull.candidatesByQid[qid]) pageHints[qid] = fallbackOcrAssistFull.candidatesByQid[qid]
+            if (Object.keys(pageHints).length > 0 && fallbackOcrAssistFull.ocrResult) {
+              // 現場渲染該頁的 hints section（reuse buildOcrHintsSection）— 直接從 helper 來避免循環依賴
+              const lines = ['', '═══ OCR HINTS (僅對 inline answer 題型提供) ═══', '']
+              lines.push('OCR-matched candidates（bbox 為 normalized [0..1]，整張圖座標）：')
+              for (const [qid, cands] of Object.entries(pageHints)) {
+                lines.push(`Q ${qid}:`)
+                cands.forEach((c, i) => {
+                  const [iw, ih] = fallbackOcrAssistFull.ocrResult.image_size
+                  const [x1, y1, x2, y2] = c.bbox
+                  const nb = { x: +(x1/iw).toFixed(3), y: +(y1/ih).toFixed(3), w: +((x2-x1)/iw).toFixed(3), h: +((y2-y1)/ih).toFixed(3) }
+                  lines.push(`  c${i+1} score=${c.score.toFixed(2)} text="${(c.text||'').slice(0,40)}" bbox=${JSON.stringify(nb)}`)
+                })
+              }
+              prompt = `${prompt}\n\n${lines.join('\n')}`
+            }
+          }
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
@@ -5267,11 +5319,34 @@ export async function runStagedGradingPhaseA({
       logStaged(pipelineRunId, stagedLogLevel, 'classify split success', {
         pages: splitPages.map((p, i) => ({ page: pageEntries[i][0], startY: +p.pageStartY.toFixed(3), endY: +p.pageEndY.toFixed(3) }))
       })
+      // ── OCR-assisted classify (feature-flagged) — 每頁獨立 OCR、parallel ──
+      // 失敗 graceful：任一頁 OCR 掛都不影響該頁的 classify（fallback 純視覺）
+      const pageOcrAssists = isOcrAssistEnabled()
+        ? await Promise.all(splitPages.map(async (p, i) => {
+            try {
+              const ids = pageEntries[i][1]
+              return await prepareOcrHintsForClassify({
+                imageBytes: Buffer.from(p.inlineData.data, 'base64'),
+                mimeType: p.inlineData.mimeType,
+                answerKeyQuestions: answerKeyQuestions.filter(q => ids.includes(q?.id))
+              })
+            } catch (e) {
+              logStaged(pipelineRunId, stagedLogLevel, `classify OCR-assist p${pageEntries[i][0]} error`, { error: e?.message })
+              return { extraSection: '', stats: { error: e?.message } }
+            }
+          }))
+        : null
+      if (pageOcrAssists) {
+        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist per-page', {
+          pages: pageOcrAssists.map((a, i) => ({ page: pageEntries[i][0], ...a.stats }))
+        })
+      }
       const classifyResponses = await Promise.all(
         pageEntries.map(([, ids], i) => {
           const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
           // No pageBreaks — single-page image, AI outputs bbox in 0~1 relative to this page
-          const prompt = buildClassifyPrompt(ids, specs, [], 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+          let prompt = buildClassifyPrompt(ids, specs, [], 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+          if (pageOcrAssists?.[i]?.extraSection) prompt = `${prompt}\n\n${pageOcrAssists[i].extraSection}`
           const pageImagePart = { inlineData: splitPages[i].inlineData }
           return executeStage({
             apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
