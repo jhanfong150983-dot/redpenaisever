@@ -21,13 +21,18 @@ export function extractPhaseALogData({
   needsReviewCount,
   stableCount,
   diffCount,
-  unstableCount
+  unstableCount,
+  ocrAssistMeta  // 🆕 OCR-assist metadata (per-page array)
 }) {
   // classify summary (不存完整 bbox，只存關鍵資訊)
   const classifyAligned = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
   const classify = {
     coverage: classifyResult?.coverage,
     visibleCount: classifyAligned.filter(q => q.visible).length
+  }
+  // 🆕 OCR-assist metadata：用於 shadow mode 分析
+  if (ocrAssistMeta) {
+    classify.ocrAssist = ocrAssistMeta
   }
 
   // read answers (只存 questionId + status + answer)

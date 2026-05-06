@@ -5141,6 +5141,10 @@ export async function runStagedGradingPhaseA({
   }
   const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
 
+  // 🆕 OCR-assist metadata 收集（用於 stage_logs 寫入）
+  // Schema: { enabled: bool, perPage: [{ page, stats, candidates }] }
+  const ocrAssistMeta = { enabled: isOcrAssistEnabled(), perPage: [] }
+
   // Build per-page question groups（classify 和 bboxOverrides 都需要）
   const pageQuestionsMap = new Map()
   const otherIds = []
@@ -5205,8 +5209,11 @@ export async function runStagedGradingPhaseA({
         })
         if (ocrAssist.extraSection) classifyPrompt = `${classifyPrompt}\n\n${ocrAssist.extraSection}`
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist', ocrAssist.stats)
+        // 🆕 收進 stage_logs metadata
+        ocrAssistMeta.perPage.push({ page: 1, stats: ocrAssist.stats, candidates: ocrAssist.candidatesByQid })
       } catch (ocrErr) {
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist error → fallback', { error: ocrErr?.message })
+        ocrAssistMeta.perPage.push({ page: 1, stats: { error: ocrErr?.message } })
       }
     }
     const classifyResponse = await executeStage({
@@ -5259,6 +5266,12 @@ export async function runStagedGradingPhaseA({
         : null
       if (fallbackOcrAssistFull) {
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist (fallback full image)', fallbackOcrAssistFull.stats)
+        // 🆕 收進 stage_logs metadata
+        ocrAssistMeta.perPage.push({
+          page: 0, // 0 表示「整張圖」
+          stats: fallbackOcrAssistFull.stats || {},
+          candidates: fallbackOcrAssistFull.candidatesByQid || {}
+        })
       }
       const classifyResponses = await Promise.all(
         pageEntries.map(([, ids]) => {
@@ -5340,6 +5353,12 @@ export async function runStagedGradingPhaseA({
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist per-page', {
           pages: pageOcrAssists.map((a, i) => ({ page: pageEntries[i][0], ...a.stats }))
         })
+        // 🆕 收進 stage_logs metadata
+        pageOcrAssists.forEach((a, i) => ocrAssistMeta.perPage.push({
+          page: pageEntries[i][0],
+          stats: a?.stats || {},
+          candidates: a?.candidatesByQid || {}
+        }))
       }
       const classifyResponses = await Promise.all(
         pageEntries.map(([, ids], i) => {
@@ -6612,7 +6631,8 @@ Return JSON:
       needsReviewCount: unstableCount,
       stableCount,
       diffCount: 0,
-      unstableCount
+      unstableCount,
+      ocrAssistMeta: ocrAssistMeta.perPage.length > 0 ? ocrAssistMeta : null  // 🆕 寫進 stage_logs.classify.ocrAssist
     })
     await saveGradingStageLog({
       ownerId: internalContext.ownerId,
