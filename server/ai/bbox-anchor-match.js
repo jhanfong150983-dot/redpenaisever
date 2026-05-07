@@ -206,30 +206,30 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
 }
 
 /**
- * Post-classify override：當 classify 對 inline 題目輸出的 bbox 比 OCR candidate 窄太多（或 x 嚴重右偏）
- * → 用 candidate bbox 覆寫（x 加 padding、y/h 不延伸）。
+ * Post-classify override：當 classify 對 inline 題目輸出的 bbox 異常窄 → 補救；其他情況保留 classify。
  *
- * 經驗（2026-05-07）：classify 在 prompt 強制規則下仍會按 TYPE RULE「冒號後接空白」公式縮到只框
- * 學生筆跡可見部分，導致老師看 review crop 時 bbox 太窄、無法判斷。
+ * 設計演進（2026-05-07 第二輪）：
  *
- * y padding 預設 0：行距通常只有 ~0.04（normalized），y 延伸 0.005 就會碰到鄰題、read 階段 crop
- * 含下一題印刷字、AI1/AI2 讀錯。
+ * v1（已棄用）：narrow OR xshift 觸發 → REPLACE 用 OCR row
+ *   問題：xshift 把 classify 對的 bbox（在答案區、右邊）拉回印刷字區（左邊）；
+ *         REPLACE 把 classify 多行 h（如 0.062）砍成 OCR row 單行 h（0.021）。
+ *   實證 4 號 1-1-14：classify 給 (x=0.292, h=0.062) 看到學生跨行、被 override 蓋成 (x=0.115, h=0.021)。
  *
- * 觸發條件（任一即覆寫）：
- * - bbox.w < candidate.w * minWidthRatio（預設 0.5、即縮到一半以下）
- * - bbox.x > candidate.x + xMisalignTolerance（預設 0.05、即 x 比 candidate.x 右偏超過 5%）
+ * v2（本版）：
+ *   - 移除 xshift trigger（classify 在答案區屬正常、不該拉回印刷字區）
+ *   - 加 yDrift 偵測：classify y center 跟 OCR row 差距 > yDriftThreshold → 認為 classify 飄到別行
+ *   - narrow + 同行 → UNION（保留 classify y/h，x 取 classify 跟 padded candidate 聯集）
+ *   - yDrift（不同行）→ REPLACE 用 OCR row（保險、避免 classify 飄到鄰題）
+ *   - 不 narrow 且同行 → 不動 classify
  *
- * @param {Array} alignedQuestions - classify 輸出的 [{questionId, visible, answerBbox, ...}]
- * @param {Object} candidatesByQid - { qid → [{idx, bbox, score, text}, ...] }；bbox 是 [x1,y1,x2,y2] pixel
- * @param {Array} imageSize - [imgW, imgH]
- * @param {Object} opts - { xPadFraction, yPadFraction, minWidthRatio, xMisalignTolerance }
- * @returns {Object} { alignedQuestions: 新陣列, overrides: [{questionId, before, after, reason}] }
+ * @param {Object} opts - { xPadFraction, yPadFraction, minWidthRatio, yDriftThreshold }
+ * @returns {Object} { alignedQuestions, overrides: [{questionId, before, after, reason}] }
  */
 export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSize, opts = {}) {
   const xPad = typeof opts.xPadFraction === 'number' ? opts.xPadFraction : 0.04
-  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0  // ⚠️ 預設 0：行距太窄、避免碰鄰題
+  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0
   const minWidthRatio = typeof opts.minWidthRatio === 'number' ? opts.minWidthRatio : 0.5
-  const xTol = typeof opts.xMisalignTolerance === 'number' ? opts.xMisalignTolerance : 0.05
+  const yDriftThreshold = typeof opts.yDriftThreshold === 'number' ? opts.yDriftThreshold : 0.05
   const [imgW, imgH] = imageSize || [1, 1]
   const overrides = []
 
@@ -244,23 +244,48 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
     const candH = (cand.bbox[3] - cand.bbox[1]) / imgH
 
     const aiX = q.answerBbox.x
+    const aiY = q.answerBbox.y
     const aiW = q.answerBbox.w
+    const aiH = q.answerBbox.h
+    const aiYCenter = aiY + aiH / 2
+    const candYCenter = candY + candH / 2
+
     const tooNarrow = aiW < candW * minWidthRatio
-    const xRightShifted = aiX > candX + xTol
+    const yDrift = Math.abs(aiYCenter - candYCenter) > yDriftThreshold
 
-    if (!tooNarrow && !xRightShifted) return q
+    let reason = null
+    let newBbox = null
 
-    // 覆寫：x 加 padding、y/h 直接用 candidate 不延伸
-    const newX = Math.max(0, candX - xPad)
-    const newY = Math.max(0, candY - yPad)
-    const newW = Math.min(1 - newX, candW + 2 * xPad)
-    const newH = Math.min(1 - newY, candH + 2 * yPad)
-    const newBbox = { x: +newX.toFixed(3), y: +newY.toFixed(3), w: +newW.toFixed(3), h: +newH.toFixed(3) }
+    if (yDrift) {
+      // Classify y 跟 OCR row 差太遠 → classify 飄到別行 → REPLACE 用 OCR row
+      const newX = Math.max(0, candX - xPad)
+      const newY = Math.max(0, candY - yPad)
+      const newW = Math.min(1 - newX, candW + 2 * xPad)
+      const newH = Math.min(1 - newY, candH + 2 * yPad)
+      newBbox = { x: +newX.toFixed(3), y: +newY.toFixed(3), w: +newW.toFixed(3), h: +newH.toFixed(3) }
+      reason = 'replace_ydrift'
+    } else if (tooNarrow) {
+      // 同行 + classify 縮太窄 → UNION（x 聯集、y/h 保留 classify）
+      const unionX = Math.max(0, Math.min(aiX, candX - xPad))
+      const unionRight = Math.max(aiX + aiW, candX + candW + xPad)
+      const unionW = Math.min(1 - unionX, unionRight - unionX)
+      newBbox = {
+        x: +unionX.toFixed(3),
+        y: +aiY.toFixed(3),
+        w: +unionW.toFixed(3),
+        h: +aiH.toFixed(3)
+      }
+      reason = 'union_narrow'
+    } else {
+      // 同行 + 寬度合理 → 不動 classify
+      return q
+    }
+
     overrides.push({
       questionId: q.questionId,
-      before: { x: +aiX.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +aiW.toFixed(3), h: +q.answerBbox.h.toFixed(3) },
+      before: { x: +aiX.toFixed(3), y: +aiY.toFixed(3), w: +aiW.toFixed(3), h: +aiH.toFixed(3) },
       after: newBbox,
-      reason: tooNarrow && xRightShifted ? 'narrow+xshift' : (tooNarrow ? 'narrow' : 'xshift')
+      reason
     })
     return { ...q, answerBbox: newBbox, bboxOverriddenByOcr: true }
   })
@@ -287,18 +312,17 @@ export function buildOcrHintsSection(candidatesByQid, imageSize, opts = {}) {
   lines.push('我們對學生作業圖跑過 OCR、根據 anchorHint 配對到「答案就在該行內」的 candidate row。')
   lines.push('（每條 OCR row 只會配給一個題目，避免相鄰題目共用 bbox）')
   lines.push('')
-  lines.push('🚨 OCR HINT 使用規則（覆寫 TYPE RULE 對應 inline 題型 x 公式）：')
+  lines.push('candidate bbox 是 OCR 偵測到的「印刷文字行範圍」、用來幫你定位答案在哪一行（哪個 y 範圍）。')
   lines.push('')
-  lines.push('  1. answerBbox.x **必須 ≤ candidate.x**（不得比 candidate 起點更靠右）')
-  lines.push('  2. answerBbox.x + answerBbox.w **必須 ≥ candidate.x + candidate.w**（不得比 candidate 終點更靠左）')
-  lines.push('  3. 你可以**往左/右擴 x**（學生筆跡常超出 OCR 偵測邊界、特別是行末延伸）')
-  lines.push('  4. ⚠️ **y/h 不要延伸到鄰題**：行距通常只有 0.04（normalized），h 加大 0.005 就碰到下一題、read 階段 crop 含下一題印刷字')
-  lines.push('     → bbox.y 維持 candidate.y、bbox.h 維持 candidate.h（OCR row 高度已涵蓋筆跡）')
-  lines.push('     → 若必須調 y/h，控制在 ±0.002 以內，絕對不要 ≥ 0.005')
-  lines.push('  5. 🚨 **嚴禁將 bbox x 縮窄到只框「學生筆跡可見部分」** — 那會切到字尾延伸、AI1/AI2 看到不同字段、變 needs_review')
-  lines.push('  6. 即使學生留空白未作答，bbox 仍維持 candidate 完整 x/w 範圍（不縮）')
+  lines.push('使用建議：')
   lines.push('')
-  lines.push(`📐 candidate bbox 已含 ±${(xPad*100).toFixed(0)}% x padding（y 不 pad 以保持行高）。`)
+  lines.push('  1. **y 軸定位**：用 candidate.y 知道答案在哪一行。請依 TYPE RULE 給合理 y/h（含學生筆跡完整高度，可跨行）')
+  lines.push('  2. **x 軸**：依 TYPE RULE 框答案區域。可以是該行的一部分（如「答：X 公尺」中 X 的位置）、也可以涵蓋整行')
+  lines.push('     - 學生筆跡常超出 OCR 偵測邊界（特別是行末延伸）→ bbox 寧可略寬涵蓋整段筆跡，不要切到字')
+  lines.push('     - 答案是長段文字時（多行 short_answer 類）→ bbox h 要包含學生跨行的完整高度')
+  lines.push('  3. ⚠️ **跨題防呆**：行距通常 0.04，注意 y/h 不要延伸到下一題的位置')
+  lines.push('')
+  lines.push(`📐 candidate bbox 已含 ±${(xPad*100).toFixed(0)}% x padding。`)
   lines.push('')
   lines.push('（其他題型如 word_problem / single_check 等沒列出 hint，請走純視覺判斷）')
   lines.push('')
