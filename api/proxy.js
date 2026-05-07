@@ -591,12 +591,24 @@ export default async function handler(req, res) {
 
   // ── 答案卷參考圖（Phase A classify 使用）────────────────────────────────────
   let answerKeyImages = []
+  let assignmentTotalPages = null  // 🆕 用於 staged-grading.js 判定是否該按 ID 切頁
   if (routeKey === 'grading.phase_a' && payload?.assignmentId) {
     answerKeyImages = await fetchAnswerSheetImagesForClassify(
       supabaseAdmin, user.id, payload.assignmentId
     )
     if (answerKeyImages.length > 0) {
       console.log(`📷 [AnswerSheet] 載入 ${answerKeyImages.length} 頁答案卷圖 assignmentId=${payload.assignmentId}`)
+    }
+    // 🆕 拿 total_pages：staged-grading 用此判定「單頁多 section 卷」、跳過 ID 自動切頁
+    try {
+      const { data: a } = await supabaseAdmin
+        .from('assignments')
+        .select('total_pages')
+        .eq('id', payload.assignmentId)
+        .maybeSingle()
+      if (a?.total_pages != null) assignmentTotalPages = Number(a.total_pages)
+    } catch (e) {
+      console.warn('[AnswerSheet] fetch total_pages failed:', e?.message)
     }
   }
 
@@ -636,7 +648,8 @@ export default async function handler(req, res) {
         domainHint: payload?.domain || undefined,
         ownerId: user.id,
         assignmentId: payload?.assignmentId || undefined,
-        submissionId: payload?.submissionId || undefined
+        submissionId: payload?.submissionId || undefined,
+        assignmentTotalPages  // 🆕 給 staged-grading 判定 ID 自動切頁
       }
     })
 

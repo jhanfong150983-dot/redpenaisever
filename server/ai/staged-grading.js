@@ -5123,9 +5123,16 @@ export async function runStagedGradingPhaseA({
   let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
   // Fallback: if pageBreaks is empty but questionIds have multi-page prefixes (1-*, 2-*, 3-*, ...),
   // estimate equal-split pageBreaks so per-page classify can still work.
-  // ⚠️ answer_only 模式跳過：ID 第一位是 section（不是 page）、整張卷在同一張圖。
-  //    平均切會把 sections 切到錯誤位置（如 Section 二/三 跨頁邊界）。
-  if (pageBreaks.length === 0 && answerSheetMode !== 'answer_only') {
+  //
+  // ⚠️ 跳過條件（任一成立都跳過 ID 自動切頁）：
+  //   1. answer_only 模式：ID 第一位是 section（不是 page）、整張卷在同一張圖
+  //   2. assignment.total_pages === 1：明確說此 assignment 只 1 頁、ID 第一位是 section
+  //
+  // Bug 紀錄：物理 + U6（單頁 4 section ID 1-x/2-x/3-x/4-x）會被誤切成 4 個 strip、
+  //          Section 二/三 跨頁邊界、classify 看到的 image piece 跟 input questions 不對應。
+  const assignmentTotalPages = internalContext?.assignmentTotalPages
+  const isSinglePagePhysical = answerSheetMode === 'answer_only' || assignmentTotalPages === 1
+  if (pageBreaks.length === 0 && !isSinglePagePhysical) {
     const pageNums = new Set()
     for (const id of questionIds) {
       const m = id.match(/^(\d+)-/)
@@ -5136,6 +5143,12 @@ export async function runStagedGradingPhaseA({
       pageBreaks = Array.from({ length: maxPage - 1 }, (_, i) => +((i + 1) / maxPage).toFixed(4))
       logStaged(pipelineRunId, stagedLogLevel, 'pageBreaks auto-estimated (equal split)', { maxPage, pageBreaks })
     }
+  }
+  if (isSinglePagePhysical) {
+    logStaged(pipelineRunId, stagedLogLevel, 'pageBreaks skipped (single-page assignment)', {
+      reason: answerSheetMode === 'answer_only' ? 'answer_only_mode' : 'total_pages_eq_1',
+      assignmentTotalPages
+    })
   }
   const classifyCorrections = Array.isArray(payload?.classifyCorrections) ? payload.classifyCorrections : []
   if (classifyCorrections.length > 0) {
@@ -5148,9 +5161,10 @@ export async function runStagedGradingPhaseA({
   const ocrAssistMeta = { enabled: isOcrAssistEnabled(), perPage: [] }
 
   // Build per-page question groups（classify 和 bboxOverrides 都需要）
-  // ⚠️ answer_only 模式：所有題目強制歸到 page 1（整張卷在同一張圖、ID 第一位是 section 不是 page）
+  // ⚠️ 單頁多 section 卷（answer_only 或 total_pages=1）強制歸到 page 1：
+  //    ID 第一位是 section 不是 page、整張卷在同一張圖、不能按 ID 切。
   const pageQuestionsMap = new Map()
-  if (answerSheetMode === 'answer_only') {
+  if (isSinglePagePhysical) {
     pageQuestionsMap.set(1, [...questionIds])
   } else {
     const otherIds = []
