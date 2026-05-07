@@ -324,48 +324,29 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
 
 /**
  * 把 candidates 渲染成 prompt 可注入的「OCR HINTS」section 字串。
- * 若沒任何 candidate 回空字串（classify prompt 不會多 token）。
+ * 若沒任何 candidate 回空字串。
  *
- * @param {Object} opts
- * @param {number} opts.xPadFraction - 渲染時 x 軸延伸比例（每側）；OCR 文字邊界會收窄、學生手寫常溢出
- * @param {number} opts.yPadFraction - y 軸延伸比例（每側）
+ * 2026-05-07 簡化：移除所有 padding 邏輯與使用建議。bbox 給原始 OCR normalized 座標，
+ * 不附任何 padding 或修改建議，讓 classify 純粹依 TYPE RULE 自行判斷答題框。
  */
-export function buildOcrHintsSection(candidatesByQid, imageSize, opts = {}) {
+export function buildOcrHintsSection(candidatesByQid, imageSize) {
   const entries = Object.entries(candidatesByQid || {}).filter(([, cands]) => cands && cands.length > 0)
   if (entries.length === 0) return ''
   const [imgW, imgH] = imageSize || [1, 1]
-  // x 軸往外延伸（學生手寫常溢出 OCR 偵測邊界）；y 軸**不延伸**（行距太窄、避免碰鄰題 read 讀錯）
-  const xPad = typeof opts.xPadFraction === 'number' ? opts.xPadFraction : 0.04
-  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0
-  const lines = ['', '═══ OCR HINTS (僅對 inline answer 題型提供) ═══', '']
-  lines.push('我們對學生作業圖跑過 OCR、根據 anchorHint 配對到「答案就在該行內」的 candidate row。')
-  lines.push('（每條 OCR row 只會配給一個題目，避免相鄰題目共用 bbox）')
-  lines.push('')
-  lines.push('candidate bbox 是 OCR 偵測到的「印刷文字行範圍」、用來幫你定位答案在哪一行（哪個 y 範圍）。')
-  lines.push('')
-  lines.push('使用建議：')
-  lines.push('')
-  lines.push('  1. **y 軸定位**：用 candidate.y 知道答案在哪一行。請依 TYPE RULE 給合理 y/h（含學生筆跡完整高度，可跨行）')
-  lines.push('  2. **x 軸**：依 TYPE RULE 框答案區域。可以是該行的一部分（如「答：X 公尺」中 X 的位置）、也可以涵蓋整行')
-  lines.push('     - 學生筆跡常超出 OCR 偵測邊界（特別是行末延伸）→ bbox 寧可略寬涵蓋整段筆跡，不要切到字')
-  lines.push('     - 答案是長段文字時（多行 short_answer 類）→ bbox h 要包含學生跨行的完整高度')
-  lines.push('  3. ⚠️ **跨題防呆**：行距通常 0.04，注意 y/h 不要延伸到下一題的位置')
-  lines.push('')
-  lines.push(`📐 candidate bbox 已含 ±${(xPad*100).toFixed(0)}% x padding。`)
-  lines.push('')
-  lines.push('（其他題型如 word_problem / single_check 等沒列出 hint，請走純視覺判斷）')
+  const lines = ['', '═══ OCR HINTS ═══', '']
+  lines.push('OCR 對學生作業圖偵測到的印刷文字行位置（normalized 座標），依 anchorHint 配對到下列題目：')
   lines.push('')
   for (const [qid, cands] of entries) {
     lines.push(`Q ${qid}:`)
     cands.forEach((c, i) => {
       const [x1, y1, x2, y2] = c.bbox
-      // 已 pad 的 normalized bbox（左右各 +xPad、上下各 +yPad），clamp 到 [0,1]
-      const px = Math.max(0, x1 / imgW - xPad)
-      const py = Math.max(0, y1 / imgH - yPad)
-      const pw = Math.min(1 - px, (x2 - x1) / imgW + 2 * xPad)
-      const ph = Math.min(1 - py, (y2 - y1) / imgH + 2 * yPad)
-      const nb = { x: +px.toFixed(3), y: +py.toFixed(3), w: +pw.toFixed(3), h: +ph.toFixed(3) }
-      lines.push(`  c${i + 1} score=${c.score.toFixed(2)} text="${(c.text || '').slice(0, 40)}" bbox=${JSON.stringify(nb)} (已含 ±${(xPad*100).toFixed(0)}% padding)`)
+      const nb = {
+        x: +(x1 / imgW).toFixed(3),
+        y: +(y1 / imgH).toFixed(3),
+        w: +((x2 - x1) / imgW).toFixed(3),
+        h: +((y2 - y1) / imgH).toFixed(3)
+      }
+      lines.push(`  c${i + 1} text="${(c.text || '').slice(0, 40)}" bbox=${JSON.stringify(nb)}`)
     })
   }
   return lines.join('\n')
