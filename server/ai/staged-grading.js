@@ -5123,7 +5123,9 @@ export async function runStagedGradingPhaseA({
   let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
   // Fallback: if pageBreaks is empty but questionIds have multi-page prefixes (1-*, 2-*, 3-*, ...),
   // estimate equal-split pageBreaks so per-page classify can still work.
-  if (pageBreaks.length === 0) {
+  // ⚠️ answer_only 模式跳過：ID 第一位是 section（不是 page）、整張卷在同一張圖。
+  //    平均切會把 sections 切到錯誤位置（如 Section 二/三 跨頁邊界）。
+  if (pageBreaks.length === 0 && answerSheetMode !== 'answer_only') {
     const pageNums = new Set()
     for (const id of questionIds) {
       const m = id.match(/^(\d+)-/)
@@ -5146,20 +5148,25 @@ export async function runStagedGradingPhaseA({
   const ocrAssistMeta = { enabled: isOcrAssistEnabled(), perPage: [] }
 
   // Build per-page question groups（classify 和 bboxOverrides 都需要）
+  // ⚠️ answer_only 模式：所有題目強制歸到 page 1（整張卷在同一張圖、ID 第一位是 section 不是 page）
   const pageQuestionsMap = new Map()
-  const otherIds = []
-  for (const id of questionIds) {
-    const m = id.match(/^(\d+)-/)
-    if (m) {
-      const pageNum = parseInt(m[1], 10)
-      if (!pageQuestionsMap.has(pageNum)) pageQuestionsMap.set(pageNum, [])
-      pageQuestionsMap.get(pageNum).push(id)
-    } else {
-      otherIds.push(id)
+  if (answerSheetMode === 'answer_only') {
+    pageQuestionsMap.set(1, [...questionIds])
+  } else {
+    const otherIds = []
+    for (const id of questionIds) {
+      const m = id.match(/^(\d+)-/)
+      if (m) {
+        const pageNum = parseInt(m[1], 10)
+        if (!pageQuestionsMap.has(pageNum)) pageQuestionsMap.set(pageNum, [])
+        pageQuestionsMap.get(pageNum).push(id)
+      } else {
+        otherIds.push(id)
+      }
     }
+    if (!pageQuestionsMap.has(1)) pageQuestionsMap.set(1, [])
+    pageQuestionsMap.get(1).push(...otherIds)
   }
-  if (!pageQuestionsMap.has(1)) pageQuestionsMap.set(1, [])
-  pageQuestionsMap.get(1).push(...otherIds)
   const pageEntries = [...pageQuestionsMap.entries()]
     .filter(([, ids]) => ids.length > 0)
     .sort(([a], [b]) => a - b)
