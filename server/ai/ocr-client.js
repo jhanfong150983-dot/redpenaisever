@@ -145,11 +145,13 @@ import { buildCellAnchorCandidates } from './bbox-cell-anchor-match.js'
 /**
  * answer_only 模式單獨開關（跟 OCR_ASSIST_CLASSIFY_ENABLED 獨立）。
  * 注釋題穩定後不希望 answer_only 開發影響它、所以分開 flag 控制。
+ *
+ * Default ON（要關掉才設 OCR_ASSIST_ANSWER_ONLY_ENABLED=false）。
  */
 export function isOcrAssistAnswerOnlyEnabled() {
   const raw = getEnvValue('OCR_ASSIST_ANSWER_ONLY_ENABLED')
-  if (!raw) return false
-  return String(raw).trim().toLowerCase() === 'true'
+  if (!raw) return true  // default on
+  return String(raw).trim().toLowerCase() !== 'false'
 }
 
 /**
