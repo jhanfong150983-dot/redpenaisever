@@ -140,33 +140,57 @@ function extFor(mimeType) {
 
 // ── High-level adapter for staged-grading.js classify integration ──
 import { buildAnchorCandidates, buildOcrHintsSection } from './bbox-anchor-match.js'
+import { buildCellAnchorCandidates } from './bbox-cell-anchor-match.js'
+
+/**
+ * answer_only 模式單獨開關（跟 OCR_ASSIST_CLASSIFY_ENABLED 獨立）。
+ * 注釋題穩定後不希望 answer_only 開發影響它、所以分開 flag 控制。
+ */
+export function isOcrAssistAnswerOnlyEnabled() {
+  const raw = getEnvValue('OCR_ASSIST_ANSWER_ONLY_ENABLED')
+  if (!raw) return false
+  return String(raw).trim().toLowerCase() === 'true'
+}
 
 /**
  * 為 classify prompt 準備 OCR HINTS section（高階 adapter）。
  * 失敗 graceful：任何環節失敗（feature flag off、OCR 掛、無 candidate）都回空字串
  * → classify prompt 等同沒這段、走純視覺判斷。
  *
+ * 依 answerSheetMode 路由不同的 candidates generator：
+ *   - 'answer_only'  → buildCellAnchorCandidates（regex + OCR section header + 印刷編號 row）
+ *   - 其他            → buildAnchorCandidates（LCS + Dice 文字配對）
+ *
+ * Output schema 一致、downstream HINT 渲染 / post-processing 共用。
+ *
  * @param {Object} params
  * @param {Buffer} params.imageBytes - 該頁圖片原始 bytes
  * @param {string} params.mimeType
  * @param {Array} params.answerKeyQuestions - 該頁的 answerKey questions
+ * @param {string} [params.answerSheetMode] - 'answer_only' | 'with_questions'
  * @param {Object} params.opts - { timeoutMs }
  * @returns {Promise<{ extraSection: string, ocrResult: object|null, candidatesByQid: object, stats: object|null }>}
  */
-export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerKeyQuestions, opts = {} }) {
-  if (!isOcrAssistEnabled()) {
-    return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'feature_flag_off' } }
+export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerKeyQuestions, answerSheetMode = 'with_questions', opts = {} }) {
+  const isAnswerOnly = answerSheetMode === 'answer_only'
+  // 依模式決定要查的 flag
+  const enabled = isAnswerOnly ? isOcrAssistAnswerOnlyEnabled() : isOcrAssistEnabled()
+  if (!enabled) {
+    return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'feature_flag_off', mode: answerSheetMode } }
   }
   if (!imageBytes || !answerKeyQuestions || answerKeyQuestions.length === 0) {
-    return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'empty_input' } }
+    return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'empty_input', mode: answerSheetMode } }
   }
 
   const ocrResult = await runOcrOnImage(imageBytes, mimeType, opts)
   if (!ocrResult) {
-    return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'ocr_failed' } }
+    return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'ocr_failed', mode: answerSheetMode } }
   }
 
-  const { candidatesByQid, stats } = buildAnchorCandidates(answerKeyQuestions, ocrResult.detections)
+  // ── candidates generator router ──
+  const { candidatesByQid, stats } = isAnswerOnly
+    ? buildCellAnchorCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size)
+    : buildAnchorCandidates(answerKeyQuestions, ocrResult.detections)
   const extraSection = buildOcrHintsSection(candidatesByQid, ocrResult.image_size)
 
   return {
@@ -175,6 +199,7 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
     candidatesByQid,
     stats: {
       ...stats,
+      mode: answerSheetMode,
       ocrDetections: ocrResult.detections.length,
       ocrElapsedMs: ocrResult.elapsedMs,
       hintInjected: extraSection.length > 0

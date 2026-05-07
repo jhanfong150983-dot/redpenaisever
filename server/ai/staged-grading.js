@@ -12,7 +12,7 @@ import {
   validateReadAccessorConsistency
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
-import { isOcrAssistEnabled, prepareOcrHintsForClassify } from './ocr-client.js'
+import { isOcrAssistEnabled, isOcrAssistAnswerOnlyEnabled, prepareOcrHintsForClassify } from './ocr-client.js'
 import { buildOcrHintsSection, applyOcrBboxOverride } from './bbox-anchor-match.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
@@ -5165,8 +5165,11 @@ export async function runStagedGradingPhaseA({
     .sort(([a], [b]) => a - b)
 
   // ── bboxOverrides → 跳過 classify AI，用前端 bbox ──
+  // 🆕 answer_only OCR cell anchor flag on 時、即使 frontend 送 bboxOverrides 也不採用、
+  //    強制走完整 classify pipeline（OCR cell anchor 會比 frontend grid 等距外推準）。
+  const skipBboxOverridesShortcut = answerSheetMode === 'answer_only' && isOcrAssistAnswerOnlyEnabled()
   let classifyResult
-  if (bboxOverrides && bboxOverrides.length > 0) {
+  if (bboxOverrides && bboxOverrides.length > 0 && !skipBboxOverridesShortcut) {
     const overrideMap = new Map(bboxOverrides.map((o) => [o.questionId, o]))
     classifyResult = { alignedQuestions: questionIds.map((qId) => {
       const override = overrideMap.get(qId)
@@ -5181,6 +5184,9 @@ export async function runStagedGradingPhaseA({
     }), coverage: 1 }
     logStaged(pipelineRunId, 'basic', 'bboxOverrides → skip classify AI', { questions: questionIds.length })
   } else {
+    if (skipBboxOverridesShortcut && bboxOverrides && bboxOverrides.length > 0) {
+      logStaged(pipelineRunId, 'basic', 'bboxOverrides ignored (OCR_ASSIST_ANSWER_ONLY_ENABLED) → run full classify with OCR cell anchor HINT', { questions: questionIds.length })
+    }
   // Per-page classify: one call per page, all dispatched in parallel.
 
   logStageStart(pipelineRunId, 'classify')
@@ -5205,7 +5211,8 @@ export async function runStagedGradingPhaseA({
         const ocrAssist = await prepareOcrHintsForClassify({
           imageBytes: Buffer.from(inlineImages[0].inlineData.data, 'base64'),
           mimeType: inlineImages[0].inlineData.mimeType,
-          answerKeyQuestions: answerKeyQuestions.filter(q => ids.includes(q?.id))
+          answerKeyQuestions: answerKeyQuestions.filter(q => ids.includes(q?.id)),
+          answerSheetMode
         })
         if (ocrAssist.extraSection) classifyPrompt = `${classifyPrompt}\n\n${ocrAssist.extraSection}`
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist', ocrAssist.stats)
@@ -5278,7 +5285,8 @@ export async function runStagedGradingPhaseA({
         ? await prepareOcrHintsForClassify({
             imageBytes: Buffer.from(inlineImages[0].inlineData.data, 'base64'),
             mimeType: inlineImages[0].inlineData.mimeType,
-            answerKeyQuestions: answerKeyQuestions
+            answerKeyQuestions: answerKeyQuestions,
+            answerSheetMode
           }).catch(e => {
             logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist (fallback path) error', { error: e?.message })
             return { extraSection: '', stats: { error: e?.message } }
@@ -5369,7 +5377,8 @@ export async function runStagedGradingPhaseA({
               return await prepareOcrHintsForClassify({
                 imageBytes: Buffer.from(p.inlineData.data, 'base64'),
                 mimeType: p.inlineData.mimeType,
-                answerKeyQuestions: answerKeyQuestions.filter(q => ids.includes(q?.id))
+                answerKeyQuestions: answerKeyQuestions.filter(q => ids.includes(q?.id)),
+                answerSheetMode
               })
             } catch (e) {
               logStaged(pipelineRunId, stagedLogLevel, `classify OCR-assist p${pageEntries[i][0]} error`, { error: e?.message })
