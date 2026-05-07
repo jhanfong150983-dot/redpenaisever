@@ -206,43 +206,24 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
 }
 
 /**
- * Post-classify override：當 classify 對 inline 題目輸出的 bbox 異常窄 → 補救；其他情況保留 classify。
+ * Post-classify width floor（2026-05-07 簡化版）。
  *
- * 設計演進（2026-05-07 第二輪）：
+ * 唯一規則：classify.w 必須 ≥ OCR row.w × 0.5。否則用 UNION x 拉寬。
+ * 不動 x 中心、不動 y、不動 h。
  *
- * v1（已棄用）：narrow OR xshift 觸發 → REPLACE 用 OCR row
- *   問題：xshift 把 classify 對的 bbox（在答案區、右邊）拉回印刷字區（左邊）；
- *         REPLACE 把 classify 多行 h（如 0.062）砍成 OCR row 單行 h（0.021）。
- *   實證 4 號 1-1-14：classify 給 (x=0.292, h=0.062) 看到學生跨行、被 override 蓋成 (x=0.115, h=0.021)。
+ * y-alignment guard：classify y 中心與 OCR row y 中心差 > yAlignThreshold（0.04，約一行高）→ 不套規則
+ *   → 自動排除 4 號 1-1-1/2/4 那種跨欄誤匹配（左欄 vs 右欄 y 差>0.05）
  *
- * v2（本版）：
- *   - 移除 xshift trigger（classify 在答案區屬正常、不該拉回印刷字區）
- *   - 加 yDrift 偵測：classify y center 跟 OCR row 差距 > yDriftThreshold → 認為 classify 飄到別行
- *   - narrow + 同行 → UNION（保留 classify y/h，x 取 classify 跟 padded candidate 聯集）
- *   - yDrift（不同行）→ REPLACE 用 OCR row（保險、避免 classify 飄到鄰題）
- *   - 不 narrow 且同行 → 不動 classify
+ * 之前 v1/v2/v3 的 REPLACE / xDrift skip 全部移除：
+ *   - REPLACE 會砍 classify 多行 h（1-1-14 多行筆跡 case）
+ *   - xDrift skip 由 yAlign guard 自然取代（跨欄 y 也對不上）
  *
- * v3（2026-05-07 第三輪）：
- *   - 加 xDrift skip guard：classify 跟 OCR candidate x 中心差 > xDriftSkipThreshold（預設 0.3）→ 跨欄誤匹配
- *   - 跨欄訊號：matcher 純文字配對，遇短文字「1.湛蓝」OCR row 在右欄、classify 正確左欄
- *     → yDrift trigger 把 classify 0.218 換成 OCR 0.898（推到右欄）
- *   - 此時相信 classify、不 override
- *   - 實證 4 號 1-1-1/2/4：classify x=0.218/0.215/0.279 vs OCR x=0.898/0.901/0.916（跳欄）
- *
- * @param {Object} opts - { xPadFraction, yPadFraction, minWidthRatio, yDriftThreshold, xDriftSkipThreshold }
+ * @param {Object} opts - { minWidthRatio, yAlignThreshold }
  * @returns {Object} { alignedQuestions, overrides: [{questionId, before, after, reason}] }
  */
 export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSize, opts = {}) {
-  // 🆕 Kill switch（2026-05-07）：default OFF，回到純粹 classify+OCR HINT 狀態方便微調 prompt。
-  // 設 OCR_BBOX_OVERRIDE_ENABLED=true 才啟用 override（保留 v3 邏輯供日後測試）。
-  if (process.env.OCR_BBOX_OVERRIDE_ENABLED !== 'true') {
-    return { alignedQuestions: alignedQuestions || [], overrides: [] }
-  }
-  const xPad = typeof opts.xPadFraction === 'number' ? opts.xPadFraction : 0.04
-  const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0
   const minWidthRatio = typeof opts.minWidthRatio === 'number' ? opts.minWidthRatio : 0.5
-  const yDriftThreshold = typeof opts.yDriftThreshold === 'number' ? opts.yDriftThreshold : 0.05
-  const xDriftSkipThreshold = typeof opts.xDriftSkipThreshold === 'number' ? opts.xDriftSkipThreshold : 0.3
+  const yAlignThreshold = typeof opts.yAlignThreshold === 'number' ? opts.yAlignThreshold : 0.04
   const [imgW, imgH] = imageSize || [1, 1]
   const overrides = []
 
@@ -260,61 +241,32 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
     const aiY = q.answerBbox.y
     const aiW = q.answerBbox.w
     const aiH = q.answerBbox.h
-    const aiXCenter = aiX + aiW / 2
     const aiYCenter = aiY + aiH / 2
-    const candXCenter = candX + candW / 2
     const candYCenter = candY + candH / 2
 
-    // v3 guard：x 中心差太遠（>0.3 of image width）→ matcher 大概率挑到別欄 row
-    // 此時 trust classify（classify 看整張圖判斷比 matcher 純文字穩）、不 override
-    const xDriftAbs = Math.abs(aiXCenter - candXCenter)
-    if (xDriftAbs > xDriftSkipThreshold) {
-      overrides.push({
-        questionId: q.questionId,
-        before: { x: +aiX.toFixed(3), y: +aiY.toFixed(3), w: +aiW.toFixed(3), h: +aiH.toFixed(3) },
-        after: null,
-        reason: 'skip_xdrift_cross_column',
-        xDriftAbs: +xDriftAbs.toFixed(3)
-      })
-      return q
+    const yMisaligned = Math.abs(aiYCenter - candYCenter) > yAlignThreshold
+    if (yMisaligned) return q  // 跨欄/跨行誤匹配 → 信任 classify
+
+    const minRequiredW = candW * minWidthRatio
+    if (aiW >= minRequiredW) return q  // 寬度已達標 → 不動
+
+    // 寬度未達標 → UNION x（保留 classify y/h）
+    const unionX = Math.max(0, Math.min(aiX, candX))
+    const unionRight = Math.max(aiX + aiW, candX + candW)
+    const unionW = Math.min(1 - unionX, unionRight - unionX)
+    const newBbox = {
+      x: +unionX.toFixed(3),
+      y: +aiY.toFixed(3),
+      w: +unionW.toFixed(3),
+      h: +aiH.toFixed(3)
     }
-
-    const tooNarrow = aiW < candW * minWidthRatio
-    const yDrift = Math.abs(aiYCenter - candYCenter) > yDriftThreshold
-
-    let reason = null
-    let newBbox = null
-
-    if (yDrift) {
-      // Classify y 跟 OCR row 差太遠 → classify 飄到別行 → REPLACE 用 OCR row
-      const newX = Math.max(0, candX - xPad)
-      const newY = Math.max(0, candY - yPad)
-      const newW = Math.min(1 - newX, candW + 2 * xPad)
-      const newH = Math.min(1 - newY, candH + 2 * yPad)
-      newBbox = { x: +newX.toFixed(3), y: +newY.toFixed(3), w: +newW.toFixed(3), h: +newH.toFixed(3) }
-      reason = 'replace_ydrift'
-    } else if (tooNarrow) {
-      // 同行 + classify 縮太窄 → UNION（x 聯集、y/h 保留 classify）
-      const unionX = Math.max(0, Math.min(aiX, candX - xPad))
-      const unionRight = Math.max(aiX + aiW, candX + candW + xPad)
-      const unionW = Math.min(1 - unionX, unionRight - unionX)
-      newBbox = {
-        x: +unionX.toFixed(3),
-        y: +aiY.toFixed(3),
-        w: +unionW.toFixed(3),
-        h: +aiH.toFixed(3)
-      }
-      reason = 'union_narrow'
-    } else {
-      // 同行 + 寬度合理 → 不動 classify
-      return q
-    }
-
     overrides.push({
       questionId: q.questionId,
       before: { x: +aiX.toFixed(3), y: +aiY.toFixed(3), w: +aiW.toFixed(3), h: +aiH.toFixed(3) },
       after: newBbox,
-      reason
+      reason: 'width_floor',
+      ocrW: +candW.toFixed(3),
+      minRequiredW: +minRequiredW.toFixed(3)
     })
     return { ...q, answerBbox: newBbox, bboxOverriddenByOcr: true }
   })
