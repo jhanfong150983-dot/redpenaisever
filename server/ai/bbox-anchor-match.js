@@ -206,24 +206,35 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
 }
 
 /**
- * Post-classify width floor（2026-05-07 簡化版）。
+ * Post-classify bbox 修正（2026-05-07 width-floor + x-shift 雙規則）。
  *
- * 唯一規則：classify.w 必須 ≥ OCR row.w × 0.5。否則用 UNION x 拉寬。
- * 不動 x 中心、不動 y、不動 h。
+ * 兩條規則依序套用：
  *
- * y-alignment guard：classify y 中心與 OCR row y 中心差 > yAlignThreshold（0.04，約一行高）→ 不套規則
- *   → 自動排除 4 號 1-1-1/2/4 那種跨欄誤匹配（左欄 vs 右欄 y 差>0.05）
+ * **規則 1：width-floor**
+ *   classify.w < OCR.w × `minWidthRatio` (0.5) → UNION x 拉寬到 OCR row 範圍
+ *   解：classify 把答案框得太窄、read 切到答案
  *
- * 之前 v1/v2/v3 的 REPLACE / xDrift skip 全部移除：
- *   - REPLACE 會砍 classify 多行 h（1-1-14 多行筆跡 case）
- *   - xDrift skip 由 yAlign guard 自然取代（跨欄 y 也對不上）
+ * **規則 2：x-shift（uniform 左移）**
+ *   有 OCR 配對的題目均勻左移 `xShift` (default 0.010)、保留右邊界（w 自動補回）
+ *   下限 = OCR.x（不會跑到題號起點之前）
+ *   解：「冒號後接空白」格式 ±0.01 視覺判定誤差導致字頭被切的系統性偏移
+ *   實證 1 號 1-1-6/9 / 4 號 1-1-9 / 5 號 1-1-10 等 cls.x 偏右案例
  *
- * @param {Object} opts - { minWidthRatio, yAlignThreshold }
+ * **y-alignment guard**：classify y 中心與 OCR row y 中心差 > `yAlignThreshold` (0.04) → 兩條規則都跳過
+ *   → 自動排除跨欄誤匹配（如 4 號 1-1-1/2/4 anchor 配到右欄 row）
+ *
+ * **width-floor 已觸發時 x-shift 自動 no-op**：因為 width-floor 已把 x 拉到 OCR.x、
+ *   x-shift 下限就是 OCR.x、不會再動。
+ *
+ * @param {Object} opts - { minWidthRatio, yAlignThreshold, xShift }
  * @returns {Object} { alignedQuestions, overrides: [{questionId, before, after, reason}] }
  */
 export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSize, opts = {}) {
   const minWidthRatio = typeof opts.minWidthRatio === 'number' ? opts.minWidthRatio : 0.5
   const yAlignThreshold = typeof opts.yAlignThreshold === 'number' ? opts.yAlignThreshold : 0.04
+  const xShift = typeof opts.xShift === 'number'
+    ? opts.xShift
+    : parseFloat(process.env.OCR_BBOX_X_SHIFT ?? '0.010')
   const [imgW, imgH] = imageSize || [1, 1]
   const overrides = []
 
@@ -244,29 +255,51 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
     const aiYCenter = aiY + aiH / 2
     const candYCenter = candY + candH / 2
 
-    const yMisaligned = Math.abs(aiYCenter - candYCenter) > yAlignThreshold
-    if (yMisaligned) return q  // 跨欄/跨行誤匹配 → 信任 classify
+    if (Math.abs(aiYCenter - candYCenter) > yAlignThreshold) return q
 
+    let workingX = aiX
+    let workingW = aiW
+    const appliedRules = []
+    const auditMeta = {}
+
+    // 規則 1：width-floor（UNION x 到 OCR row 範圍）
     const minRequiredW = candW * minWidthRatio
-    if (aiW >= minRequiredW) return q  // 寬度已達標 → 不動
+    if (workingW < minRequiredW) {
+      const unionX = Math.max(0, Math.min(workingX, candX))
+      const unionRight = Math.max(workingX + workingW, candX + candW)
+      workingX = unionX
+      workingW = Math.min(1 - unionX, unionRight - unionX)
+      appliedRules.push('width_floor')
+      auditMeta.ocrW = +candW.toFixed(3)
+      auditMeta.minRequiredW = +minRequiredW.toFixed(3)
+    }
 
-    // 寬度未達標 → UNION x（保留 classify y/h）
-    const unionX = Math.max(0, Math.min(aiX, candX))
-    const unionRight = Math.max(aiX + aiW, candX + candW)
-    const unionW = Math.min(1 - unionX, unionRight - unionX)
+    // 規則 2：x-shift（左移 + 保留右邊界）
+    if (xShift > 0) {
+      const shiftedX = Math.max(candX, workingX - xShift)
+      if (shiftedX < workingX) {
+        const rightEdge = workingX + workingW
+        workingW = rightEdge - shiftedX
+        workingX = shiftedX
+        appliedRules.push('x_shift')
+        auditMeta.xShiftAmount = +(aiX - shiftedX).toFixed(3)
+      }
+    }
+
+    if (appliedRules.length === 0) return q
+
     const newBbox = {
-      x: +unionX.toFixed(3),
+      x: +workingX.toFixed(3),
       y: +aiY.toFixed(3),
-      w: +unionW.toFixed(3),
+      w: +Math.min(1 - workingX, workingW).toFixed(3),
       h: +aiH.toFixed(3)
     }
     overrides.push({
       questionId: q.questionId,
       before: { x: +aiX.toFixed(3), y: +aiY.toFixed(3), w: +aiW.toFixed(3), h: +aiH.toFixed(3) },
       after: newBbox,
-      reason: 'width_floor',
-      ocrW: +candW.toFixed(3),
-      minRequiredW: +minRequiredW.toFixed(3)
+      reason: appliedRules.join('+'),
+      ...auditMeta
     })
     return { ...q, answerBbox: newBbox, bboxOverriddenByOcr: true }
   })
