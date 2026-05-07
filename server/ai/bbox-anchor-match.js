@@ -233,6 +233,11 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
  * @returns {Object} { alignedQuestions, overrides: [{questionId, before, after, reason}] }
  */
 export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSize, opts = {}) {
+  // 🆕 Kill switch（2026-05-07）：default OFF，回到純粹 classify+OCR HINT 狀態方便微調 prompt。
+  // 設 OCR_BBOX_OVERRIDE_ENABLED=true 才啟用 override（保留 v3 邏輯供日後測試）。
+  if (process.env.OCR_BBOX_OVERRIDE_ENABLED !== 'true') {
+    return { alignedQuestions: alignedQuestions || [], overrides: [] }
+  }
   const xPad = typeof opts.xPadFraction === 'number' ? opts.xPadFraction : 0.04
   const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0
   const minWidthRatio = typeof opts.minWidthRatio === 'number' ? opts.minWidthRatio : 0.5
