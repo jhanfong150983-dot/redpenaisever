@@ -141,6 +141,7 @@ function extFor(mimeType) {
 // ── High-level adapter for staged-grading.js classify integration ──
 import { buildAnchorCandidates, buildOcrHintsSection } from './bbox-anchor-match.js'
 import { buildCellAnchorCandidates } from './bbox-cell-anchor-match.js'
+import { buildSingleChoiceAnchorCandidates } from './bbox-single-choice-match.js'
 
 /**
  * answer_only 模式單獨開關（跟 OCR_ASSIST_CLASSIFY_ENABLED 獨立）。
@@ -150,6 +151,19 @@ import { buildCellAnchorCandidates } from './bbox-cell-anchor-match.js'
  */
 export function isOcrAssistAnswerOnlyEnabled() {
   const raw = getEnvValue('OCR_ASSIST_ANSWER_ONLY_ENABLED')
+  if (!raw) return true  // default on
+  return String(raw).trim().toLowerCase() !== 'false'
+}
+
+/**
+ * with_questions 模式 single_choice 結構解析增益開關。
+ * Default ON（要關掉才設 OCR_ASSIST_SINGLE_CHOICE_ENABLED=false）。
+ *
+ * 為什麼要分支：single_choice anchorHint 是純結構描述（「題組X第N小題前括號」）、
+ * LCS+Dice 配不到、需要 regex 結構解析。
+ */
+export function isOcrAssistSingleChoiceEnabled() {
+  const raw = getEnvValue('OCR_ASSIST_SINGLE_CHOICE_ENABLED')
   if (!raw) return true  // default on
   return String(raw).trim().toLowerCase() !== 'false'
 }
@@ -190,9 +204,28 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
   }
 
   // ── candidates generator router ──
-  const { candidatesByQid, stats } = isAnswerOnly
-    ? buildCellAnchorCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size)
-    : buildAnchorCandidates(answerKeyQuestions, ocrResult.detections)
+  let candidatesByQid, stats
+  if (isAnswerOnly) {
+    ;({ candidatesByQid, stats } = buildCellAnchorCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size))
+  } else {
+    // with_questions 模式：跑既有 LCS+Dice、再 merge single_choice 結構解析（如啟用）
+    const lcsResult = buildAnchorCandidates(answerKeyQuestions, ocrResult.detections)
+    candidatesByQid = lcsResult.candidatesByQid
+    stats = { ...lcsResult.stats }
+    if (isOcrAssistSingleChoiceEnabled()) {
+      const scResult = buildSingleChoiceAnchorCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size)
+      // 結構解析優先：覆寫 single_choice 題的 candidates
+      let mergedCount = 0
+      for (const [qid, cands] of Object.entries(scResult.candidatesByQid)) {
+        candidatesByQid[qid] = cands
+        mergedCount++
+      }
+      stats.singleChoiceStructural = {
+        ...scResult.stats,
+        mergedCount  // 多少 single_choice 題的 LCS 結果被結構解析覆蓋
+      }
+    }
+  }
   const extraSection = buildOcrHintsSection(candidatesByQid, ocrResult.image_size)
 
   return {
