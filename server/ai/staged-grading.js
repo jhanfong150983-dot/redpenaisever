@@ -5234,6 +5234,10 @@ export async function runStagedGradingPhaseA({
     // 🆕 Post-classify OCR bbox override（單頁 path）：narrow / x-shifted bbox 用 padded candidate 覆寫
     if (ocrAssistMeta.perPage[0]?.candidates && Object.keys(ocrAssistMeta.perPage[0].candidates).length > 0) {
       const ocrSize = ocrAssistMeta.perPage[0].imageSize || [inlineImages[0].inlineData.width || 1, inlineImages[0].inlineData.height || 1]
+      // 🆕 audit：保存 classify 原始 bbox (before override)
+      const classifyBboxesBefore = classifyResult.alignedQuestions
+        .filter(q => q.answerBbox)
+        .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
       const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
         classifyResult.alignedQuestions,
         ocrAssistMeta.perPage[0].candidates,
@@ -5243,6 +5247,9 @@ export async function runStagedGradingPhaseA({
         classifyResult = { ...classifyResult, alignedQuestions: overriddenQs }
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (single-page)', { count: overrides.length, samples: overrides.slice(0, 5) })
       }
+      // 🆕 audit：把 classify 原始 + override 紀錄寫進 stage_logs
+      ocrAssistMeta.perPage[0].classifyBboxes = classifyBboxesBefore
+      ocrAssistMeta.perPage[0].overrides = overrides
     }
   } else {
     // Multi-page: split merged image into individual pages, one classify call per page (parallel).
@@ -5331,6 +5338,10 @@ export async function runStagedGradingPhaseA({
       // 🆕 Post-classify OCR bbox override（multi-page fallback path、整張圖座標）
       const fallbackMeta = ocrAssistMeta.perPage.find(p => p.page === 0)
       if (fallbackMeta?.candidates && Object.keys(fallbackMeta.candidates).length > 0 && fallbackMeta.imageSize) {
+        // 🆕 audit：保存 classify 原始 bbox
+        const classifyBboxesBefore = classifyResult.alignedQuestions
+          .filter(q => q.answerBbox)
+          .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
         const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
           classifyResult.alignedQuestions, fallbackMeta.candidates, fallbackMeta.imageSize
         )
@@ -5338,6 +5349,9 @@ export async function runStagedGradingPhaseA({
           classifyResult = { ...classifyResult, alignedQuestions: overriddenQs }
           logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (multi-page fallback)', { count: overrides.length, samples: overrides.slice(0, 5) })
         }
+        // 🆕 audit：寫進 stage_logs
+        fallbackMeta.classifyBboxes = classifyBboxesBefore
+        fallbackMeta.overrides = overrides
       }
     } else {
       // Success: each page gets its own cropped image — no pageBreaks needed in prompt
@@ -5415,6 +5429,10 @@ export async function runStagedGradingPhaseA({
         // 🆕 Post-classify OCR bbox override（在 per-page coords 階段做、再 remap）
         const pageMeta = ocrAssistMeta.perPage.find(p => p.page === pageEntries[i][0])
         if (pageMeta?.candidates && Object.keys(pageMeta.candidates).length > 0 && pageMeta.imageSize) {
+          // 🆕 audit：保存 classify 原始 bbox（per-page coords，未 remap）
+          const classifyBboxesBefore = norm.alignedQuestions
+            .filter(q => q.answerBbox)
+            .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
           const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
             norm.alignedQuestions, pageMeta.candidates, pageMeta.imageSize
           )
@@ -5422,6 +5440,9 @@ export async function runStagedGradingPhaseA({
             norm = { ...norm, alignedQuestions: overriddenQs }
             allOverrides.push(...overrides.map(o => ({ ...o, page: pageEntries[i][0] })))
           }
+          // 🆕 audit：寫進該 page meta
+          pageMeta.classifyBboxes = classifyBboxesBefore
+          pageMeta.overrides = overrides
         }
         const { pageStartY, pageEndY } = splitPages[i]
         for (const q of norm.alignedQuestions) {
