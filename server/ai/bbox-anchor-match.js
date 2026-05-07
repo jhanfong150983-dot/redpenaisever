@@ -222,7 +222,14 @@ export function buildAnchorCandidates(answerKeyQuestions, ocrDetections, opts = 
  *   - yDrift（不同行）→ REPLACE 用 OCR row（保險、避免 classify 飄到鄰題）
  *   - 不 narrow 且同行 → 不動 classify
  *
- * @param {Object} opts - { xPadFraction, yPadFraction, minWidthRatio, yDriftThreshold }
+ * v3（2026-05-07 第三輪）：
+ *   - 加 xDrift skip guard：classify 跟 OCR candidate x 中心差 > xDriftSkipThreshold（預設 0.3）→ 跨欄誤匹配
+ *   - 跨欄訊號：matcher 純文字配對，遇短文字「1.湛蓝」OCR row 在右欄、classify 正確左欄
+ *     → yDrift trigger 把 classify 0.218 換成 OCR 0.898（推到右欄）
+ *   - 此時相信 classify、不 override
+ *   - 實證 4 號 1-1-1/2/4：classify x=0.218/0.215/0.279 vs OCR x=0.898/0.901/0.916（跳欄）
+ *
+ * @param {Object} opts - { xPadFraction, yPadFraction, minWidthRatio, yDriftThreshold, xDriftSkipThreshold }
  * @returns {Object} { alignedQuestions, overrides: [{questionId, before, after, reason}] }
  */
 export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSize, opts = {}) {
@@ -230,6 +237,7 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
   const yPad = typeof opts.yPadFraction === 'number' ? opts.yPadFraction : 0
   const minWidthRatio = typeof opts.minWidthRatio === 'number' ? opts.minWidthRatio : 0.5
   const yDriftThreshold = typeof opts.yDriftThreshold === 'number' ? opts.yDriftThreshold : 0.05
+  const xDriftSkipThreshold = typeof opts.xDriftSkipThreshold === 'number' ? opts.xDriftSkipThreshold : 0.3
   const [imgW, imgH] = imageSize || [1, 1]
   const overrides = []
 
@@ -247,8 +255,24 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
     const aiY = q.answerBbox.y
     const aiW = q.answerBbox.w
     const aiH = q.answerBbox.h
+    const aiXCenter = aiX + aiW / 2
     const aiYCenter = aiY + aiH / 2
+    const candXCenter = candX + candW / 2
     const candYCenter = candY + candH / 2
+
+    // v3 guard：x 中心差太遠（>0.3 of image width）→ matcher 大概率挑到別欄 row
+    // 此時 trust classify（classify 看整張圖判斷比 matcher 純文字穩）、不 override
+    const xDriftAbs = Math.abs(aiXCenter - candXCenter)
+    if (xDriftAbs > xDriftSkipThreshold) {
+      overrides.push({
+        questionId: q.questionId,
+        before: { x: +aiX.toFixed(3), y: +aiY.toFixed(3), w: +aiW.toFixed(3), h: +aiH.toFixed(3) },
+        after: null,
+        reason: 'skip_xdrift_cross_column',
+        xDriftAbs: +xDriftAbs.toFixed(3)
+      })
+      return q
+    }
 
     const tooNarrow = aiW < candW * minWidthRatio
     const yDrift = Math.abs(aiYCenter - candYCenter) > yDriftThreshold
