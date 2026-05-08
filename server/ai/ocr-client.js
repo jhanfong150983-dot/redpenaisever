@@ -142,6 +142,7 @@ function extFor(mimeType) {
 import { buildAnchorCandidates, buildOcrHintsSection } from './bbox-anchor-match.js'
 import { buildCellAnchorCandidates } from './bbox-cell-anchor-match.js'
 import { buildSingleChoiceAnchorCandidates } from './bbox-single-choice-match.js'
+import { buildBracketGapCandidates } from './bbox-bracket-gap-match.js'
 
 /**
  * answer_only 模式單獨開關（跟 OCR_ASSIST_CLASSIFY_ENABLED 獨立）。
@@ -164,6 +165,20 @@ export function isOcrAssistAnswerOnlyEnabled() {
  */
 export function isOcrAssistSingleChoiceEnabled() {
   const raw = getEnvValue('OCR_ASSIST_SINGLE_CHOICE_ENABLED')
+  if (!raw) return true  // default on
+  return String(raw).trim().toLowerCase() !== 'false'
+}
+
+/**
+ * with_questions 模式 fill_blank-with-bracket gap 偵測增益開關。
+ * Default ON（要關掉才設 OCR_ASSIST_BRACKET_GAP_ENABLED=false）。
+ *
+ * 解 root cause：題幹和答案行可能都含相同 keyword（如「多美走」「公尺」）、
+ * LCS 可能配到題幹 row、classify 視覺判斷飄到題幹位置。
+ * Bracket gap 偵測「（」結尾 +「）」開頭 OCR row pair、自動排除題幹（題幹沒這 pattern）。
+ */
+export function isOcrAssistBracketGapEnabled() {
+  const raw = getEnvValue('OCR_ASSIST_BRACKET_GAP_ENABLED')
   if (!raw) return true  // default on
   return String(raw).trim().toLowerCase() !== 'false'
 }
@@ -208,22 +223,31 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
   if (isAnswerOnly) {
     ;({ candidatesByQid, stats } = buildCellAnchorCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size))
   } else {
-    // with_questions 模式：跑既有 LCS+Dice、再 merge single_choice 結構解析（如啟用）
+    // with_questions 模式：LCS+Dice 為基礎、再 merge single_choice + bracket gap 增益
     const lcsResult = buildAnchorCandidates(answerKeyQuestions, ocrResult.detections)
     candidatesByQid = lcsResult.candidatesByQid
     stats = { ...lcsResult.stats }
+
+    // single_choice 結構解析：覆寫 single_choice qids
     if (isOcrAssistSingleChoiceEnabled()) {
       const scResult = buildSingleChoiceAnchorCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size)
-      // 結構解析優先：覆寫 single_choice 題的 candidates
       let mergedCount = 0
       for (const [qid, cands] of Object.entries(scResult.candidatesByQid)) {
         candidatesByQid[qid] = cands
         mergedCount++
       }
-      stats.singleChoiceStructural = {
-        ...scResult.stats,
-        mergedCount  // 多少 single_choice 題的 LCS 結果被結構解析覆蓋
+      stats.singleChoiceStructural = { ...scResult.stats, mergedCount }
+    }
+
+    // bracket gap 偵測：覆寫 fill_blank-with-bracket qids（精準 gap 取代 LCS row）
+    if (isOcrAssistBracketGapEnabled()) {
+      const bgResult = buildBracketGapCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size)
+      let mergedCount = 0
+      for (const [qid, cands] of Object.entries(bgResult.candidatesByQid)) {
+        candidatesByQid[qid] = cands
+        mergedCount++
       }
+      stats.bracketGap = { ...bgResult.stats, mergedCount }
     }
   }
   const extraSection = buildOcrHintsSection(candidatesByQid, ocrResult.image_size)
