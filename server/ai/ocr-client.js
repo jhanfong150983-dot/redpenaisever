@@ -19,15 +19,16 @@
 
 import { getEnvValue } from '../_env.js'
 
-const DEFAULT_TIMEOUT_MS = 15000
+const DEFAULT_TIMEOUT_MS = 45000  // bumped 15s → 45s：PaddleOCR 處理被降採樣到 4000px 的長圖常需 20-30s
 
 /**
  * 是否啟用 OCR 增益。為單一進入點檢查、上層只查這個 boolean。
  */
 export function isOcrAssistEnabled() {
   const raw = getEnvValue('OCR_ASSIST_CLASSIFY_ENABLED')
-  if (!raw) return false
-  return String(raw).trim().toLowerCase() === 'true'
+  const enabled = !!raw && String(raw).trim().toLowerCase() === 'true'
+  console.log(`[ocr-client] isOcrAssistEnabled() = ${enabled} (raw="${raw || ''}")`)
+  return enabled
 }
 
 function getOcrConfig() {
@@ -54,6 +55,8 @@ export async function runOcrOnImage(imageBytes, mimeType, opts = {}) {
 
   const timeoutMs = Number(opts.timeoutMs) || DEFAULT_TIMEOUT_MS
   const filename = opts.filename || 'submission' + extFor(mimeType)
+  const sizeKB = imageBytes ? (imageBytes.length / 1024).toFixed(1) : '0'
+  console.log(`[ocr-client] runOcrOnImage → ${filename} ${sizeKB}KB timeout=${timeoutMs}ms url=${config.url}`)
 
   // 用 multipart/form-data 上傳
   // Node 18+ FormData 是內建的，不需要 form-data 套件
@@ -87,6 +90,7 @@ export async function runOcrOnImage(imageBytes, mimeType, opts = {}) {
       console.warn('[ocr-client] OCR response shape invalid → fallback')
       return null
     }
+    console.log(`[ocr-client] OCR ${resp.status} OK after ${elapsedMs}ms → ${data.detections.length} detections, image_size=${JSON.stringify(data.image_size)}`)
     return { ...data, elapsedMs }
   } catch (e) {
     const elapsedMs = Date.now() - t0
@@ -206,15 +210,19 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
   const isAnswerOnly = answerSheetMode === 'answer_only'
   // 依模式決定要查的 flag
   const enabled = isAnswerOnly ? isOcrAssistAnswerOnlyEnabled() : isOcrAssistEnabled()
+  console.log(`[ocr-client.prepareHints] entry mode=${answerSheetMode} enabled=${enabled} questions=${answerKeyQuestions?.length || 0} bytes=${imageBytes?.length || 0}`)
   if (!enabled) {
+    console.log(`[ocr-client.prepareHints] skipped: feature_flag_off`)
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'feature_flag_off', mode: answerSheetMode } }
   }
   if (!imageBytes || !answerKeyQuestions || answerKeyQuestions.length === 0) {
+    console.log(`[ocr-client.prepareHints] skipped: empty_input`)
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'empty_input', mode: answerSheetMode } }
   }
 
   const ocrResult = await runOcrOnImage(imageBytes, mimeType, opts)
   if (!ocrResult) {
+    console.log(`[ocr-client.prepareHints] skipped: ocr_failed (runOcrOnImage returned null)`)
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'ocr_failed', mode: answerSheetMode } }
   }
 

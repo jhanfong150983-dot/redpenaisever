@@ -5159,6 +5159,12 @@ export async function runStagedGradingPhaseA({
   // 🆕 OCR-assist metadata 收集（用於 stage_logs 寫入）
   // Schema: { enabled: bool, perPage: [{ page, stats, candidates }] }
   const ocrAssistMeta = { enabled: isOcrAssistEnabled(), perPage: [] }
+  logStaged(pipelineRunId, 'basic', 'OCR-assist init', {
+    enabled: ocrAssistMeta.enabled,
+    answerSheetMode,
+    bboxOverridesPresent: !!(bboxOverrides && bboxOverrides.length > 0),
+    bboxOverridesCount: bboxOverrides?.length || 0
+  })
 
   // Build per-page question groups（classify 和 bboxOverrides 都需要）
   // ⚠️ 單頁多 section 卷（answer_only 或 total_pages=1）強制歸到 page 1：
@@ -5203,7 +5209,7 @@ export async function runStagedGradingPhaseA({
         bboxCorrected: override?.corrected || false
       }
     }), coverage: 1 }
-    logStaged(pipelineRunId, 'basic', 'bboxOverrides → skip classify AI', { questions: questionIds.length })
+    logStaged(pipelineRunId, 'basic', 'classify path = SHORTCUT (bboxOverrides → skip classify AI, no OCR)', { questions: questionIds.length })
   } else {
     if (skipBboxOverridesShortcut && bboxOverrides && bboxOverrides.length > 0) {
       logStaged(pipelineRunId, 'basic', 'bboxOverrides ignored (OCR_ASSIST_ANSWER_ONLY_ENABLED) → run full classify with OCR cell anchor HINT', { questions: questionIds.length })
@@ -5224,11 +5230,13 @@ export async function runStagedGradingPhaseA({
     const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
     const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
     let classifyPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+    logStaged(pipelineRunId, 'basic', 'classify path = ELSE.SINGLE_PAGE (will check OCR-assist)', { questionCount: ids.length, ocrAssistEnabled: isOcrAssistEnabled() })
     // ── OCR-assisted classify (feature-flagged) ──
     // 對 inline answer types (fill_blank/multi_fill/...) 注入 OCR-matched candidate bbox 當 anchor。
     // 失敗 graceful：OCR 掛 / 超時 / 無 candidate → extraSection 為空、走純視覺 classify。
     if (isOcrAssistEnabled()) {
       try {
+        logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: calling prepareOcrHintsForClassify')
         const ocrAssist = await prepareOcrHintsForClassify({
           imageBytes: Buffer.from(inlineImages[0].inlineData.data, 'base64'),
           mimeType: inlineImages[0].inlineData.mimeType,
@@ -5236,13 +5244,16 @@ export async function runStagedGradingPhaseA({
           answerSheetMode
         })
         if (ocrAssist.extraSection) classifyPrompt = `${classifyPrompt}\n\n${ocrAssist.extraSection}`
-        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist', ocrAssist.stats)
+        logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: completed', ocrAssist.stats)
         // 🆕 收進 stage_logs metadata（含 imageSize 供 post-classify override 使用）
         ocrAssistMeta.perPage.push({ page: 1, stats: ocrAssist.stats, candidates: ocrAssist.candidatesByQid, imageSize: ocrAssist.ocrResult?.image_size })
+        logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: pushed perPage', { perPageLen: ocrAssistMeta.perPage.length })
       } catch (ocrErr) {
-        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist error → fallback', { error: ocrErr?.message })
+        logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: ERROR → fallback', { error: ocrErr?.message, stack: ocrErr?.stack?.split('\n').slice(0, 3).join(' | ') })
         ocrAssistMeta.perPage.push({ page: 1, stats: { error: ocrErr?.message } })
       }
+    } else {
+      logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: SKIPPED (isOcrAssistEnabled=false)')
     }
     const classifyResponse = await executeStage({
       apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
@@ -5302,6 +5313,7 @@ export async function runStagedGradingPhaseA({
       })
       // ── OCR-assisted classify (feature-flagged) — 整張圖 OCR 一次、每 page 獨立 filter candidates ──
       // 注意：split 失敗時整張圖可能超過 4000px，OCR 解析度會降，但仍可作位置 anchor。
+      logStaged(pipelineRunId, 'basic', 'classify path = ELSE.MULTI_PAGE_FALLBACK (split failed)', { ocrAssistEnabled: isOcrAssistEnabled() })
       const fallbackOcrAssistFull = isOcrAssistEnabled()
         ? await prepareOcrHintsForClassify({
             imageBytes: Buffer.from(inlineImages[0].inlineData.data, 'base64'),
@@ -5309,10 +5321,11 @@ export async function runStagedGradingPhaseA({
             answerKeyQuestions: answerKeyQuestions,
             answerSheetMode
           }).catch(e => {
-            logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist (fallback path) error', { error: e?.message })
+            logStaged(pipelineRunId, 'basic', 'OCR-assist fallback: ERROR', { error: e?.message, stack: e?.stack?.split('\n').slice(0, 3).join(' | ') })
             return { extraSection: '', stats: { error: e?.message } }
           })
         : null
+      if (!isOcrAssistEnabled()) logStaged(pipelineRunId, 'basic', 'OCR-assist fallback: SKIPPED (isOcrAssistEnabled=false)')
       if (fallbackOcrAssistFull) {
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist (fallback full image)', fallbackOcrAssistFull.stats)
         // 🆕 收進 stage_logs metadata（含 imageSize）
@@ -5391,6 +5404,7 @@ export async function runStagedGradingPhaseA({
       })
       // ── OCR-assisted classify (feature-flagged) — 每頁獨立 OCR、parallel ──
       // 失敗 graceful：任一頁 OCR 掛都不影響該頁的 classify（fallback 純視覺）
+      logStaged(pipelineRunId, 'basic', 'classify path = ELSE.MULTI_PAGE_SPLIT (split success)', { pages: splitPages.length, ocrAssistEnabled: isOcrAssistEnabled() })
       const pageOcrAssists = isOcrAssistEnabled()
         ? await Promise.all(splitPages.map(async (p, i) => {
             try {
@@ -5402,11 +5416,12 @@ export async function runStagedGradingPhaseA({
                 answerSheetMode
               })
             } catch (e) {
-              logStaged(pipelineRunId, stagedLogLevel, `classify OCR-assist p${pageEntries[i][0]} error`, { error: e?.message })
+              logStaged(pipelineRunId, 'basic', `OCR-assist multi-page p${pageEntries[i][0]}: ERROR`, { error: e?.message, stack: e?.stack?.split('\n').slice(0, 3).join(' | ') })
               return { extraSection: '', stats: { error: e?.message } }
             }
           }))
         : null
+      if (!isOcrAssistEnabled()) logStaged(pipelineRunId, 'basic', 'OCR-assist multi-page: SKIPPED (isOcrAssistEnabled=false)')
       if (pageOcrAssists) {
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR-assist per-page', {
           pages: pageOcrAssists.map((a, i) => ({ page: pageEntries[i][0], ...a.stats }))
@@ -6737,6 +6752,18 @@ Return JSON:
   })
 
   // 寫入 Phase A stage log 到 Supabase（await 確保 serverless 環境下不漏存）
+  logStaged(pipelineRunId, 'basic', 'OCR-assist final summary (before save)', {
+    enabled: ocrAssistMeta.enabled,
+    perPageLen: ocrAssistMeta.perPage.length,
+    willSaveToLog: ocrAssistMeta.perPage.length > 0,
+    perPageStatuses: ocrAssistMeta.perPage.map(p => ({
+      page: p.page,
+      hasError: !!p.stats?.error,
+      skipped: p.stats?.skipped,
+      ocrElapsedMs: p.stats?.ocrElapsedMs,
+      ocrDetections: p.stats?.ocrDetections
+    }))
+  })
   if (internalContext?.ownerId) {
     const phaseALogData = extractPhaseALogData({
       pipelineRunId,
