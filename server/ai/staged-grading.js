@@ -12,7 +12,7 @@ import {
   validateReadAccessorConsistency
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
-import { isOcrAssistEnabled, isOcrAssistAnswerOnlyEnabled, prepareOcrHintsForClassify } from './ocr-client.js'
+import { isOcrAssistEnabled, prepareOcrHintsForClassify } from './ocr-client.js'
 import { buildOcrHintsSection, applyOcrBboxOverride } from './bbox-anchor-match.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
@@ -5119,7 +5119,6 @@ export async function runStagedGradingPhaseA({
 
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
-  const bboxOverrides = Array.isArray(payload?.bboxOverrides) ? payload.bboxOverrides : null
   let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
   // Fallback: if pageBreaks is empty but questionIds have multi-page prefixes (1-*, 2-*, 3-*, ...),
   // estimate equal-split pageBreaks so per-page classify can still work.
@@ -5161,12 +5160,10 @@ export async function runStagedGradingPhaseA({
   const ocrAssistMeta = { enabled: isOcrAssistEnabled(), perPage: [] }
   logStaged(pipelineRunId, 'basic', 'OCR-assist init', {
     enabled: ocrAssistMeta.enabled,
-    answerSheetMode,
-    bboxOverridesPresent: !!(bboxOverrides && bboxOverrides.length > 0),
-    bboxOverridesCount: bboxOverrides?.length || 0
+    answerSheetMode
   })
 
-  // Build per-page question groups（classify 和 bboxOverrides 都需要）
+  // Build per-page question groups
   // ⚠️ 單頁多 section 卷（answer_only 或 total_pages=1）強制歸到 page 1：
   //    ID 第一位是 section 不是 page、整張卷在同一張圖、不能按 ID 切。
   const pageQuestionsMap = new Map()
@@ -5191,29 +5188,7 @@ export async function runStagedGradingPhaseA({
     .filter(([, ids]) => ids.length > 0)
     .sort(([a], [b]) => a - b)
 
-  // ── bboxOverrides → 跳過 classify AI，用前端 bbox ──
-  // 🆕 answer_only OCR cell anchor flag on 時、即使 frontend 送 bboxOverrides 也不採用、
-  //    強制走完整 classify pipeline（OCR cell anchor 會比 frontend grid 等距外推準）。
-  const skipBboxOverridesShortcut = answerSheetMode === 'answer_only' && isOcrAssistAnswerOnlyEnabled()
   let classifyResult
-  if (bboxOverrides && bboxOverrides.length > 0 && !skipBboxOverridesShortcut) {
-    const overrideMap = new Map(bboxOverrides.map((o) => [o.questionId, o]))
-    classifyResult = { alignedQuestions: questionIds.map((qId) => {
-      const override = overrideMap.get(qId)
-      const akQ = answerKeyQuestions.find((q) => q?.id === qId)
-      return {
-        questionId: qId,
-        questionType: akQ ? resolveExpectedQuestionType(akQ) : 'fill_blank',
-        visible: true,
-        answerBbox: override?.answerBbox || null,
-        bboxCorrected: override?.corrected || false
-      }
-    }), coverage: 1 }
-    logStaged(pipelineRunId, 'basic', 'classify path = SHORTCUT (bboxOverrides → skip classify AI, no OCR)', { questions: questionIds.length })
-  } else {
-    if (skipBboxOverridesShortcut && bboxOverrides && bboxOverrides.length > 0) {
-      logStaged(pipelineRunId, 'basic', 'bboxOverrides ignored (OCR_ASSIST_ANSWER_ONLY_ENABLED) → run full classify with OCR cell anchor HINT', { questions: questionIds.length })
-    }
   // Per-page classify: one call per page, all dispatched in parallel.
 
   logStageStart(pipelineRunId, 'classify')
@@ -5222,8 +5197,6 @@ export async function runStagedGradingPhaseA({
     answerKeyPages: answerKeyImageParts.length,
     pages: pageEntries.map(([p, ids]) => ({ page: p, count: ids.length }))
   })
-
-  // classifyResult 已在外層 if/else 之前宣告（let classifyResult）
 
   if (pageEntries.length <= 1) {
     // Single page (or all questions share one page) — one call
@@ -5517,9 +5490,7 @@ export async function runStagedGradingPhaseA({
       }, classifyQuestionSpecs)
     }
   }
-  } // end else (skip classify when bboxOverrides)
 
-  // classifyAligned: bboxOverrides 時已在上方構造好，不需要再覆蓋
   let classifyAligned = classifyResult.alignedQuestions
   logStaged(pipelineRunId, stagedLogLevel, 'classify normalized-summary', {
     coverage: classifyResult.coverage,
@@ -5580,8 +5551,7 @@ export async function runStagedGradingPhaseA({
   logStaged(pipelineRunId, 'basic', 'classify quality-gate', {
     severity: classifyQG.severity, warnings: classifyQG.warnings, metrics: classifyQG.metrics
   })
-  if (classifyQG.severity === QG_SEVERITY.FAIL && !payload?.classifyOnly && !bboxOverrides) {
-    // classifyOnly / bboxOverrides 不 retry — 中位數校正會修復 bbox 問題
+  if (classifyQG.severity === QG_SEVERITY.FAIL) {
     logStaged(pipelineRunId, stagedLogLevel, 'classify quality FAIL → retry (1/1)')
     // Re-run classify: single-page path (simple retry with same prompt)
     if (pageEntries.length <= 1) {
@@ -5674,19 +5644,6 @@ export async function runStagedGradingPhaseA({
   const dynamicPad = +(0.03 / totalPages).toFixed(4)
   const dynamicPadWide = +(0.08 / totalPages).toFixed(4)
   logStaged(pipelineRunId, stagedLogLevel, 'dynamic crop padding', { totalPages, pad: dynamicPad, padWide: dynamicPadWide })
-
-  // ── classifyOnly mode: 回傳 bbox 就結束，不做 crop/read/AI3 ─────────────
-  if (payload?.classifyOnly) {
-    const bboxResults = classifyAligned
-      .filter((q) => q.visible)
-      .map((q) => ({
-        questionId: q.questionId,
-        questionType: q.questionType,
-        answerBbox: q.answerBbox || null
-      }))
-    logStaged(pipelineRunId, 'basic', 'classifyOnly → return bbox', { count: bboxResults.length })
-    return { classifyOnly: true, bboxResults, stageResponses }
-  }
 
   // Focused checkbox crops: single_check / multi_check / multi_choice
   // We pre-crop first, then exclude successful IDs from full-image ReadAnswer.
