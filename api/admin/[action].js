@@ -3360,5 +3360,117 @@ export default async function handler(req, res) {
     return await handleAnalytics(req, res, supabaseAdmin)
   }
 
+  if (action === 'announcements') {
+    return await handleAnnouncements(req, res, supabaseAdmin, adminUser)
+  }
+
   res.status(404).json({ error: 'Unknown action' })
+}
+
+// ========== ANNOUNCEMENTS ==========
+async function handleAnnouncements(req, res, supabaseAdmin, adminUser) {
+  if (req.method === 'GET') {
+    const { data, error } = await supabaseAdmin
+      .from('announcements')
+      .select('id, title, body, active, starts_at, ends_at, created_at, updated_at, created_by')
+      .order('created_at', { ascending: false })
+      .limit(100)
+    if (error) {
+      return res.status(500).json({ error: error.message || '讀取公告失敗' })
+    }
+    return res.status(200).json({ announcements: data || [] })
+  }
+
+  if (req.method === 'POST') {
+    const body = parseJsonBody(req, res)
+    if (!body) return
+    const title = String(body.title || '').trim()
+    if (!title) {
+      return res.status(400).json({ error: '標題不可為空' })
+    }
+    const startsAt = parseOptionalDateTime(body.startsAt)
+    const endsAt = parseOptionalDateTime(body.endsAt)
+    if (startsAt === undefined || endsAt === undefined) {
+      return res.status(400).json({ error: '起訖時間格式錯誤' })
+    }
+    const insert = {
+      title,
+      body: String(body.body || ''),
+      active: parseBoolean(body.active, false),
+      starts_at: startsAt || new Date().toISOString(),
+      ends_at: endsAt || null,
+      created_by: adminUser?.id || null
+    }
+    const { data, error } = await supabaseAdmin
+      .from('announcements')
+      .insert(insert)
+      .select('id, title, body, active, starts_at, ends_at, created_at, updated_at, created_by')
+      .single()
+    if (error) {
+      return res.status(500).json({ error: error.message || '新增公告失敗' })
+    }
+    return res.status(200).json({ announcement: data })
+  }
+
+  if (req.method === 'PATCH') {
+    const body = parseJsonBody(req, res)
+    if (!body) return
+    const id = String(body.id || '').trim()
+    if (!id) {
+      return res.status(400).json({ error: 'id 必填' })
+    }
+    const updates = { updated_at: new Date().toISOString() }
+    if (typeof body.title === 'string') {
+      const t = body.title.trim()
+      if (!t) return res.status(400).json({ error: '標題不可為空' })
+      updates.title = t
+    }
+    if (typeof body.body === 'string') {
+      updates.body = body.body
+    }
+    if (body.active !== undefined) {
+      updates.active = parseBoolean(body.active, false)
+    }
+    if (body.startsAt !== undefined) {
+      const sa = parseOptionalDateTime(body.startsAt)
+      if (sa === undefined) {
+        return res.status(400).json({ error: '起始時間格式錯誤' })
+      }
+      updates.starts_at = sa || new Date().toISOString()
+    }
+    if (body.endsAt !== undefined) {
+      const ea = parseOptionalDateTime(body.endsAt)
+      if (ea === undefined) {
+        return res.status(400).json({ error: '結束時間格式錯誤' })
+      }
+      updates.ends_at = ea
+    }
+    const { data, error } = await supabaseAdmin
+      .from('announcements')
+      .update(updates)
+      .eq('id', id)
+      .select('id, title, body, active, starts_at, ends_at, created_at, updated_at, created_by')
+      .single()
+    if (error) {
+      return res.status(500).json({ error: error.message || '更新公告失敗' })
+    }
+    return res.status(200).json({ announcement: data })
+  }
+
+  if (req.method === 'DELETE') {
+    const id = String(req.query?.id || '').trim()
+    if (!id) {
+      return res.status(400).json({ error: 'id 必填' })
+    }
+    const { error } = await supabaseAdmin
+      .from('announcements')
+      .delete()
+      .eq('id', id)
+    if (error) {
+      return res.status(500).json({ error: error.message || '刪除公告失敗' })
+    }
+    return res.status(200).json({ ok: true })
+  }
+
+  return res.status(405).json({ error: 'Method Not Allowed' })
 }

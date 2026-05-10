@@ -6600,7 +6600,44 @@ const log = document.getElementById('log');
     await handleQualityCheckLog(req, res)
     return
   }
+  if (action === 'announcement-active') {
+    await handleAnnouncementActive(req, res)
+    return
+  }
   res.status(404).json({ error: 'Not Found' })
+}
+
+// ─────────────────────────────────────────────────────────
+// handleAnnouncementActive
+// GET /api/data/announcement-active
+// 回目前 active && now ∈ [starts_at, ends_at] 的最新一則公告，給登入後 modal 用
+// ─────────────────────────────────────────────────────────
+async function handleAnnouncementActive(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  const nowIso = new Date().toISOString()
+  const { data, error } = await supabaseDb
+    .from('announcements')
+    .select('id, title, body, starts_at, ends_at')
+    .eq('active', true)
+    .lte('starts_at', nowIso)
+    .or(`ends_at.is.null,ends_at.gt.${nowIso}`)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    res.status(500).json({ error: error.message || '讀取公告失敗' })
+    return
+  }
+  res.status(200).json({ announcement: data || null })
 }
 
 // ─────────────────────────────────────────────────────────
