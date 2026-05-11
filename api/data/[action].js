@@ -907,11 +907,14 @@ function parseMistakesFromGradingResult(gradingResult) {
       (typeof mistake.reason === 'string' && mistake.reason.trim()) || ''
     if (!questionId && !questionText && !reason) continue
     const linkedDetail = detailsByQuestionId.get(questionId) || null
+    // 學生看的訂正引導：優先用 explain stage 產的 studentGuidance（已避免洩漏答案的三段式引導）、
+    // 沒有才 fallback 到 reason（reason 是給老師審計的批改理由、可能直接含答案/單位）。
+    const guidance = (typeof linkedDetail?.studentGuidance === 'string' && linkedDetail.studentGuidance.trim()) || ''
     mistakes.push({
       questionId: questionId || questionText || `Q${mistakes.length + 1}`,
       questionText: questionText || questionId || '',
       reason: reason || '需要再次確認作答內容',
-      hintText: String(reason || ''),
+      hintText: String(guidance || reason || ''),
       studentAnswerRaw: (typeof linkedDetail?.studentAnswer === 'string' && linkedDetail.studentAnswer.trim()) || undefined,
       questionBbox: normalizeBbox(linkedDetail?.questionBbox),
       answerBbox: normalizeBbox(linkedDetail?.answerBbox)
@@ -934,11 +937,13 @@ function parseMistakesFromGradingResult(gradingResult) {
       (typeof detail.reason === 'string' && detail.reason.trim()) ||
       (typeof detail.comment === 'string' && detail.comment.trim()) ||
       '需要再次確認作答內容'
+    // 學生看的訂正引導：優先用 studentGuidance（explain stage 產、禁洩漏）、否則 fallback reason
+    const guidance = (typeof detail.studentGuidance === 'string' && detail.studentGuidance.trim()) || ''
     mistakes.push({
       questionId,
       questionText: questionId,
       reason,
-      hintText: String(reason || ''),
+      hintText: String(guidance || reason || ''),
       studentAnswerRaw: (typeof detail.studentAnswer === 'string' && detail.studentAnswer.trim()) || undefined,
       questionBbox: normalizeBbox(detail.questionBbox),
       answerBbox: normalizeBbox(detail.answerBbox)
