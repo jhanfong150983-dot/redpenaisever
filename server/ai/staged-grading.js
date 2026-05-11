@@ -540,6 +540,54 @@ async function splitSubmissionImageByPageBreaks(imageBase64, mimeType, pageBreak
   }
 }
 
+/**
+ * OCR-assist 專用 split：每頁 top 向前借 `topOverlapRatio` 比例（預設 33%）。
+ * 用途：解 group header 跨頁問題 — 「題組X」section header 可能落在前頁底、
+ * questions 在後頁、後頁 OCR 看不到 header 導致 matcher 找不到 group。
+ * 向前借一塊讓 header 跟 questions 一起出現在後頁 OCR 結果裡。
+ *
+ * 注意：output bbox y 是 overlap 圖的 local coord、不直接跟 classify bbox 對齊。
+ *      matcher 只用 group key 配對、不用 y 跨 stage 比對、所以兩套 coord 不衝突。
+ *      classify AI 仍走原本的 splitSubmissionImageByPageBreaks (no overlap)。
+ */
+async function splitWithTopOverlapForOcr(imageBase64, mimeType, pageBreaks, topOverlapRatio = 0.33) {
+  if (!imageBase64 || !Array.isArray(pageBreaks) || pageBreaks.length === 0) return null
+  try {
+    const { default: sharp } = await import('sharp')
+    const imageBuffer = Buffer.from(imageBase64, 'base64')
+    const metadata = await sharp(imageBuffer).metadata()
+    const { width, height } = metadata
+    if (!width || !height) return null
+
+    const boundaries = [0, ...pageBreaks, 1]
+    const extractPromises = []
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      const startY = boundaries[i]
+      const endY = boundaries[i + 1]
+      const pageRatio = endY - startY
+      // 第一頁不向前借（沒前頁）、其他頁向前借 topOverlapRatio × 該頁高度
+      const overlapRatio = i === 0 ? 0 : pageRatio * topOverlapRatio
+      const topPx = Math.max(0, Math.round((startY - overlapRatio) * height))
+      const bottomPx = Math.round(endY * height)
+      const pagePxHeight = bottomPx - topPx
+      if (pagePxHeight <= 0) continue
+      extractPromises.push(
+        sharp(imageBuffer)
+          .extract({ left: 0, top: topPx, width, height: pagePxHeight })
+          .jpeg({ quality: 90 })
+          .toBuffer()
+      )
+    }
+    const buffers = await Promise.all(extractPromises)
+    return buffers.map((buf) => ({
+      inlineData: { data: buf.toString('base64'), mimeType: 'image/jpeg' }
+    }))
+  } catch (err) {
+    console.warn('[staged-grading] splitWithTopOverlapForOcr failed:', err?.message)
+    return null
+  }
+}
+
 // Remap a bbox from per-page normalized coordinates (0~1) to full-image normalized coordinates.
 // pageStartY/pageEndY: the page's vertical range within the full image (0~1).
 function remapBboxToFullImage(bbox, pageStartY, pageEndY) {
@@ -5416,8 +5464,19 @@ export async function runStagedGradingPhaseA({
       // ── OCR-assisted classify (feature-flagged) — 每頁獨立 OCR、parallel ──
       // 失敗 graceful：任一頁 OCR 掛都不影響該頁的 classify（fallback 純視覺）
       logStaged(pipelineRunId, 'basic', 'classify path = ELSE.MULTI_PAGE_SPLIT (split success)', { pages: splitPages.length, ocrAssistEnabled: isOcrAssistEnabled() })
+      // 🆕 OCR 用 top-overlap split（向前頁底借 33%、解 group header 跨頁問題）。
+      // classify AI 仍用 no-overlap splitPages（保留 per-page coord 系統）。
+      const ocrSplitPages = isOcrAssistEnabled()
+        ? await splitWithTopOverlapForOcr(submissionImg.data, submissionImg.mimeType, pageBreaks)
+        : null
+      const ocrInputPages = ocrSplitPages && ocrSplitPages.length === splitPages.length ? ocrSplitPages : splitPages
+      if (ocrSplitPages) {
+        logStaged(pipelineRunId, 'basic', 'OCR-assist using top-overlap split', { pages: ocrSplitPages.length, topOverlapRatio: 0.33 })
+      } else if (isOcrAssistEnabled()) {
+        logStaged(pipelineRunId, 'basic', 'OCR-assist top-overlap split failed → fallback to no-overlap splitPages')
+      }
       const pageOcrAssists = isOcrAssistEnabled()
-        ? await Promise.all(splitPages.map(async (p, i) => {
+        ? await Promise.all(ocrInputPages.map(async (p, i) => {
             try {
               const ids = pageEntries[i][1]
               return await prepareOcrHintsForClassify({
