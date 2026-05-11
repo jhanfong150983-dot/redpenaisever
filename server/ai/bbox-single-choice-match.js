@@ -36,27 +36,74 @@ const PATTERNS = [
 
 /**
  * 解 single_choice anchorHint。
+ *
+ * 新 prompt 強制格式：「位於『<section>』第 N 小題題號前的括號內」
+ * 支援的 section 標題格式：
+ *   - 題組X（X 為中文數字一二三...或阿拉伯數字）
+ *   - 壹/貳/參/.../拾、XX 題（中文大寫數字 + 頓號）
+ *   - 一/二/三、XX 題（中文小寫數字 + 頓號）
+ *   - Part A/B/C...
+ *   - Section 1/2/3...
+ *
+ * 也兼容舊 prompt 寫的 anchorHint 格式（無 『』 引號、或描述性文字）。
+ *
  * @returns null | { groupKey, groupLabel, ordinal }
  */
 export function parseSingleChoiceAnchorHint(hint) {
   if (!hint) return null
   const h = String(hint)
 
+  // ── 先抽 ordinal（第N小題 / 第N題 / 題號N） ──
+  const ordMatch = h.match(/第\s*(\d+)\s*小?題/) || h.match(/題號\s*(\d+)/)
+  const ordinal = ordMatch ? +ordMatch[1] : null
+
+  // ── 從 『...』 或 「...」 抽 section 標題 ──
+  const secMatch = h.match(/『([^』]+)』/) || h.match(/「([^」]+)」/)
+  if (secMatch && ordinal !== null) {
+    const sec = secMatch[1].trim()
+    const fromSection = parseSectionName(sec)
+    if (fromSection) return { ...fromSection, ordinal }
+  }
+
+  // ── 兼容舊格式（沒引號包覆的 section 名）──
   // Part X 題號 N（容忍 PartX 無空白）
   let m = h.match(/Part\s*([A-Z])\b.*?(?:題號|閱讀測驗)?\s*\(?\s*(\d+)\s*\)?/i)
   if (m) return { groupKey: `Part_${m[1].toUpperCase()}`, groupLabel: `Part ${m[1].toUpperCase()}`, ordinal: +m[2] }
-
-  // 「中文、」後方第 N 題
-  m = h.match(/「\s*([一二三四五六七八九十百]+)\s*、?\s*」.+?第\s*(\d+)\s*題/)
-  if (m) return { groupKey: `chinese_${m[1]}`, groupLabel: `${m[1]}、`, ordinal: +m[2] }
 
   // 題組(中文/數字)第N小題
   m = h.match(/[題题]組\s*([一二三四五六七八九十\d]+)\s*第\s*(\d+)\s*小?題/)
   if (m) return { groupKey: `題組${m[1]}`, groupLabel: `題組${m[1]}`, ordinal: +m[2] }
 
-  // 第N小題（沒 group prefix）
-  m = h.match(/第\s*(\d+)\s*小?題/)
-  if (m) return { groupKey: 'default', groupLabel: '（預設組）', ordinal: +m[1] }
+  // 第N小題沒 group prefix → return null（避免 default fallback 抓到錯誤的 row）
+  // 舊版這裡 return 'default'、會被 main matcher 的 fallback 抓 OCR 第一個 group 的 row、
+  // 容易 mis-match（如 1-1-x 配到題組二的 row）。改回 null 讓 read 走純視覺 classify。
+  return null
+}
+
+/**
+ * 解 section 名（從 anchorHint 的 『』 或 「」 內抽出）。
+ * @returns null | { groupKey, groupLabel }
+ */
+function parseSectionName(sec) {
+  // 題組X
+  let m = sec.match(/^[題题]組\s*([一二三四五六七八九十\d]+)/)
+  if (m) return { groupKey: `題組${m[1]}`, groupLabel: `題組${m[1]}` }
+
+  // Part X
+  m = sec.match(/^Part\s*([A-Z])/i)
+  if (m) return { groupKey: `Part_${m[1].toUpperCase()}`, groupLabel: `Part ${m[1].toUpperCase()}` }
+
+  // Section N
+  m = sec.match(/^Section\s*(\d+)/i)
+  if (m) return { groupKey: `Section_${m[1]}`, groupLabel: `Section ${m[1]}` }
+
+  // 中文大寫數字 + 頓號：壹/貳/參/肆/伍/陸/柒/捌/玖/拾
+  m = sec.match(/^([壹貳參肆伍陸柒捌玖拾]+)\s*[、，]/)
+  if (m) return { groupKey: `cap_${m[1]}`, groupLabel: `${m[1]}、` }
+
+  // 中文小寫數字 + 頓號：一/二/三...
+  m = sec.match(/^([一二三四五六七八九十百]+)\s*[、，]/)
+  if (m) return { groupKey: `chinese_${m[1]}`, groupLabel: `${m[1]}、` }
 
   return null
 }
@@ -95,12 +142,25 @@ export function detectGroups(detections, imgW = 0) {
     const d = detections[i]
     const text = (d.rec_text || '').trim()
     let key = null, label = null
+    // 題組X
     let m = text.match(/[題题]組\s*([一二三四五六七八九十\d]+)/)
     if (m) { key = `題組${m[1]}`; label = `題組${m[1]}` }
+    // Part X
     if (!key) {
       m = text.match(/Part\s*([A-Z])\b/i)
       if (m) { key = `Part_${m[1].toUpperCase()}`; label = `Part ${m[1].toUpperCase()}` }
     }
+    // Section N
+    if (!key) {
+      m = text.match(/Section\s*(\d+)/i)
+      if (m) { key = `Section_${m[1]}`; label = `Section ${m[1]}` }
+    }
+    // 中文大寫數字 + 頓號（壹、貳、參…）
+    if (!key) {
+      m = text.match(/^\s*[（(]?\s*([壹貳參肆伍陸柒捌玖拾]+)\s*[、)）]/)
+      if (m) { key = `cap_${m[1]}`; label = `${m[1]}、` }
+    }
+    // 中文小寫數字 + 頓號（一、二、三…）
     if (!key) {
       m = text.match(/^\s*[（(]?\s*([一二三四五六七八九十百])\s*[、)）]/)
       if (m) { key = `chinese_${m[1]}`; label = `${m[1]}、` }
