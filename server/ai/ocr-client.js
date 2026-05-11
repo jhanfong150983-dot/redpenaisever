@@ -227,25 +227,26 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
   }
 
   // 🆕 若是 overlap-split 的圖（input 前 N% 是借來的前頁底）、把 OCR 結果從 overlap 座標
-  // 轉成 no-overlap 座標：detection y 扣掉 overlap、image_size height 縮、detection 完全
-  // 在 overlap 區域的（y_bot < 0）丟掉。downstream HINT prompt + applyOcrBboxOverride 才能
-  // 正確對到 classify AI 看的 no-overlap 圖。
+  // 轉成 no-overlap 座標：detection y 扣掉 overlap、image_size height 縮。
+  // ⚠️ NOT 丟掉 overlap region 的 detection — overlap 的目的就是要 catch 那邊的 group
+  // header（如「題組七」落在前頁底跨進來）、丟掉 = 浪費 overlap 的意義。讓 detection y
+  // 可以是負值、matcher 的 detectGroups 仍能識別、findQuestionNumberRows 找出的 question
+  // rows 是 page 本體（y > 0 in adjusted）、HINT/override 拿到的 candidate 都是正常 y。
   if (inputCropTopRatio > 0 && Array.isArray(ocrResult.image_size)) {
     const [imgW, imgH] = ocrResult.image_size
     const overlapPxInOcr = Math.round(imgH * inputCropTopRatio)
-    const adjustedDetections = (ocrResult.detections || [])
-      .map((d) => {
-        const [x1, y1, x2, y2] = d.bbox
-        return { ...d, bbox: [x1, y1 - overlapPxInOcr, x2, y2 - overlapPxInOcr] }
-      })
-      .filter((d) => d.bbox[3] > 0)  // y_bot > 0 才在 page 範圍內、完全在 overlap 區的丟掉
+    const adjustedDetections = (ocrResult.detections || []).map((d) => {
+      const [x1, y1, x2, y2] = d.bbox
+      return { ...d, bbox: [x1, y1 - overlapPxInOcr, x2, y2 - overlapPxInOcr] }
+    })
+    const overlapHeaderCount = adjustedDetections.filter((d) => d.bbox[3] <= 0).length
     ocrResult = {
       ...ocrResult,
       image_size: [imgW, imgH - overlapPxInOcr],
       detections: adjustedDetections,
-      overlapAdjusted: { inputCropTopRatio: +inputCropTopRatio.toFixed(3), overlapPxInOcr, droppedDetections: (ocrResult.detections?.length || 0) - adjustedDetections.length }
+      overlapAdjusted: { inputCropTopRatio: +inputCropTopRatio.toFixed(3), overlapPxInOcr, overlapHeaderCount }
     }
-    console.log(`[ocr-client.prepareHints] overlap-adjusted: -${overlapPxInOcr}px y, dropped ${ocrResult.overlapAdjusted.droppedDetections} detections in overlap region`)
+    console.log(`[ocr-client.prepareHints] overlap-adjusted: -${overlapPxInOcr}px y, ${overlapHeaderCount} detections in overlap region (kept for group detection)`)
   }
 
   // ── candidates generator router ──
