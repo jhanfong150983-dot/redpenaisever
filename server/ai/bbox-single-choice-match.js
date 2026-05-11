@@ -268,12 +268,11 @@ export function buildSingleChoiceAnchorCandidates(answerKeyQuestions, ocrDetecti
     if (!parsed) continue
     stats.parsedCount++
 
-    let groupRows = grouped.get(parsed.groupKey)
-    if (!groupRows || groupRows.length === 0) {
-      // Fallback：取第一組（topmost）
-      const firstGroup = [...grouped.entries()].find(([_, rows]) => rows.length > 0)
-      if (firstGroup) groupRows = firstGroup[1]
-    }
+    // 找不到對應 group 直接 skip、不 fallback 抓「第一個有 rows 的 group」。
+    // 舊版的 fallback 邏輯會造成 mis-match：例如卷上 OCR 沒抓到「題組一」header、
+    // 1-1-x 的 anchorHint 指向「題組一」、fallback 卻抓到「題組二」rows、配出錯位的 bbox。
+    // 寧可不配（走純視覺 classify）、也不要配錯位置。
+    const groupRows = grouped.get(parsed.groupKey)
     if (!groupRows || groupRows.length === 0) continue
 
     const row = groupRows.find(r => r.ordinal === parsed.ordinal)
