@@ -275,8 +275,12 @@ export function buildSingleChoiceAnchorCandidates(answerKeyQuestions, ocrDetecti
     const groupRows = grouped.get(parsed.groupKey)
     if (!groupRows || groupRows.length === 0) continue
 
-    const row = groupRows.find(r => r.ordinal === parsed.ordinal)
-    if (!row) continue
+    // 優先選 paren-typed row（前括號答題格式如「(?)N.」）、最後才 fallback 到 plain（純「N.」）
+    // 理由：題目描述清單（如「1.馬偕拿聖經」）也會 match plain pattern 但不是答題位置、
+    // 真正的 single_choice 答題 row 通常是「(?)N.題目」格式、要優先匹配
+    const matches = groupRows.filter(r => r.ordinal === parsed.ordinal)
+    if (matches.length === 0) continue
+    const row = matches.find(r => r.patternType !== 'plain') || matches[0]
 
     result[q.id] = [{
       idx: row.idx,
