@@ -560,6 +560,7 @@ async function splitWithTopOverlapForOcr(imageBase64, mimeType, pageBreaks, topO
     if (!width || !height) return null
 
     const boundaries = [0, ...pageBreaks, 1]
+    const pageInfos = []
     const extractPromises = []
     for (let i = 0; i < boundaries.length - 1; i++) {
       const startY = boundaries[i]
@@ -571,6 +572,9 @@ async function splitWithTopOverlapForOcr(imageBase64, mimeType, pageBreaks, topO
       const bottomPx = Math.round(endY * height)
       const pagePxHeight = bottomPx - topPx
       if (pagePxHeight <= 0) continue
+      // 該頁實際 top overlap 像素 / 該頁總高度 = overlap 比例（用於 OCR coord 後處理）
+      const inputTopOverlapPx = Math.round(startY * height) - topPx
+      pageInfos.push({ inputTopOverlapPx, inputPageHeight: pagePxHeight })
       extractPromises.push(
         sharp(imageBuffer)
           .extract({ left: 0, top: topPx, width, height: pagePxHeight })
@@ -579,8 +583,11 @@ async function splitWithTopOverlapForOcr(imageBase64, mimeType, pageBreaks, topO
       )
     }
     const buffers = await Promise.all(extractPromises)
-    return buffers.map((buf) => ({
-      inlineData: { data: buf.toString('base64'), mimeType: 'image/jpeg' }
+    return buffers.map((buf, i) => ({
+      inlineData: { data: buf.toString('base64'), mimeType: 'image/jpeg' },
+      // 後處理 OCR 結果用：input 圖前 N px 是借來的 overlap、OCR 內部 resize 後要等比例扣
+      inputTopOverlapPx: pageInfos[i].inputTopOverlapPx,
+      inputPageHeight: pageInfos[i].inputPageHeight
     }))
   } catch (err) {
     console.warn('[staged-grading] splitWithTopOverlapForOcr failed:', err?.message)
@@ -5479,11 +5486,17 @@ export async function runStagedGradingPhaseA({
         ? await Promise.all(ocrInputPages.map(async (p, i) => {
             try {
               const ids = pageEntries[i][1]
+              // overlap-split 的圖前 N px 是借來的前頁底、傳給 prepareOcrHints 讓它把
+              // OCR 結果 y 扣掉 overlap、轉成 no-overlap 座標、讓 HINT 跟 classify AI 看的圖對齊
+              const inputCropTopRatio = p.inputTopOverlapPx && p.inputPageHeight
+                ? p.inputTopOverlapPx / p.inputPageHeight
+                : 0
               return await prepareOcrHintsForClassify({
                 imageBytes: Buffer.from(p.inlineData.data, 'base64'),
                 mimeType: p.inlineData.mimeType,
                 answerKeyQuestions: answerKeyQuestions.filter(q => ids.includes(q?.id)),
-                answerSheetMode
+                answerSheetMode,
+                inputCropTopRatio
               })
             } catch (e) {
               logStaged(pipelineRunId, 'basic', `OCR-assist multi-page p${pageEntries[i][0]}: ERROR`, { error: e?.message, stack: e?.stack?.split('\n').slice(0, 3).join(' | ') })

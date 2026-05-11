@@ -206,11 +206,11 @@ export function isOcrAssistBracketGapEnabled() {
  * @param {Object} params.opts - { timeoutMs }
  * @returns {Promise<{ extraSection: string, ocrResult: object|null, candidatesByQid: object, stats: object|null }>}
  */
-export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerKeyQuestions, answerSheetMode = 'with_questions', opts = {} }) {
+export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerKeyQuestions, answerSheetMode = 'with_questions', opts = {}, inputCropTopRatio = 0 }) {
   const isAnswerOnly = answerSheetMode === 'answer_only'
   // 依模式決定要查的 flag
   const enabled = isAnswerOnly ? isOcrAssistAnswerOnlyEnabled() : isOcrAssistEnabled()
-  console.log(`[ocr-client.prepareHints] entry mode=${answerSheetMode} enabled=${enabled} questions=${answerKeyQuestions?.length || 0} bytes=${imageBytes?.length || 0}`)
+  console.log(`[ocr-client.prepareHints] entry mode=${answerSheetMode} enabled=${enabled} questions=${answerKeyQuestions?.length || 0} bytes=${imageBytes?.length || 0} cropTop=${inputCropTopRatio}`)
   if (!enabled) {
     console.log(`[ocr-client.prepareHints] skipped: feature_flag_off`)
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'feature_flag_off', mode: answerSheetMode } }
@@ -220,10 +220,32 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'empty_input', mode: answerSheetMode } }
   }
 
-  const ocrResult = await runOcrOnImage(imageBytes, mimeType, opts)
+  let ocrResult = await runOcrOnImage(imageBytes, mimeType, opts)
   if (!ocrResult) {
     console.log(`[ocr-client.prepareHints] skipped: ocr_failed (runOcrOnImage returned null)`)
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'ocr_failed', mode: answerSheetMode } }
+  }
+
+  // 🆕 若是 overlap-split 的圖（input 前 N% 是借來的前頁底）、把 OCR 結果從 overlap 座標
+  // 轉成 no-overlap 座標：detection y 扣掉 overlap、image_size height 縮、detection 完全
+  // 在 overlap 區域的（y_bot < 0）丟掉。downstream HINT prompt + applyOcrBboxOverride 才能
+  // 正確對到 classify AI 看的 no-overlap 圖。
+  if (inputCropTopRatio > 0 && Array.isArray(ocrResult.image_size)) {
+    const [imgW, imgH] = ocrResult.image_size
+    const overlapPxInOcr = Math.round(imgH * inputCropTopRatio)
+    const adjustedDetections = (ocrResult.detections || [])
+      .map((d) => {
+        const [x1, y1, x2, y2] = d.bbox
+        return { ...d, bbox: [x1, y1 - overlapPxInOcr, x2, y2 - overlapPxInOcr] }
+      })
+      .filter((d) => d.bbox[3] > 0)  // y_bot > 0 才在 page 範圍內、完全在 overlap 區的丟掉
+    ocrResult = {
+      ...ocrResult,
+      image_size: [imgW, imgH - overlapPxInOcr],
+      detections: adjustedDetections,
+      overlapAdjusted: { inputCropTopRatio: +inputCropTopRatio.toFixed(3), overlapPxInOcr, droppedDetections: (ocrResult.detections?.length || 0) - adjustedDetections.length }
+    }
+    console.log(`[ocr-client.prepareHints] overlap-adjusted: -${overlapPxInOcr}px y, dropped ${ocrResult.overlapAdjusted.droppedDetections} detections in overlap region`)
   }
 
   // ── candidates generator router ──
