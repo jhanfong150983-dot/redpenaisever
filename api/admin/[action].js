@@ -3467,15 +3467,22 @@ async function qualityOverview(db, days) {
   const reviewCounts = rows.map((r) => r.needs_review_count || 0)
   const reviewedCount = reviewCounts.filter((c) => c > 0).length
   const avgReview = total ? reviewCounts.reduce((a, b) => a + b, 0) / total : 0
-  const matchRates = []
+  // OCR-assist 整體命中率：用「所有 matcher 加起來的最終 candidates」/「inlineCount」、
+  // 不只看 LCS+Dice 的 matchRate（那會偏低估、漏算 single_choice/bracket_gap/sub_cell/blank_paren）
+  let totalInline = 0
+  let totalMatched = 0
   for (const r of rows) {
     const perPage = r.classify?.ocrAssist?.perPage || []
     for (const p of perPage) {
-      const rate = p?.stats?.matchRate
-      if (typeof rate === 'number') matchRates.push(rate)
+      const inlineCount = p?.stats?.inlineCount || 0
+      if (inlineCount === 0) continue
+      // p.candidates 是所有 matcher merge 完的最終結果（key = qid、value = [candidate]）
+      const finalMatched = p?.candidates ? Object.keys(p.candidates).length : 0
+      totalInline += inlineCount
+      totalMatched += Math.min(finalMatched, inlineCount)  // cap、避免超過 inlineCount
     }
   }
-  const avgOcrMatch = matchRates.length ? matchRates.reduce((a, b) => a + b, 0) / matchRates.length : null
+  const avgOcrMatch = totalInline > 0 ? totalMatched / totalInline : null
 
   // 卡住 submissions（pending_grading / grading_in_progress、source=student_correction）
   const { data: stuck } = await db
