@@ -94,10 +94,13 @@ function findBlankParenRows(detections, parsed, mode = 'exact') {
 
   const matches = []
   for (let i = 0; i < detections.length; i++) {
-    const text = (detections[i].rec_text || '').trim()
+    const det = detections[i]
+    // 排除 overlap-region detection（y < 0 表示是上一頁底部漏進來的、不是本頁內容）
+    if (Array.isArray(det.bbox) && det.bbox[1] < 0) continue
+    const text = (det.rec_text || '').trim()
     const textNorm = normalize(text)
     if (re.test(textNorm)) {
-      matches.push({ idx: i, det: detections[i] })
+      matches.push({ idx: i, det })
     }
   }
   return matches
