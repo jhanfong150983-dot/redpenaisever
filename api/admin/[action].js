@@ -3410,15 +3410,22 @@ function normalizeAnswer(s) {
   if (s == null) return ''
   let v = String(s)
   if (/未作答|未填寫|沒寫|無作答/.test(v)) return '∅'  // 標準化「沒寫」
-  // 抽純數字+英文字母（去除單位、標點、空白）
+  // 只處理「不會改變語意」的差異：
+  //   - 全形/半形標點（，,、；; 等）
+  //   - 空白 / 換行 / Tab
+  //   - 純排版裝飾符（⧉、|、─、表格分隔線）
+  // **不動文字內容**——學生寫錯字「裡 vs 理」「即便 vs 及便」要當真實質差、給老師看
   v = v
-    .replace(/[\s　]/g, '')                      // 空白
-    .replace(/答[：:]/g, '')                         // 「答：」
-    .replace(/[A-Z]\s*[:：]/g, '')                    // 「A: 」開頭
-    .replace(/[,，、:：;；。.]/g, '')                  // 標點
-    .replace(/[歲倍個年元支份題分秒個人]/g, '')        // 常見單位
+    .replace(/[\s　\n\r\t]/g, '')                    // 各種空白 / 換行 / Tab
+    .replace(/[，,、]/g, '')                         // 中英文逗號 / 頓號
+    .replace(/[。.]/g, '')                           // 中英文句號
+    .replace(/[；;]/g, '')                            // 中英文分號
+    .replace(/[：:]/g, '')                            // 中英文冒號
+    .replace(/[！!？?]/g, '')                         // 驚嘆問號
+    .replace(/[⧉│┤├─━]/g, '')                       // 排版裝飾分隔符
     .replace(/[（）()【】\[\]「」『』]/g, '')          // 括號
-  return v.toLowerCase()
+  // 注意：保留中英文大小寫差異（A vs a 在某些選擇題有意義）
+  return v
 }
 
 function classifyDiff(a, b) {
