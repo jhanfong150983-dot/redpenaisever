@@ -148,6 +148,7 @@ import { buildCellAnchorCandidates } from './bbox-cell-anchor-match.js'
 import { buildSingleChoiceAnchorCandidates } from './bbox-single-choice-match.js'
 import { buildBracketGapCandidates } from './bbox-bracket-gap-match.js'
 import { buildSubCellAnchorCandidates } from './bbox-sub-cell-match.js'
+import { buildBlankParenCandidates } from './bbox-blank-paren-match.js'
 
 /**
  * answer_only 模式單獨開關（跟 OCR_ASSIST_CLASSIFY_ENABLED 獨立）。
@@ -198,6 +199,21 @@ export function isOcrAssistBracketGapEnabled() {
  */
 export function isOcrAssistSubCellEnabled() {
   const raw = getEnvValue('OCR_ASSIST_SUB_CELL_ENABLED')
+  if (!raw) return true  // default on
+  return String(raw).trim().toLowerCase() !== 'false'
+}
+
+/**
+ * with_questions 模式 fill_blank「prefix（ ）suffix」（括號內留空）增益開關。
+ * Default ON（要關掉才設 OCR_ASSIST_BLANK_PAREN_ENABLED=false）。
+ *
+ * 處理「線段圖中標示『大（ ）歲』」這種<b>括號內是空格本身</b>的 anchorHint：
+ *   - 跟 bracket_gap 不同（bracket_gap 找兩個 OCR row 中間的空白、適合題幹被切兩 row）
+ *   - 找單一 OCR row 含「prefix(任意)suffix」、學生填或沒填都能配
+ *   - 多 qid 共用同 anchor（如 page 同時有兩處「相差（ ）倍」）按 y-asc + qid lex 配對
+ */
+export function isOcrAssistBlankParenEnabled() {
+  const raw = getEnvValue('OCR_ASSIST_BLANK_PAREN_ENABLED')
   if (!raw) return true  // default on
   return String(raw).trim().toLowerCase() !== 'false'
 }
@@ -305,6 +321,17 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
         mergedCount++
       }
       stats.subCell = { ...subResult.stats, mergedCount }
+    }
+
+    // blank-paren 偵測：覆寫 fill_blank「prefix（ ）suffix」格式的 qids
+    if (isOcrAssistBlankParenEnabled()) {
+      const bpResult = buildBlankParenCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size)
+      let mergedCount = 0
+      for (const [qid, cands] of Object.entries(bpResult.candidatesByQid)) {
+        candidatesByQid[qid] = cands
+        mergedCount++
+      }
+      stats.blankParen = { ...bpResult.stats, mergedCount }
     }
   }
   const extraSection = buildOcrHintsSection(candidatesByQid, ocrResult.image_size)
