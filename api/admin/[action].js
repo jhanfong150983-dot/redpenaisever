@@ -3445,11 +3445,12 @@ function median(arr) {
 async function qualityOverview(db, days) {
   const sinceIso = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
 
-  // 最近 N 天 stage_log（取每 submission 最新一筆）
+  // 最近 N 天 stage_log（只看 Phase A、因為 Phase B/accessor 的 needs_review_count 是 null）
   const { data: logs, error } = await db
     .from('grading_stage_logs')
     .select('submission_id, created_at, needs_review_count, classify, consistency, total_score')
     .gte('created_at', sinceIso)
+    .not('classify', 'is', null)  // 只取 Phase A 那筆、避免 Phase B 蓋掉 needs_review_count
     .order('created_at', { ascending: false })
     .limit(2000)
   if (error) throw new Error(error.message)
