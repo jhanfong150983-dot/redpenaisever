@@ -3448,7 +3448,7 @@ async function qualityOverview(db, days) {
   // 最近 N 天 stage_log（只看 Phase A、因為 Phase B/accessor 的 needs_review_count 是 null）
   const { data: logs, error } = await db
     .from('grading_stage_logs')
-    .select('submission_id, created_at, needs_review_count, classify, consistency, total_score')
+    .select('submission_id, assignment_id, created_at, needs_review_count, classify, consistency, total_score')
     .gte('created_at', sinceIso)
     .not('classify', 'is', null)  // 只取 Phase A 那筆、避免 Phase B 蓋掉 needs_review_count
     .order('created_at', { ascending: false })
@@ -3467,19 +3467,21 @@ async function qualityOverview(db, days) {
   const reviewCounts = rows.map((r) => r.needs_review_count || 0)
   const reviewedCount = reviewCounts.filter((c) => c > 0).length
   const avgReview = total ? reviewCounts.reduce((a, b) => a + b, 0) / total : 0
-  // OCR-assist 整體命中率：用「所有 matcher 加起來的最終 candidates」/「inlineCount」、
-  // 不只看 LCS+Dice 的 matchRate（那會偏低估、漏算 single_choice/bracket_gap/sub_cell/blank_paren）
+  // OCR-assist 整體命中率：「所有 matcher 加起來的最終 candidates」/「該頁可被 anchor 的題數」
+  // - with_questions 模式：分母 = stats.inlineCount（LCS+Dice schema、含 fill_blank 系列 + single_choice）
+  // - answer_only 模式：分母 = stats.totalQuestions（cell_anchor schema、所有題都該配）
   let totalInline = 0
   let totalMatched = 0
   for (const r of rows) {
     const perPage = r.classify?.ocrAssist?.perPage || []
     for (const p of perPage) {
-      const inlineCount = p?.stats?.inlineCount || 0
-      if (inlineCount === 0) continue
-      // p.candidates 是所有 matcher merge 完的最終結果（key = qid、value = [candidate]）
+      // 分母：依 stats schema 取不同欄位
+      const denom = p?.stats?.inlineCount || p?.stats?.totalQuestions || 0
+      if (denom === 0) continue
+      // 分子：p.candidates 是所有 matcher merge 完的最終結果
       const finalMatched = p?.candidates ? Object.keys(p.candidates).length : 0
-      totalInline += inlineCount
-      totalMatched += Math.min(finalMatched, inlineCount)  // cap、避免超過 inlineCount
+      totalInline += denom
+      totalMatched += Math.min(finalMatched, denom)
     }
   }
   const avgOcrMatch = totalInline > 0 ? totalMatched / totalInline : null
@@ -3512,6 +3514,45 @@ async function qualityOverview(db, days) {
       }
     })
 
+  // 按 assignment 拆解 OCR rate（讓 user 一眼看到哪份拉低總分）
+  const byAssignmentMap = new Map()
+  for (const r of rows) {
+    const perPage = r.classify?.ocrAssist?.perPage || []
+    for (const p of perPage) {
+      const denom = p?.stats?.inlineCount || p?.stats?.totalQuestions || 0
+      const matched = p?.candidates ? Object.keys(p.candidates).length : 0
+      if (!byAssignmentMap.has(r.assignment_id)) {
+        byAssignmentMap.set(r.assignment_id, { aid: r.assignment_id, pages: 0, inline: 0, matched: 0, submissions: new Set() })
+      }
+      const entry = byAssignmentMap.get(r.assignment_id)
+      entry.pages++
+      entry.inline += denom
+      entry.matched += Math.min(matched, denom || matched)
+      entry.submissions.add(r.submission_id)
+    }
+  }
+  const assignmentIds = [...byAssignmentMap.keys()]
+  const titleMap = new Map()
+  if (assignmentIds.length > 0) {
+    const { data: ass } = await db
+      .from('assignments')
+      .select('id, title, answer_sheet_mode')
+      .in('id', assignmentIds)
+    for (const a of ass || []) titleMap.set(a.id, { title: a.title, mode: a.answer_sheet_mode })
+  }
+  const byAssignment = [...byAssignmentMap.values()]
+    .map((e) => ({
+      assignment_id: e.aid,
+      title: titleMap.get(e.aid)?.title || '(無標題)',
+      mode: titleMap.get(e.aid)?.mode || null,
+      submissions: e.submissions.size,
+      pages: e.pages,
+      inline: e.inline,
+      matched: e.matched,
+      rate: e.inline > 0 ? +(e.matched / e.inline).toFixed(3) : null
+    }))
+    .sort((a, b) => b.pages - a.pages)
+
   return {
     days_window: days,
     total_submissions: total,
@@ -3519,7 +3560,8 @@ async function qualityOverview(db, days) {
     avg_needs_review: +avgReview.toFixed(2),
     avg_ocr_match_rate: avgOcrMatch != null ? +avgOcrMatch.toFixed(3) : null,
     stuck_correction_count: stuckCount,
-    daily
+    daily,
+    by_assignment: byAssignment
   }
 }
 
