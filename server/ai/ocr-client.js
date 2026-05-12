@@ -147,6 +147,7 @@ import { buildAnchorCandidates, buildOcrHintsSection } from './bbox-anchor-match
 import { buildCellAnchorCandidates } from './bbox-cell-anchor-match.js'
 import { buildSingleChoiceAnchorCandidates } from './bbox-single-choice-match.js'
 import { buildBracketGapCandidates } from './bbox-bracket-gap-match.js'
+import { buildSubCellAnchorCandidates } from './bbox-sub-cell-match.js'
 
 /**
  * answer_only 模式單獨開關（跟 OCR_ASSIST_CLASSIFY_ENABLED 獨立）。
@@ -183,6 +184,20 @@ export function isOcrAssistSingleChoiceEnabled() {
  */
 export function isOcrAssistBracketGapEnabled() {
   const raw = getEnvValue('OCR_ASSIST_BRACKET_GAP_ENABLED')
+  if (!raw) return true  // default on
+  return String(raw).trim().toLowerCase() !== 'false'
+}
+
+/**
+ * with_questions 模式 multi_fill 子格 (N)label 後方底線增益開關。
+ * Default ON（要關掉才設 OCR_ASSIST_SUB_CELL_ENABLED=false）。
+ *
+ * 處理 anchorHint 含「(N)label 後方的底線處」格式的 sub-cell：
+ *   例：「位於『題組三』第1小題，(1)推力 後方的底線處」
+ * 找 OCR row 含「(N)label」、用該 row bbox 當 anchor。
+ */
+export function isOcrAssistSubCellEnabled() {
+  const raw = getEnvValue('OCR_ASSIST_SUB_CELL_ENABLED')
   if (!raw) return true  // default on
   return String(raw).trim().toLowerCase() !== 'false'
 }
@@ -279,6 +294,17 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
         mergedCount++
       }
       stats.bracketGap = { ...bgResult.stats, mergedCount }
+    }
+
+    // sub-cell 偵測：覆寫 multi_fill「(N)label 後方底線」格式的 qids
+    if (isOcrAssistSubCellEnabled()) {
+      const subResult = buildSubCellAnchorCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size)
+      let mergedCount = 0
+      for (const [qid, cands] of Object.entries(subResult.candidatesByQid)) {
+        candidatesByQid[qid] = cands
+        mergedCount++
+      }
+      stats.subCell = { ...subResult.stats, mergedCount }
     }
   }
   const extraSection = buildOcrHintsSection(candidatesByQid, ocrResult.image_size)
