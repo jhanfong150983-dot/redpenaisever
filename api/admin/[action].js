@@ -3364,7 +3364,436 @@ export default async function handler(req, res) {
     return await handleAnnouncements(req, res, supabaseAdmin, adminUser)
   }
 
+  if (action === 'quality') {
+    return await handleQuality(req, res, supabaseAdmin)
+  }
+
   res.status(404).json({ error: 'Unknown action' })
+}
+
+// ========== QUALITY DASHBOARD ==========
+// 開發者用、看批改品質指標、不顯示給老師/學生
+// /api/admin/quality?mode=overview|bbox|read|export[&assignmentId=xxx&days=N]
+
+async function handleQuality(req, res, supabaseAdmin) {
+  const mode = String(req.query?.mode || 'overview')
+  const assignmentId = req.query?.assignmentId ? String(req.query.assignmentId) : null
+  const days = Math.min(Math.max(Number(req.query?.days) || 7, 1), 90)
+
+  try {
+    if (mode === 'overview') return res.status(200).json(await qualityOverview(supabaseAdmin, days))
+    if (mode === 'bbox') {
+      if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
+      return res.status(200).json(await qualityBbox(supabaseAdmin, assignmentId))
+    }
+    if (mode === 'read') {
+      if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
+      return res.status(200).json(await qualityRead(supabaseAdmin, assignmentId))
+    }
+    if (mode === 'export') {
+      if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
+      const md = await qualityExportMarkdown(supabaseAdmin, assignmentId)
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+      return res.status(200).send(md)
+    }
+    if (mode === 'assignments') return res.status(200).json(await qualityAssignmentList(supabaseAdmin, days))
+    return res.status(400).json({ error: 'Unknown mode' })
+  } catch (err) {
+    console.error('[admin/quality] error:', err)
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Quality query failed' })
+  }
+}
+
+// ── Helpers ──
+
+function normalizeAnswer(s) {
+  if (s == null) return ''
+  let v = String(s)
+  if (/未作答|未填寫|沒寫|無作答/.test(v)) return '∅'  // 標準化「沒寫」
+  // 抽純數字+英文字母（去除單位、標點、空白）
+  v = v
+    .replace(/[\s　]/g, '')                      // 空白
+    .replace(/答[：:]/g, '')                         // 「答：」
+    .replace(/[A-Z]\s*[:：]/g, '')                    // 「A: 」開頭
+    .replace(/[,，、:：;；。.]/g, '')                  // 標點
+    .replace(/[歲倍個年元支份題分秒個人]/g, '')        // 常見單位
+    .replace(/[（）()【】\[\]「」『』]/g, '')          // 括號
+  return v.toLowerCase()
+}
+
+function classifyDiff(a, b) {
+  const na = normalizeAnswer(a)
+  const nb = normalizeAnswer(b)
+  if (a === b) return 'identical'
+  if (na === nb) return 'format_only'
+  if (na === '∅' || nb === '∅') return 'one_blank'
+  return 'substantive'
+}
+
+function percentile(arr, p) {
+  if (arr.length === 0) return null
+  const sorted = [...arr].sort((x, y) => x - y)
+  const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * p))
+  return sorted[idx]
+}
+
+function median(arr) {
+  return percentile(arr, 0.5)
+}
+
+// ── Overview: 過去 N 天系統健康度 ──
+async function qualityOverview(db, days) {
+  const sinceIso = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
+
+  // 最近 N 天 stage_log（取每 submission 最新一筆）
+  const { data: logs, error } = await db
+    .from('grading_stage_logs')
+    .select('submission_id, created_at, needs_review_count, classify, consistency, total_score')
+    .gte('created_at', sinceIso)
+    .order('created_at', { ascending: false })
+    .limit(2000)
+  if (error) throw new Error(error.message)
+
+  // 去重 — 每 submission 留最新一筆
+  const latest = new Map()
+  for (const log of logs || []) {
+    if (!latest.has(log.submission_id)) latest.set(log.submission_id, log)
+  }
+  const rows = [...latest.values()]
+  const total = rows.length
+
+  // 計各指標
+  const reviewCounts = rows.map((r) => r.needs_review_count || 0)
+  const reviewedCount = reviewCounts.filter((c) => c > 0).length
+  const avgReview = total ? reviewCounts.reduce((a, b) => a + b, 0) / total : 0
+  const matchRates = []
+  for (const r of rows) {
+    const perPage = r.classify?.ocrAssist?.perPage || []
+    for (const p of perPage) {
+      const rate = p?.stats?.matchRate
+      if (typeof rate === 'number') matchRates.push(rate)
+    }
+  }
+  const avgOcrMatch = matchRates.length ? matchRates.reduce((a, b) => a + b, 0) / matchRates.length : null
+
+  // 卡住 submissions（pending_grading / grading_in_progress、source=student_correction）
+  const { data: stuck } = await db
+    .from('submissions')
+    .select('id, source, status, created_at')
+    .in('status', ['pending_grading', 'pending_grading_retry', 'grading_in_progress'])
+    .eq('source', 'student_correction')
+  const stuckCount = stuck?.length || 0
+
+  // 每日聚合
+  const byDay = new Map()
+  for (const r of rows) {
+    const day = String(r.created_at).slice(0, 10)
+    if (!byDay.has(day)) byDay.set(day, [])
+    byDay.get(day).push(r)
+  }
+  const daily = [...byDay.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(([day, dayRows]) => {
+      const rc = dayRows.map((r) => r.needs_review_count || 0)
+      const rev = rc.filter((c) => c > 0).length
+      return {
+        day,
+        count: dayRows.length,
+        review_rate: dayRows.length ? +(rev / dayRows.length).toFixed(3) : 0,
+        avg_review: dayRows.length ? +(rc.reduce((a, b) => a + b, 0) / dayRows.length).toFixed(2) : 0
+      }
+    })
+
+  return {
+    days_window: days,
+    total_submissions: total,
+    review_rate: total ? +(reviewedCount / total).toFixed(3) : 0,
+    avg_needs_review: +avgReview.toFixed(2),
+    avg_ocr_match_rate: avgOcrMatch != null ? +avgOcrMatch.toFixed(3) : null,
+    stuck_correction_count: stuckCount,
+    daily
+  }
+}
+
+// ── Assignment list（給前端 dropdown 用）──
+async function qualityAssignmentList(db, days) {
+  const sinceIso = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
+  // 找最近有 grading_stage_logs 的 assignment
+  const { data, error } = await db
+    .from('grading_stage_logs')
+    .select('assignment_id, created_at')
+    .gte('created_at', sinceIso)
+    .order('created_at', { ascending: false })
+    .limit(5000)
+  if (error) throw new Error(error.message)
+  const counts = new Map()
+  for (const r of data || []) {
+    counts.set(r.assignment_id, (counts.get(r.assignment_id) || 0) + 1)
+  }
+  const aids = [...counts.keys()]
+  if (aids.length === 0) return { assignments: [] }
+  const { data: ass } = await db
+    .from('assignments')
+    .select('id, title, total_pages, doc_type, created_at')
+    .in('id', aids)
+  return {
+    assignments: (ass || [])
+      .map((a) => ({ ...a, log_count: counts.get(a.id) || 0 }))
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
+  }
+}
+
+// ── BBox 一致性分析 ──
+async function qualityBbox(db, assignmentId) {
+  // 取 assignment 所有 stage_log（每 submission 最新）
+  const { data: logs, error } = await db
+    .from('grading_stage_logs')
+    .select('submission_id, created_at, classify')
+    .eq('assignment_id', assignmentId)
+    .not('classify', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(2000)
+  if (error) throw new Error(error.message)
+  const latest = new Map()
+  for (const r of logs || []) {
+    if (!latest.has(r.submission_id)) latest.set(r.submission_id, r)
+  }
+  const rows = [...latest.values()]
+
+  // 收集 classifyBboxes（per qid）+ matcher stats
+  const bboxByQid = new Map()  // qid → [{submissionId, x,y,w,h, page}]
+  const matcherStats = { blankParen: { matched: 0, parsed: 0 }, bracketGap: { matched: 0, parsed: 0 },
+    singleChoice: { matched: 0, parsed: 0 }, subCell: { matched: 0, parsed: 0 } }
+  const ocrCoverageZero = []  // {sid, qid}
+
+  for (const r of rows) {
+    const perPage = r.classify?.ocrAssist?.perPage || []
+    perPage.forEach((p, pageIdx) => {
+      // matcher stats
+      const s = p?.stats || {}
+      const bp = s.blankParen, bg = s.bracketGap, sc = s.singleChoiceStructural, sub = s.subCell
+      if (bp) { matcherStats.blankParen.matched += bp.matchedCount || 0; matcherStats.blankParen.parsed += bp.parsedCount || 0 }
+      if (bg) { matcherStats.bracketGap.matched += bg.matchedCount || 0; matcherStats.bracketGap.parsed += bg.parsedCount || 0 }
+      if (sc) { matcherStats.singleChoice.matched += sc.matchedCount || 0; matcherStats.singleChoice.parsed += sc.parsedCount || 0 }
+      if (sub) { matcherStats.subCell.matched += sub.matchedCount || 0; matcherStats.subCell.parsed += sub.parsedCount || 0 }
+
+      // classify bboxes
+      const cb = p?.classifyBboxes || []
+      const candidates = p?.candidates || {}
+      for (const item of cb) {
+        const qid = item.qid
+        const b = item.bbox || {}
+        if (!bboxByQid.has(qid)) bboxByQid.set(qid, [])
+        bboxByQid.get(qid).push({
+          submissionId: r.submission_id,
+          page: pageIdx,
+          x: b.x, y: b.y, w: b.w, h: b.h
+        })
+        // OCR coverage zero check
+        const cand = candidates[qid]
+        if (!cand || (Array.isArray(cand) && cand.length === 0)) {
+          ocrCoverageZero.push({ submissionId: r.submission_id, qid })
+        }
+      }
+    })
+  }
+
+  // 每 qid 算 median + 找 outlier
+  const qidStats = []
+  const outliers = []
+  for (const [qid, list] of bboxByQid.entries()) {
+    if (list.length < 3) continue  // 樣本太少不算
+    const xs = list.map((l) => l.x).filter((v) => typeof v === 'number')
+    const ys = list.map((l) => l.y).filter((v) => typeof v === 'number')
+    const ws = list.map((l) => l.w).filter((v) => typeof v === 'number')
+    const mx = median(xs), my = median(ys), mw = median(ws)
+    qidStats.push({
+      qid, n: list.length,
+      median_x: +mx.toFixed(3), median_y: +my.toFixed(3), median_w: +mw.toFixed(3)
+    })
+    // 偏離閾值 0.06（normalized、約 6% 頁寬）
+    for (const item of list) {
+      const dx = Math.abs((item.x || 0) - mx)
+      const dy = Math.abs((item.y || 0) - my)
+      if (dx > 0.06 || dy > 0.06) {
+        outliers.push({
+          submissionId: item.submissionId, qid,
+          dev_x: +dx.toFixed(3), dev_y: +dy.toFixed(3),
+          your_bbox: { x: item.x, y: item.y, w: item.w, h: item.h },
+          class_median: { x: +mx.toFixed(3), y: +my.toFixed(3), w: +mw.toFixed(3) }
+        })
+      }
+    }
+  }
+
+  // 每份 submission 偏離題數
+  const outlierByStudent = new Map()
+  for (const o of outliers) {
+    outlierByStudent.set(o.submissionId, (outlierByStudent.get(o.submissionId) || 0) + 1)
+  }
+  const submissionOutlierRanking = [...outlierByStudent.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([sid, count]) => ({ submissionId: sid, outlier_count: count }))
+
+  return {
+    assignmentId,
+    total_submissions: rows.length,
+    matcher_stats: Object.fromEntries(Object.entries(matcherStats).map(([k, v]) => [
+      k,
+      { ...v, rate: v.parsed ? +(v.matched / v.parsed).toFixed(3) : null }
+    ])),
+    qid_stats: qidStats.sort((a, b) => (a.qid < b.qid ? -1 : 1)),
+    outliers: outliers.sort((a, b) => (b.dev_x + b.dev_y) - (a.dev_x + a.dev_y)).slice(0, 30),
+    submission_outlier_ranking: submissionOutlierRanking,
+    ocr_coverage_zero: ocrCoverageZero.slice(0, 30)
+  }
+}
+
+// ── Read AI 不一致分析 ──
+async function qualityRead(db, assignmentId) {
+  const { data: logs, error } = await db
+    .from('grading_stage_logs')
+    .select('submission_id, created_at, read_answer_1, read_answer_2, needs_review_count, consistency')
+    .eq('assignment_id', assignmentId)
+    .not('read_answer_1', 'is', null)
+    .not('read_answer_2', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(2000)
+  if (error) throw new Error(error.message)
+  const latest = new Map()
+  for (const r of logs || []) {
+    if (!latest.has(r.submission_id)) latest.set(r.submission_id, r)
+  }
+  const rows = [...latest.values()]
+
+  let totalQuestions = 0
+  const diffsByType = { identical: 0, format_only: 0, one_blank: 0, substantive: 0 }
+  const formatExamples = []   // {sid, qid, a1, a2}
+  const blankExamples = []    // {sid, qid, a1, a2}
+  const substantiveExamples = []
+  const reviewByCount = new Map()  // submissionId → count
+
+  for (const r of rows) {
+    const r1 = Array.isArray(r.read_answer_1) ? r.read_answer_1 : []
+    const r2 = Array.isArray(r.read_answer_2) ? r.read_answer_2 : []
+    const r2ByQid = new Map(r2.map((q) => [q.questionId, q]))
+    for (const q of r1) {
+      const qid = q.questionId
+      const a1 = q.answer
+      const a2 = r2ByQid.get(qid)?.answer
+      totalQuestions++
+      const diff = classifyDiff(a1, a2)
+      diffsByType[diff]++
+      if (diff === 'format_only' && formatExamples.length < 30) {
+        formatExamples.push({ submissionId: r.submission_id, qid, a1, a2 })
+      } else if (diff === 'one_blank' && blankExamples.length < 30) {
+        blankExamples.push({ submissionId: r.submission_id, qid, a1, a2 })
+      } else if (diff === 'substantive' && substantiveExamples.length < 30) {
+        substantiveExamples.push({ submissionId: r.submission_id, qid, a1, a2 })
+      }
+    }
+    if (r.needs_review_count > 0) reviewByCount.set(r.submission_id, r.needs_review_count)
+  }
+
+  const submissionReviewRanking = [...reviewByCount.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([sid, count]) => ({ submissionId: sid, needs_review_count: count }))
+
+  const fmtRate = totalQuestions ? diffsByType.format_only / totalQuestions : 0
+  const reviewableNoise = diffsByType.format_only  // 假警報數
+
+  return {
+    assignmentId,
+    total_submissions: rows.length,
+    total_questions: totalQuestions,
+    diff_breakdown: diffsByType,
+    format_only_rate: +fmtRate.toFixed(3),
+    estimated_false_review: reviewableNoise,
+    format_examples: formatExamples,
+    blank_examples: blankExamples,
+    substantive_examples: substantiveExamples,
+    submission_review_ranking: submissionReviewRanking
+  }
+}
+
+// ── Markdown export ──
+async function qualityExportMarkdown(db, assignmentId) {
+  const [bbox, read, assInfo] = await Promise.all([
+    qualityBbox(db, assignmentId),
+    qualityRead(db, assignmentId),
+    db.from('assignments').select('id, title, doc_type, total_pages').eq('id', assignmentId).maybeSingle()
+      .then((r) => r.data)
+  ])
+  const title = assInfo?.title || assignmentId
+  const lines = []
+  lines.push(`# 批改品質報告 — ${title}`)
+  lines.push(`assignment_id: \`${assignmentId}\``)
+  lines.push(`產生時間: ${new Date().toISOString()}`)
+  lines.push('')
+  lines.push(`## 概覽`)
+  lines.push(`- submission 數: **${bbox.total_submissions}**`)
+  lines.push(`- 總題數（AI1 視角）: ${read.total_questions}`)
+  lines.push(`- read 不一致拆解:`)
+  lines.push(`  - identical: ${read.diff_breakdown.identical}`)
+  lines.push(`  - format_only（假警報）: **${read.diff_breakdown.format_only}**`)
+  lines.push(`  - one_blank（一邊未作答）: ${read.diff_breakdown.one_blank}`)
+  lines.push(`  - substantive（真不一致）: ${read.diff_breakdown.substantive}`)
+  lines.push(`- 估計可砍掉的假 review: **${read.estimated_false_review}** 題（占 ${(read.format_only_rate * 100).toFixed(1)}%）`)
+  lines.push('')
+  lines.push(`## Matcher 命中率`)
+  lines.push('| matcher | matched | parsed | rate |')
+  lines.push('|---|---|---|---|')
+  for (const [k, v] of Object.entries(bbox.matcher_stats)) {
+    lines.push(`| ${k} | ${v.matched} | ${v.parsed} | ${v.rate != null ? (v.rate * 100).toFixed(0) + '%' : '-'} |`)
+  }
+  lines.push('')
+  lines.push(`## BBox outlier（偏離班級中位數 > 6%）`)
+  if (bbox.outliers.length === 0) {
+    lines.push('（無）')
+  } else {
+    lines.push('| submission | qid | dev_x | dev_y | your(x,y) | median(x,y) |')
+    lines.push('|---|---|---|---|---|---|')
+    for (const o of bbox.outliers.slice(0, 20)) {
+      lines.push(`| ${o.submissionId.slice(-8)} | ${o.qid} | ${o.dev_x} | ${o.dev_y} | (${o.your_bbox.x},${o.your_bbox.y}) | (${o.class_median.x},${o.class_median.y}) |`)
+    }
+  }
+  lines.push('')
+  lines.push(`## 框錯的學生 top 10（outlier 數）`)
+  for (const r of bbox.submission_outlier_ranking) {
+    lines.push(`- \`${r.submissionId}\` → ${r.outlier_count} 題偏離`)
+  }
+  lines.push('')
+  lines.push(`## OCR coverage = 0（classify bbox 沒包到 OCR row）`)
+  if (bbox.ocr_coverage_zero.length === 0) {
+    lines.push('（無）')
+  } else {
+    for (const c of bbox.ocr_coverage_zero.slice(0, 20)) {
+      lines.push(`- \`${c.submissionId.slice(-8)}\` → ${c.qid}`)
+    }
+  }
+  lines.push('')
+  lines.push(`## Read 格式偽不一致 — 範例（normalize 後相等）`)
+  for (const e of read.format_examples.slice(0, 15)) {
+    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
+  }
+  lines.push('')
+  lines.push(`## Read 一邊未作答`)
+  for (const e of read.blank_examples.slice(0, 15)) {
+    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
+  }
+  lines.push('')
+  lines.push(`## Read 真實質性不一致`)
+  for (const e of read.substantive_examples.slice(0, 15)) {
+    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
+  }
+  lines.push('')
+  lines.push(`## needsReview top 10`)
+  for (const r of read.submission_review_ranking) {
+    lines.push(`- \`${r.submissionId}\` → ${r.needs_review_count} 題進 review`)
+  }
+  return lines.join('\n')
 }
 
 // ========== ANNOUNCEMENTS ==========
