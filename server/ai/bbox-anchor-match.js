@@ -255,28 +255,6 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
     const aiYCenter = aiY + aiH / 2
     const candYCenter = candY + candH / 2
 
-    // 🆕 2026-05-14 cell_anchor deterministic path（score >= 1.0）：跳過 LCS-style 微調
-    // 直接 REPLACE bbox 為 OCR cell anchor 位置
-    // 原因：cell_anchor 來自 section header + 印刷編號 row、是真理；
-    //       classify AI 飄到別 row/cell 時 LCS-style 微調的 y-guard 會跳過、漂走的 bbox 永遠救不回來
-    if (cand.score >= 1.0) {
-      const newBbox = {
-        x: +candX.toFixed(3),
-        y: +candY.toFixed(3),
-        w: +candW.toFixed(3),
-        h: +candH.toFixed(3)
-      }
-      const driftedY = Math.abs(aiYCenter - candYCenter) > yAlignThreshold
-      overrides.push({
-        questionId: q.questionId,
-        before: { x: +aiX.toFixed(3), y: +aiY.toFixed(3), w: +aiW.toFixed(3), h: +aiH.toFixed(3) },
-        after: newBbox,
-        reason: driftedY ? 'cell_anchor_replace_y_drifted' : 'cell_anchor_replace',
-        candScore: cand.score
-      })
-      return { ...q, answerBbox: newBbox, bboxOverriddenByOcr: true }
-    }
-
     if (Math.abs(aiYCenter - candYCenter) > yAlignThreshold) return q
 
     let workingX = aiX
