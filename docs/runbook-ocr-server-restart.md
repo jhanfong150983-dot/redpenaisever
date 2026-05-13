@@ -67,20 +67,24 @@ OCR_ASSIST_CLASSIFY_ENABLED = false
 
 ### Step 1：啟動 PaddleOCR server
 
-依先前安裝指南（[paddleocr_install_windows.md](../../docs/paddleocr-install-windows.md) 或記憶筆記）：
-
 ```powershell
 # 1. cd 到 OCR server 目錄
-cd <你的 OCR server 安裝路徑>
+cd C:\paddleocr-server
 
-# 2. 啟動 venv（如果用 venv）
+# 2. 啟動 venv
 .\venv\Scripts\Activate.ps1
-# 或 conda activate <env_name>
 
-# 3. 啟動 server（依你的 entrypoint、譬如）
+# 3. 啟動 FastAPI server（entry point = main.py、port 8000）
 uvicorn main:app --host 0.0.0.0 --port 8000
-# 或 python main.py
 ```
+
+⚠️ 注意：
+- **`(venv)` 必須出現在 prompt 前面**才代表 venv 啟動成功
+- 如果 `Activate.ps1` 跑不了、先執行：
+  ```powershell
+  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+  ```
+- 如果 uvicorn 報 `Could not import module "main"`、表示在錯的目錄。先 `Get-ChildItem *.py` 確認當前目錄有 `main.py`
 
 ### Step 2：確認 OCR 本地能用
 
@@ -94,16 +98,26 @@ curl -X POST http://localhost:8000/ocr -H "X-API-Key: dev-secret-please-change" 
 
 ### Step 3：啟動 cloudflared tunnel
 
+cloudflared.exe 放在 `C:\cloudflared\cloudflared.exe`、不在系統 PATH 上、所以**要用相對路徑跑、不是直接打 `cloudflared`**：
+
 ```powershell
-cloudflared tunnel --url http://localhost:8000
+cd C:\cloudflared
+.\cloudflared.exe tunnel --url http://localhost:8000
 ```
+
+⚠️ 注意：
+- **必須加 `.\` 前綴**（PowerShell 安全機制、不會自動從當前目錄找 exe）
+- 直接打 `cloudflared tunnel ...` 會報 `not recognized as a cmdlet`、不要被嚇到
+- 如果想以後直接打 `cloudflared`、要把 `C:\cloudflared` 加進系統 PATH
 
 會印出新 URL、譬如：
 ```
+Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):
 https://abcdef-12345-xyz.trycloudflare.com
 ```
 
 **⚠️ 複製這個 URL、每次重啟都不一樣。**
+**⚠️ 不要關這個 PowerShell 視窗、cloudflared 是 foreground process、關掉 tunnel 就斷。**
 
 ### Step 4：確認 tunnel 通
 
