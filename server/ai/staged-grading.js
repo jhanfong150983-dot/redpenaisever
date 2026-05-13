@@ -5338,13 +5338,20 @@ export async function runStagedGradingPhaseA({
     const classifyParsed = parseCandidateJson(classifyResponse.data)
     if (!classifyParsed || typeof classifyParsed !== 'object') throw new Error('PhaseA classify parse failed')
     classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs)
+    // 🆕 無條件保存 classify 原始 bbox（不論 OCR-assist 有沒有跑）
+    // 之前只在 OCR-assist 有 match 時才保存、導致 admin dashboard 沒 OCR 就看不到 bbox
+    const classifyBboxesBefore = classifyResult.alignedQuestions
+      .filter(q => q.answerBbox)
+      .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
+    // 確保 perPage[0] 存在（OCR-assist 關掉時也要寫 bbox）
+    if (!ocrAssistMeta.perPage[0]) {
+      ocrAssistMeta.perPage[0] = { page: 1, stats: { skipped: 'feature_flag_off' }, candidates: {} }
+    }
+    ocrAssistMeta.perPage[0].classifyBboxes = classifyBboxesBefore
+
     // 🆕 Post-classify OCR bbox override（單頁 path）：narrow / x-shifted bbox 用 padded candidate 覆寫
     if (ocrAssistMeta.perPage[0]?.candidates && Object.keys(ocrAssistMeta.perPage[0].candidates).length > 0) {
       const ocrSize = ocrAssistMeta.perPage[0].imageSize || [inlineImages[0].inlineData.width || 1, inlineImages[0].inlineData.height || 1]
-      // 🆕 audit：保存 classify 原始 bbox (before override)
-      const classifyBboxesBefore = classifyResult.alignedQuestions
-        .filter(q => q.answerBbox)
-        .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
       const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
         classifyResult.alignedQuestions,
         ocrAssistMeta.perPage[0].candidates,
@@ -5354,8 +5361,6 @@ export async function runStagedGradingPhaseA({
         classifyResult = { ...classifyResult, alignedQuestions: overriddenQs }
         logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (single-page)', { count: overrides.length, samples: overrides.slice(0, 5) })
       }
-      // 🆕 audit：把 classify 原始 + override 紀錄寫進 stage_logs
-      ocrAssistMeta.perPage[0].classifyBboxes = classifyBboxesBefore
       ocrAssistMeta.perPage[0].overrides = overrides
     }
   } else {
@@ -5445,13 +5450,19 @@ export async function runStagedGradingPhaseA({
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
       }, classifyQuestionSpecs)
-      // 🆕 Post-classify OCR bbox override（multi-page fallback path、整張圖座標）
-      const fallbackMeta = ocrAssistMeta.perPage.find(p => p.page === 0)
-      if (fallbackMeta?.candidates && Object.keys(fallbackMeta.candidates).length > 0 && fallbackMeta.imageSize) {
-        // 🆕 audit：保存 classify 原始 bbox
-        const classifyBboxesBefore = classifyResult.alignedQuestions
-          .filter(q => q.answerBbox)
-          .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
+      // 🆕 無條件保存 classify 原始 bbox（multi-page fallback path、整張圖座標）
+      const classifyBboxesBefore = classifyResult.alignedQuestions
+        .filter(q => q.answerBbox)
+        .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
+      let fallbackMeta = ocrAssistMeta.perPage.find(p => p.page === 0)
+      if (!fallbackMeta) {
+        fallbackMeta = { page: 0, stats: { skipped: 'feature_flag_off' }, candidates: {} }
+        ocrAssistMeta.perPage.push(fallbackMeta)
+      }
+      fallbackMeta.classifyBboxes = classifyBboxesBefore
+
+      // Post-classify OCR bbox override（只在有 candidates 時跑）
+      if (fallbackMeta.candidates && Object.keys(fallbackMeta.candidates).length > 0 && fallbackMeta.imageSize) {
         const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
           classifyResult.alignedQuestions, fallbackMeta.candidates, fallbackMeta.imageSize
         )
@@ -5459,8 +5470,6 @@ export async function runStagedGradingPhaseA({
           classifyResult = { ...classifyResult, alignedQuestions: overriddenQs }
           logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (multi-page fallback)', { count: overrides.length, samples: overrides.slice(0, 5) })
         }
-        // 🆕 audit：寫進 stage_logs
-        fallbackMeta.classifyBboxes = classifyBboxesBefore
         fallbackMeta.overrides = overrides
       }
     } else {
@@ -5556,13 +5565,19 @@ export async function runStagedGradingPhaseA({
       const allOverrides = []
       const normalizedResults = pageEntries.map(([, ids], i) => {
         let norm = normalizeClassifyResult(parsedResults[i], ids)
-        // 🆕 Post-classify OCR bbox override（在 per-page coords 階段做、再 remap）
-        const pageMeta = ocrAssistMeta.perPage.find(p => p.page === pageEntries[i][0])
-        if (pageMeta?.candidates && Object.keys(pageMeta.candidates).length > 0 && pageMeta.imageSize) {
-          // 🆕 audit：保存 classify 原始 bbox（per-page coords，未 remap）
-          const classifyBboxesBefore = norm.alignedQuestions
-            .filter(q => q.answerBbox)
-            .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
+        // 🆕 無條件保存 classify 原始 bbox（per-page coords、未 remap）
+        const classifyBboxesBefore = norm.alignedQuestions
+          .filter(q => q.answerBbox)
+          .map(q => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
+        let pageMeta = ocrAssistMeta.perPage.find(p => p.page === pageEntries[i][0])
+        if (!pageMeta) {
+          pageMeta = { page: pageEntries[i][0], stats: { skipped: 'feature_flag_off' }, candidates: {} }
+          ocrAssistMeta.perPage.push(pageMeta)
+        }
+        pageMeta.classifyBboxes = classifyBboxesBefore
+
+        // Post-classify OCR bbox override（只在有 candidates 時跑）
+        if (pageMeta.candidates && Object.keys(pageMeta.candidates).length > 0 && pageMeta.imageSize) {
           const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
             norm.alignedQuestions, pageMeta.candidates, pageMeta.imageSize
           )
@@ -5570,8 +5585,6 @@ export async function runStagedGradingPhaseA({
             norm = { ...norm, alignedQuestions: overriddenQs }
             allOverrides.push(...overrides.map(o => ({ ...o, page: pageEntries[i][0] })))
           }
-          // 🆕 audit：寫進該 page meta
-          pageMeta.classifyBboxes = classifyBboxesBefore
           pageMeta.overrides = overrides
         }
         const { pageStartY, pageEndY } = splitPages[i]

@@ -114,6 +114,12 @@ function normalizeScoringMode(value) {
   return null
 }
 
+function normalizeAnswerSheetMode(value) {
+  if (value === 'with_questions') return 'with_questions'
+  if (value === 'answer_only') return 'answer_only'
+  return null
+}
+
 function compactObject(obj) {
   return Object.fromEntries(
     Object.entries(obj).filter(([, value]) => value !== undefined)
@@ -3574,7 +3580,7 @@ async function handleSync(req, res) {
             student_upload_enabled: a.studentUploadEnabled ?? a.student_upload_enabled ?? undefined,
             answer_sheet_image_paths: a.answerSheetImagePaths ?? a.answer_sheet_image_paths ?? undefined,
             question_booklet_image_paths: a.questionBookletImagePaths ?? a.question_booklet_image_paths ?? undefined,
-            answer_sheet_mode: a.answerSheetMode ?? a.answer_sheet_mode ?? undefined,
+            answer_sheet_mode: normalizeAnswerSheetMode(a.answerSheetMode ?? a.answer_sheet_mode) ?? undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(a.updatedAt ?? a.updated_at) ?? nowIso
           })
@@ -3612,7 +3618,7 @@ async function handleSync(req, res) {
           total_score: t.totalScore ?? t.total_score ?? undefined,
           share_code: t.shareCode ?? t.share_code ?? ('AK-' + Math.random().toString(36).substring(2, 8).toUpperCase()),
           page_orientations: t.pageOrientations ?? t.page_orientations ?? undefined,
-          answer_sheet_mode: t.answerSheetMode ?? t.answer_sheet_mode ?? undefined,
+          answer_sheet_mode: normalizeAnswerSheetMode(t.answerSheetMode ?? t.answer_sheet_mode) ?? undefined,
           answer_sheet_image_paths: t.answerSheetImagePaths ?? t.answer_sheet_image_paths ?? undefined,
           question_booklet_image_paths: t.questionBookletImagePaths ?? t.question_booklet_image_paths ?? undefined,
           version: t.version ?? 1,
@@ -4954,6 +4960,11 @@ async function handleStudentSubmission(req, res) {
 
   const supabaseDb = getSupabaseAdmin()
 
+  // 在 outer scope 宣告、讓 catch 能補救
+  let submissionId = null
+  let studentContextRef = null
+  let assignmentIdRef = null
+
   try {
     const studentContexts = await resolveStudentContextsByAuthUser(
       supabaseDb,
@@ -5102,7 +5113,9 @@ async function handleStudentSubmission(req, res) {
       }
     }
 
-    const submissionId = generateSubmissionId()
+    submissionId = generateSubmissionId()
+    studentContextRef = studentContext
+    assignmentIdRef = assignmentId
     const { filePath, thumbFilePath } = await uploadSubmissionAssets(
       supabaseDb,
       submissionId,
@@ -5399,6 +5412,29 @@ async function handleStudentSubmission(req, res) {
       classroomKey: buildStudentClassroomKey(studentContext)
     })
   } catch (err) {
+    console.error('[STUDENT-SUBMISSION] outer catch:', err?.message, err?.stack?.split('\n').slice(0, 3).join(' | '))
+    // 🆕 防孤兒：若 submission 已 insert（submissionId 已產出）、補救 status
+    // 避免任何 5xx 留下 pending_grading 卡住的紀錄（2026-05-12 + 5/13 schema bug 都踩過）
+    if (submissionId) {
+      try {
+        await supabaseDb
+          .from('submissions')
+          .update({ status: 'grading_failed', updated_at: new Date().toISOString() })
+          .eq('id', submissionId)
+        if (studentContextRef && assignmentIdRef) {
+          await upsertAssignmentStudentState(
+            supabaseDb, user.id, assignmentIdRef, studentContextRef.id,
+            {
+              status: 'correction_required',
+              last_status_reason: 'AI 批改失敗（系統錯誤、請重新送出）'
+            }
+          ).catch(() => {})
+        }
+      } catch (fallbackErr) {
+        console.error('[STUDENT-SUBMISSION] outer-catch fallback also failed:', fallbackErr?.message)
+        // 落地不了就算了、至少 client 收到 500 error
+      }
+    }
     res.status(500).json({
       error: err instanceof Error ? err.message : '學生上傳作業失敗'
     })
