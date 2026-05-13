@@ -170,8 +170,21 @@ export function findCellNumberRow(detections, section, opts = {}) {
   }
 
   // ── 合併：A 為主、B 補位 ──
+  // 2026-05-14 加入 ghost detection：A 跟 B 同 ord 但 y_top 差太大時、丟 A
+  //   - A 路徑只看「孤立純數字 box」、容易被 OCR 把學生筆跡誤判成數字（如 ㄗ→2）抓到 ghost
+  //   - B 路徑是「以數字開頭的整段文字」（如 "1.潰「ㄊㄧㄝˋ」："）、印刷文字、不可能在答案區
+  //   - 兩者都宣稱同 ord 時、B 的證據強得多
+  //   - 物理 case：B 抓不到孤立「1」（regex 要求 leading digit + punct）、走 else 不影響
+  const aGhostDropThreshold = 60  // px、超過此距離視為不同 row
   const merged = new Map(bAnchorsByOrd)
-  for (const [ord, anchor] of aAnchorsByOrd) merged.set(ord, anchor)
+  for (const [ord, aAnchor] of aAnchorsByOrd) {
+    const bAnchor = bAnchorsByOrd.get(ord)
+    if (bAnchor && Math.abs(aAnchor.y_top - bAnchor.y_top) > aGhostDropThreshold) {
+      // A 跟 B 同 ord 但 y 差太大、A 可能是 ghost、保留 B 不覆蓋
+      continue
+    }
+    merged.set(ord, aAnchor)
+  }
 
   return [...merged.values()].sort((a, b) => a.ordinal - b.ordinal)
 }
