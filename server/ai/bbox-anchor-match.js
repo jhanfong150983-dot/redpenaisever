@@ -313,15 +313,14 @@ export function applyOcrBboxOverride(alignedQuestions, candidatesByQid, imageSiz
  *
  * 2026-05-07 簡化：移除所有 padding 邏輯與使用建議。bbox 給原始 OCR normalized 座標，
  * 不附任何 padding 或修改建議，讓 classify 純粹依 TYPE RULE 自行判斷答題框。
- *
- * 2026-05-14 按 score 分兩組描述：
- *   - score >= 1.0 (cell_anchor / single_choice / sub_cell exact): bbox 是「精確答案 cell 邊界」
- *     prompt 要求 classify 直接採用、不擴張
- *   - score < 1.0 (LCS+Dice 文字配對 / sub_cell loose): bbox 是「印刷文字行位置」
- *     prompt 維持「僅供參考、依 TYPE RULE 自行判斷」
  */
-function renderHintBlock(entries, imgW, imgH) {
-  const lines = []
+export function buildOcrHintsSection(candidatesByQid, imageSize) {
+  const entries = Object.entries(candidatesByQid || {}).filter(([, cands]) => cands && cands.length > 0)
+  if (entries.length === 0) return ''
+  const [imgW, imgH] = imageSize || [1, 1]
+  const lines = ['', '═══ OCR HINTS ═══', '']
+  lines.push('OCR 對學生作業圖偵測到的印刷文字行位置（normalized 座標），依 anchorHint 配對到下列題目：')
+  lines.push('')
   for (const [qid, cands] of entries) {
     lines.push(`Q ${qid}:`)
     cands.forEach((c, i) => {
@@ -335,33 +334,5 @@ function renderHintBlock(entries, imgW, imgH) {
       lines.push(`  c${i + 1} text="${(c.text || '').slice(0, 40)}" bbox=${JSON.stringify(nb)}`)
     })
   }
-  return lines
-}
-
-export function buildOcrHintsSection(candidatesByQid, imageSize) {
-  const entries = Object.entries(candidatesByQid || {}).filter(([, cands]) => cands && cands.length > 0)
-  if (entries.length === 0) return ''
-  const [imgW, imgH] = imageSize || [1, 1]
-
-  const deterministic = entries.filter(([, cands]) => (cands[0]?.score ?? 0) >= 1.0)
-  const heuristic = entries.filter(([, cands]) => (cands[0]?.score ?? 0) < 1.0)
-
-  const lines = ['', '═══ OCR HINTS ═══', '']
-
-  if (deterministic.length > 0) {
-    lines.push('【精確答案 cell 邊界】（OCR 結構分析、deterministic、由印刷編號+section header 算出）：')
-    lines.push('以下 bbox 是各題答案 cell 的精確邊界。請【直接採用此 bbox】、**不要**自行擴張 y/h/x/w 或往題目印刷區延伸。bbox 已排除題號跟題目文字、只含學生答案區。')
-    lines.push('')
-    lines.push(...renderHintBlock(deterministic, imgW, imgH))
-    if (heuristic.length > 0) lines.push('')
-  }
-
-  if (heuristic.length > 0) {
-    lines.push('【印刷文字行位置】（OCR+文字配對、僅供參考）：')
-    lines.push('以下是 OCR 偵測到的印刷文字行位置（normalized 座標）、答案區可能在文字附近。請依 TYPE RULE 自行判斷答題框。')
-    lines.push('')
-    lines.push(...renderHintBlock(heuristic, imgW, imgH))
-  }
-
   return lines.join('\n')
 }
