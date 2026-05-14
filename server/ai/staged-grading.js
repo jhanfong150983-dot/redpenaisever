@@ -30,15 +30,6 @@ const READ_ANSWER_GENERATION_CONFIG = {
   }
 }
 
-// Classify 階段：純幾何定位（bbox + question type）、不需要看手寫筆跡
-// 2026-05-14 加：classify 沒設 temperature 導致 default ~1.0、bbox y 跨 run 漂 0.02-0.03
-// 設 0.1 大幅降低隨機性、保留一點空間給 question type 判斷（避免 0 太僵硬）
-const CLASSIFY_GENERATION_CONFIG = {
-  generationConfig: {
-    temperature: 0.1
-  }
-}
-
 
 function createPipelineRunId(requestId = '') {
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -5337,7 +5328,7 @@ export async function runStagedGradingPhaseA({
       logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: SKIPPED (isOcrAssistEnabled=false)')
     }
     const classifyResponse = await executeStage({
-      apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
+      apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
       stageContents: [{ role: 'user', parts: [{ text: classifyPrompt }, ...submissionImageParts] }]
     })
@@ -5436,7 +5427,7 @@ export async function runStagedGradingPhaseA({
             }
           }
           return executeStage({
-            apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
+            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
             stageContents: [{ role: 'user', parts: [{ text: prompt }, ...submissionImageParts] }]
           })
@@ -5549,7 +5540,7 @@ export async function runStagedGradingPhaseA({
           if (pageOcrAssists?.[i]?.extraSection) prompt = `${prompt}\n\n${pageOcrAssists[i].extraSection}`
           const pageImagePart = { inlineData: splitPages[i].inlineData }
           return executeStage({
-            apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
+            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
             stageContents: [{ role: 'user', parts: [{ text: prompt }, pageImagePart] }]
           })
@@ -5697,7 +5688,7 @@ export async function runStagedGradingPhaseA({
       const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
       const retryPrompt = buildClassifyPrompt(ids, specs, pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
       const retryResp = await executeStage({
-        apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
+        apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
         stageContents: [{ role: 'user', parts: [{ text: retryPrompt }, ...submissionImageParts] }]
       })
@@ -5724,7 +5715,7 @@ export async function runStagedGradingPhaseA({
           const prompt = buildClassifyPrompt(ids, specs, useSplit ? [] : pageBreaks, 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
           const imgPart = useSplit ? { inlineData: splitPages[i].inlineData } : submissionImageParts[0]
           return executeStage({
-            apiKey, model, payload: { ...payload, ...CLASSIFY_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint,
+            apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
             stageContents: [{ role: 'user', parts: [{ text: prompt }, imgPart] }]
           })
