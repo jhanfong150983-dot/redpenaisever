@@ -152,14 +152,17 @@ import { buildBlankParenCandidates } from './bbox-blank-paren-match.js'
 
 /**
  * answer_only 模式單獨開關（跟 OCR_ASSIST_CLASSIFY_ENABLED 獨立）。
- * 注釋題穩定後不希望 answer_only 開發影響它、所以分開 flag 控制。
  *
- * Default ON（要關掉才設 OCR_ASSIST_ANSWER_ONLY_ENABLED=false）。
+ * Default OFF（2026-05-14 改）。
+ * Why: 5+5+25 份本地測試證實 answer_only 卷（純題號+方框 table）classify
+ * 自己就夠強、加 OCR HINTS / override 反而把 classify 已對齊的 bbox 推歪。
+ * 拍照歪曲 case 由 user 重拍處理、不在這支 pipeline 救。
+ * 緊急 backup：設 OCR_ASSIST_ANSWER_ONLY_ENABLED=true 可重新打開。
  */
 export function isOcrAssistAnswerOnlyEnabled() {
   const raw = getEnvValue('OCR_ASSIST_ANSWER_ONLY_ENABLED')
-  if (!raw) return true  // default on
-  return String(raw).trim().toLowerCase() !== 'false'
+  if (!raw) return false  // default off
+  return String(raw).trim().toLowerCase() === 'true'
 }
 
 /**
