@@ -213,8 +213,9 @@ export function deriveCellBboxes(anchors, section, imgW, imgH) {
     if (row) {
       row.anchors.push(a)
       row.y_top = Math.min(row.y_top, a.y_top)
+      row.y_bot = Math.max(row.y_bot, a.y_bot)
     } else {
-      rows.push({ y_top: a.y_top, anchors: [a] })
+      rows.push({ y_top: a.y_top, y_bot: a.y_bot, anchors: [a] })
     }
   }
   rows.sort((a, b) => a.y_top - b.y_top)
@@ -224,7 +225,13 @@ export function deriveCellBboxes(anchors, section, imgW, imgH) {
   for (let ri = 0; ri < rows.length; ri++) {
     const row = rows[ri]
     row.anchors.sort((a, b) => a.x_left - b.x_left)
-    const yStart = row.y_top
+    // 2026-05-14 yStart 改用 row.y_bot（anchor 底部）而不是 row.y_top
+    //   - A path anchor（如物理「1」純數字 box）：y_bot 是數字底、跳過數字本身、cell 從答案區開始
+    //   - B path anchor（如國中國語「1.潰「ㄊㄧㄝˋ」：」整段）：y_bot 是題目文字底、cell 跳過題目印刷文字、只含答案區
+    //   - 都對：物理 baseline 仍能讓 read AI 讀到答案、國中國語修掉「cell 含題目區」問題
+    // 但若該 row 只有 A path anchor（純數字 box）、保留舊行為（y_top）避免 baseline regression
+    const hasB = row.anchors.some(a => a.source === 'B')
+    const yStart = hasB ? row.y_bot : row.y_top
     const yEnd = rows[ri + 1]?.y_top ?? Math.min(section.y_end, yStart + 200)
 
     // typical width within this row
