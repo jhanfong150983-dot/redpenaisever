@@ -2388,15 +2388,23 @@ Do NOT infer question type. Question type is fixed by specs.${pageBoundarySectio
 不論題目實際的 questionType 是什麼（single_choice / multi_choice / fill_blank / short_answer），
 **bbox 規則一律照 fill_blank 的「box（方框型）」格式處理**。
 
-▸ box 方框型 bbox 規則
-  - bbox 框 □ 整個邊界 + 內部填寫的學生筆跡（含算式中的 ×/+/− 等運算符）
-  - 🚨 邊距：bbox **不要緊貼 □**，四邊各向外推 3-5% 頁寬，避免切到 □ 邊框或筆跡尾巴
-  - short_answer 多行作答：bbox 縱向加大涵蓋整個寫字區塊
+▸ box 方框型 bbox 規則（🚨 嚴格遵守）
+  - **bbox 邊界由「印刷的 □ 格子邊框」唯一決定**
+  - 不論該格學生有沒有寫、寫得多大、寫得多小、寫得多偏，**bbox 永遠是該格 □ 的位置 + 邊距**
+  - **嚴禁** 把 bbox 縮成只框手寫字本身 — 手寫筆跡大小**完全不影響** bbox 尺寸
+  - 邊距：bbox 比 □ 各邊外推 3-5% 頁寬（避免切到 □ 邊框或筆跡尾巴）
+  - 空格題的 bbox 跟有寫的題 bbox **應該完全一樣大小** — 因為兩者都是同一個 □
+  - short_answer 多行作答無 □（純橫線/格線）：bbox 框「印刷的作答區範圍」（橫線涵蓋的矩形）、不框手寫
 
-範例（單格）：
-  □ 邊界 x=0.40~0.48, y=0.20~0.28
-  → bbox.x = 0.36, bbox.y = 0.18
-  → bbox.w = 0.16, bbox.h = 0.12
+範例 1（單格、有寫）：
+  □ 邊界 x=0.40~0.48, y=0.20~0.28、學生在中間寫一個小字「A」
+  → bbox.x = 0.36, bbox.y = 0.18, bbox.w = 0.16, bbox.h = 0.12
+  （框 □、不是框那個小「A」字）
+
+範例 2（單格、空白）：
+  □ 邊界 x=0.40~0.48, y=0.20~0.28、學生沒寫
+  → bbox.x = 0.36, bbox.y = 0.18, bbox.w = 0.16, bbox.h = 0.12
+  （跟範例 1 完全一樣 — 因為都是同一個 □）
 
 ═══════════════ 共通規則 ═══════════════
 
@@ -2439,6 +2447,7 @@ Do NOT infer question type. Question type is fixed by specs.${pageBoundarySectio
 - 用「一般選擇題 25-35% 頁寬」這種規則 → 完全不對
 - 因為某格空白就把 bbox 偏到鄰格找筆跡 → 嚴禁
 - sub-cells 用主欄寬度 → 整列右移，read 全錯
+- **bbox 縮成只框手寫字、寬高跟同 row 其他格不一致** → 違反「box 由 □ 邊框決定」鐵則、重新框 □ 整格
 
 ═══════════════ 輸入資料 ═══════════════
 
