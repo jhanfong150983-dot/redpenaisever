@@ -3710,10 +3710,13 @@ async function qualityBbox(db, assignmentId) {
 }
 
 // ── Read AI 不一致分析 ──
+// 設計：AI1/AI2 raw 文字差異是 *診斷*（看 OCR 階段在哪些 case 不穩）、
+// 不代表會送 review。AI3 已經 normalize 大半（特別是計算題只比最終答案）。
+// 真正的「送 review」是 arbiter.consistent === false。
 async function qualityRead(db, assignmentId) {
   const { data: logs, error } = await db
     .from('grading_stage_logs')
-    .select('submission_id, created_at, read_answer_1, read_answer_2, needs_review_count, consistency')
+    .select('submission_id, created_at, read_answer_1, read_answer_2, needs_review_count, arbiter')
     .eq('assignment_id', assignmentId)
     .not('read_answer_1', 'is', null)
     .not('read_answer_2', 'is', null)
@@ -3727,16 +3730,25 @@ async function qualityRead(db, assignmentId) {
   const rows = [...latest.values()]
 
   let totalQuestions = 0
+  // diff_breakdown：raw 文字差異統計（純診斷、不等於送 review）
   const diffsByType = { identical: 0, format_only: 0, one_blank: 0, substantive: 0 }
-  const formatExamples = []   // {sid, qid, a1, a2}
-  const blankExamples = []    // {sid, qid, a1, a2}
+  // ai3_inconsistent_by_diff：cross-reference AI3 真實送 review 數、依 diff 類別拆
+  // - format_only + AI3=inconsistent → AI3 漏 normalize 的真正 noise（值得關注）
+  // - substantive + AI3=inconsistent → 真實送 review（系統設計如此、不是 bug）
+  const ai3InconsistentByDiff = { identical: 0, format_only: 0, one_blank: 0, substantive: 0 }
+  const formatExamples = []
+  const blankExamples = []
   const substantiveExamples = []
-  const reviewByCount = new Map()  // submissionId → count
+  // ai3MissedFormat：AI3 真的送 review 但 raw 比對是 format_only 的 case（AI3 應該 normalize 卻沒抓到）
+  const ai3MissedFormat = []
+  const reviewByCount = new Map()
 
   for (const r of rows) {
     const r1 = Array.isArray(r.read_answer_1) ? r.read_answer_1 : []
     const r2 = Array.isArray(r.read_answer_2) ? r.read_answer_2 : []
+    const arb = Array.isArray(r.arbiter) ? r.arbiter : []
     const r2ByQid = new Map(r2.map((q) => [q.questionId, q]))
+    const arbByQid = new Map(arb.map((a) => [a.questionId, a]))
     for (const q of r1) {
       const qid = q.questionId
       const a1 = q.answer
@@ -3744,12 +3756,20 @@ async function qualityRead(db, assignmentId) {
       totalQuestions++
       const diff = classifyDiff(a1, a2)
       diffsByType[diff]++
+      // AI3 對該題的 consistent 決策（true = 自動 normalize 通過、false = 送 review）
+      const arbItem = arbByQid.get(qid)
+      const ai3Inconsistent = arbItem ? arbItem.consistent === false : false
+      if (ai3Inconsistent) ai3InconsistentByDiff[diff]++
       if (diff === 'format_only' && formatExamples.length < 30) {
-        formatExamples.push({ submissionId: r.submission_id, qid, a1, a2 })
+        formatExamples.push({ submissionId: r.submission_id, qid, a1, a2, ai3Consistent: arbItem?.consistent ?? null })
       } else if (diff === 'one_blank' && blankExamples.length < 30) {
-        blankExamples.push({ submissionId: r.submission_id, qid, a1, a2 })
+        blankExamples.push({ submissionId: r.submission_id, qid, a1, a2, ai3Consistent: arbItem?.consistent ?? null })
       } else if (diff === 'substantive' && substantiveExamples.length < 30) {
-        substantiveExamples.push({ submissionId: r.submission_id, qid, a1, a2 })
+        substantiveExamples.push({ submissionId: r.submission_id, qid, a1, a2, ai3Consistent: arbItem?.consistent ?? null })
+      }
+      // 若 raw=format_only 但 AI3 還是送 review → 收集起來、提示 prompt 改善方向
+      if (diff === 'format_only' && ai3Inconsistent && ai3MissedFormat.length < 30) {
+        ai3MissedFormat.push({ submissionId: r.submission_id, qid, a1, a2 })
       }
     }
     if (r.needs_review_count > 0) reviewByCount.set(r.submission_id, r.needs_review_count)
@@ -3760,19 +3780,26 @@ async function qualityRead(db, assignmentId) {
     .slice(0, 10)
     .map(([sid, count]) => ({ submissionId: sid, needs_review_count: count }))
 
-  const fmtRate = totalQuestions ? diffsByType.format_only / totalQuestions : 0
-  const reviewableNoise = diffsByType.format_only  // 假警報數
+  const totalAi3Inconsistent =
+    ai3InconsistentByDiff.identical +
+    ai3InconsistentByDiff.format_only +
+    ai3InconsistentByDiff.one_blank +
+    ai3InconsistentByDiff.substantive
 
   return {
     assignmentId,
     total_submissions: rows.length,
     total_questions: totalQuestions,
+    // 診斷指標：raw 文字差異拆解（含 AI3 已自動 normalize 的份）
     diff_breakdown: diffsByType,
-    format_only_rate: +fmtRate.toFixed(3),
-    estimated_false_review: reviewableNoise,
+    // 真實 review 統計：AI3 實際判 inconsistent 的數量
+    ai3_inconsistent_total: totalAi3Inconsistent,
+    ai3_inconsistent_by_diff: ai3InconsistentByDiff,
     format_examples: formatExamples,
     blank_examples: blankExamples,
     substantive_examples: substantiveExamples,
+    // AI3 沒處理好的格式差異（少數應該 normalize 卻送 review 的 case）
+    ai3_missed_format_examples: ai3MissedFormat,
     submission_review_ranking: submissionReviewRanking
   }
 }
@@ -3794,12 +3821,18 @@ async function qualityExportMarkdown(db, assignmentId) {
   lines.push(`## 概覽`)
   lines.push(`- submission 數: **${bbox.total_submissions}**`)
   lines.push(`- 總題數（AI1 視角）: ${read.total_questions}`)
-  lines.push(`- read 不一致拆解:`)
-  lines.push(`  - identical: ${read.diff_breakdown.identical}`)
-  lines.push(`  - format_only（假警報）: **${read.diff_breakdown.format_only}**`)
-  lines.push(`  - one_blank（一邊未作答）: ${read.diff_breakdown.one_blank}`)
-  lines.push(`  - substantive（真不一致）: ${read.diff_breakdown.substantive}`)
-  lines.push(`- 估計可砍掉的假 review: **${read.estimated_false_review}** 題（占 ${(read.format_only_rate * 100).toFixed(1)}%）`)
+  lines.push(`- **AI3 實際送 review: ${read.ai3_inconsistent_total} 題**（這是真正會排隊給老師人工複核的數量）`)
+  lines.push('')
+  lines.push(`### AI1/AI2 raw 文字差異（診斷用、不等於送 review）`)
+  lines.push(`AI3 會自動 normalize 計算題的步驟差異、prefix 差異、半全形等格式不同。下表只看 AI1 跟 AI2 原始字串差異、`)
+  lines.push(`「送 review」要看上面那行的 AI3 inconsistent 數。`)
+  lines.push('')
+  lines.push(`| diff 類型 | raw 數量 | 其中 AI3 送 review | 說明 |`)
+  lines.push(`|---|---|---|---|`)
+  lines.push(`| identical | ${read.diff_breakdown.identical} | ${read.ai3_inconsistent_by_diff.identical} | AI1=AI2 完全相同 |`)
+  lines.push(`| format_only | ${read.diff_breakdown.format_only} | ${read.ai3_inconsistent_by_diff.format_only} | 純空白/標點/前綴差異（AI3 normalize 後通常 consistent） |`)
+  lines.push(`| one_blank | ${read.diff_breakdown.one_blank} | ${read.ai3_inconsistent_by_diff.one_blank} | 一方 blank、另一方有答案（通常需 review） |`)
+  lines.push(`| substantive | ${read.diff_breakdown.substantive} | ${read.ai3_inconsistent_by_diff.substantive} | 內容真不一致（多數會送 review） |`)
   lines.push('')
   lines.push(`## Matcher 命中率`)
   lines.push('| matcher | matched | parsed | rate |')
@@ -3833,19 +3866,29 @@ async function qualityExportMarkdown(db, assignmentId) {
     }
   }
   lines.push('')
-  lines.push(`## Read 格式偽不一致 — 範例（normalize 後相等）`)
+  lines.push(`## Read 格式差異範例（AI1≠AI2 raw、但多數 AI3 已 normalize）`)
   for (const e of read.format_examples.slice(0, 15)) {
-    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
+    const ai3 = e.ai3Consistent === false ? '⚠️ AI3 送 review' : e.ai3Consistent === true ? 'AI3 通過' : ''
+    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid} ${ai3}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
   }
   lines.push('')
+  if (read.ai3_missed_format_examples.length > 0) {
+    lines.push(`## ⚠️ AI3 應 normalize 卻送 review 的 format diff（值得 prompt 調整）`)
+    for (const e of read.ai3_missed_format_examples.slice(0, 15)) {
+      lines.push(`- ${e.submissionId.slice(-8)} ${e.qid}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
+    }
+    lines.push('')
+  }
   lines.push(`## Read 一邊未作答`)
   for (const e of read.blank_examples.slice(0, 15)) {
-    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
+    const ai3 = e.ai3Consistent === false ? '⚠️ AI3 送 review' : e.ai3Consistent === true ? 'AI3 通過' : ''
+    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid} ${ai3}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
   }
   lines.push('')
-  lines.push(`## Read 真實質性不一致`)
+  lines.push(`## Read 內容真不一致`)
   for (const e of read.substantive_examples.slice(0, 15)) {
-    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
+    const ai3 = e.ai3Consistent === false ? '⚠️ AI3 送 review' : e.ai3Consistent === true ? 'AI3 通過' : ''
+    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid} ${ai3}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
   }
   lines.push('')
   lines.push(`## needsReview top 10`)
