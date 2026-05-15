@@ -15,6 +15,10 @@ const PIPELINE_FAILURE_MESSAGES = {
       userMessage: '批改失敗：這份作業的答題框被推到紙張邊緣，AI 沒抓到正確的答題區起點。',
       userAction: '請重新批改這份作業（同一張圖、再跑一次通常能修正）。'
     },
+    CLASSIFY_BBOX_PEER_OUTLIER: {
+      userMessage: '批改失敗：這份作業的答題框跟其他學生的位置明顯不同，可能 AI 框錯位置。',
+      userAction: '請重新批改這份作業（再跑一次 AI 通常能修正）。'
+    },
     CLASSIFY_BBOX_SHIFTED: {
       userMessage: '批改失敗：這份作業的答題框整批位置對錯了。',
       userAction: '請重新批改這份作業。'
