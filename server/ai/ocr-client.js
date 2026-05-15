@@ -149,6 +149,7 @@ import { buildSingleChoiceAnchorCandidates } from './bbox-single-choice-match.js
 import { buildBracketGapCandidates } from './bbox-bracket-gap-match.js'
 import { buildSubCellAnchorCandidates } from './bbox-sub-cell-match.js'
 import { buildBlankParenCandidates } from './bbox-blank-paren-match.js'
+import { buildRowAnchorCandidates, isEligibleForRowAnchor } from './bbox-row-anchor-match.js'
 
 /**
  * answer_only 模式單獨開關（跟 OCR_ASSIST_CLASSIFY_ENABLED 獨立）。
@@ -221,6 +222,23 @@ export function isOcrAssistBlankParenEnabled() {
   const raw = getEnvValue('OCR_ASSIST_BLANK_PAREN_ENABLED')
   if (!raw) return true  // default on
   return String(raw).trim().toLowerCase() !== 'false'
+}
+
+/**
+ * Row anchor matcher（single_choice / multi_choice / true_false）開關。
+ * Default OFF（要打開才設 OCR_ROW_ANCHOR_ENABLED=true）。
+ *
+ * 用 OCR 找印刷「N.」題號 row、直接覆寫 classify Gemini 對該題的 bbox。
+ * 適用：連續編號（無題組）+ 高解析度（>= 1000px）+ 單選/多選/是非題。
+ *
+ * 自然測試 29 份本地實證 725/725 cells framed、+15.4% AI 對 vs production。
+ * 落地策略：先開、用 production stage_logs 觀察一週、再決定 default。
+ * 詳見：local-only/自然測試_1/、Phase 1 落地紀錄。
+ */
+export function isOcrRowAnchorEnabled() {
+  const raw = getEnvValue('OCR_ROW_ANCHOR_ENABLED')
+  if (!raw) return false  // default off
+  return String(raw).trim().toLowerCase() === 'true'
 }
 
 /**
@@ -341,10 +359,26 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
   }
   const extraSection = buildOcrHintsSection(candidatesByQid, ocrResult.image_size)
 
+  // 🆕 Row anchor matcher — 跟 candidatesByQid (HINTS) 獨立的 full-replace bbox
+  // 只對 single_choice/multi_choice/true_false 連續編號 + 高解析度卷子啟用
+  let rowAnchorBboxes = null
+  let rowAnchorEligibility = null
+  if (isOcrRowAnchorEnabled() && !isAnswerOnly) {
+    rowAnchorEligibility = isEligibleForRowAnchor(answerKeyQuestions, ocrResult.image_size)
+    if (rowAnchorEligibility.eligible) {
+      const rowResult = buildRowAnchorCandidates(answerKeyQuestions, ocrResult.detections, ocrResult.image_size)
+      rowAnchorBboxes = rowResult.candidatesByQid
+      stats.rowAnchor = { ...rowResult.stats, eligibility: 'eligible' }
+    } else {
+      stats.rowAnchor = { skipped: rowAnchorEligibility.reason, detail: rowAnchorEligibility.detail }
+    }
+  }
+
   return {
     extraSection,
     ocrResult,
     candidatesByQid,
+    rowAnchorBboxes,  // 🆕 single_choice 全替換 bbox（單獨於 candidatesByQid）
     stats: {
       ...stats,
       mode: answerSheetMode,

@@ -12,8 +12,9 @@ import {
   validateReadAccessorConsistency
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
-import { isOcrAssistEnabled, prepareOcrHintsForClassify } from './ocr-client.js'
+import { isOcrAssistEnabled, prepareOcrHintsForClassify, isOcrRowAnchorEnabled } from './ocr-client.js'
 import { buildOcrHintsSection, applyOcrBboxOverride } from './bbox-anchor-match.js'
+import { applyRowAnchorOverride } from './bbox-row-anchor-match.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -5347,7 +5348,7 @@ export async function runStagedGradingPhaseA({
         if (ocrAssist.extraSection) classifyPrompt = `${classifyPrompt}\n\n${ocrAssist.extraSection}`
         logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: completed', ocrAssist.stats)
         // 🆕 收進 stage_logs metadata（含 imageSize 供 post-classify override 使用）
-        ocrAssistMeta.perPage.push({ page: 1, stats: ocrAssist.stats, candidates: ocrAssist.candidatesByQid, imageSize: ocrAssist.ocrResult?.image_size })
+        ocrAssistMeta.perPage.push({ page: 1, stats: ocrAssist.stats, candidates: ocrAssist.candidatesByQid, rowAnchorBboxes: ocrAssist.rowAnchorBboxes || null, imageSize: ocrAssist.ocrResult?.image_size })
         logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: pushed perPage', { perPageLen: ocrAssistMeta.perPage.length })
       } catch (ocrErr) {
         logStaged(pipelineRunId, 'basic', 'OCR-assist single-page: ERROR → fallback', { error: ocrErr?.message, stack: ocrErr?.stack?.split('\n').slice(0, 3).join(' | ') })
@@ -5398,6 +5399,21 @@ export async function runStagedGradingPhaseA({
       }
       ocrAssistMeta.perPage[0].overrides = overrides
     }
+
+    // 🆕 Row anchor full-replace override（single_choice/multi_choice/true_false）
+    // 跟 candidatesByQid 走的 adjust override 不同：row anchor 是「OCR 鎖題號 row、bbox 全替換」、
+    // 信任度高、不做 narrow / x-shift 判斷。詳見 bbox-row-anchor-match.js
+    const rowAnchorBboxes = ocrAssistMeta.perPage[0]?.rowAnchorBboxes
+    if (rowAnchorBboxes && Object.keys(rowAnchorBboxes).length > 0) {
+      const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides } = applyRowAnchorOverride(
+        classifyResult.alignedQuestions, rowAnchorBboxes
+      )
+      if (rowOverrides.length > 0) {
+        classifyResult = { ...classifyResult, alignedQuestions: rowOverriddenQs }
+        logStaged(pipelineRunId, stagedLogLevel, 'classify row-anchor override (single-page)', { count: rowOverrides.length, samples: rowOverrides.slice(0, 5) })
+      }
+      ocrAssistMeta.perPage[0].rowAnchorOverrides = rowOverrides
+    }
   } else {
     // Multi-page: split merged image into individual pages, one classify call per page (parallel).
     // Each call gets ONLY its page's image → AI outputs bbox in single-page coords (0~1)
@@ -5439,6 +5455,7 @@ export async function runStagedGradingPhaseA({
           page: 0, // 0 表示「整張圖」
           stats: fallbackOcrAssistFull.stats || {},
           candidates: fallbackOcrAssistFull.candidatesByQid || {},
+          rowAnchorBboxes: fallbackOcrAssistFull.rowAnchorBboxes || null,
           imageSize: fallbackOcrAssistFull.ocrResult?.image_size
         })
       }
@@ -5507,6 +5524,18 @@ export async function runStagedGradingPhaseA({
         }
         fallbackMeta.overrides = overrides
       }
+
+      // 🆕 Row anchor full-replace override（multi-page fallback path）
+      if (fallbackMeta.rowAnchorBboxes && Object.keys(fallbackMeta.rowAnchorBboxes).length > 0) {
+        const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides } = applyRowAnchorOverride(
+          classifyResult.alignedQuestions, fallbackMeta.rowAnchorBboxes
+        )
+        if (rowOverrides.length > 0) {
+          classifyResult = { ...classifyResult, alignedQuestions: rowOverriddenQs }
+          logStaged(pipelineRunId, stagedLogLevel, 'classify row-anchor override (multi-page fallback)', { count: rowOverrides.length, samples: rowOverrides.slice(0, 5) })
+        }
+        fallbackMeta.rowAnchorOverrides = rowOverrides
+      }
     } else {
       // Success: each page gets its own cropped image — no pageBreaks needed in prompt
       logStaged(pipelineRunId, stagedLogLevel, 'classify split success', {
@@ -5558,6 +5587,7 @@ export async function runStagedGradingPhaseA({
           page: pageEntries[i][0],
           stats: a?.stats || {},
           candidates: a?.candidatesByQid || {},
+          rowAnchorBboxes: a?.rowAnchorBboxes || null,
           imageSize: a?.ocrResult?.image_size
         }))
       }
@@ -5621,6 +5651,18 @@ export async function runStagedGradingPhaseA({
             allOverrides.push(...overrides.map(o => ({ ...o, page: pageEntries[i][0] })))
           }
           pageMeta.overrides = overrides
+        }
+
+        // 🆕 Row anchor full-replace override（multi-page split path）
+        if (pageMeta.rowAnchorBboxes && Object.keys(pageMeta.rowAnchorBboxes).length > 0) {
+          const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides } = applyRowAnchorOverride(
+            norm.alignedQuestions, pageMeta.rowAnchorBboxes
+          )
+          if (rowOverrides.length > 0) {
+            norm = { ...norm, alignedQuestions: rowOverriddenQs }
+            allOverrides.push(...rowOverrides.map(o => ({ ...o, page: pageEntries[i][0], type: 'row_anchor' })))
+          }
+          pageMeta.rowAnchorOverrides = rowOverrides
         }
         const { pageStartY, pageEndY } = splitPages[i]
         for (const q of norm.alignedQuestions) {
