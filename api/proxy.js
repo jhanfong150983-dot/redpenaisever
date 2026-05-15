@@ -11,6 +11,7 @@ import { getAuthUser } from '../server/_auth.js'
 import { getSupabaseAdmin } from '../server/_supabase.js'
 import { getEnvValue } from '../server/_env.js'
 import { runAiPipeline } from '../server/ai/orchestrator.js'
+import { resolveBillingUserId } from '../server/billing-user.js'
 import crypto from 'crypto'
 
 // 🆕 AnswerKey 緩存（按 user + hash 存儲）
@@ -529,12 +530,23 @@ export default async function handler(req, res) {
   let currentBalance = 0
   let isAdmin = false
   let hasValidInkSession = false
+  // 計費對象：學生 → 老師 owner_id；老師/admin → 自己
+  // 「老師付費、學生免費」的核心：所有 balance check / deduction 都對 billingUserId 做
+  let billingUserId = user.id
+  let actorUserId = user.id
+  let isStudentActor = false
   try {
     supabaseAdmin = getSupabaseAdmin()
+
+    const billing = await resolveBillingUserId(supabaseAdmin, user.id)
+    billingUserId = billing.billingUserId
+    actorUserId = billing.actorUserId
+    isStudentActor = billing.isStudent
+
     const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
       .select('ink_balance, role')
-      .eq('id', user.id)
+      .eq('id', billingUserId)
       .maybeSingle()
 
     if (profileError) {
@@ -547,11 +559,17 @@ export default async function handler(req, res) {
     currentBalance =
       typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
 
+    if (isStudentActor) {
+      console.log(`${logPrefix} billing-routed student actor=${actorUserId.slice(0, 8)}... → teacher=${billingUserId.slice(0, 8)}... balance=${currentBalance}`)
+    }
+
     if (inkSessionId) {
       try {
+        // session 仍以 actor（學生本人）為 key — 一個老師可能同時有多個學生在批改、
+        // 各自的 usage 透過自己的 session 分開記
         const sessionCheck = await resolveInkSession(
           supabaseAdmin,
-          user.id,
+          actorUserId,
           inkSessionId
         )
         if (!sessionCheck.ok) {
@@ -671,10 +689,12 @@ export default async function handler(req, res) {
         if (isAdmin) {
           inkSummary = { chargedPoints: 0, balanceBefore: currentBalance, balanceAfter: currentBalance, applied: true, adminBypass: true }
         } else if (hasValidInkSession && inkSessionId) {
+          // session usage 記在 actor（學生本人）名下，方便追蹤是哪個學生用了多少
+          // 真正的扣款在 session 結算時，會 resolve 到 billingUserId（老師）
           const { error: usageError } = await supabaseAdmin
             .from('ink_session_usage')
             .insert({
-              user_id: user.id,
+              user_id: actorUserId,
               session_id: inkSessionId,
               input_tokens: cost.inputTokens,
               output_tokens: cost.outputTokens,
@@ -694,14 +714,16 @@ export default async function handler(req, res) {
 
         if (!inkSummary) {
           if (cost.points > 0) {
-            const nextBalance = currentBalance - cost.points
+            // floor at 0：避免 cost > balance 時把餘額扣成負數
+            // 真正的 "balance ≤ 0 不准呼叫" 守在前面的 proxy.js:578 那層
+            const nextBalance = Math.max(0, currentBalance - cost.points)
             const { error: updateError } = await supabaseAdmin
               .from('profiles')
               .update({
                 ink_balance: nextBalance,
                 updated_at: new Date().toISOString()
               })
-              .eq('id', user.id)
+              .eq('id', billingUserId)
 
             if (updateError) {
               console.warn('Ink balance update failed:', updateError)
@@ -721,14 +743,16 @@ export default async function handler(req, res) {
             }
 
             const { error: ledgerError } = await supabaseAdmin.from('ink_ledger').insert({
-              user_id: user.id,
+              user_id: billingUserId,
               delta: -cost.points,
               reason: 'gemini_generate_content',
               metadata: {
                 model: model,
                 usage: data.usageMetadata,
                 cost,
-                inkSessionId: inkSessionId || null
+                inkSessionId: inkSessionId || null,
+                actorUserId,                    // 實際發出 request 的人（學生時與 user_id 不同）
+                billedTo: isStudentActor ? 'teacher_owner' : 'self'
               }
             })
 

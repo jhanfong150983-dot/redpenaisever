@@ -2,6 +2,7 @@ import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
 import { settleInkSession } from '../../server/ink-session.js'
+import { resolveBillingUserId } from '../../server/billing-user.js'
 
 const SESSION_TTL_MINUTES = 120
 
@@ -49,10 +50,14 @@ async function handleStart(req, res) {
   const now = new Date()
   const nowIso = now.toISOString()
 
+  // 學生開 session 要看「該學生的老師」帳戶餘額，不是學生自己的
+  const billing = await resolveBillingUserId(supabaseAdmin, user.id)
+  const billingUserId = billing.billingUserId
+
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('profiles')
     .select('ink_balance')
-    .eq('id', user.id)
+    .eq('id', billingUserId)
     .maybeSingle()
 
   if (profileError) {
@@ -63,8 +68,13 @@ async function handleStart(req, res) {
   const currentBalance =
     typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
 
-  if (currentBalance < 0) {
-    res.status(402).json({ error: '墨水不足，請先補充墨水' })
+  // 跟 proxy.js:578 保持一致：餘額 <= 0 就不准開 session
+  // （原本是 < 0，但 floor at 0 之後 0 也代表已耗盡）
+  if (currentBalance <= 0) {
+    const message = billing.isStudent
+      ? '老師帳戶墨水不足，請聯絡老師補充後再試'
+      : '墨水不足，請先補充墨水'
+    res.status(402).json({ error: message })
     return
   }
 

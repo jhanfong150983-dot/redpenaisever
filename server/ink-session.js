@@ -1,3 +1,5 @@
+import { resolveBillingUserId } from './billing-user.js'
+
 const INK_EXCHANGE_RATE = 33
 const INPUT_USD_PER_MILLION = 0.5
 const OUTPUT_USD_PER_MILLION = 3
@@ -67,11 +69,17 @@ export async function settleInkSession({
         : totals.inputTokens + totals.outputTokens
   })
 
-  // 查詢使用者角色，admin 不扣墨水
+  // 解析計費對象：學生 → 老師 owner_id；老師/admin → 自己
+  // session 的 user_id 是 actor（可能是學生）；扣款要打到 billingUserId（學生時是老師）
+  const billing = await resolveBillingUserId(supabaseAdmin, userId)
+  const billingUserId = billing.billingUserId
+  const isStudentActor = billing.isStudent
+
+  // 查詢計費對象（老師 / 自己）的 role / balance，admin 不扣墨水
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('profiles')
     .select('ink_balance, role')
-    .eq('id', userId)
+    .eq('id', billingUserId)
     .maybeSingle()
 
   if (profileError) {
@@ -90,7 +98,9 @@ export async function settleInkSession({
   }
 
   if (cost.points > 0 && !isAdmin) {
-    const nextBalance = currentBalance - cost.points
+    // floor at 0：避免 session usage 累積成本超過老師當前餘額時把帳戶扣成負數
+    // 老師餘額不夠時，這次照扣到 0，下一次開 session 會被擋
+    const nextBalance = Math.max(0, currentBalance - cost.points)
 
     const { error: updateError } = await supabaseAdmin
       .from('profiles')
@@ -98,7 +108,7 @@ export async function settleInkSession({
         ink_balance: nextBalance,
         updated_at: new Date().toISOString()
       })
-      .eq('id', userId)
+      .eq('id', billingUserId)
 
     if (updateError) {
       throw new Error('更新使用者點數失敗')
@@ -112,7 +122,7 @@ export async function settleInkSession({
     }
 
     const { error: ledgerError } = await supabaseAdmin.from('ink_ledger').insert({
-      user_id: userId,
+      user_id: billingUserId,
       delta: -cost.points,
       reason: 'gemini_session_settlement',
       metadata: {
@@ -123,7 +133,9 @@ export async function settleInkSession({
           totalTokens: cost.totalTokens,
           calls: usageRows?.length ?? 0
         },
-        cost
+        cost,
+        actorUserId: userId,
+        billedTo: isStudentActor ? 'teacher_owner' : 'self'
       }
     })
 
