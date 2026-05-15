@@ -11,9 +11,13 @@ export const QG_SEVERITY = { PASS: 'pass', WARN: 'warn', FAIL: 'fail' }
 // 用於 Phase A 失敗時、回給前端展示給老師看的訊息。
 const PIPELINE_FAILURE_MESSAGES = {
   classify: {
-    CLASSIFY_BBOX_SHIFTED: {
-      userMessage: '批改失敗：這份作業的答題框整批位置對錯了，AI 沒能正確抓到答案卷的起點。',
+    CLASSIFY_BBOX_EDGE_PUSHED: {
+      userMessage: '批改失敗：這份作業的答題框被推到紙張邊緣，AI 沒抓到正確的答題區起點。',
       userAction: '請重新批改這份作業（同一張圖、再跑一次通常能修正）。'
+    },
+    CLASSIFY_BBOX_SHIFTED: {
+      userMessage: '批改失敗：這份作業的答題框整批位置對錯了。',
+      userAction: '請重新批改這份作業。'
     },
     CLASSIFY_BBOX_OVERLAP_DRIFT: {
       userMessage: '批改失敗：這份作業的答題框畫得太大、相鄰題目互相壓到，可能讀到別題的答案。',
@@ -398,6 +402,29 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds, ref
     warnings.push(`FAIL:CLASSIFY_PIXEL_BBOX_REJECTED(${pixelRejected})`)
   }
 
+  // ── BBox edge-pushed (shift detection, ref-independent) ──
+  // 偵測整批 bbox 被推到頁面任一邊緣（強烈的 shift 訊號）。
+  // 不依賴 answer_key ref bbox、跑在所有 assignment（無 gate）、
+  // 對紙張對齊微差不敏感（normal sub bbox 距頁邊有 8% 緩衝、不會誤判）。
+  // 閾值依據國中國語 25 sub + cross-assignment 100+ sub 驗證、shifted vs normal 切分乾淨。
+  if (bboxes.length >= 5) {
+    let nearTop = 0, nearBottom = 0, nearLeft = 0, nearRight = 0
+    for (const b of bboxes) {
+      if (b.y < 0.03) nearTop++
+      if (b.y + b.h > 0.97) nearBottom++
+      if (b.x < 0.03) nearLeft++
+      if (b.x + b.w > 0.97) nearRight++
+    }
+    metrics.nearEdgeTop = nearTop
+    metrics.nearEdgeBottom = nearBottom
+    metrics.nearEdgeLeft = nearLeft
+    metrics.nearEdgeRight = nearRight
+    const maxNearEdge = Math.max(nearTop, nearBottom, nearLeft, nearRight)
+    if (maxNearEdge >= 5) {
+      warnings.push(`FAIL:CLASSIFY_BBOX_EDGE_PUSHED(top=${nearTop},bottom=${nearBottom},left=${nearLeft},right=${nearRight})`)
+    }
+  }
+
   // ── BBox drift checks (shift / overlap-drift / jitter) ──
   // Only runs when caller provides ref bboxes (Map<qid, refBbox>).
   // Thresholds validated against 國中國語定期評量 25 subs (25/25 accuracy).
@@ -447,9 +474,10 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds, ref
       metrics.bboxDriftAreaRatio = +areaRatio.toFixed(3)
       metrics.bboxDriftOverlapCount = driftOverlapCount
 
-      if (Math.abs(dyMed) > 0.04 || Math.abs(dxMed) > 0.04) {
-        warnings.push(`FAIL:CLASSIFY_BBOX_SHIFTED(dy=${metrics.bboxDriftDyMed},dx=${metrics.bboxDriftDxMed})`)
-      }
+      // Shift detection moved to edge-based check below (runs unconditionally, no ref needed).
+      // ref-based shift（compare dy_median vs ref）有風險：老師掃描跟學生掃描有 1-2% 紙張對齊差
+      // 會被誤判成 shift。edge-based shift（看 bbox 是否被推到頁邊）對紙張對齊差不敏感、
+      // 而且不需要 ref、可以對所有 assignment 跑（不用 gate）。
       if (driftOverlapCount > 0 || areaRatio > 1.7) {
         warnings.push(`FAIL:CLASSIFY_BBOX_OVERLAP_DRIFT(${driftOverlapCount}_pairs,area=${metrics.bboxDriftAreaRatio})`)
         if (driftOverlapPairs.length > 0) metrics.bboxDriftOverlapPairs = driftOverlapPairs.slice(0, 5)
