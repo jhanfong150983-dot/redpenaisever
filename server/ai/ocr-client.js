@@ -167,15 +167,17 @@ export function isOcrAssistAnswerOnlyEnabled() {
 
 /**
  * with_questions 模式 single_choice 結構解析增益開關。
- * Default ON（要關掉才設 OCR_ASSIST_SINGLE_CHOICE_ENABLED=false）。
  *
- * 為什麼要分支：single_choice anchorHint 是純結構描述（「題組X第N小題前括號」）、
- * LCS+Dice 配不到、需要 regex 結構解析。
+ * Default OFF（2026-05-15 改）。
+ * Why: 自然/學力檢測類 single_choice 卷子上 user 實證 OCR matcher 抓錯 bbox、
+ * 導致 read AI 系統性誤讀某些題（13+ 人選同樣的「錯」答案、實則是 bbox 框到錯位置）。
+ * 改回純 classify 視覺判斷、不靠 OCR 結構 anchor。
+ * 緊急 backup：設 OCR_ASSIST_SINGLE_CHOICE_ENABLED=true 可開回去。
  */
 export function isOcrAssistSingleChoiceEnabled() {
   const raw = getEnvValue('OCR_ASSIST_SINGLE_CHOICE_ENABLED')
-  if (!raw) return true  // default on
-  return String(raw).trim().toLowerCase() !== 'false'
+  if (!raw) return false  // default off
+  return String(raw).trim().toLowerCase() === 'true'
 }
 
 /**
