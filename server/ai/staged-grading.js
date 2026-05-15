@@ -21,7 +21,7 @@ const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 // "solving" or "normalizing" student answers across runs.
 // thinking_level=MINIMAL: gemini-3-flash-preview defaults to HIGH which is slow;
 // fallback models (e.g. gemini-2.5-flash) will have thinkingConfig stripped automatically.
-const READ_ANSWER_GENERATION_CONFIG = {
+export const READ_ANSWER_GENERATION_CONFIG = {
   generationConfig: {
     temperature: 0.3,
     thinkingConfig: {
@@ -450,7 +450,7 @@ function extractInlineImages(contents) {
 // useActualBbox=true：直接使用 bbox 的實際範圍（map_symbol / grid_geometry / connect_dots 等大面積區域用）
 const FIXED_CROP_W = 0.55  // 佔圖寬的 55%
 const FIXED_CROP_H = 0.20  // 佔圖高的 20%
-async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
+export async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
   if (!bbox || !imageBase64) return null
   try {
     const { default: sharp } = await import('sharp')
@@ -4039,7 +4039,7 @@ function buildReReadAnswerPrompt(classifyResult, options = {}) {
 // ── AI2（校對審查員）：看裁切圖 + 知道正確答案 ─────────────────────────────────
 // AI2 receives the same crops as AI1, but also knows the correct answer for each question.
 // This creates cognitive diversity: AI1 is pure OCR, AI2 is reference-aware review.
-function buildReviewReadPrompt(classifyResult, options = {}) {
+export function buildReviewReadPrompt(classifyResult, options = {}) {
   const basePrompt = buildReadAnswerPrompt(classifyResult, options)
   return `== ROLE: 校對審查員 (Review Reader) ==
 You are a review reader. You see the same cropped answer regions as the transcriber, but you ALSO know the correct answer for each question (shown in the label).
@@ -4071,7 +4071,7 @@ ${basePrompt}`
 // - Images sent = one crop per question (NO full submission image)
 // - AI1 CANNOT see question stems or surrounding context
 // - Must apply blank-first strictly (crop may be the answer space only)
-function buildDetailReadPrompt(classifyResult, options = {}) {
+export function buildDetailReadPrompt(classifyResult, options = {}) {
   const basePrompt = buildReadAnswerPrompt(classifyResult, options)
   return `== ROLE: 客觀抄寫員 (Objective Transcriber) ==
 You are a pure OCR transcriber. You do NOT know the correct answer. You have NO mathematical knowledge and must NOT solve, infer, or guess.
@@ -4121,7 +4121,7 @@ const BOPOMOFO_ARBITER_GUIDE = `
 6. ㄇ vs ㄈ：看哪一側開口
 `.trim()
 
-function buildArbiterPrompt(arbiterItems) {
+export function buildArbiterPrompt(arbiterItems) {
   // arbiterItems: [{ questionId, questionType, ai1Answer, ai1Status, ai2Answer, ai2Status }]
   const questionBlocks = arbiterItems.map((item) => {
     const ai1Str = item.ai1Status === 'blank' ? '（空白）' : item.ai1Status === 'unreadable' ? '（無法辨識）' : `「${item.ai1Answer}」`
