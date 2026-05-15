@@ -585,33 +585,57 @@ function normalizeDeletedList(items) {
     .filter(Boolean)
 }
 
+// PostgREST sends `.in()` as a URL query string. Large ID lists overflow the
+// gateway URL length limit (~8KB) and come back as 400 Bad Request before
+// reaching Postgres. Chunk the IN clause to stay under that limit.
+const IN_CLAUSE_CHUNK_SIZE = 200
+
+function chunkArray(arr, size) {
+  if (arr.length <= size) return [arr]
+  const chunks = []
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size))
+  }
+  return chunks
+}
+
 async function fetchExistingUpdatedMap(supabaseDb, tableName, ids, ownerId) {
   if (ids.length === 0) return new Map()
-  const result = await supabaseDb
-    .from(tableName)
-    .select('id, updated_at')
-    .eq('owner_id', ownerId)
-    .in('id', ids)
-  if (result.error) {
-    throw new Error(result.error.message)
+  const map = new Map()
+  for (const chunk of chunkArray(ids, IN_CLAUSE_CHUNK_SIZE)) {
+    const result = await supabaseDb
+      .from(tableName)
+      .select('id, updated_at')
+      .eq('owner_id', ownerId)
+      .in('id', chunk)
+    if (result.error) {
+      throw new Error(result.error.message)
+    }
+    for (const row of result.data || []) {
+      map.set(row.id, toMillis(row.updated_at))
+    }
   }
-  return new Map(
-    (result.data || []).map((row) => [row.id, toMillis(row.updated_at)])
-  )
+  return map
 }
 
 async function fetchDeletedSet(supabaseDb, tableName, ids, ownerId) {
   if (ids.length === 0) return new Set()
-  const result = await supabaseDb
-    .from('deleted_records')
-    .select('record_id')
-    .eq('owner_id', ownerId)
-    .eq('table_name', tableName)
-    .in('record_id', ids)
-  if (result.error) {
-    throw new Error(result.error.message)
+  const set = new Set()
+  for (const chunk of chunkArray(ids, IN_CLAUSE_CHUNK_SIZE)) {
+    const result = await supabaseDb
+      .from('deleted_records')
+      .select('record_id')
+      .eq('owner_id', ownerId)
+      .eq('table_name', tableName)
+      .in('record_id', chunk)
+    if (result.error) {
+      throw new Error(result.error.message)
+    }
+    for (const row of result.data || []) {
+      set.add(row.record_id)
+    }
   }
-  return new Set((result.data || []).map((row) => row.record_id))
+  return set
 }
 
 async function touchAssignmentTagStates(supabaseDb, ownerId, assignmentIds) {
@@ -3764,23 +3788,29 @@ async function handleSync(req, res) {
         (s) => s?.id && s?.assignmentId && s?.studentId
       )
       const incomingSubmissionIds = incomingSubmissions.map((s) => s.id)
-      const [deletedSubmissionSet, existingSubmissionResult] = await Promise.all([
+      const fetchExistingSubmissions = async () => {
+        if (incomingSubmissionIds.length === 0) return []
+        const rows = []
+        for (const chunk of chunkArray(incomingSubmissionIds, IN_CLAUSE_CHUNK_SIZE)) {
+          const result = await supabaseDb
+            .from('submissions')
+            .select('id, status, graded_at, updated_at')
+            .eq('owner_id', user.id)
+            .in('id', chunk)
+          if (result.error) {
+            throw new Error(result.error.message)
+          }
+          rows.push(...(result.data || []))
+        }
+        return rows
+      }
+      const [deletedSubmissionSet, existingSubmissionRows] = await Promise.all([
         fetchDeletedSet(supabaseDb, 'submissions', incomingSubmissionIds, user.id),
-        incomingSubmissionIds.length > 0
-          ? supabaseDb
-              .from('submissions')
-              .select('id, status, graded_at, updated_at')
-              .eq('owner_id', user.id)
-              .in('id', incomingSubmissionIds)
-          : Promise.resolve({ data: [], error: null })
+        fetchExistingSubmissions()
       ])
 
-      if (existingSubmissionResult.error) {
-        throw new Error(existingSubmissionResult.error.message)
-      }
-
       const existingSubmissionMap = new Map(
-        (existingSubmissionResult.data || []).map((row) => [row.id, row])
+        existingSubmissionRows.map((row) => [row.id, row])
       )
 
       const submissionRows = []
@@ -3881,16 +3911,24 @@ async function handleSync(req, res) {
           }
         }
         if (newRowImagePaths.length > 0) {
-          const { data: storageRows, error: storageQueryErr } = await supabaseDb
-            .schema('storage')
-            .from('objects')
-            .select('name')
-            .eq('bucket_id', 'homework-images')
-            .in('name', newRowImagePaths)
+          const storageSet = new Set()
+          let storageQueryErr = null
+          for (const chunk of chunkArray(newRowImagePaths, IN_CLAUSE_CHUNK_SIZE)) {
+            const { data: storageRows, error } = await supabaseDb
+              .schema('storage')
+              .from('objects')
+              .select('name')
+              .eq('bucket_id', 'homework-images')
+              .in('name', chunk)
+            if (error) {
+              storageQueryErr = error
+              break
+            }
+            for (const r of storageRows || []) storageSet.add(r.name)
+          }
           if (storageQueryErr) {
             console.warn('[sync] storage existence check failed (skip drop):', storageQueryErr.message)
           } else {
-            const storageSet = new Set((storageRows || []).map((r) => r.name))
             for (let i = submissionRows.length - 1; i >= 0; i -= 1) {
               const row = submissionRows[i]
               const isNew = !existingSubmissionMap.has(row.id)
@@ -3934,13 +3972,15 @@ async function handleSync(req, res) {
           let dbGradedRows = []
           if (submissionIds.length > 0) {
             try {
-              const { data } = await supabaseDb
-                .from('submissions')
-                .select('id, assignment_id, student_id, status, graded_at, grading_result, source')
-                .eq('owner_id', user.id)
-                .in('id', submissionIds)
-                .not('grading_result', 'is', null)
-              dbGradedRows = data || []
+              for (const chunk of chunkArray(submissionIds, IN_CLAUSE_CHUNK_SIZE)) {
+                const { data } = await supabaseDb
+                  .from('submissions')
+                  .select('id, assignment_id, student_id, status, graded_at, grading_result, source')
+                  .eq('owner_id', user.id)
+                  .in('id', chunk)
+                  .not('grading_result', 'is', null)
+                if (data) dbGradedRows.push(...data)
+              }
             } catch { /* non-fatal */ }
           }
           // 也包含 student_correction 來源（不管是否已有 grading_result）
@@ -3952,12 +3992,14 @@ async function handleSync(req, res) {
           if (correctionRows.length > 0) {
             try {
               const correctionIds = correctionRows.map(r => r.id).filter(Boolean)
-              const { data } = await supabaseDb
-                .from('submissions')
-                .select('id, assignment_id, student_id, status, graded_at, grading_result, source')
-                .eq('owner_id', user.id)
-                .in('id', correctionIds)
-              correctionDbRows = data || []
+              for (const chunk of chunkArray(correctionIds, IN_CLAUSE_CHUNK_SIZE)) {
+                const { data } = await supabaseDb
+                  .from('submissions')
+                  .select('id, assignment_id, student_id, status, graded_at, grading_result, source')
+                  .eq('owner_id', user.id)
+                  .in('id', chunk)
+                if (data) correctionDbRows.push(...data)
+              }
             } catch { /* non-fatal */ }
           }
           const stateTransitionRows = [...dbGradedRows, ...correctionDbRows]
