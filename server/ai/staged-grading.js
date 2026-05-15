@@ -10,7 +10,8 @@ import {
   validateExplainQuality,
   validateClassifyReadConsistency,
   validateReadAccessorConsistency,
-  buildPipelineFailure
+  buildPipelineFailure,
+  applyJitterBboxExpansion
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
 import { isOcrAssistEnabled, prepareOcrHintsForClassify, isOcrRowAnchorEnabled } from './ocr-client.js'
@@ -5877,6 +5878,20 @@ export async function runStagedGradingPhaseA({
     }
   }
   // ── End Classify Quality Gate ─────────────────────────────────────────────
+
+  // ── Jitter bbox expansion（WARN 級、不算 fail）──
+  // 若偵測到 jitter（answer_only + teacher_scan 才會出 signal），把所有 bbox 左右各擴 0.02
+  // 修 AI 把 bbox 縮在筆跡上、可能切到筆畫頭尾的問題。
+  const finalClassifyQG = classifyRetryQG ?? classifyQG
+  const hasJitter = finalClassifyQG?.warnings?.some(w => typeof w === 'string' && w.startsWith('CLASSIFY_BBOX_JITTER'))
+  if (hasJitter) {
+    const expanded = applyJitterBboxExpansion(classifyResult, 0.02)
+    classifyAligned = classifyResult.alignedQuestions
+    logStaged(pipelineRunId, 'basic', 'jitter detected → bbox w expansion applied', {
+      expandedCount: expanded,
+      delta: 0.02
+    })
+  }
 
   const wordProblemIds = classifyAligned
     .filter((q) => q.visible && q.questionType === 'word_problem')

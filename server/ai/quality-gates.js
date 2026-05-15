@@ -95,6 +95,35 @@ const PIPELINE_FAILURE_MESSAGES = {
 }
 
 /**
+ * 偵測到 jitter 時、把所有 visible bbox 的 w 左右各擴 delta（page-width 比例）。
+ * In-place 修改 classifyResult.alignedQuestions[].answerBbox。
+ *
+ * 為什麼 jitter 走幾何擴張而非 retry：
+ * - jitter 來源是 AI 偏好把 bbox 縮在筆跡上（系統性傾向），retry 改不掉
+ * - answer_only 模式下學生字必在印刷格內，往外擴 0.02（約一個字）不會吃到鄰格的字
+ * - shift / overlap 仍走 retry → fail path（這函式不處理）
+ *
+ * @param {object} classifyResult - { alignedQuestions: [...] }，會被原地修改
+ * @param {number} delta - 每側擴張幅度（normalized 0-1 ratio），預設 0.02
+ * @returns {number} 實際修改的 bbox 數
+ */
+export function applyJitterBboxExpansion(classifyResult, delta = 0.02) {
+  let count = 0
+  const aligned = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
+  for (const q of aligned) {
+    if (!q?.visible || !q?.answerBbox) continue
+    const b = q.answerBbox
+    if (typeof b.x !== 'number' || typeof b.w !== 'number') continue
+    const newX = Math.max(0, b.x - delta)
+    const newRight = Math.min(1, b.x + b.w + delta)
+    b.x = newX
+    b.w = newRight - newX
+    count++
+  }
+  return count
+}
+
+/**
  * Build a frontend-friendly pipeline failure object from one or more QG results.
  * @param {string} stage - 'classify' | 'read' | 'arbiter'
  * @param {Array<{warnings:string[], metrics:object}>} qgResults - One or more QG outputs to merge
@@ -425,8 +454,11 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds, ref
         warnings.push(`FAIL:CLASSIFY_BBOX_OVERLAP_DRIFT(${driftOverlapCount}_pairs,area=${metrics.bboxDriftAreaRatio})`)
         if (driftOverlapPairs.length > 0) metrics.bboxDriftOverlapPairs = driftOverlapPairs.slice(0, 5)
       }
+      // jitter 用 WARN 級（沒 FAIL 前綴）— 不會觸發 retry / fail path
+      // staged-grading 看到 CLASSIFY_BBOX_JITTER warning 會直接把所有 bbox 左右各擴 0.02
+      // 修筆跡邊緣被切掉的問題（answer_only 模式下擴 w 安全：學生字必在格子內）
       if (dxStd > 0.025 || dyStd > 0.025) {
-        warnings.push(`FAIL:CLASSIFY_BBOX_JITTER(dxStd=${metrics.bboxDriftDxStd},dyStd=${metrics.bboxDriftDyStd})`)
+        warnings.push(`CLASSIFY_BBOX_JITTER(dxStd=${metrics.bboxDriftDxStd},dyStd=${metrics.bboxDriftDyStd})`)
       }
     }
   }
