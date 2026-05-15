@@ -313,3 +313,4 @@ export function applyRowAnchorOverride(alignedQuestions, candidatesByQid) {
   })
   return { alignedQuestions: out, overrides }
 }
+// force redeploy 2026-05-15
