@@ -166,6 +166,114 @@ function pass1bFindDigitParenPairs(detections, applicableNs, byN) {
   }
 }
 
+// ── Pass 1C：page-edge 幾何 row 補抓（無 text 也救）────────────
+//
+// 解決：jpeg OCR 在 page 第一題 (e.g. Q11、page 2 top) 上經常 text 全爛、
+// 連 Pass 1A/1B 都救不到、但 OCR 仍偵測到 row 形狀（wide bbox 在 column 內）。
+// 6 種失敗 mode 都有 row-shape detection 在 y=~120 column 內：
+//   - empty text (score=0)：seat 4, 15, 24
+//   - 只「（）」：seat 22
+//   - 只「）」：seat 25
+//   - 「II」（OCR 把 11 看錯）+ wide right neighbor：seat 28
+//
+// 策略：
+// 1. 對每 column (left/right) 的最上 missing N、找最上 row-shape detection
+// 2. 同 y 鄰近 detections 合併成完整 row bbox（解 seat 28 的拆段問題）
+// 3. deriveCellBbox 走 no-paren fallback、用 nDigits 推 cell offset
+// 也處理 page 底部 missing 對稱情況。
+
+function pass1cPageEdgeAnchor(detections, applicableNs, byN, imgH) {
+  const sortedNs = [...applicableNs].sort((a, b) => a - b)
+
+  // 依已 matched N 推 column 分組
+  const cols = {
+    left: { xMin: 0, xMax: COL_X_LEFT_MAX, ns: [] },
+    right: { xMin: COL_X_RIGHT_MIN, xMax: COL_X_RIGHT_MAX, ns: [] }
+  }
+  for (const n of sortedNs) {
+    if (!byN.has(n)) continue
+    const x = byN.get(n).bbox[0]
+    cols[x < 400 ? 'left' : 'right'].ns.push(n)
+  }
+  // 缺的 N 用相鄰 matched 推 column
+  for (const n of sortedNs) {
+    if (byN.has(n)) continue
+    let closest = null, closestDist = Infinity
+    for (const m of sortedNs) {
+      if (!byN.has(m)) continue
+      const d = Math.abs(m - n)
+      if (d < closestDist) { closestDist = d; closest = m }
+    }
+    if (closest != null) {
+      const x = byN.get(closest).bbox[0]
+      cols[x < 400 ? 'left' : 'right'].ns.push(n)
+    }
+  }
+
+  for (const colName of ['left', 'right']) {
+    const col = cols[colName]
+    if (col.ns.length === 0) continue
+    const colNs = [...col.ns].sort((a, b) => a - b)
+
+    // 上邊：找 top-most missing N（沒 matched N 在它之前）
+    for (let i = 0; i < colNs.length; i++) {
+      const n = colNs[i]
+      if (byN.has(n)) break
+      const matchedAfter = colNs.slice(i + 1).filter(m => byN.has(m))
+      const yMax = matchedAfter.length > 0 ? byN.get(matchedAfter[0]).bbox[1] - 30 : 400
+      const yMin = 50
+      tryEdgeAnchor(detections, n, col.xMin, col.xMax, yMin, yMax, 'top', byN)
+      if (!byN.has(n)) break  // 找不到、停止往下試
+    }
+    // 下邊：找 bottom-most missing N
+    for (let i = colNs.length - 1; i >= 0; i--) {
+      const n = colNs[i]
+      if (byN.has(n)) break
+      const matchedBefore = colNs.slice(0, i).filter(m => byN.has(m))
+      const yMin = matchedBefore.length > 0 ? byN.get(matchedBefore[matchedBefore.length - 1]).bbox[3] + 30 : imgH - 400
+      const yMax = imgH - 50
+      tryEdgeAnchor(detections, n, col.xMin, col.xMax, yMin, yMax, 'bottom', byN)
+      if (!byN.has(n)) break
+    }
+  }
+}
+
+function tryEdgeAnchor(detections, n, colXMin, colXMax, yMin, yMax, edge, byN) {
+  // Find row-shape detection in col x range, in y range, width > 250
+  const cands = detections.filter(d => {
+    if (d.bbox[0] < colXMin || d.bbox[0] >= colXMax) return false
+    if (d.bbox[1] < yMin || d.bbox[1] > yMax) return false
+    const w = d.bbox[2] - d.bbox[0]
+    return w > 250
+  })
+  if (cands.length === 0) return
+
+  cands.sort((a, b) => edge === 'top' ? a.bbox[1] - b.bbox[1] : b.bbox[1] - a.bbox[1])
+  const best = cands[0]
+
+  // 合併同 y (±20) 內、x 端可能在 column 內或往右延伸的鄰近 detections
+  const yCenter = (best.bbox[1] + best.bbox[3]) / 2
+  const sameY = detections.filter(d => {
+    const yc = (d.bbox[1] + d.bbox[3]) / 2
+    if (Math.abs(yc - yCenter) > 20) return false
+    // 必須有部分在 column 開始位置之後（避免抓到完全不相關的右邊欄 detection）
+    return d.bbox[0] < 700  // 大致排除右邊欄（如果這是 left col case）、雙欄都不會誤抓
+  })
+
+  const x1 = Math.min(...sameY.map(d => d.bbox[0]))
+  const y1 = Math.min(...sameY.map(d => d.bbox[1]))
+  const x2 = Math.max(...sameY.map(d => d.bbox[2]))
+  const y2 = Math.max(...sameY.map(d => d.bbox[3]))
+
+  byN.set(n, {
+    bbox: [x1, y1, x2, y2],
+    rec_text: '',
+    rec_score: 0.5,
+    _pass1c: true,
+    _edge: edge
+  })
+}
+
 // ── Pass 2：y 內插補漏 ────────────────────────────────────────
 
 /**
@@ -349,6 +457,9 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
   // 3b. Pass 1B：補抓「裸 N + 鄰近 paren」配對（jpeg q90 下 OCR 拆兩個 detection 的情況）
   pass1bFindDigitParenPairs(detections, applicableNs, byN)
   const pass1bCount = byN.size - pass1aCount
+  // 3c. Pass 1C：page edge 幾何 row 補抓（text 完全爛、靠 row shape）
+  pass1cPageEdgeAnchor(detections, applicableNs, byN, imgH)
+  const pass1cCount = byN.size - pass1aCount - pass1bCount
   // 🆕 預先算 Pass 1 每題的 cell bbox（normalized 0~1）、Pass 2 widthSafety 用 cell median 而非 row median
   const cellByN_px = new Map()  // n → { x1,y1,x2,y2 } 絕對 px
   for (const [n, row] of byN) {
@@ -370,6 +481,7 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
   let fallbackCount = 0
   let widthSafetyCount = 0
   let pass1bUsed = 0
+  let pass1cUsed = 0
   for (const n of applicableNs) {
     const row = byN.get(n)
     if (!row) continue
@@ -381,6 +493,7 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
     if (row._fallback) fallbackCount++
     if (row._widthSafety) widthSafetyCount++
     if (row._pass1b) pass1bUsed++
+    if (row._pass1c) pass1cUsed++
   }
   return {
     candidatesByQid,
@@ -390,7 +503,9 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
       matchRate: applicable.length ? +(matchedCount / applicable.length).toFixed(3) : 0,
       pass1aMatched: pass1aCount,
       pass1bMatched: pass1bCount,
+      pass1cMatched: pass1cCount,
       pass1bUsed,
+      pass1cUsed,
       pass2Fallback: fallbackCount,
       widthSafetyTriggered: widthSafetyCount,
       assignmentMethod: 'row_anchor_n_pattern'
