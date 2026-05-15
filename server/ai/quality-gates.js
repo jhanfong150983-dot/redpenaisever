@@ -6,6 +6,124 @@ import { AI_ROUTE_KEYS } from './routes.js'
 // 'fail'  — significant quality issue, should trigger retry
 export const QG_SEVERITY = { PASS: 'pass', WARN: 'warn', FAIL: 'fail' }
 
+// ── Pipeline failure messages (frontend-facing) ─────────────────────────────
+// Translates QG warning reason codes into teacher-readable Chinese + suggested action.
+// 用於 Phase A 失敗時、回給前端展示給老師看的訊息。
+const PIPELINE_FAILURE_MESSAGES = {
+  classify: {
+    CLASSIFY_BBOX_SHIFTED: {
+      userMessage: '批改失敗：這份作業的答題框整批位置對錯了，AI 沒能正確抓到答案卷的起點。',
+      userAction: '請重新批改這份作業（同一張圖、再跑一次通常能修正）。'
+    },
+    CLASSIFY_BBOX_OVERLAP_DRIFT: {
+      userMessage: '批改失敗：這份作業的答題框畫得太大、相鄰題目互相壓到，可能讀到別題的答案。',
+      userAction: '請重新批改這份作業；若仍失敗，請重新拍攝或掃描得清楚一點。'
+    },
+    CLASSIFY_BBOX_JITTER: {
+      userMessage: '批改失敗：這份作業的答題框沒對齊印刷格子、可能切到學生筆跡。',
+      userAction: '請重新批改這份作業。'
+    },
+    CLASSIFY_BBOX_OVERLAP: {
+      userMessage: '批改失敗：這份作業的答題框嚴重重疊。',
+      userAction: '請重新批改這份作業。'
+    },
+    CLASSIFY_LOW_COVERAGE: {
+      userMessage: '批改失敗：AI 無法辨識出大部分題目的答題位置。',
+      userAction: '請確認上傳的是正確的答案卷；如是，請重新批改試試。'
+    },
+    CLASSIFY_HIGH_MISSING_BBOX: {
+      userMessage: '批改失敗：AI 找到題目但無法定位答題框。',
+      userAction: '請重新批改；若仍失敗，請改善掃描品質。'
+    },
+    CLASSIFY_BBOX_SIZE_ANOMALY: {
+      userMessage: '批改失敗：答題框尺寸異常（太大或太小）。',
+      userAction: '請重新批改。'
+    },
+    CLASSIFY_BBOX_OUT_OF_BOUNDS: {
+      userMessage: '批改失敗：答題框超出頁面邊界。',
+      userAction: '請重新批改。'
+    },
+    CLASSIFY_BBOX_CLUSTERED: {
+      userMessage: '批改失敗：答題框全部擠在一個小區域。',
+      userAction: '請重新批改。'
+    },
+    CLASSIFY_PIXEL_BBOX_REJECTED: {
+      userMessage: '批改失敗：部分答題框格式不正確。',
+      userAction: '請重新批改。'
+    },
+    __default__: {
+      userMessage: '批改失敗：答題框識別出問題。',
+      userAction: '請重新批改。'
+    }
+  },
+  read: {
+    READ_LOW_COVERAGE: {
+      userMessage: '批改失敗：AI 沒讀到大部分題目的學生答案。',
+      userAction: '請重新批改；若仍失敗，請檢查學生作答是否清楚。'
+    },
+    READ_LOW_READ_RATE: {
+      userMessage: '批改失敗：太多題目 AI 標記為「讀不到」。',
+      userAction: '請重新批改；若仍失敗，請改善掃描或拍攝品質。'
+    },
+    READ_HIGH_DISAGREEMENT: {
+      userMessage: '批改失敗：兩位 AI 讀出來的答案大幅不一致。',
+      userAction: '請重新批改。'
+    },
+    CROSS_CLASSIFY_READ_HIGH_UNREADABLE: {
+      userMessage: '批改失敗：找到答題框但讀不到內容（可能框錯位置）。',
+      userAction: '請重新批改。'
+    },
+    __default__: {
+      userMessage: '批改失敗：學生答案讀取出問題。',
+      userAction: '請重新批改。'
+    }
+  },
+  arbiter: {
+    ARBITER_MISSING_DECISIONS: {
+      userMessage: '批改失敗：AI 一致性判斷階段漏題。',
+      userAction: '請重新批改。'
+    },
+    ARBITER_INVALID_STATUS: {
+      userMessage: '批改失敗：AI 一致性判斷階段回傳異常狀態。',
+      userAction: '請重新批改。'
+    },
+    __default__: {
+      userMessage: '批改失敗：AI 一致性判斷階段出錯。',
+      userAction: '請重新批改。'
+    }
+  }
+}
+
+/**
+ * Build a frontend-friendly pipeline failure object from one or more QG results.
+ * @param {string} stage - 'classify' | 'read' | 'arbiter'
+ * @param {Array<{warnings:string[], metrics:object}>} qgResults - One or more QG outputs to merge
+ * @returns {{stage, reasonCode, userMessage, userAction, technical}}
+ */
+export function buildPipelineFailure(stage, qgResults) {
+  const results = Array.isArray(qgResults) ? qgResults : [qgResults]
+  const allWarnings = results.flatMap((r) => r?.warnings ?? [])
+  const failWarnings = allWarnings.filter((w) => typeof w === 'string' && w.startsWith('FAIL:'))
+  const firstFail = failWarnings[0] ?? ''
+  const reasonCode = firstFail.match(/FAIL:([A-Z_]+)/)?.[1] ?? `${stage.toUpperCase()}_UNKNOWN`
+  const msgMap = PIPELINE_FAILURE_MESSAGES[stage] ?? {}
+  const msg = msgMap[reasonCode] ?? msgMap.__default__ ?? {
+    userMessage: '批改失敗',
+    userAction: '請重新批改。'
+  }
+  const mergedMetrics = Object.assign({}, ...results.map((r) => r?.metrics ?? {}))
+  return {
+    stage,
+    reasonCode,
+    userMessage: msg.userMessage,
+    userAction: msg.userAction,
+    technical: {
+      warnings: allWarnings,
+      metrics: mergedMetrics
+    }
+  }
+}
+
 function toFiniteNumber(value) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
@@ -59,6 +177,18 @@ function computeBboxIoU(a, b) {
   if (intersection === 0) return 0
   const union = a.w * a.h + b.w * b.h - intersection
   return union > 0 ? intersection / union : 0
+}
+
+function _bboxStatsMean(arr) { return arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0 }
+function _bboxStatsMedian(arr) {
+  if (!arr.length) return 0
+  const s = [...arr].sort((a, b) => a - b)
+  return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2
+}
+function _bboxStatsStdev(arr) {
+  if (!arr.length) return 0
+  const m = _bboxStatsMean(arr)
+  return Math.sqrt(_bboxStatsMean(arr.map((v) => (v - m) ** 2)))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -137,7 +267,12 @@ function validateGradingClassifyResponse(data) {
  * Receives the normalized classifyResult (with proper bbox objects) and the expected questionIds.
  * Returns { severity, warnings, metrics } where severity='fail' means retry is recommended.
  */
-export function validateClassifyQuality(classifyResult, expectedQuestionIds) {
+// @param refBboxByQid - optional Map<questionId, refBbox> to enable bbox drift detection
+//                       (shift / overlap-drift / jitter). When omitted, only structural checks run.
+//                       Note: ref bbox is used for **detection only** (compute deltas/IoU vs current).
+//                       Mutation of bbox via ref is forbidden — see
+//                       memory/feedback_dont_use_answerkey_bbox_for_student.md.
+export function validateClassifyQuality(classifyResult, expectedQuestionIds, refBboxByQid) {
   const warnings = []
   const metrics = {}
   const aligned = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
@@ -232,6 +367,68 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds) {
   if (pixelRejected > 0) {
     metrics.pixelBboxRejected = pixelRejected
     warnings.push(`FAIL:CLASSIFY_PIXEL_BBOX_REJECTED(${pixelRejected})`)
+  }
+
+  // ── BBox drift checks (shift / overlap-drift / jitter) ──
+  // Only runs when caller provides ref bboxes (Map<qid, refBbox>).
+  // Thresholds validated against 國中國語定期評量 25 subs (25/25 accuracy).
+  // Ref bbox used purely for **detection** — never written into student bbox.
+  if (refBboxByQid && refBboxByQid.size > 0 && bboxes.length >= 3) {
+    const dys = [], dxs = []
+    const driftBoxes = []
+    for (const b of bboxes) {
+      const ref = refBboxByQid.get(b.id)
+      if (!ref) continue
+      dys.push(b.y - ref.y)
+      dxs.push(b.x - ref.x)
+      driftBoxes.push({ id: b.id, cur: { x: b.x, y: b.y, w: b.w, h: b.h }, ref })
+    }
+    if (driftBoxes.length >= 3) {
+      const dyMed = _bboxStatsMedian(dys)
+      const dxMed = _bboxStatsMedian(dxs)
+      const dyStd = _bboxStatsStdev(dys)
+      const dxStd = _bboxStatsStdev(dxs)
+      const curAreas = driftBoxes.map((b) => b.cur.w * b.cur.h)
+      const refAreas = driftBoxes.map((b) => b.ref.w * b.ref.h)
+      const refAreaMean = _bboxStatsMean(refAreas)
+      const areaRatio = refAreaMean > 0 ? _bboxStatsMean(curAreas) / refAreaMean : 0
+
+      // Drift overlap: subtler than existing 0.5 check.
+      // Skip pairs where ref bboxes already overlap (legitimately adjacent on the printed sheet).
+      let driftOverlapCount = 0
+      const driftOverlapPairs = []
+      for (let i = 0; i < driftBoxes.length; i++) {
+        for (let j = i + 1; j < driftBoxes.length; j++) {
+          if (questionGroupOf({ id: driftBoxes[i].id }) === questionGroupOf({ id: driftBoxes[j].id })) continue
+          const refIou = computeBboxIoU(driftBoxes[i].ref, driftBoxes[j].ref)
+          if (refIou > 0.02) continue
+          const curIou = computeBboxIoU(driftBoxes[i].cur, driftBoxes[j].cur)
+          if (curIou > 0.12) {
+            driftOverlapCount++
+            driftOverlapPairs.push({ a: driftBoxes[i].id, b: driftBoxes[j].id, iou: +curIou.toFixed(3) })
+          }
+        }
+      }
+
+      metrics.bboxDriftSampleSize = driftBoxes.length
+      metrics.bboxDriftDyMed = +dyMed.toFixed(4)
+      metrics.bboxDriftDxMed = +dxMed.toFixed(4)
+      metrics.bboxDriftDyStd = +dyStd.toFixed(4)
+      metrics.bboxDriftDxStd = +dxStd.toFixed(4)
+      metrics.bboxDriftAreaRatio = +areaRatio.toFixed(3)
+      metrics.bboxDriftOverlapCount = driftOverlapCount
+
+      if (Math.abs(dyMed) > 0.04 || Math.abs(dxMed) > 0.04) {
+        warnings.push(`FAIL:CLASSIFY_BBOX_SHIFTED(dy=${metrics.bboxDriftDyMed},dx=${metrics.bboxDriftDxMed})`)
+      }
+      if (driftOverlapCount > 0 || areaRatio > 1.7) {
+        warnings.push(`FAIL:CLASSIFY_BBOX_OVERLAP_DRIFT(${driftOverlapCount}_pairs,area=${metrics.bboxDriftAreaRatio})`)
+        if (driftOverlapPairs.length > 0) metrics.bboxDriftOverlapPairs = driftOverlapPairs.slice(0, 5)
+      }
+      if (dxStd > 0.025 || dyStd > 0.025) {
+        warnings.push(`FAIL:CLASSIFY_BBOX_JITTER(dxStd=${metrics.bboxDriftDxStd},dyStd=${metrics.bboxDriftDyStd})`)
+      }
+    }
   }
 
   return { warnings, metrics, severity: severityFromWarnings(warnings) }

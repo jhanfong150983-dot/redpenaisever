@@ -9,7 +9,8 @@ import {
   validateAccessorQuality,
   validateExplainQuality,
   validateClassifyReadConsistency,
-  validateReadAccessorConsistency
+  validateReadAccessorConsistency,
+  buildPipelineFailure
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
 import { isOcrAssistEnabled, prepareOcrHintsForClassify, isOcrRowAnchorEnabled } from './ocr-client.js'
@@ -5246,6 +5247,23 @@ export async function runStagedGradingPhaseA({
   const PIPELINE_BUDGET_MS = 250_000
   const getRemainingBudget = () => Math.max(1000, PIPELINE_BUDGET_MS - (Date.now() - pipelineStartedAt))
 
+  // Build a failure-return payload when retry exhausted at any FAIL gate.
+  // Returns shape compatible with normal success return (questionResults=[] so
+  // frontend `.filter()` won't crash; pipelineFailure signals to skip Phase B).
+  const buildFailureReturn = (stage, qgResults) => {
+    const failure = buildPipelineFailure(stage, qgResults)
+    logStaged(pipelineRunId, 'basic', `PhaseA FAIL at ${stage} (retry exhausted)`, failure)
+    return {
+      phaseAComplete: false,
+      pipelineFailure: failure,
+      questionResults: [],
+      stableCount: 0,
+      diffCount: 0,
+      unstableCount: 0,
+      needsReviewCount: 0
+    }
+  }
+
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
@@ -5747,10 +5765,18 @@ export async function runStagedGradingPhaseA({
   }
 
   // ── Classify Quality Gate + Auto-Retry (max 1) ────────────────────────────
-  const classifyQG = validateClassifyQuality(classifyResult, questionIds)
+  // Build ref bbox map for drift detection (shift / overlap-drift / jitter).
+  // Ref is used for **detection only** — never to mutate student bbox.
+  // See memory/feedback_dont_use_answerkey_bbox_for_student.md.
+  const classifyRefBboxByQid = new Map()
+  for (const q of answerKeyQuestions) {
+    if (q?.id && q?.answerBbox) classifyRefBboxByQid.set(q.id, q.answerBbox)
+  }
+  const classifyQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid)
   logStaged(pipelineRunId, 'basic', 'classify quality-gate', {
     severity: classifyQG.severity, warnings: classifyQG.warnings, metrics: classifyQG.metrics
   })
+  let classifyRetryQG = null
   if (classifyQG.severity === QG_SEVERITY.FAIL) {
     logStaged(pipelineRunId, stagedLogLevel, 'classify quality FAIL → retry (1/1)')
     // Re-run classify: single-page path (simple retry with same prompt)
@@ -5769,9 +5795,9 @@ export async function runStagedGradingPhaseA({
         const retryParsed = parseCandidateJson(retryResp.data)
         if (retryParsed && typeof retryParsed === 'object') {
           classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs)
-          const retryQG = validateClassifyQuality(classifyResult, questionIds)
+          classifyRetryQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid)
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
-            severity: retryQG.severity, warnings: retryQG.warnings
+            severity: classifyRetryQG.severity, warnings: classifyRetryQG.warnings
           })
         }
       }
@@ -5819,14 +5845,20 @@ export async function runStagedGradingPhaseA({
             unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
             pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
           }, classifyQuestionSpecs)
-          const retryQG = validateClassifyQuality(classifyResult, questionIds)
+          classifyRetryQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid)
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
-            severity: retryQG.severity, warnings: retryQG.warnings
+            severity: classifyRetryQG.severity, warnings: classifyRetryQG.warnings
           })
         }
       }
     }
     classifyAligned = classifyResult.alignedQuestions
+
+    // Retry exhausted check: if retry didn't complete OR still FAIL → fail this submission.
+    // (No further AI calls; frontend will surface pipelineFailure and skip Phase B.)
+    if (!classifyRetryQG || classifyRetryQG.severity === QG_SEVERITY.FAIL) {
+      return buildFailureReturn('classify', [classifyRetryQG ?? classifyQG])
+    }
   }
   // ── End Classify Quality Gate ─────────────────────────────────────────────
 
@@ -6465,13 +6497,12 @@ export async function runStagedGradingPhaseA({
     severity: classifyReadQG.severity, warnings: classifyReadQG.warnings, metrics: classifyReadQG.metrics
   })
 
-  // If both read quality AND cross-stage fail → likely a systematic bbox issue.
-  // Re-run classify once, then re-crop and re-read (costly but necessary).
-  if (readQG.severity === QG_SEVERITY.FAIL && classifyReadQG.severity === QG_SEVERITY.FAIL) {
-    logStaged(pipelineRunId, stagedLogLevel, 'read+classify cross-stage FAIL → flagging for batch-level retry')
-    stageWarnings.push('[QualityGate] read+classify cross-stage FAIL (bbox systematic issue likely)')
-  } else if (readQG.severity === QG_SEVERITY.FAIL) {
-    stageWarnings.push(`[QualityGate] read quality FAIL: ${readQG.warnings.join(', ')}`)
+  // Read / cross-stage FAIL → 整份失敗、不繼續走 arbiter。
+  // 設計理由：classify 階段已 retry 過一次（若 classify QG 觸發），read FAIL 的 root cause
+  // 多半是 bbox 系統性問題。再 retry read 不會修好 root cause，浪費 AI call。
+  // 直接走失敗路徑、讓老師重批這份（系統會重跑 classify）。
+  if (readQG.severity === QG_SEVERITY.FAIL || classifyReadQG.severity === QG_SEVERITY.FAIL) {
+    return buildFailureReturn('read', [readQG, classifyReadQG])
   }
 
   // ── A5: CONSISTENCY CHECK (pure logic, no crops yet) ─────────────────────
@@ -6772,17 +6803,60 @@ Return JSON:
     }
   }
 
-  // ── Arbiter Quality Gate ──
+  // ── Arbiter Quality Gate + Auto-Retry (max 1) ──
   const ai3ResultCount = arbiterByQuestionId.size
-  if (ai3ResultCount > 0) {
-    const arbiterResults = Array.from(arbiterByQuestionId.values())
+  if (ai3ResultCount > 0 && arbiterItemsForAI3.length > 0) {
     const arbiterExpectedIds = arbiterItemsForAI3.map((item) => item.questionId)
-    const arbiterQG = validateArbiterQuality(arbiterResults, arbiterExpectedIds)
+    let arbiterQG = validateArbiterQuality(Array.from(arbiterByQuestionId.values()), arbiterExpectedIds)
     logStaged(pipelineRunId, 'basic', 'arbiter quality-gate', {
       severity: arbiterQG.severity, warnings: arbiterQG.warnings, metrics: arbiterQG.metrics
     })
+
     if (arbiterQG.severity === QG_SEVERITY.FAIL) {
-      stageWarnings.push(`[QualityGate] arbiter FAIL: ${arbiterQG.warnings.join(', ')}`)
+      logStaged(pipelineRunId, stagedLogLevel, 'arbiter quality FAIL → retry (1/1)')
+      try {
+        const retryPrompt = buildArbiterPrompt(arbiterItemsForAI3)
+        const retryResp = await executeStage({
+          apiKey,
+          model,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(),
+          routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_ARBITER,
+          stageContents: [{ role: 'user', parts: [{ text: retryPrompt }] }]
+        })
+        logStageEnd(pipelineRunId, 'AI3-arbiter-retry', retryResp)
+        stageResponses.push(retryResp)
+        if (retryResp.ok) {
+          const retryParsed = parseCandidateJson(retryResp.data)
+          const retryResults = Array.isArray(retryParsed?.consistencyResults) ? retryParsed.consistencyResults : []
+          // Replace prior decisions with retry results (retry is the authoritative re-run)
+          arbiterByQuestionId.clear()
+          for (const r of retryResults) {
+            const qId = ensureString(r?.questionId).trim()
+            if (!qId) continue
+            const item = arbiterItemsForAI3.find((i) => i.questionId === qId)
+            if (!item) continue
+            const decision = applyForensicDecision(r, item.ai1Answer, item.ai2Answer)
+            arbiterByQuestionId.set(qId, {
+              arbiterStatus: decision.arbiterStatus,
+              finalAnswer: decision.finalAnswer,
+              consistent: r.consistent,
+              reason: r.reason || undefined
+            })
+          }
+          arbiterQG = validateArbiterQuality(Array.from(arbiterByQuestionId.values()), arbiterExpectedIds)
+          logStaged(pipelineRunId, 'basic', 'arbiter retry quality-gate', {
+            severity: arbiterQG.severity, warnings: arbiterQG.warnings
+          })
+        }
+      } catch (retryErr) {
+        logStaged(pipelineRunId, stagedLogLevel, 'arbiter retry threw', { error: retryErr?.message })
+      }
+
+      if (arbiterQG.severity === QG_SEVERITY.FAIL) {
+        return buildFailureReturn('arbiter', [arbiterQG])
+      }
     }
   }
 

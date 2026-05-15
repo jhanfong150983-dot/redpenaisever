@@ -2232,17 +2232,27 @@ async function handleSaveGrading(req, res) {
     let updated = 0
     for (const sub of submissions) {
       if (!sub?.id) continue
+      // Phase A 失敗時、client 會帶 status='grading_failed' + gradingResult.pipelineFailure
+      // 該情況不寫入 score / ai_score / graded_at（沒有實際批分）
+      const isFailure = sub?.status === 'grading_failed'
+      const updateFields = isFailure
+        ? {
+            status: 'grading_failed',
+            grading_result: sub.gradingResult ?? undefined,
+            updated_at: new Date().toISOString()
+          }
+        : {
+            status: 'graded',
+            score: toNumber(sub.score) ?? undefined,
+            ai_score: toNumber(sub.aiScore) ?? undefined,
+            score_source: sub.scoreSource ?? 'ai',
+            grading_result: sub.gradingResult ?? undefined,
+            graded_at: sub.gradedAt ?? Date.now(),
+            updated_at: new Date().toISOString()
+          }
       const { error } = await supabaseDb
         .from('submissions')
-        .update(compactObject({
-          status: 'graded',
-          score: toNumber(sub.score) ?? undefined,
-          ai_score: toNumber(sub.aiScore) ?? undefined,
-          score_source: sub.scoreSource ?? 'ai',
-          grading_result: sub.gradingResult ?? undefined,
-          graded_at: sub.gradedAt ?? Date.now(),
-          updated_at: new Date().toISOString()
-        }))
+        .update(compactObject(updateFields))
         .eq('id', sub.id)
         .eq('owner_id', user.id)
       if (!error) updated++
