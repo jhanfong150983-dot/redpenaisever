@@ -147,7 +147,25 @@ function pass2InterpolateMissing(byN, allDetections, applicableNs) {
       const best = candidates.reduce((a, b) =>
         Math.abs(a.bbox[1] - predY) < Math.abs(b.bbox[1] - predY) ? a : b
       )
-      byN.set(n, { ...best, _fallback: true, _n: n })
+      // 🚨 寬度防呆：若 candidate 過寬（> 0.15 頁寬 ≈ 200px on 1342）、
+      // 用同欄 Pass 1 cells 的 median x1/x2 替換、只保留 candidate 的 y
+      const candW = best.bbox[2] - best.bbox[0]
+      const wThreshold = (sec.colXMax - sec.colXMin) * 0.9  // 比 column 還寬就太誇張、應為 cell 不是 row
+      let bboxToUse = best.bbox
+      const widthSafetyTriggered = candW > 150  // 150 px、約 11% 頁寬
+      if (widthSafetyTriggered) {
+        const passLcells = sec.ns
+          .filter(m => byN.has(m) && !byN.get(m)._fallback)
+          .map(m => byN.get(m))
+        if (passLcells.length >= 2) {
+          const sorted = (arr) => [...arr].sort((a, b) => a - b)
+          const med = (arr) => sorted(arr)[Math.floor(arr.length / 2)]
+          const medX1 = med(passLcells.map(c => c.bbox[0]))
+          const medX2 = med(passLcells.map(c => c.bbox[2]))
+          bboxToUse = [medX1, best.bbox[1], medX2, best.bbox[3]]
+        }
+      }
+      byN.set(n, { ...best, bbox: bboxToUse, _fallback: true, _n: n, _widthSafety: widthSafetyTriggered })
     }
   }
 }
@@ -271,6 +289,7 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
   const candidatesByQid = {}
   let matchedCount = 0
   let fallbackCount = 0
+  let widthSafetyCount = 0
   for (const n of applicableNs) {
     const row = byN.get(n)
     if (!row) continue
@@ -280,6 +299,7 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
     candidatesByQid[qid] = cell
     matchedCount++
     if (row._fallback) fallbackCount++
+    if (row._widthSafety) widthSafetyCount++
   }
   return {
     candidatesByQid,
@@ -288,6 +308,7 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
       matched: matchedCount,
       matchRate: applicable.length ? +(matchedCount / applicable.length).toFixed(3) : 0,
       pass2Fallback: fallbackCount,
+      widthSafetyTriggered: widthSafetyCount,
       assignmentMethod: 'row_anchor_n_pattern'
     }
   }
