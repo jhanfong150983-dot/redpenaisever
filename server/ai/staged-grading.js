@@ -10,8 +10,7 @@ import {
   validateExplainQuality,
   validateClassifyReadConsistency,
   validateReadAccessorConsistency,
-  buildPipelineFailure,
-  applyJitterBboxExpansion
+  buildPipelineFailure
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
 import { isOcrAssistEnabled, prepareOcrHintsForClassify, isOcrRowAnchorEnabled } from './ocr-client.js'
@@ -5879,18 +5878,9 @@ export async function runStagedGradingPhaseA({
   }
   // ── End Classify Quality Gate ─────────────────────────────────────────────
 
-  // ── Answer-only bbox 左右擴 0.02（不需 jitter detection）──
-  // answer_only 模式下、AI 偶爾會把 bbox 縮在筆跡上、切到頭尾筆畫。
-  // 學生填答必在印刷格內、擴 0.02 不會吃到鄰格手寫（user 確認過）。
-  // 不分 source、所有 answer_only 一律套（deterministic、零 AI call）。
-  if (answerSheetMode === 'answer_only') {
-    const expanded = applyJitterBboxExpansion(classifyResult, 0.02)
-    classifyAligned = classifyResult.alignedQuestions
-    logStaged(pipelineRunId, 'basic', 'answer_only: bbox w padding applied', {
-      expandedCount: expanded,
-      delta: 0.02
-    })
-  }
+  // Bbox padding 已拿掉 — classify prompt 已要求 AI 「bbox 比 □ 各邊外推 3-5% 頁寬」、
+  // 我們再加 0.02 padding 等於雙重 padding、會把 bbox 推進印刷字 / 鄰格文字範圍。
+  // 少數 AI 沒照 prompt 加 padding（緊貼筆跡）的 case 改靠 read 階段檢查抓。
 
   const wordProblemIds = classifyAligned
     .filter((q) => q.visible && q.questionType === 'word_problem')
