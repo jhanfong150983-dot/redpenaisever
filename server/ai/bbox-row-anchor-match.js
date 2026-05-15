@@ -110,6 +110,62 @@ function pass1FindRowsByText(detections) {
   return byN
 }
 
+// ── Pass 1B：裸數字 + 鄰近 paren detection 配對 ───────────────
+//
+// 解決：production 用 jpeg q90 時、PaddleOCR 把「7.()又真希望...」拆成
+// 多個 detection：「7」+「（）」+「又真希望...」。Pass 1 regex 只認
+// 「N.」開頭、會漏。
+// Pass 1B 找到「N」純數字 detection + 右側鄰近的 paren detection、配對合成 row。
+//
+// 跟 Pass 1A 互補：Pass 1A 抓到的 N 不會再被 Pass 1B 覆寫。
+
+function pass1bFindDigitParenPairs(detections, applicableNs, byN) {
+  const DIGIT_RE = /^\s*(\d{1,2})\s*$/
+  const PAREN_RE = /[（(]/
+  const DIGIT_MIN_SCORE = 0.8
+  const PAREN_MAX_X_DIST = 80
+  const Y_CENTER_MAX_DIST = 15
+
+  for (const d of detections) {
+    const t = String(d.rec_text || '').trim()
+    const m = t.match(DIGIT_RE)
+    if (!m) continue
+    const n = parseInt(m[1])
+    if (n < 1 || n > 99) continue
+    if (!applicableNs.includes(n)) continue
+    if (byN.has(n)) continue  // Pass 1A 已經抓到
+    if ((d.rec_score || 0) < DIGIT_MIN_SCORE) continue
+    const x = d.bbox[0]
+    if (!((x < COL_X_LEFT_MAX) || (x >= COL_X_RIGHT_MIN && x < COL_X_RIGHT_MAX))) continue
+
+    // 找右側鄰近的 paren detection
+    const digRight = d.bbox[2]
+    const digYCenter = (d.bbox[1] + d.bbox[3]) / 2
+    let bestParen = null
+    let bestDist = Infinity
+    for (const p of detections) {
+      if (p === d) continue
+      const pt = String(p.rec_text || '').trim()
+      if (!PAREN_RE.test(pt)) continue
+      const xDist = p.bbox[0] - digRight
+      if (xDist < -5 || xDist > PAREN_MAX_X_DIST) continue
+      const pyCenter = (p.bbox[1] + p.bbox[3]) / 2
+      if (Math.abs(pyCenter - digYCenter) > Y_CENTER_MAX_DIST) continue
+      if (xDist < bestDist) { bestDist = xDist; bestParen = p }
+    }
+    if (!bestParen) continue
+
+    // 合成 row detection、_pass1b 標記、deriveCellBbox 走 paren-direct path
+    byN.set(n, {
+      bbox: [d.bbox[0], Math.min(d.bbox[1], bestParen.bbox[1]), bestParen.bbox[2], Math.max(d.bbox[3], bestParen.bbox[3])],
+      rec_text: `${m[1]}. ${bestParen.rec_text.trim()}`,
+      rec_score: Math.min(d.rec_score, bestParen.rec_score),
+      _pass1b: true,
+      _parenBbox: bestParen.bbox  // [x1, y1, x2, y2] 絕對 px
+    })
+  }
+}
+
 // ── Pass 2：y 內插補漏 ────────────────────────────────────────
 
 /**
@@ -221,6 +277,17 @@ function deriveCellBbox(row, n, fullW, fullH) {
     }
   }
 
+  // Pass 1B：直接用 paren detection bbox 當 cell（已知精確位置、不用 ratio 算）
+  if (row._pass1b && row._parenBbox) {
+    const [px1, py1, px2, py2] = row._parenBbox
+    return {
+      x: Math.max(0, px1 - 6) / fullW,
+      y: Math.max(0, py1 - padY) / fullH,
+      w: (Math.min(fullW, px2 + 8) - Math.max(0, px1 - 6)) / fullW,
+      h: (Math.min(fullH, py2 + padY) - Math.max(0, py1 - padY)) / fullH
+    }
+  }
+
   const fullParenMatch = t.match(/^(\d{1,2})\s*[.．]\s*[（(]\s*(.*?)\s*[)）]/)
   if (fullParenMatch) {
     const insideStart = t.indexOf(fullParenMatch[0].includes('（') ? '（' : '(')
@@ -276,8 +343,12 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
     if (n != null) nToQid.set(n, q.id)
   }
   const applicableNs = [...nToQid.keys()]
-  // 3. Pass 1
+  // 3. Pass 1A：text 開頭 "N." 匹配
   const byN = pass1FindRowsByText(detections)
+  const pass1aCount = byN.size
+  // 3b. Pass 1B：補抓「裸 N + 鄰近 paren」配對（jpeg q90 下 OCR 拆兩個 detection 的情況）
+  pass1bFindDigitParenPairs(detections, applicableNs, byN)
+  const pass1bCount = byN.size - pass1aCount
   // 🆕 預先算 Pass 1 每題的 cell bbox（normalized 0~1）、Pass 2 widthSafety 用 cell median 而非 row median
   const cellByN_px = new Map()  // n → { x1,y1,x2,y2 } 絕對 px
   for (const [n, row] of byN) {
@@ -298,6 +369,7 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
   let matchedCount = 0
   let fallbackCount = 0
   let widthSafetyCount = 0
+  let pass1bUsed = 0
   for (const n of applicableNs) {
     const row = byN.get(n)
     if (!row) continue
@@ -308,6 +380,7 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
     matchedCount++
     if (row._fallback) fallbackCount++
     if (row._widthSafety) widthSafetyCount++
+    if (row._pass1b) pass1bUsed++
   }
   return {
     candidatesByQid,
@@ -315,6 +388,9 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
       applicable: applicable.length,
       matched: matchedCount,
       matchRate: applicable.length ? +(matchedCount / applicable.length).toFixed(3) : 0,
+      pass1aMatched: pass1aCount,
+      pass1bMatched: pass1bCount,
+      pass1bUsed,
       pass2Fallback: fallbackCount,
       widthSafetyTriggered: widthSafetyCount,
       assignmentMethod: 'row_anchor_n_pattern'
