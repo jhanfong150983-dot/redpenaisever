@@ -115,7 +115,7 @@ function pass1FindRowsByText(detections) {
 /**
  * 對 applicableQids 內缺的 N、用 Pass 1 結果預測 y、找該位置的 OCR detection
  */
-function pass2InterpolateMissing(byN, allDetections, applicableNs) {
+function pass2InterpolateMissing(byN, allDetections, applicableNs, cellByN_px = new Map()) {
   // 分左右欄處理
   const sections = groupByColumn(applicableNs, byN)
   for (const sec of sections) {
@@ -154,14 +154,15 @@ function pass2InterpolateMissing(byN, allDetections, applicableNs) {
       let bboxToUse = best.bbox
       const widthSafetyTriggered = candW > 150  // 150 px、約 11% 頁寬
       if (widthSafetyTriggered) {
-        const passLcells = sec.ns
-          .filter(m => byN.has(m) && !byN.get(m)._fallback)
-          .map(m => byN.get(m))
-        if (passLcells.length >= 2) {
+        // 🆕 用 Pass 1 已計算的 **cell bbox** median（不是 OCR row 整段寬）
+        const sameColCells = sec.ns
+          .filter(m => cellByN_px.has(m) && !byN.get(m)?._fallback)
+          .map(m => cellByN_px.get(m))
+        if (sameColCells.length >= 2) {
           const sorted = (arr) => [...arr].sort((a, b) => a - b)
           const med = (arr) => sorted(arr)[Math.floor(arr.length / 2)]
-          const medX1 = med(passLcells.map(c => c.bbox[0]))
-          const medX2 = med(passLcells.map(c => c.bbox[2]))
+          const medX1 = med(sameColCells.map(c => c.x1))
+          const medX2 = med(sameColCells.map(c => c.x2))
           bboxToUse = [medX1, best.bbox[1], medX2, best.bbox[3]]
         }
       }
@@ -283,8 +284,21 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
   const applicableNs = [...nToQid.keys()]
   // 3. Pass 1
   const byN = pass1FindRowsByText(detections)
-  // 4. Pass 2 (只對 applicable N 補)
-  pass2InterpolateMissing(byN, detections, applicableNs)
+  // 🆕 預先算 Pass 1 每題的 cell bbox（normalized 0~1）、Pass 2 widthSafety 用 cell median 而非 row median
+  const cellByN_px = new Map()  // n → { x1,y1,x2,y2 } 絕對 px
+  for (const [n, row] of byN) {
+    const cell = deriveCellBbox(row, n, imgW, imgH)
+    if (cell) {
+      cellByN_px.set(n, {
+        x1: cell.x * imgW,
+        y1: cell.y * imgH,
+        x2: (cell.x + cell.w) * imgW,
+        y2: (cell.y + cell.h) * imgH
+      })
+    }
+  }
+  // 4. Pass 2 (只對 applicable N 補)、傳 cellByN_px 給 widthSafety
+  pass2InterpolateMissing(byN, detections, applicableNs, cellByN_px)
   // 5. derive cell bboxes
   const candidatesByQid = {}
   let matchedCount = 0
