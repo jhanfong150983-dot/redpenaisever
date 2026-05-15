@@ -5768,10 +5768,28 @@ export async function runStagedGradingPhaseA({
   // Build ref bbox map for drift detection (shift / overlap-drift / jitter).
   // Ref is used for **detection only** — never to mutate student bbox.
   // See memory/feedback_dont_use_answerkey_bbox_for_student.md.
-  const classifyRefBboxByQid = new Map()
-  for (const q of answerKeyQuestions) {
-    if (q?.id && q?.answerBbox) classifyRefBboxByQid.set(q.id, q.answerBbox)
+  //
+  // ⚠️ GATE：ref bbox 只在以下情境跟學生 bbox 座標可比：
+  //   - 單頁卷（answer_only 或 assignmentTotalPages === 1）— 多頁卷 ref 是 per-page normalized、
+  //     學生 bbox 是 full-image normalized，y 座標尺度不同
+  //   - teacher_scan source — 學生拍照（teacher_camera / student_upload）角度跟掃描差太大、
+  //     normalized 座標下放大成系統性偏移、shift/jitter signal 會 100% false positive
+  // 不符上述條件就跳過 ref 比對、只跑既有 7 項結構性檢查。
+  const isSinglePagePhysicalPage = answerSheetMode === 'answer_only' || assignmentTotalPages === 1
+  const isRefBboxReliable = isSinglePagePhysicalPage && submissionSource === 'teacher_scan'
+  const classifyRefBboxByQid = isRefBboxReliable ? new Map() : null
+  if (classifyRefBboxByQid) {
+    for (const q of answerKeyQuestions) {
+      if (q?.id && q?.answerBbox) classifyRefBboxByQid.set(q.id, q.answerBbox)
+    }
   }
+  logStaged(pipelineRunId, stagedLogLevel, 'classify drift detection', {
+    enabled: !!classifyRefBboxByQid,
+    isSinglePagePhysicalPage,
+    submissionSource,
+    answerSheetMode,
+    assignmentTotalPages
+  })
   const classifyQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid)
   logStaged(pipelineRunId, 'basic', 'classify quality-gate', {
     severity: classifyQG.severity, warnings: classifyQG.warnings, metrics: classifyQG.metrics
