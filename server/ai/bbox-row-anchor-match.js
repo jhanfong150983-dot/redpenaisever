@@ -125,18 +125,12 @@ function pass2InterpolateMissing(byN, allDetections, applicableNs, cellByN_px = 
     for (const n of missing) {
       const before = [...foundList].reverse().find(x => x.n < n)
       const after = foundList.find(x => x.n > n)
-      let predY
-      if (before && after) {
-        predY = before.y + (after.y - before.y) * (n - before.n) / (after.n - before.n)
-      } else if (before) {
-        const bb = [...foundList].reverse().find(x => x.n < before.n)
-        if (!bb) continue
-        predY = before.y + (before.y - bb.y) / (before.n - bb.n) * (n - before.n)
-      } else if (after) {
-        const aa = foundList.find(x => x.n > after.n)
-        if (!aa) continue
-        predY = after.y - (aa.y - after.y) / (aa.n - after.n) * (after.n - n)
-      } else continue
+      // 🚨 只允許「夾在 before & after 之間」的內插、禁止單邊外插
+      // 原因：欄底/欄頂題目沒 after/before、線性外插假設「row gap 恆定」
+      // 但前題可能有長題幹（e.g. seat 8 自然測試 Q7、Q6 後 5 行題幹）→ 外插必錯
+      // failed gracefully：沒 neighbors 夾就 fallback 給 classify 原 bbox
+      if (!before || !after) continue
+      const predY = before.y + (after.y - before.y) * (n - before.n) / (after.n - before.n)
       // 找 column x 範圍內、y ± tolerance 的 detection（含空 text）
       const candidates = allDetections.filter(d =>
         Math.abs(d.bbox[1] - predY) < Y_INTERPOLATION_TOLERANCE
