@@ -4429,6 +4429,9 @@ ${isHighSchool
        - This rule applies even if criteria uses strong language like "準確" or "明確" — those words describe concept clarity, not verbatim matching.
   - Do NOT require fixed answer-sentence format (e.g. "答：" / "A:") for short_answer.
   - ⚠️ MINIMUM EXPRESSION STANDARD (HIGHEST PRIORITY — overrides ALL other rules including LENIENT FOCUS and CORE FIRST):
+    🚨 SCOPE: This rule ONLY applies when Domain is "社會" or "自然".
+    For other domains (especially 國語注釋題 where referenceAnswer itself is 2-4 chars like "深藍"、"回頭"、"盡情歌唱"),
+    this rule MUST be skipped — short reference answers are NORMAL and a literal match deserves full score.
     Even if the core concept is correct, the student must express it as a reasonably complete thought — not a bare fragment.
     CHECK THIS RULE FIRST before applying any strictness-based evaluation.
     FAIL standard (HARD CAP: score MUST NOT exceed 50% of maxScore — do NOT give full marks even if concept matches):
@@ -4439,6 +4442,7 @@ ${isHighSchool
       - Contains a verb context, connector, or subject that shows understanding
       - e.g. "為了增進感情" ✓, "讓人增進感情" ✓, "可以加強彼此感情" ✓, "增進彼此的感情" ✓ (>4字 with 的)
     This rule does NOT apply to fill_blank, multi_fill, or calculation questions.
+    This rule does NOT apply to 國語/English/其他 domains — only 社會 and 自然.
 - diagram_color: studentAnswerRaw is a description of the student's coloring (e.g. "塗色：第1個圓完整，第2個圓左側2/3，第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
   - 塗色位置: check if the colored region is the correct side/area (e.g. left vs right, which cells). Position must match referenceAnswer.
