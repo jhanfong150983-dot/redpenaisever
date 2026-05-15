@@ -6890,9 +6890,10 @@ async function handleRefreshAssignmentSummary(req, res) {
     }
 
     // 3. 讀取答案鍵的 concept_code（從 assignments 表）
+    // 同時拉 answer_sheet_image_paths / question_booklet_image_paths 供 3b 取題目圖
     const { data: assignment, error: assignmentErr } = await supabaseDb
       .from('assignments')
-      .select('answer_key')
+      .select('answer_key, answer_sheet_image_paths, question_booklet_image_paths, answer_sheet_mode')
       .eq('id', assignmentId)
       .eq('owner_id', user.id)
       .maybeSingle()
@@ -6922,9 +6923,14 @@ async function handleRefreshAssignmentSummary(req, res) {
       }
     }
 
-    // 3b. 嘗試從 Supabase Storage 取得答案卷圖片（給 AI 看題目內容）
+    // 3b. 嘗試從 Supabase Storage 取得題目圖片（給 AI 看題目內容）
+    // 兩個來源（任一即可）：
+    //   - answer-sheets/${assignmentId}/page-${i}.webp 是 with_questions 模式的卷子
+    //   - question_booklet_image_paths 是 answer_only 模式 user 另外上傳的題本
+    // answer_only 模式時答題卡沒題目文字、必須讀題本才能讓 AI 看到題目
     const answerSheetImages = []
     try {
+      // 路徑 A：固定 path 的 answer sheets（適用 with_questions 卷）
       for (let i = 0; i < 10; i++) {
         const path = `answer-sheets/${assignmentId}/page-${i}.webp`
         const { data: imgData, error: imgErr } = await supabaseDb.storage
@@ -6933,11 +6939,27 @@ async function handleRefreshAssignmentSummary(req, res) {
         const buffer = Buffer.from(await imgData.arrayBuffer())
         answerSheetImages.push({ mimeType: 'image/webp', data: buffer.toString('base64') })
       }
+      // 路徑 B：answer_only 模式的題本（user 另外上傳）
+      const bookletPaths = Array.isArray(assignment?.question_booklet_image_paths)
+        ? assignment.question_booklet_image_paths
+        : []
+      for (const p of bookletPaths) {
+        if (typeof p !== 'string' || !p) continue
+        const { data: imgData, error: imgErr } = await supabaseDb.storage
+          .from('homework-images').download(p)
+        if (imgErr || !imgData) continue
+        const buffer = Buffer.from(await imgData.arrayBuffer())
+        const mimeType = p.toLowerCase().endsWith('.jpg') || p.toLowerCase().endsWith('.jpeg')
+          ? 'image/jpeg' : 'image/webp'
+        answerSheetImages.push({ mimeType, data: buffer.toString('base64') })
+      }
       if (answerSheetImages.length > 0) {
-        console.log(`${logPrefix} fetched ${answerSheetImages.length} answer sheet image(s) for multimodal summary`)
+        console.log(`${logPrefix} fetched ${answerSheetImages.length} image(s) for multimodal summary (mode=${assignment?.answer_sheet_mode || 'unknown'}, booklets=${bookletPaths.length})`)
+      } else {
+        console.log(`${logPrefix} no images available (no answer-sheets/, no question_booklet_image_paths)`)
       }
     } catch (imgFetchErr) {
-      console.warn(`${logPrefix} answer sheet image fetch failed (non-fatal):`, imgFetchErr?.message || imgFetchErr)
+      console.warn(`${logPrefix} image fetch failed (non-fatal):`, imgFetchErr?.message || imgFetchErr)
     }
 
     // 3. 整理每位學生的錯誤清單
