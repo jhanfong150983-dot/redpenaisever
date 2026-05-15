@@ -12,6 +12,7 @@ import { getEnvValue } from '../../server/_env.js'
 import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
+import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import {
   isValidDsns,
   getJasmineAccessToken,
@@ -7097,6 +7098,28 @@ ${studentLines || '（無錯誤）'}
     const apiKey = getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY')
     if (!apiKey) throw new Error('Server API Key missing')
 
+    // 5a. 墨水 balance check：報告為老師專屬功能、billingUserId = user.id
+    // 不接 ink_session（session 是給批改用、報告獨立 call）
+    let isAdminUser = false
+    let balanceBeforeCharge = 0
+    try {
+      const { data: profile } = await supabaseDb
+        .from('profiles').select('ink_balance, role').eq('id', user.id).maybeSingle()
+      isAdminUser = profile?.role === 'admin'
+      balanceBeforeCharge = typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
+      if (!isAdminUser && balanceBeforeCharge <= 0) {
+        await supabaseDb.from('assignment_summaries').upsert(
+          { owner_id: user.id, assignment_id: assignmentId, status: 'failed',
+            error_message: '墨水不足、請先補充再生成報告', updated_at: new Date().toISOString() },
+          { onConflict: 'owner_id,assignment_id' }
+        )
+        res.status(402).json({ success: false, error: '墨水不足、請先補充再生成報告' })
+        return
+      }
+    } catch (e) {
+      console.warn(`${logPrefix} ink balance check failed (non-fatal):`, e?.message)
+    }
+
     const summaryModel = getEnvValue('SYSTEM_GEMINI_MODEL') || 'gemini-3-flash-preview'
     const SUMMARY_TIMEOUT_MS = 120_000
     // 組合 multimodal parts：圖片（若有）+ 文字 prompt
@@ -7128,6 +7151,43 @@ ${studentLines || '（無錯誤）'}
         pipeline: pipelineResult.data?._pipeline
       })
       throw wrapError(`gemini_call_failed: status=${pipelineResult.status}`)
+    }
+
+    // 5b. 扣墨水（成功 call AI 後才扣、admin bypass）
+    // 跟 proxy.js 相同公式 (computeInkPointsFromTokens) 確保一致
+    try {
+      const usage = pipelineResult.data?.usageMetadata
+      if (usage && !isAdminUser) {
+        const cost = computeInkPointsFromTokens({
+          inputTokens: usage.promptTokenCount,
+          outputTokens: usage.candidatesTokenCount,
+          totalTokens: usage.totalTokenCount,
+        })
+        if (cost.points > 0) {
+          const nextBalance = Math.max(0, balanceBeforeCharge - cost.points)
+          await supabaseDb.from('profiles')
+            .update({ ink_balance: nextBalance, updated_at: new Date().toISOString() })
+            .eq('id', user.id)
+          await supabaseDb.from('ink_ledger').insert({
+            user_id: user.id,
+            delta: -cost.points,
+            reason: 'report_teacher_summary',
+            metadata: {
+              assignment_id: assignmentId,
+              model: summaryModel,
+              usage,
+              cost,
+              billedTo: 'self',
+            }
+          })
+          console.log(`${logPrefix} ink charged ${cost.points} (balance ${balanceBeforeCharge} → ${nextBalance})`)
+        }
+      } else if (isAdminUser) {
+        console.log(`${logPrefix} admin bypass ink charge`)
+      }
+    } catch (chargeErr) {
+      // 扣款失敗不影響 user 得到報告、僅 log
+      console.warn(`${logPrefix} ink charge failed (non-fatal):`, chargeErr?.message)
     }
 
     const rawText = pipelineResult.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
