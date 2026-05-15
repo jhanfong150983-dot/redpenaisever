@@ -54,9 +54,11 @@ async function handleStart(req, res) {
   const billing = await resolveBillingUserId(supabaseAdmin, user.id)
   const billingUserId = billing.billingUserId
 
+  // 同時讀 role：admin 不論餘額都可開 session（包括 admin 名下學生）
+  // 跟 proxy.js:578 + ink-session.js settlement 的 isAdmin bypass 對齊
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('profiles')
-    .select('ink_balance')
+    .select('ink_balance, role')
     .eq('id', billingUserId)
     .maybeSingle()
 
@@ -65,12 +67,14 @@ async function handleStart(req, res) {
     return
   }
 
+  const isAdmin = profile?.role === 'admin'
   const currentBalance =
     typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
 
   // 跟 proxy.js:578 保持一致：餘額 <= 0 就不准開 session
-  // （原本是 < 0，但 floor at 0 之後 0 也代表已耗盡）
-  if (currentBalance <= 0) {
+  // 但 admin（含 admin 名下學生）bypass，餘額多少都能開
+  // —— admin 在 proxy 跟 settlement 都不扣費、開 session 也不該被擋
+  if (!isAdmin && currentBalance <= 0) {
     const message = billing.isStudent
       ? '老師帳戶墨水不足，請聯絡老師補充後再試'
       : '墨水不足，請先補充墨水'
