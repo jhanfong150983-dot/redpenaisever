@@ -5879,15 +5879,14 @@ export async function runStagedGradingPhaseA({
   }
   // ── End Classify Quality Gate ─────────────────────────────────────────────
 
-  // ── Jitter bbox expansion（WARN 級、不算 fail）──
-  // 若偵測到 jitter（answer_only + teacher_scan 才會出 signal），把所有 bbox 左右各擴 0.02
-  // 修 AI 把 bbox 縮在筆跡上、可能切到筆畫頭尾的問題。
-  const finalClassifyQG = classifyRetryQG ?? classifyQG
-  const hasJitter = finalClassifyQG?.warnings?.some(w => typeof w === 'string' && w.startsWith('CLASSIFY_BBOX_JITTER'))
-  if (hasJitter) {
+  // ── Answer-only bbox 左右擴 0.02（不需 jitter detection）──
+  // answer_only 模式下、AI 偶爾會把 bbox 縮在筆跡上、切到頭尾筆畫。
+  // 學生填答必在印刷格內、擴 0.02 不會吃到鄰格手寫（user 確認過）。
+  // 不分 source、所有 answer_only 一律套（deterministic、零 AI call）。
+  if (answerSheetMode === 'answer_only') {
     const expanded = applyJitterBboxExpansion(classifyResult, 0.02)
     classifyAligned = classifyResult.alignedQuestions
-    logStaged(pipelineRunId, 'basic', 'jitter detected → bbox w expansion applied', {
+    logStaged(pipelineRunId, 'basic', 'answer_only: bbox w padding applied', {
       expandedCount: expanded,
       delta: 0.02
     })

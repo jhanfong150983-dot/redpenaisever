@@ -478,16 +478,15 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds, ref
       // ref-based shift（compare dy_median vs ref）有風險：老師掃描跟學生掃描有 1-2% 紙張對齊差
       // 會被誤判成 shift。edge-based shift（看 bbox 是否被推到頁邊）對紙張對齊差不敏感、
       // 而且不需要 ref、可以對所有 assignment 跑（不用 gate）。
-      if (driftOverlapCount > 0 || areaRatio > 1.7) {
-        warnings.push(`FAIL:CLASSIFY_BBOX_OVERLAP_DRIFT(${driftOverlapCount}_pairs,area=${metrics.bboxDriftAreaRatio})`)
+      // Overlap drift only — area_ratio 已拿掉（風險：對紙張掃描尺度差敏感、
+      // 而且 seat 25 那種 inflation case 也會被 pair IoU 抓到，重複偵測）
+      if (driftOverlapCount > 0) {
+        warnings.push(`FAIL:CLASSIFY_BBOX_OVERLAP_DRIFT(${driftOverlapCount}_pairs)`)
         if (driftOverlapPairs.length > 0) metrics.bboxDriftOverlapPairs = driftOverlapPairs.slice(0, 5)
       }
-      // jitter 用 WARN 級（沒 FAIL 前綴）— 不會觸發 retry / fail path
-      // staged-grading 看到 CLASSIFY_BBOX_JITTER warning 會直接把所有 bbox 左右各擴 0.02
-      // 修筆跡邊緣被切掉的問題（answer_only 模式下擴 w 安全：學生字必在格子內）
-      if (dxStd > 0.025 || dyStd > 0.025) {
-        warnings.push(`CLASSIFY_BBOX_JITTER(dxStd=${metrics.bboxDriftDxStd},dyStd=${metrics.bboxDriftDyStd})`)
-      }
+      // Jitter detection 已拿掉 — bbox 緊貼筆跡切到字的問題、改在 staged-grading 用
+      // 「answer_only 一律 padding w 0.02」處理、不需要事前偵測。
+      // dx_stdev / dy_stdev 仍計算進 metrics 供 forensic 查詢。
     }
   }
 
