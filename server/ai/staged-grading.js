@@ -5769,14 +5769,14 @@ export async function runStagedGradingPhaseA({
   // Ref is used for **detection only** — never to mutate student bbox.
   // See memory/feedback_dont_use_answerkey_bbox_for_student.md.
   //
-  // ⚠️ GATE：ref bbox 只在以下情境跟學生 bbox 座標可比：
-  //   - 單頁卷（answer_only 或 assignmentTotalPages === 1）— 多頁卷 ref 是 per-page normalized、
-  //     學生 bbox 是 full-image normalized，y 座標尺度不同
-  //   - teacher_scan source — 學生拍照（teacher_camera / student_upload）角度跟掃描差太大、
-  //     normalized 座標下放大成系統性偏移、shift/jitter signal 會 100% false positive
-  // 不符上述條件就跳過 ref 比對、只跑既有 7 項結構性檢查。
-  const isSinglePagePhysicalPage = answerSheetMode === 'answer_only' || assignmentTotalPages === 1
-  const isRefBboxReliable = isSinglePagePhysicalPage && submissionSource === 'teacher_scan'
+  // ⚠️ GATE：ref bbox 只在 answer_only + teacher_scan 才跟學生 bbox 座標可比。
+  //   - answer_only：老師答案卷跟學生答案卷走同一個 template、locate bbox 直接對得齊
+  //   - 非 answer_only（含 total_pages=1 的 with_questions）：ref 跟學生圖屬不同上傳路徑、
+  //     normalized 座標下不對齊；多頁更是 per-page 跟 full-image 尺度不同
+  //   - teacher_scan：同一台掃描器同一次掃，紙張位置一致
+  //   - student_upload / teacher_camera：拍照角度差太大、normalized 座標下放大成系統性偏移
+  // 不符上述條件就跳過 ref 比對、只跑既有 7 項結構性檢查（既有行為不變）。
+  const isRefBboxReliable = answerSheetMode === 'answer_only' && submissionSource === 'teacher_scan'
   const classifyRefBboxByQid = isRefBboxReliable ? new Map() : null
   if (classifyRefBboxByQid) {
     for (const q of answerKeyQuestions) {
@@ -5785,10 +5785,8 @@ export async function runStagedGradingPhaseA({
   }
   logStaged(pipelineRunId, stagedLogLevel, 'classify drift detection', {
     enabled: !!classifyRefBboxByQid,
-    isSinglePagePhysicalPage,
     submissionSource,
-    answerSheetMode,
-    assignmentTotalPages
+    answerSheetMode
   })
   const classifyQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid)
   logStaged(pipelineRunId, 'basic', 'classify quality-gate', {
