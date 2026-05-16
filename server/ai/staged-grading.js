@@ -5254,9 +5254,38 @@ export async function runStagedGradingPhaseA({
   // Build a failure-return payload when retry exhausted at any FAIL gate.
   // Returns shape compatible with normal success return (questionResults=[] so
   // frontend `.filter()` won't crash; pipelineFailure signals to skip Phase B).
+  //
+  // 🆕 失敗時也寫 stage_logs（含 ocrAssistMeta.classifyBboxes）、讓 admin 之後能
+  // 視覺化看「被拒絕的 bbox 長甚麼樣」、debug 哪條 quality gate 觸發。
   const buildFailureReturn = (stage, qgResults) => {
     const failure = buildPipelineFailure(stage, qgResults)
     logStaged(pipelineRunId, 'basic', `PhaseA FAIL at ${stage} (retry exhausted)`, failure)
+    // 失敗時也寫 stage_log、保留 classify bboxes 供事後 debug / 視覺化
+    if (internalContext?.ownerId) {
+      try {
+        const failureLogData = {
+          pipelineFailure: failure,
+          failedAtStage: stage,
+          classify: {
+            ocrAssist: typeof ocrAssistMeta !== 'undefined' && ocrAssistMeta?.perPage?.length > 0 ? ocrAssistMeta : null,
+            qualityGate: { severity: 'fail', warnings: failure.technical?.warnings, metrics: failure.technical?.metrics }
+          }
+        }
+        saveGradingStageLog({
+          ownerId: internalContext.ownerId,
+          assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
+          submissionId: internalContext.submissionId || payload?.submissionId || '',
+          pipelineRunId,
+          phase: 'phase_a',
+          model,
+          logData: failureLogData
+        }).catch((e) => {
+          logStaged(pipelineRunId, 'basic', 'failure stage_log write failed (non-fatal)', { error: e?.message })
+        })
+      } catch (e) {
+        logStaged(pipelineRunId, 'basic', 'failure stage_log build failed (non-fatal)', { error: e?.message })
+      }
+    }
     return {
       phaseAComplete: false,
       pipelineFailure: failure,
