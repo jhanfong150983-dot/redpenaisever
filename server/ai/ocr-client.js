@@ -183,45 +183,36 @@ export function isOcrAssistSingleChoiceEnabled() {
 
 /**
  * with_questions 模式 fill_blank-with-bracket gap 偵測增益開關。
- * Default ON（要關掉才設 OCR_ASSIST_BRACKET_GAP_ENABLED=false）。
+ * Default OFF（2026-05-17 改：fill_blank 改走純 AI classify、OCR matchers 不提供 hint）
  *
- * 解 root cause：題幹和答案行可能都含相同 keyword（如「多美走」「公尺」）、
- * LCS 可能配到題幹 row、classify 視覺判斷飄到題幹位置。
- * Bracket gap 偵測「（」結尾 +「）」開頭 OCR row pair、自動排除題幹（題幹沒這 pattern）。
+ * 歷史：原本想用 OCR 找答題格 bbox 當 classify hint、但 fill_blank 多 paren / 拆段 / 算式 □ 等
+ * 結構複雜、OCR matchers 無法穩定產出 ON_BLANK bbox、反而干擾 AI classify。
+ * 經 3 model × 5 run 一致性測試（Pro 3.0 best 73%）、決定 fill_blank 移除 OCR hint。
  */
 export function isOcrAssistBracketGapEnabled() {
   const raw = getEnvValue('OCR_ASSIST_BRACKET_GAP_ENABLED')
-  if (!raw) return true  // default on
-  return String(raw).trim().toLowerCase() !== 'false'
+  if (!raw) return false  // default off (2026-05-17)
+  return String(raw).trim().toLowerCase() === 'true'
 }
 
 /**
  * with_questions 模式 multi_fill 子格 (N)label 後方底線增益開關。
- * Default ON（要關掉才設 OCR_ASSIST_SUB_CELL_ENABLED=false）。
- *
- * 處理 anchorHint 含「(N)label 後方的底線處」格式的 sub-cell：
- *   例：「位於『題組三』第1小題，(1)推力 後方的底線處」
- * 找 OCR row 含「(N)label」、用該 row bbox 當 anchor。
+ * Default OFF（2026-05-17 改：fill_blank 改走純 AI classify、OCR matchers 不提供 hint）
  */
 export function isOcrAssistSubCellEnabled() {
   const raw = getEnvValue('OCR_ASSIST_SUB_CELL_ENABLED')
-  if (!raw) return true  // default on
-  return String(raw).trim().toLowerCase() !== 'false'
+  if (!raw) return false  // default off (2026-05-17)
+  return String(raw).trim().toLowerCase() === 'true'
 }
 
 /**
  * with_questions 模式 fill_blank「prefix（ ）suffix」（括號內留空）增益開關。
- * Default ON（要關掉才設 OCR_ASSIST_BLANK_PAREN_ENABLED=false）。
- *
- * 處理「線段圖中標示『大（ ）歲』」這種<b>括號內是空格本身</b>的 anchorHint：
- *   - 跟 bracket_gap 不同（bracket_gap 找兩個 OCR row 中間的空白、適合題幹被切兩 row）
- *   - 找單一 OCR row 含「prefix(任意)suffix」、學生填或沒填都能配
- *   - 多 qid 共用同 anchor（如 page 同時有兩處「相差（ ）倍」）按 y-asc + qid lex 配對
+ * Default OFF（2026-05-17 改：fill_blank 改走純 AI classify、OCR matchers 不提供 hint）
  */
 export function isOcrAssistBlankParenEnabled() {
   const raw = getEnvValue('OCR_ASSIST_BLANK_PAREN_ENABLED')
-  if (!raw) return true  // default on
-  return String(raw).trim().toLowerCase() !== 'false'
+  if (!raw) return false  // default off (2026-05-17)
+  return String(raw).trim().toLowerCase() === 'true'
 }
 
 /**
