@@ -135,6 +135,17 @@ export async function runAiPipeline({
           pipelineMeta: { pipeline: 'grading-phase-a', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
         }
       }
+      // 🆕 pipelineFailure 路徑：phaseAComplete=false + pipelineFailure 物件
+      // 之前沒 wrap、proxy.js 拿 pipelineResult.data = undefined、response body 空、
+      // 前端拿到 500 卻沒 body 解 pipelineFailure → spinner 永遠 hang
+      else if (pipelineResult?.pipelineFailure) {
+        const failureData = { phaseAComplete: false, pipelineFailure: pipelineResult.pipelineFailure }
+        pipelineResult = {
+          status: 500,
+          data: { candidates: [{ content: { parts: [{ text: JSON.stringify(failureData) }] } }] },
+          pipelineMeta: { pipeline: 'grading-phase-a-failure', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: { reasonCode: pipelineResult.pipelineFailure?.reasonCode } }
+        }
+      }
     } catch (error) {
       console.warn(`${logPrefix} phase-a crashed`, error)
       pipelineResult = null
