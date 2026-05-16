@@ -5821,7 +5821,7 @@ export async function runStagedGradingPhaseA({
     submissionSource,
     answerSheetMode
   })
-  const classifyQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid)
+  const classifyQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid, { answerSheetMode })
   logStaged(pipelineRunId, 'basic', 'classify quality-gate', {
     severity: classifyQG.severity, warnings: classifyQG.warnings, metrics: classifyQG.metrics
   })
@@ -5844,7 +5844,7 @@ export async function runStagedGradingPhaseA({
         const retryParsed = parseCandidateJson(retryResp.data)
         if (retryParsed && typeof retryParsed === 'object') {
           classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs)
-          classifyRetryQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid)
+          classifyRetryQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid, { answerSheetMode })
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: classifyRetryQG.severity, warnings: classifyRetryQG.warnings
           })
@@ -5894,7 +5894,7 @@ export async function runStagedGradingPhaseA({
             unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
             pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
           }, classifyQuestionSpecs)
-          classifyRetryQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid)
+          classifyRetryQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid, { answerSheetMode })
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: classifyRetryQG.severity, warnings: classifyRetryQG.warnings
           })

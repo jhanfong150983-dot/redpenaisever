@@ -280,7 +280,13 @@ function validateGradingClassifyResponse(data) {
 //                       Note: ref bbox is used for **detection only** (compute deltas/IoU vs current).
 //                       Mutation of bbox via ref is forbidden — see
 //                       memory/feedback_dont_use_answerkey_bbox_for_student.md.
-export function validateClassifyQuality(classifyResult, expectedQuestionIds, refBboxByQid) {
+// @param opts.answerSheetMode - 'answer_only' | 'with_questions'：用於 gate EDGE_PUSHED
+//                                EDGE_PUSHED 設計時用國中國語 25 份 answer_only 驗證、
+//                                假設 normal sub 距邊 8% 緩衝。但 with_questions 數學卷
+//                                有 calculation / word_problem 大格本來跨整寬、會誤觸發。
+//                                所以 EDGE_PUSHED 只在 answer_only 模式跑、跟 ref-based
+//                                drift (SHIFTED/OVERLAP_DRIFT/JITTER) 一致對齊驗證範圍。
+export function validateClassifyQuality(classifyResult, expectedQuestionIds, refBboxByQid, opts = {}) {
   const warnings = []
   const metrics = {}
   const aligned = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
@@ -379,10 +385,11 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds, ref
 
   // ── BBox edge-pushed (shift detection, ref-independent) ──
   // 偵測整批 bbox 被推到頁面任一邊緣（強烈的 shift 訊號）。
-  // 不依賴 answer_key ref bbox、跑在所有 assignment（無 gate）、
-  // 對紙張對齊微差不敏感（normal sub bbox 距頁邊有 8% 緩衝、不會誤判）。
-  // 閾值依據國中國語 25 sub + cross-assignment 100+ sub 驗證、shifted vs normal 切分乾淨。
-  if (bboxes.length >= 5) {
+  // 不依賴 answer_key ref bbox、設計時假設 normal sub bbox 距頁邊有 8% 緩衝。
+  // ⚠️ 只在 answer_only 模式跑：驗證 dataset 是國中國語 25 份 answer_only 卷、
+  //    with_questions 數學/混合題型卷有 calculation / word_problem 大格本來
+  //    就跨整寬、會誤觸發。對齊驗證範圍、跟 ref-based drift (SHIFTED 等) 一致。
+  if (opts.answerSheetMode === 'answer_only' && bboxes.length >= 5) {
     let nearTop = 0, nearBottom = 0, nearLeft = 0, nearRight = 0
     for (const b of bboxes) {
       if (b.y < 0.03) nearTop++
