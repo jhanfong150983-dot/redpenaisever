@@ -138,13 +138,20 @@ export async function callGeminiGenerateContent({
   const allModels = [model, ...fallbackModels]
   let lastResult = null
 
+  // 2026-05-17: Pro 3.x preview 不支援 thinking_level='MINIMAL' (Flash-only flag)
+  // 對 Pro 模型一律 strip thinkingConfig、避免 400 reject
+  const isProModel = (m) => typeof m === 'string' && /pro/i.test(m)
+
   for (let i = 0; i < allModels.length; i++) {
     const currentModel = allModels[i]
-    const effectivePayload = i > 0 ? stripThinkingConfig(payload) : payload
+    const shouldStrip = i > 0 || isProModel(currentModel)
+    const effectivePayload = shouldStrip ? stripThinkingConfig(payload) : payload
     if (i > 0) {
       console.warn(
         `[ai-model-adapter] 503-fallback switching to model=${currentModel} fallbackIndex=${i}`
       )
+    } else if (shouldStrip) {
+      console.log(`[ai-model-adapter] strip thinkingConfig for Pro model=${currentModel}`)
     }
 
     const result = await callSingleModel({
