@@ -2281,6 +2281,36 @@ async function handleSaveGrading(req, res) {
   }
 }
 
+// 2026-05-18: PR3 審查頁老師確認後寫 final_answers 到 submissions。
+// 不更動 score / status (status 仍是 synced、由 deriveCardStage 透過 final_answers 完整性算出待批改 / 待複核)
+async function handleSaveFinalAnswers(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const submissions = Array.isArray(body?.submissions) ? body.submissions : []
+  if (submissions.length === 0) { res.status(400).json({ error: 'Missing submissions' }); return }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    let updated = 0
+    for (const sub of submissions) {
+      if (!sub?.id || !Array.isArray(sub?.finalAnswers)) continue
+      const { error } = await supabaseDb
+        .from('submissions')
+        .update({
+          final_answers: sub.finalAnswers,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', sub.id)
+        .eq('owner_id', user.id)
+      if (!error) updated++
+    }
+    res.status(200).json({ success: true, updated })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '儲存失敗' })
+  }
+}
+
 async function handleClearGrading(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
   const { user } = await getAuthUser(req, res)
@@ -6633,6 +6663,10 @@ const log = document.getElementById('log');
   }
   if (action === 'save-grading') {
     await handleSaveGrading(req, res)
+    return
+  }
+  if (action === 'save-final-answers') {
+    await handleSaveFinalAnswers(req, res)
     return
   }
   if (action === 'clear-grading') {
