@@ -32,6 +32,16 @@ export const READ_ANSWER_GENERATION_CONFIG = {
   }
 }
 
+// 2026-05-17: classify vs read 用不同 model（split-model strategy）
+// classify 需要視覺精度（找 bbox 位置）→ 用 caller 傳的 model（如 Pro 3.1）
+// read 是 decode crop（簡單任務）→ default Flash、可用 READ_ANSWER_MODEL env 覆寫
+// 好處：read 是 batch call (AI1+AI2+WordProblem+Calc = 4 calls)、Flash 省 10x token + ~30x 速度
+function getReadAnswerModel(classifyModel) {
+  const fromEnv = String(process.env.READ_ANSWER_MODEL || '').trim()
+  if (fromEnv) return fromEnv
+  return 'gemini-3-flash-preview'
+}
+
 
 function createPipelineRunId(requestId = '') {
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -6098,11 +6108,14 @@ export async function runStagedGradingPhaseA({
     ai1CropCount: ai1IncludeIds.length,
     ai2CropCount: ai2Parts.filter((p) => p.inlineData).length
   })
+  // 2026-05-17: read 用獨立 model（split-model strategy）、默認 Flash 省成本+速度
+  const readModel = getReadAnswerModel(model)
+  if (readModel !== model) logStaged(pipelineRunId, stagedLogLevel, `read using split model classify=${model} read=${readModel}`)
   const parallelCalls = [
     // AI1: detail read (crop images only)
     executeStage({
       apiKey,
-      model,
+      model: readModel,
       payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
       timeoutMs: getRemainingBudget(),
       routeHint,
@@ -6112,7 +6125,7 @@ export async function runStagedGradingPhaseA({
     // AI2: review read (same crops as AI1, but knows correct answers — acts as reviewer)
     executeStage({
       apiKey,
-      model,
+      model: readModel,
       payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
       timeoutMs: getRemainingBudget(),
       routeHint,
@@ -6127,7 +6140,7 @@ export async function runStagedGradingPhaseA({
     parallelCalls.push(
       executeStage({
         apiKey,
-        model,
+        model: readModel,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
@@ -6146,7 +6159,7 @@ export async function runStagedGradingPhaseA({
     parallelCalls.push(
       executeStage({
         apiKey,
-        model,
+        model: readModel,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
