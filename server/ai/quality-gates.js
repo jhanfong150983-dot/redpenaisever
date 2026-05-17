@@ -593,6 +593,10 @@ export function validateReadAnswerQuality(readResult1, readResult2, expectedQues
   }
 
   // ── AI1/AI2 overall disagreement rate ──
+  // 2026-05-17: READ_HIGH_DISAGREEMENT FAIL 拿掉、改由 AI3 全權處理
+  // 原本 0.5 閾值會在 AI3 之前先擋下、但 AI1/AI2 prompt role 差異本來就會產生格式落差
+  // （× vs x、全形 vs 半形、單位有無）、這正是 AI3 該解決的事
+  // 保留 metrics 計算（log/stage_log 都還會看到 disagreement rate）、但不再 FAIL
   if (answers2.length > 0) {
     const ai2ById = new Map(answers2.map((a) => [a.questionId, a]))
     let disagreements = 0
@@ -610,9 +614,7 @@ export function validateReadAnswerQuality(readResult1, readResult2, expectedQues
     metrics.ai1ai2Comparisons = comparisons
     metrics.ai1ai2Disagreements = disagreements
     metrics.ai1ai2DisagreementRate = +disagreementRate.toFixed(3)
-    if (comparisons >= 3 && disagreementRate > 0.5) {  // AI1/AI2 角色分化後閾值從 0.4 調至 0.5
-      warnings.push(`FAIL:READ_HIGH_DISAGREEMENT(${disagreements}/${comparisons}=${metrics.ai1ai2DisagreementRate})`)
-    }
+    // 已不再 FAIL — AI3 接手判斷 semantic disagreement
   }
 
   return { warnings, metrics, severity: severityFromWarnings(warnings) }
