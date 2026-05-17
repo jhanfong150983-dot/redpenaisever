@@ -4,6 +4,7 @@ import { AI_ROUTE_KEYS, normalizeRouteKey, resolveRouteKey } from './routes.js'
 import {
   runStagedGradingEvaluate,
   runStagedGradingPhaseA,
+  runStagedGradingPhaseAArbiter,
   runStagedGradingPhaseB
 } from './staged-grading.js'
 
@@ -87,6 +88,7 @@ export async function runAiPipeline({
     resolvedRouteKey === AI_ROUTE_KEYS.GRADING_EVALUATE &&
     internalContext?.enableStagedGrading !== false
   const isPhaseA = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A
+  const isPhaseAArbiter = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A_ARBITER
   const isPhaseB = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B
 
   // answer_sheet_mode 對 extract / classify / explain pipeline 的分支都重要，log 到 orchestrator 入口便於追蹤
@@ -112,6 +114,15 @@ export async function runAiPipeline({
           status: 200,
           data: { candidates: [{ content: { parts: [{ text: JSON.stringify(pipelineResult) }] } }] },
           pipelineMeta: { pipeline: 'grading-classify-only', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+        }
+      }
+      // 2026-05-17: stopBeforeArbiter early-return — 包進 standard pipeline response、
+      // client 收到後帶 _phaseAReadContext 打第二個 endpoint (phase_a_arbiter)
+      else if (pipelineResult?.phaseAReadyForArbiter) {
+        pipelineResult = {
+          status: 200,
+          data: { candidates: [{ content: { parts: [{ text: JSON.stringify(pipelineResult) }] } }] },
+          pipelineMeta: { pipeline: 'grading-phase-a-pre-arbiter', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
         }
       }
       // Wrap phaseA result so it travels through the standard pipeline response shape
@@ -149,6 +160,56 @@ export async function runAiPipeline({
     } catch (error) {
       console.warn(`${logPrefix} phase-a crashed`, error)
       pipelineResult = null
+    }
+  } else if (isPhaseAArbiter) {
+    console.log(`${logPrefix} phase-a-arbiter route=${resolvedRouteKey}`)
+    try {
+      pipelineResult = await runStagedGradingPhaseAArbiter({
+        apiKey, model, contents, payload, routeHint, internalContext
+      })
+      if (pipelineResult?.phaseAComplete) {
+        const phaseAData = { phaseAComplete: true, ...pipelineResult }
+        const _internal = phaseAData._internal || {}
+        delete phaseAData._internal
+        phaseAData._phaseContext = {
+          answerKey: _internal.answerKey,
+          questionIds: _internal.questionIds,
+          classifyResult: _internal.classifyResult,
+          pipelineRunId: _internal.pipelineRunId,
+          stagedLogLevel: _internal.stagedLogLevel
+          // readAnswerResult excluded: Phase B uses finalAnswers
+          // cropByQuestionId excluded: base64 images are too large
+        }
+        pipelineResult = {
+          status: 200,
+          data: { candidates: [{ content: { parts: [{ text: JSON.stringify(phaseAData) }] } }] },
+          pipelineMeta: { pipeline: 'grading-phase-a-arbiter', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+        }
+      } else if (pipelineResult?.pipelineFailure) {
+        const failureData = { phaseAComplete: false, pipelineFailure: pipelineResult.pipelineFailure }
+        pipelineResult = {
+          status: 500,
+          data: { candidates: [{ content: { parts: [{ text: JSON.stringify(failureData) }] } }] },
+          pipelineMeta: { pipeline: 'grading-phase-a-arbiter-failure', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: { reasonCode: pipelineResult.pipelineFailure?.reasonCode } }
+        }
+      }
+    } catch (error) {
+      console.warn(`${logPrefix} phase-a-arbiter crashed`, error)
+      const failureData = {
+        phaseAComplete: false,
+        pipelineFailure: {
+          stage: 'arbiter',
+          reasonCode: 'PHASE_A_ARBITER_CRASHED',
+          userMessage: '批改失敗：AI3 一致性判斷階段發生錯誤',
+          userAction: '請重新批改',
+          technical: { error: error?.message }
+        }
+      }
+      pipelineResult = {
+        status: 500,
+        data: { candidates: [{ content: { parts: [{ text: JSON.stringify(failureData) }] } }] },
+        pipelineMeta: { pipeline: 'grading-phase-a-arbiter-failure', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+      }
     }
   } else if (isPhaseB) {
     console.log(`${logPrefix} phase-b route=${resolvedRouteKey}`)
@@ -195,7 +256,7 @@ export async function runAiPipeline({
   }
 
   if (!pipelineResult) {
-    if (shouldRunStagedGrading || isPhaseA || isPhaseB) {
+    if (shouldRunStagedGrading || isPhaseA || isPhaseAArbiter || isPhaseB) {
       console.warn(`${logPrefix} staged-unavailable fallback=single-shot`)
     }
     console.log(`${logPrefix} single-shot route=${resolvedRouteKey}`)

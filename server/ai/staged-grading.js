@@ -5209,6 +5209,12 @@ export async function runStagedGradingPhaseA({
   routeHint = {},
   internalContext = {}
 }) {
+  // 2026-05-17: 拆 arbiter 出獨立 HTTP call（GRADING_PHASE_A_ARBITER）。
+  // payload.phaseAStopBeforeArbiter=true 時、跑完 OCR+classify+read+pre-arbiter overrides 後早退、
+  // 把純文字狀態（questionResultsRaw + bboxes + ocrAssistedQids 等）放 _phaseAReadContext 回 client、
+  // client 帶 context 打第二個 endpoint（runStagedGradingPhaseAArbiter）跑 AI3 + 最終 build。
+  // 各 call 各吃 300s Vercel budget、AI3 不再被擠死。
+  const stopBeforeArbiter = payload?.phaseAStopBeforeArbiter === true
   const pipelineRunId = createPipelineRunId(internalContext?.requestId)
   const stagedLogLevel = getStagedLogLevel()
   const resolvedAnswerKey = internalContext?.resolvedAnswerKey
@@ -5245,6 +5251,8 @@ export async function runStagedGradingPhaseA({
   const answerSheetMode = internalContext?.answerSheetMode || 'with_questions'
   const submissionSource = payload?.submissionSource || internalContext?.submissionSource || null
   logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length} answerSheetMode=${answerSheetMode} submissionSource=${submissionSource || 'unset'}`)
+  // 2026-05-17: 中文 log——讓人在 Vercel log stream 一眼掃到階段邊界
+  logStaged(pipelineRunId, 'basic', `[A1] 進場 題目數=${questionIds.length} 模式=${answerSheetMode} 模型=${model}${stopBeforeArbiter ? ' (拆解模式：跑完 read 後早退)' : ''}`)
 
   const stageResponses = []
   const stageWarnings = []
@@ -5261,21 +5269,34 @@ export async function runStagedGradingPhaseA({
   //
   // 🆕 失敗時也寫 stage_logs（含 ocrAssistMeta.classifyBboxes）、讓 admin 之後能
   // 視覺化看「被拒絕的 bbox 長甚麼樣」、debug 哪條 quality gate 觸發。
-  const buildFailureReturn = (stage, qgResults) => {
+  const buildFailureReturn = async (stage, qgResults, extra) => {
     const failure = buildPipelineFailure(stage, qgResults)
     logStaged(pipelineRunId, 'basic', `PhaseA FAIL at ${stage} (retry exhausted)`, failure)
     // 失敗時也寫 stage_log、保留 classify bboxes 供事後 debug / 視覺化
+    // 2026-05-17: 改 await — fire-and-forget 在 Vercel function 提早 return 時、
+    // process 被 terminate、insert promise 來不及落地（學生 3/5 失敗無 row）。
     if (internalContext?.ownerId) {
       try {
+        const extractAnswers = (result) => {
+          const answers = Array.isArray(result?.answers) ? result.answers : []
+          return answers.map((a) => ({
+            questionId: a.questionId,
+            status: a.status,
+            answer: a.studentAnswerRaw || a.studentAnswer || ''
+          }))
+        }
         const failureLogData = {
           pipelineFailure: failure,
           failedAtStage: stage,
           classify: {
             ocrAssist: typeof ocrAssistMeta !== 'undefined' && ocrAssistMeta?.perPage?.length > 0 ? ocrAssistMeta : null,
             qualityGate: { severity: 'fail', warnings: failure.technical?.warnings, metrics: failure.technical?.metrics }
-          }
+          },
+          // 2026-05-17: read FAIL 時保留 AI1 / AI2 答案、之後可撈出來查 disagreement 來源
+          read_answer_1: extra?.readAnswerResult ? extractAnswers(extra.readAnswerResult) : null,
+          read_answer_2: extra?.reReadAnswerResult ? extractAnswers(extra.reReadAnswerResult) : null
         }
-        saveGradingStageLog({
+        await saveGradingStageLog({
           ownerId: internalContext.ownerId,
           assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
           submissionId: internalContext.submissionId || payload?.submissionId || '',
@@ -5283,11 +5304,9 @@ export async function runStagedGradingPhaseA({
           phase: 'phase_a',
           model,
           logData: failureLogData
-        }).catch((e) => {
-          logStaged(pipelineRunId, 'basic', 'failure stage_log write failed (non-fatal)', { error: e?.message })
         })
       } catch (e) {
-        logStaged(pipelineRunId, 'basic', 'failure stage_log build failed (non-fatal)', { error: e?.message })
+        logStaged(pipelineRunId, 'basic', 'failure stage_log write failed (non-fatal)', { error: e?.message })
       }
     }
     return {
@@ -5303,7 +5322,7 @@ export async function runStagedGradingPhaseA({
 
   // 2026-05-17: HTTP error wrapper — 把模型 HTTP error (400/503/504) 包成 pipelineFailure
   // 解決前端只看到 generic「批改失敗」、看不到具體原因（如 Pro 不支援 thinking_level）
-  const buildHttpErrorReturn = (stage, response) => {
+  const buildHttpErrorReturn = async (stage, response) => {
     const status = Number(response?.status) || 500
     const dataPreview = JSON.stringify(response?.data || {}).slice(0, 300)
     let userMessage
@@ -5340,7 +5359,7 @@ export async function runStagedGradingPhaseA({
     logStaged(pipelineRunId, 'basic', `PhaseA HTTP ERROR at ${stage}`, failure)
     if (internalContext?.ownerId) {
       try {
-        saveGradingStageLog({
+        await saveGradingStageLog({
           ownerId: internalContext.ownerId,
           assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
           submissionId: internalContext.submissionId || payload?.submissionId || '',
@@ -5348,8 +5367,10 @@ export async function runStagedGradingPhaseA({
           phase: 'phase_a',
           model,
           logData: { pipelineFailure: failure, failedAtStage: stage }
-        }).catch((e) => logStaged(pipelineRunId, 'basic', 'HTTP-error stage_log write failed', { error: e?.message }))
-      } catch (e) { /* non-fatal */ }
+        })
+      } catch (e) {
+        logStaged(pipelineRunId, 'basic', 'HTTP-error stage_log write failed', { error: e?.message })
+      }
     }
     return {
       phaseAComplete: false,
@@ -5921,6 +5942,37 @@ export async function runStagedGradingPhaseA({
   logStaged(pipelineRunId, 'basic', 'classify quality-gate', {
     severity: classifyQG.severity, warnings: classifyQG.warnings, metrics: classifyQG.metrics
   })
+  // 2026-05-17: 中文彙總——bbox 來源統計（讓人秒懂這份卷的 classify 結果）
+  {
+    const aligned = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
+    const visibleCount = aligned.filter((q) => q.visible).length
+    const ocrAssistedCount = (() => {
+      let n = 0
+      for (const page of ocrAssistMeta.perPage) n += Object.keys(page.candidates || {}).length
+      return n
+    })()
+    const rowAnchorCount = (() => {
+      let n = 0
+      for (const page of ocrAssistMeta.perPage) {
+        if (page.rowAnchorOverrides) n += page.rowAnchorOverrides.length
+      }
+      return n
+    })()
+    const mathEqCount = aligned.filter((q) => q.framingReason === 'math_eq_blank_override_v2').length
+    const proClassifyCount = visibleCount - ocrAssistedCount - rowAnchorCount - mathEqCount
+    const qgLabel = classifyQG.severity === QG_SEVERITY.PASS ? '通過'
+      : classifyQG.severity === QG_SEVERITY.WARN ? '警告' : '失敗'
+    logStaged(pipelineRunId, 'basic',
+      `[A1] classify 完成 涵蓋=${(classifyQG.metrics?.coverage ?? 0).toFixed(2)} 可見=${visibleCount}/${questionIds.length} 品質=${qgLabel}`,
+      {
+        bbox來源: {
+          Pro_classify: Math.max(0, proClassifyCount),
+          OCR_row_anchor: rowAnchorCount,
+          math_eq_blank: mathEqCount,
+          OCR_assist_覆寫: ocrAssistedCount
+        }
+      })
+  }
   let classifyRetryQG = null
   if (classifyQG.severity === QG_SEVERITY.FAIL) {
     logStaged(pipelineRunId, stagedLogLevel, 'classify quality FAIL → retry (1/1)')
@@ -6095,6 +6147,14 @@ export async function runStagedGradingPhaseA({
   for (const [qId, cropData] of focusedCheckboxCropMap) {
     allQuestionCropMap.set(qId, cropData)
   }
+  // 2026-05-17: 中文彙總——進入 A2 + crop 完成
+  {
+    const totalCropBytes = Array.from(allQuestionCropMap.values())
+      .reduce((sum, c) => sum + (c?.data?.length || 0), 0)
+    const cropMB = (totalCropBytes / 1_000_000).toFixed(2)
+    logStaged(pipelineRunId, 'basic',
+      `[A2] 進場 切圖完成 共 ${allQuestionCropMap.size} 張 (約 ${cropMB}MB)、準備 AI1 + AI2 並行讀答`)
+  }
 
   // Build AI1 parts: text prompt + interleaved (label + crop) per question
   const ai1IncludeIds = Array.from(allQuestionCropMap.keys())
@@ -6210,6 +6270,16 @@ export async function runStagedGradingPhaseA({
   logStageEnd(pipelineRunId, 'ReadAnswer', readAnswerResponse)
   logStageEnd(pipelineRunId, 'reReadAnswer', reReadAnswerResponse)
   stageResponses.push(readAnswerResponse, reReadAnswerResponse)
+  // 2026-05-17: 中文彙總——AI1 / AI2 並行 read 結果
+  {
+    const ai1Ms = Math.round(Number(readAnswerResponse?.modelLatencyMs) || 0)
+    const ai2Ms = Math.round(Number(reReadAnswerResponse?.modelLatencyMs) || 0)
+    const ai1Status = readAnswerResponse?.status || '?'
+    const ai2Status = reReadAnswerResponse?.status || '?'
+    const wallSeconds = (Math.max(ai1Ms, ai2Ms) / 1000).toFixed(1)
+    logStaged(pipelineRunId, 'basic',
+      `[A2] AI1+AI2 並行 read 完成 AI1=${ai1Ms}ms(${ai1Status}) AI2=${ai2Ms}ms(${ai2Status}) wall≈${wallSeconds}s`)
+  }
 
   if (!readAnswerResponse.ok) {
     return buildHttpErrorReturn('read_answer', readAnswerResponse)
@@ -6635,13 +6705,37 @@ export async function runStagedGradingPhaseA({
   logStaged(pipelineRunId, stagedLogLevel, 'cross-stage classify→read quality-gate', {
     severity: classifyReadQG.severity, warnings: classifyReadQG.warnings, metrics: classifyReadQG.metrics
   })
+  // 2026-05-17: 中文彙總——AI1 vs AI2 不一致細節（哪幾題、disagreement rate）
+  {
+    const m = readQG.metrics || {}
+    const cmp = Number(m.ai1ai2Comparisons || 0)
+    const diff = Number(m.ai1ai2Disagreements || 0)
+    const rate = Number(m.ai1ai2DisagreementRate || 0)
+    // 找出實際不一致的題號
+    const disagreeQids = []
+    if (Array.isArray(readAnswerResult?.answers) && Array.isArray(reReadAnswerResult?.answers)) {
+      const a2Map = new Map(reReadAnswerResult.answers.map((a) => [a.questionId, a]))
+      for (const a1 of readAnswerResult.answers) {
+        if (a1.status !== 'read') continue
+        const a2 = a2Map.get(a1.questionId)
+        if (!a2 || a2.status !== 'read') continue
+        const raw1 = (a1.studentAnswerRaw ?? '').trim()
+        const raw2 = (a2.studentAnswerRaw ?? '').trim()
+        if (raw1 !== raw2) disagreeQids.push(a1.questionId)
+      }
+    }
+    const qgLabel = readQG.severity === QG_SEVERITY.PASS ? '通過'
+      : readQG.severity === QG_SEVERITY.WARN ? '警告' : '失敗'
+    logStaged(pipelineRunId, 'basic',
+      `[A2] read 品質檢查=${qgLabel} 比對=${cmp} 不一致=${diff} 比率=${rate.toFixed(3)}${disagreeQids.length > 0 ? ' 不一致題號=' + disagreeQids.join(',') : ''}`)
+  }
 
   // Read / cross-stage FAIL → 整份失敗、不繼續走 arbiter。
   // 設計理由：classify 階段已 retry 過一次（若 classify QG 觸發），read FAIL 的 root cause
   // 多半是 bbox 系統性問題。再 retry read 不會修好 root cause，浪費 AI call。
   // 直接走失敗路徑、讓老師重批這份（系統會重跑 classify）。
   if (readQG.severity === QG_SEVERITY.FAIL || classifyReadQG.severity === QG_SEVERITY.FAIL) {
-    return buildFailureReturn('read', [readQG, classifyReadQG])
+    return buildFailureReturn('read', [readQG, classifyReadQG], { readAnswerResult, reReadAnswerResult })
   }
 
   // ── A5: CONSISTENCY CHECK (pure logic, no crops yet) ─────────────────────
@@ -6864,6 +6958,71 @@ Return JSON:
     }
   }
 
+  // 2026-05-17: stopBeforeArbiter early-return（拆 arbiter 出獨立 HTTP call）
+  // 走到這裡：OCR + classify + read1+read2 + E↔F + English spelling/spacing 全跑完
+  // 接下來的 AI3-arbiter + 最終 build 改成第二支 endpoint（runStagedGradingPhaseAArbiter）跑
+  if (stopBeforeArbiter) {
+    // 收集 OCR-assist 過的 qids（A3 ocrBlankOverride 邏輯需要）
+    const ocrAssistedQidsList = []
+    for (const page of ocrAssistMeta.perPage) {
+      for (const qid of Object.keys(page.candidates || {})) ocrAssistedQidsList.push(qid)
+    }
+    // alignedQuestions 輕量版本（A3 重切 crop 時用 bbox）
+    const alignedQuestionsLite = classifyAligned.map((q) => ({
+      questionId: q.questionId,
+      questionType: q.questionType,
+      visible: q.visible,
+      answerBbox: q.answerBbox ? { x: +q.answerBbox.x, y: +q.answerBbox.y, w: +q.answerBbox.w, h: +q.answerBbox.h } : null,
+      bboxCorrected: !!q.bboxCorrected,
+      framingReason: q.framingReason || undefined
+    }))
+    // stage_log 寫入用、純文字
+    const classifySummary = {
+      coverage: classifyResult?.coverage,
+      visibleCount: classifyAligned.filter((q) => q.visible).length
+    }
+    const extractMin = (result) => {
+      const answers = Array.isArray(result?.answers) ? result.answers : []
+      return answers.map((a) => ({
+        questionId: a.questionId,
+        status: a.status,
+        answer: a.studentAnswerRaw || a.studentAnswer || ''
+      }))
+    }
+    const readAnswer1Mini = extractMin(readAnswerResult)
+    const readAnswer2Mini = extractMin(reReadAnswerResult)
+    const stageLatencySoFar = stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0)
+
+    logStaged(pipelineRunId, 'basic', `PhaseA 早退（stopBeforeArbiter）→ 等 client 打 phase_a_arbiter`, {
+      pipelineRunId,
+      contextBytes: '~50KB',
+      questionCount: questionResultsRaw.length,
+      ocrAssistedCount: ocrAssistedQidsList.length,
+      stageLatencyMsSoFar: stageLatencySoFar
+    })
+
+    return {
+      phaseAReadyForArbiter: true,
+      _phaseAReadContext: {
+        pipelineRunId,
+        stagedLogLevel,
+        questionResultsRaw,
+        alignedQuestionsLite,
+        ocrAssistedQids: ocrAssistedQidsList,
+        isEnglishDomainForSpelling,
+        // stage_log 重建用（A3 寫最終 phase_a row）
+        classifySummary,
+        readAnswer1Mini,
+        readAnswer2Mini,
+        ocrAssistMeta: ocrAssistMeta.perPage.length > 0 ? ocrAssistMeta : null,
+        stageLatencyMsSoFar: stageLatencySoFar,
+        // backward compat：A3 完跑完才合成完整 _internal（含 cropByQuestionId、由 A3 重切）
+        answerKey,
+        questionIds
+      }
+    }
+  }
+
   // ── AI3 Arbiter (serial): compare AI1/AI2 results and make evidence-based decision ──
   // Filter: skip questions where both AI1 and AI2 are blank (auto agree) or both unreadable (auto needs_review)
   const akByQidForArbiter = isEnglishDomainForSpelling ? mapByQuestionId(answerKeyQuestions, (q) => q?.id) : null
@@ -6994,7 +7153,7 @@ Return JSON:
       }
 
       if (arbiterQG.severity === QG_SEVERITY.FAIL) {
-        return buildFailureReturn('arbiter', [arbiterQG])
+        return buildFailureReturn('arbiter', [arbiterQG], { readAnswerResult, reReadAnswerResult })
       }
     }
   }
@@ -7173,6 +7332,370 @@ Return JSON:
       readAnswerResult,
       stageResponses,
       stageWarnings,
+      pipelineRunId,
+      stagedLogLevel,
+      cropByQuestionId
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase A Arbiter: 獨立 HTTP call 跑 AI3 + 最終 build
+//
+// 2026-05-17：拆 arbiter 出獨立 endpoint、解決 290s budget 把 AI3 擠死的痛點。
+// 流程：client 先打 grading.phase_a (with phaseAStopBeforeArbiter=true)、拿 _phaseAReadContext、
+//      再打 grading.phase_a_arbiter (帶原圖 + _phaseAReadContext) 跑完剩下的。
+// 各 call 各吃自己的 300s budget、AI3 永遠跑得完。
+// ─────────────────────────────────────────────────────────────────────────────
+export async function runStagedGradingPhaseAArbiter({
+  apiKey,
+  model,
+  contents,
+  payload = {},
+  routeHint = {},
+  internalContext = {}
+}) {
+  const phaseAReadContext = payload?._phaseAReadContext || internalContext?._phaseAReadContext
+  if (!phaseAReadContext || typeof phaseAReadContext !== 'object') {
+    throw new Error('runStagedGradingPhaseAArbiter: _phaseAReadContext is required')
+  }
+  const {
+    pipelineRunId,
+    stagedLogLevel: ctxLogLevel,
+    questionResultsRaw,
+    alignedQuestionsLite,
+    ocrAssistedQids,
+    isEnglishDomainForSpelling,
+    classifySummary,
+    readAnswer1Mini,
+    readAnswer2Mini,
+    ocrAssistMeta,
+    stageLatencyMsSoFar,
+    answerKey,
+    questionIds
+  } = phaseAReadContext
+  const stagedLogLevel = ctxLogLevel || getStagedLogLevel()
+
+  logStaged(pipelineRunId, 'basic', `[A3] 進場 questionCount=${questionResultsRaw?.length || 0} ocrAssistedCount=${(ocrAssistedQids || []).length} model=${model}`)
+
+  const pipelineStartedAt = Date.now()
+  // A3 自己的 budget — 純文字 LLM + 重切 needs_review crop、夠用
+  const ARBITER_BUDGET_MS = 290_000
+  const getRemainingBudget = () => Math.max(1000, ARBITER_BUDGET_MS - (Date.now() - pipelineStartedAt))
+
+  const stageResponses = []
+  const ocrAssistedQidSet = new Set(Array.isArray(ocrAssistedQids) ? ocrAssistedQids : [])
+  const alignedById = new Map((alignedQuestionsLite || []).map((q) => [q.questionId, q]))
+
+  // ── AI3 Arbiter call ──
+  const arbiterItems = (questionResultsRaw || [])
+    .filter((qr) => {
+      const s1 = qr.readAnswer1?.status
+      const s2 = qr.readAnswer2?.status
+      if (s1 === 'blank' && s2 === 'blank') return false
+      return true
+    })
+    .map((qr) => ({
+      questionId: qr.questionId,
+      questionType: qr.questionType,
+      ai1Answer: qr.readAnswer1?.studentAnswer,
+      ai1Status: qr.readAnswer1?.status,
+      ai2Answer: qr.readAnswer2?.studentAnswer,
+      ai2Status: qr.readAnswer2?.status
+    }))
+
+  logStaged(pipelineRunId, 'basic', `[A3] arbiter 候選 ${arbiterItems.length} 題（已扣掉雙 blank）`)
+
+  const arbiterByQuestionId = new Map()
+  if (arbiterItems.length > 0) {
+    try {
+      const arbiterPromptText = buildArbiterPrompt(arbiterItems)
+      const arbiterParts = [{ text: arbiterPromptText }]
+      logStageStart(pipelineRunId, 'AI3-arbiter')
+      const arbiterResponse = await executeStage({
+        apiKey,
+        model,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_ARBITER,
+        stageContents: [{ role: 'user', parts: arbiterParts }]
+      })
+      logStageEnd(pipelineRunId, 'AI3-arbiter', arbiterResponse)
+      stageResponses.push(arbiterResponse)
+      if (arbiterResponse.ok) {
+        const arbiterParsed = parseCandidateJson(arbiterResponse.data)
+        const results = Array.isArray(arbiterParsed?.consistencyResults) ? arbiterParsed.consistencyResults : []
+        for (const r of results) {
+          const qId = ensureString(r?.questionId).trim()
+          if (!qId) continue
+          const item = arbiterItems.find((i) => i.questionId === qId)
+          if (!item) continue
+          const decision = applyForensicDecision(r, item.ai1Answer, item.ai2Answer)
+          arbiterByQuestionId.set(qId, {
+            arbiterStatus: decision.arbiterStatus,
+            finalAnswer: decision.finalAnswer,
+            consistent: r.consistent,
+            reason: r.reason || undefined
+          })
+        }
+        const consistentCount = Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'arbitrated_agree').length
+        const inconsistentCount = Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
+        logStaged(pipelineRunId, 'basic', `[A3] AI3 判定完成 一致=${consistentCount} 不一致=${inconsistentCount} 收到=${results.length}/${arbiterItems.length}`)
+      } else {
+        logStaged(pipelineRunId, 'basic', `[A3] AI3 失敗 status=${arbiterResponse.status} → fallback 純字串比對`)
+      }
+    } catch (arbiterErr) {
+      logStaged(pipelineRunId, stagedLogLevel, '[A3] AI3 例外 → fallback', { error: arbiterErr?.message })
+    }
+  }
+
+  // ── Arbiter Quality Gate + Auto-Retry ──
+  let arbiterQGFinal = null
+  const ai3ResultCount = arbiterByQuestionId.size
+  if (ai3ResultCount > 0 && arbiterItems.length > 0) {
+    const arbiterExpectedIds = arbiterItems.map((item) => item.questionId)
+    let arbiterQG = validateArbiterQuality(Array.from(arbiterByQuestionId.values()), arbiterExpectedIds)
+    logStaged(pipelineRunId, 'basic', `[A3] 品質檢查 嚴重度=${arbiterQG.severity}`, { warnings: arbiterQG.warnings, metrics: arbiterQG.metrics })
+
+    if (arbiterQG.severity === QG_SEVERITY.FAIL) {
+      logStaged(pipelineRunId, stagedLogLevel, '[A3] arbiter QG FAIL → retry (1/1)')
+      try {
+        const retryPrompt = buildArbiterPrompt(arbiterItems)
+        const retryResp = await executeStage({
+          apiKey,
+          model,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(),
+          routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_ARBITER,
+          stageContents: [{ role: 'user', parts: [{ text: retryPrompt }] }]
+        })
+        logStageEnd(pipelineRunId, 'AI3-arbiter-retry', retryResp)
+        stageResponses.push(retryResp)
+        if (retryResp.ok) {
+          const retryParsed = parseCandidateJson(retryResp.data)
+          const retryResults = Array.isArray(retryParsed?.consistencyResults) ? retryParsed.consistencyResults : []
+          arbiterByQuestionId.clear()
+          for (const r of retryResults) {
+            const qId = ensureString(r?.questionId).trim()
+            if (!qId) continue
+            const item = arbiterItems.find((i) => i.questionId === qId)
+            if (!item) continue
+            const decision = applyForensicDecision(r, item.ai1Answer, item.ai2Answer)
+            arbiterByQuestionId.set(qId, {
+              arbiterStatus: decision.arbiterStatus,
+              finalAnswer: decision.finalAnswer,
+              consistent: r.consistent,
+              reason: r.reason || undefined
+            })
+          }
+          arbiterQG = validateArbiterQuality(Array.from(arbiterByQuestionId.values()), arbiterExpectedIds)
+          logStaged(pipelineRunId, 'basic', `[A3] retry QG 嚴重度=${arbiterQG.severity}`)
+        }
+      } catch (retryErr) {
+        logStaged(pipelineRunId, stagedLogLevel, '[A3] retry 例外', { error: retryErr?.message })
+      }
+    }
+    arbiterQGFinal = arbiterQG
+  }
+
+  // ── Build final questionResults (含 needs_review crop URL) ──
+  const ocrBlankOverrides = []
+  const inlineImages = extractInlineImages(contents)
+  const inlineImage = inlineImages[0]
+  const fullImageDataUrl = inlineImage
+    ? `data:${inlineImage.inlineData.mimeType};base64,${inlineImage.inlineData.data}`
+    : undefined
+
+  // 先建構 questionResults（不含 crop URL）、判斷 needs_review 後再補 crop
+  const questionResultsPreCrop = (questionResultsRaw || []).map((qr) => {
+    let arbiterResult = arbiterByQuestionId.get(qr.questionId) ?? (() => {
+      const s1 = qr.readAnswer1?.status
+      const s2 = qr.readAnswer2?.status
+      if (s1 === 'blank' && s2 === 'blank') {
+        return { arbiterStatus: 'arbitrated_agree', finalAnswer: '' }
+      }
+      if (s1 === 'unreadable' && s2 === 'unreadable') {
+        return { arbiterStatus: 'needs_review' }
+      }
+      return qr.consistencyStatus === 'stable'
+        ? { arbiterStatus: 'arbitrated_agree', finalAnswer: qr.readAnswer1?.studentAnswer }
+        : { arbiterStatus: 'needs_review' }
+    })()
+    if (arbiterResult.arbiterStatus === 'arbitrated_agree' && qr.containmentPreferredRaw) {
+      arbiterResult = { ...arbiterResult, finalAnswer: qr.containmentPreferredRaw }
+    }
+    // OCR-assisted + blank → 視為未作答（與 runStagedGradingPhaseA 邏輯一致）
+    if (arbiterResult.arbiterStatus === 'needs_review' && ocrAssistedQidSet.has(qr.questionId)) {
+      const r1Status = qr.readAnswer1?.status
+      const r2Status = qr.readAnswer2?.status
+      if (r1Status === 'blank' || r2Status === 'blank') {
+        ocrBlankOverrides.push({
+          questionId: qr.questionId,
+          r1: r1Status === 'blank' ? '(blank)' : ensureString(qr.readAnswer1?.studentAnswer, ''),
+          r2: r2Status === 'blank' ? '(blank)' : ensureString(qr.readAnswer2?.studentAnswer, '')
+        })
+        arbiterResult = { arbiterStatus: 'arbitrated_agree', finalAnswer: '', ocrBlankOverride: true }
+      }
+    }
+    return { ...qr, arbiterResult }
+  })
+
+  // Re-crop ONLY needs_review questions (省 wall time + 頻寬)
+  const needsReviewQids = questionResultsPreCrop
+    .filter((qr) => qr.arbiterResult?.arbiterStatus === 'needs_review')
+    .map((qr) => qr.questionId)
+
+  const cropByQuestionId = new Map()
+  if (needsReviewQids.length > 0 && inlineImage) {
+    const cropResults = await Promise.all(
+      needsReviewQids.map(async (qid) => {
+        const aq = alignedById.get(qid)
+        if (!aq?.answerBbox) return { qid, cropData: null }
+        const isParenSubQ = aq.questionType === 'fill_blank' && qid.split('-').length >= 3
+        const dynamicPad = 0.005
+        const cropPad = isParenSubQ ? 0.003 : dynamicPad
+        const cropData = await cropInlineImageByBbox(
+          inlineImage.inlineData.data,
+          inlineImage.inlineData.mimeType,
+          aq.answerBbox,
+          true,
+          cropPad
+        )
+        return { qid, cropData }
+      })
+    )
+    for (const { qid, cropData } of cropResults) {
+      if (cropData) cropByQuestionId.set(qid, cropData)
+    }
+    logStaged(pipelineRunId, 'basic', `[A3] needs_review 重切 crop ${needsReviewQids.length} 題、成功 ${cropByQuestionId.size}`)
+  }
+
+  const questionResults = questionResultsPreCrop.map((qr) => {
+    const isNeedsReview = qr.arbiterResult?.arbiterStatus === 'needs_review'
+    const cropData = cropByQuestionId.get(qr.questionId)
+    let answerCropImageUrl
+    if (isNeedsReview) {
+      if (cropData) {
+        answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+      } else if (fullImageDataUrl) {
+        answerCropImageUrl = fullImageDataUrl
+      }
+    }
+    return { ...qr, answerCropImageUrl, hasCropImage: !!cropData }
+  })
+
+  // ── English spacing review flag（pre-arbiter 階段加上 spacingReviewFlag、這邊轉成 needs_review）──
+  const spacingReviewFlagged = []
+  for (const qr of questionResults) {
+    const rawQr = (questionResultsRaw || []).find((r) => r.questionId === qr.questionId)
+    if (rawQr?.spacingReviewFlag && qr.arbiterResult?.arbiterStatus !== 'needs_review') {
+      qr.arbiterResult = {
+        ...qr.arbiterResult,
+        arbiterStatus: 'needs_review',
+        spacingReviewFlag: true,
+        spacingReviewReason: '學生書寫可能有多餘空格，請老師確認'
+      }
+      const cropData = cropByQuestionId.get(qr.questionId)
+      if (cropData) {
+        qr.answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+      }
+      spacingReviewFlagged.push(qr.questionId)
+    }
+  }
+  if (spacingReviewFlagged.length > 0) {
+    logStaged(pipelineRunId, stagedLogLevel, '[A3] english spacing flagged', spacingReviewFlagged)
+  }
+
+  // ── Per-question summary log ──
+  const perQuestionLog = questionResults
+    .filter((qr) => qr.visible !== false)
+    .map((qr) => {
+      const bbox = qr.answerBbox
+      const correctedTag = qr.bboxCorrected ? ' ⚡corrected' : ''
+      const bboxStr = bbox ? `x=${(+bbox.x).toFixed(3)} y=${(+bbox.y).toFixed(3)} w=${(+bbox.w).toFixed(3)}${correctedTag}` : 'no-bbox'
+      const ai1 = qr.readAnswer1?.status === 'blank' ? '(blank)' : qr.readAnswer1?.studentAnswer || '?'
+      const ai2 = qr.readAnswer2?.status === 'blank' ? '(blank)' : qr.readAnswer2?.studentAnswer || '?'
+      const ar = qr.arbiterResult || {}
+      const ai3 = ar.arbiterStatus === 'arbitrated_agree'
+        ? `✓ consistent → ${ar.finalAnswer || '(blank)'}`
+        : `✗ inconsistent${ar.reason ? ` (${ar.reason})` : ''} → needs_review`
+      return `${qr.questionId} [${qr.questionType}] | bbox: ${bboxStr} | AI1: ${ai1} | AI2: ${ai2} | AI3: ${ai3}`
+    })
+  logStaged(pipelineRunId, 'basic', '[A3] per-question summary', '\n' + perQuestionLog.join('\n'))
+
+  if (ocrBlankOverrides.length > 0) {
+    logStaged(pipelineRunId, stagedLogLevel, '[A3] OCR-anchored blank override', ocrBlankOverrides)
+  }
+
+  const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
+  const diffCount = 0
+  const unstableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus === 'needs_review').length
+  logStaged(pipelineRunId, 'basic', `[A3] 最終統計 stable=${stableCount} needs_review=${unstableCount}`)
+
+  // ── stage_log 寫入（完整 phase_a row、合併 pre-arbiter 跟 arbiter 的 metrics） ──
+  if (internalContext?.ownerId) {
+    const ownStageLatency = stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0)
+    const totalStageLatency = (Number(stageLatencyMsSoFar) || 0) + ownStageLatency
+    const phaseALogData = {
+      classify: {
+        coverage: classifySummary?.coverage,
+        visibleCount: classifySummary?.visibleCount,
+        ...(ocrAssistMeta ? { ocrAssist: ocrAssistMeta } : {})
+      },
+      read_answer_1: readAnswer1Mini || [],
+      read_answer_2: readAnswer2Mini || [],
+      arbiter: Array.from(arbiterByQuestionId.entries()).map(([qId, r]) => ({
+        questionId: qId,
+        status: r.arbiterStatus,
+        finalAnswer: r.finalAnswer,
+        consistent: r.consistent,
+        reason: r.reason
+      })),
+      quality_gates: arbiterQGFinal
+        ? { arbiter: { severity: arbiterQGFinal.severity, warnings: arbiterQGFinal.warnings, metrics: arbiterQGFinal.metrics } }
+        : {},
+      stage_latencies: { total_ms: totalStageLatency },
+      needs_review_count: unstableCount
+    }
+    try {
+      await saveGradingStageLog({
+        ownerId: internalContext.ownerId,
+        assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
+        submissionId: internalContext.submissionId || payload?.submissionId || '',
+        pipelineRunId,
+        phase: 'phase_a',
+        model,
+        logData: phaseALogData
+      })
+    } catch (e) {
+      logStaged(pipelineRunId, 'basic', '[A3] stage_log 寫入失敗 (non-fatal)', { error: e?.message })
+    }
+  }
+
+  logStaged(pipelineRunId, 'basic', `[A3] 離場 整段耗時=${Math.round((Date.now() - pipelineStartedAt) / 1000)}s`)
+
+  // 重建 classifyResult-like 物件給 _internal（Phase B 需要 alignedQuestions）
+  const reconstructedClassifyResult = {
+    coverage: classifySummary?.coverage,
+    alignedQuestions: alignedQuestionsLite || []
+  }
+
+  return {
+    phaseAComplete: true,
+    questionResults,
+    stableCount,
+    diffCount,
+    unstableCount,
+    needsReviewCount: unstableCount,
+    _internal: {
+      answerKey,
+      questionIds,
+      classifyResult: reconstructedClassifyResult,
+      readAnswerResult: { answers: readAnswer1Mini || [] },
+      stageResponses,
+      stageWarnings: [],
       pipelineRunId,
       stagedLogLevel,
       cropByQuestionId

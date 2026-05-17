@@ -40,6 +40,18 @@ const PIPELINE_REGISTRY = new Map([
     createPipeline(AI_ROUTE_KEYS.GRADING_LOCATE, 'grading-locate-pipeline')
   ],
   [
+    AI_ROUTE_KEYS.GRADING_PHASE_A_CLASSIFY,
+    createPipeline(AI_ROUTE_KEYS.GRADING_PHASE_A_CLASSIFY, 'grading-phase-a-classify-pipeline')
+  ],
+  [
+    AI_ROUTE_KEYS.GRADING_PHASE_A_READ,
+    createPipeline(AI_ROUTE_KEYS.GRADING_PHASE_A_READ, 'grading-phase-a-read-pipeline')
+  ],
+  [
+    AI_ROUTE_KEYS.GRADING_PHASE_A_ARBITER,
+    createPipeline(AI_ROUTE_KEYS.GRADING_PHASE_A_ARBITER, 'grading-phase-a-arbiter-pipeline')
+  ],
+  [
     AI_ROUTE_KEYS.GRADING_EXPLAIN,
     createPipeline(AI_ROUTE_KEYS.GRADING_EXPLAIN, 'grading-explain-pipeline')
   ],
