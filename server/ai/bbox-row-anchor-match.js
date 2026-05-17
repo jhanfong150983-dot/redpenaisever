@@ -428,6 +428,20 @@ function pass2InterpolateMissing(byN, allDetections, applicableNs, cellByN_px = 
     if (/^\d[^.．\d]/.test(s) && /[一-鿿]/.test(s)) return true
     return false
   }
+  // v6 (2026-05-17): 計算式 row reject — 例「2.5x」「(2.5+2.5)x」「=5x1」等
+  // 解 math sub1 page 2 case：production OCR 缺 Q3 header detection、Pass 2 撿到 "2.5x" 計算行
+  // 計算式特徵：少於 2 個 CJK 字、或 text 含 = / × / ÷ / ＝ / 多個分數線
+  const isCalcRow = (t) => {
+    const s = String(t || '').trim()
+    if (!s) return false
+    // CJK 字數 < 2 且含數字 → 計算式
+    const cjkCount = (s.match(/[一-鿿]/g) || []).length
+    const digitCount = (s.match(/\d/g) || []).length
+    if (cjkCount < 2 && digitCount > 0) return true
+    // 含 = / × / ÷ / ＝ / 多 / 等運算符
+    if (/[=×÷＝]/.test(s) && cjkCount < 4) return true
+    return false
+  }
   // 分左右欄處理
   const sections = groupByColumn(applicableNs, byN)
   for (const sec of sections) {
@@ -445,11 +459,13 @@ function pass2InterpolateMissing(byN, allDetections, applicableNs, cellByN_px = 
       const predY = before.y + (after.y - before.y) * (n - before.n) / (after.n - before.n)
       // 找 column x 範圍內、y ± tolerance 的 detection（含空 text）
       // v5: 排除 option marker row（避免內插落到 ①②③④ option 行）
+      // v6: 排除計算式 row（math 卷 Q3 header 漏抓時 Pass 2 撿到 "2.5x" 計算行）
       const candidates = allDetections.filter(d =>
         Math.abs(d.bbox[1] - predY) < Y_INTERPOLATION_TOLERANCE
         && d.bbox[0] >= sec.colXMin
         && d.bbox[0] < sec.colXMax
         && !isOptionRow(d.rec_text)
+        && !isCalcRow(d.rec_text)
       )
       if (candidates.length === 0) continue
       const best = candidates.reduce((a, b) =>
