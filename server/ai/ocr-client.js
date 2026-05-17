@@ -46,6 +46,8 @@ function getOcrConfig() {
  * @returns {Promise<{ image_size:[number,number], detections:Array, elapsedMs:number } | null>}
  *   失敗 / timeout / config 缺：回 null（讓上層 fallback）
  */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
 export async function runOcrOnImage(imageBytes, mimeType, opts = {}) {
   const config = getOcrConfig()
   if (!config) {
@@ -56,50 +58,84 @@ export async function runOcrOnImage(imageBytes, mimeType, opts = {}) {
   const timeoutMs = Number(opts.timeoutMs) || DEFAULT_TIMEOUT_MS
   const filename = opts.filename || 'submission' + extFor(mimeType)
   const sizeKB = imageBytes ? (imageBytes.length / 1024).toFixed(1) : '0'
+  const maxRetries = 2  // 2026-05-17 加 retry：cloudflare tunnel 偶爾 502/503/504、retry 通常救回
   console.log(`[ocr-client] runOcrOnImage → ${filename} ${sizeKB}KB timeout=${timeoutMs}ms url=${config.url}`)
 
-  // 用 multipart/form-data 上傳
-  // Node 18+ FormData 是內建的，不需要 form-data 套件
-  const blob = new Blob([imageBytes], { type: mimeType })
-  const form = new FormData()
-  form.append('file', blob, filename)
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const blob = new Blob([imageBytes], { type: mimeType })
+    const form = new FormData()
+    form.append('file', blob, filename)
 
-  const controller = new AbortController()
-  const externalSignal = opts.abortSignal
-  if (externalSignal) {
-    if (externalSignal.aborted) return null
-    externalSignal.addEventListener('abort', () => controller.abort(), { once: true })
-  }
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const controller = new AbortController()
+    const externalSignal = opts.abortSignal
+    if (externalSignal) {
+      if (externalSignal.aborted) return null
+      externalSignal.addEventListener('abort', () => controller.abort(), { once: true })
+    }
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-  const t0 = Date.now()
-  try {
-    const resp = await fetch(`${config.url}/ocr`, {
-      method: 'POST',
-      headers: { 'X-API-Key': config.apiKey },
-      body: form,
-      signal: controller.signal
-    })
-    const elapsedMs = Date.now() - t0
-    if (!resp.ok) {
-      console.warn(`[ocr-client] OCR ${resp.status} after ${elapsedMs}ms → fallback`)
+    const t0 = Date.now()
+    try {
+      const resp = await fetch(`${config.url}/ocr`, {
+        method: 'POST',
+        headers: { 'X-API-Key': config.apiKey },
+        body: form,
+        signal: controller.signal
+      })
+      const elapsedMs = Date.now() - t0
+      if (!resp.ok) {
+        // 5xx 才 retry（4xx 不 retry、可能是 API key / payload 問題）
+        const isRetriable = resp.status >= 500 && resp.status < 600
+        if (isRetriable && attempt < maxRetries) {
+          const backoffMs = Math.min(1000 * Math.pow(2, attempt), 4000)
+          console.warn(`[ocr-client] OCR ${resp.status} after ${elapsedMs}ms → retry ${attempt + 1}/${maxRetries} in ${backoffMs}ms`)
+          clearTimeout(timer)
+          await sleep(backoffMs)
+          continue
+        }
+        console.warn(`[ocr-client] OCR ${resp.status} after ${elapsedMs}ms → fallback (attempt=${attempt + 1}/${maxRetries + 1})`)
+        return null
+      }
+      const data = await resp.json()
+      if (!Array.isArray(data?.image_size) || !Array.isArray(data?.detections)) {
+        console.warn('[ocr-client] OCR response shape invalid → fallback')
+        return null
+      }
+      const retryNote = attempt > 0 ? ` (after ${attempt} retry)` : ''
+      console.log(`[ocr-client] OCR ${resp.status} OK after ${elapsedMs}ms → ${data.detections.length} detections, image_size=${JSON.stringify(data.image_size)}${retryNote}`)
+      return { ...data, elapsedMs }
+    } catch (e) {
+      const elapsedMs = Date.now() - t0
+      const isAbort = e?.name === 'AbortError'
+      const reason = isAbort ? 'timeout/abort' : (e?.message || 'unknown')
+      // timeout/network error 也 retry（除非是 external abort）
+      if (!isAbort && attempt < maxRetries) {
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 4000)
+        console.warn(`[ocr-client] OCR call failed after ${elapsedMs}ms: ${reason} → retry ${attempt + 1}/${maxRetries} in ${backoffMs}ms`)
+        clearTimeout(timer)
+        await sleep(backoffMs)
+        continue
+      }
+      // External abort (pipeline budget exhausted) — 不 retry
+      if (isAbort && externalSignal?.aborted) {
+        console.warn(`[ocr-client] OCR aborted by external signal after ${elapsedMs}ms → fallback`)
+        return null
+      }
+      // 內部 timeout、retry 一次看 cloudflare 是否 recover
+      if (attempt < maxRetries) {
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 4000)
+        console.warn(`[ocr-client] OCR timeout after ${elapsedMs}ms → retry ${attempt + 1}/${maxRetries} in ${backoffMs}ms`)
+        clearTimeout(timer)
+        await sleep(backoffMs)
+        continue
+      }
+      console.warn(`[ocr-client] OCR call failed after ${elapsedMs}ms: ${reason} → fallback (attempt=${attempt + 1}/${maxRetries + 1})`)
       return null
+    } finally {
+      clearTimeout(timer)
     }
-    const data = await resp.json()
-    if (!Array.isArray(data?.image_size) || !Array.isArray(data?.detections)) {
-      console.warn('[ocr-client] OCR response shape invalid → fallback')
-      return null
-    }
-    console.log(`[ocr-client] OCR ${resp.status} OK after ${elapsedMs}ms → ${data.detections.length} detections, image_size=${JSON.stringify(data.image_size)}`)
-    return { ...data, elapsedMs }
-  } catch (e) {
-    const elapsedMs = Date.now() - t0
-    const reason = e?.name === 'AbortError' ? 'timeout/abort' : (e?.message || 'unknown')
-    console.warn(`[ocr-client] OCR call failed after ${elapsedMs}ms: ${reason} → fallback`)
-    return null
-  } finally {
-    clearTimeout(timer)
   }
+  return null
 }
 
 /**
