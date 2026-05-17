@@ -385,7 +385,7 @@ export default async function handler(req, res) {
   }
   const requestId = createProxyRequestId(req)
   const logPrefix = `[proxy][${requestId}]`
-  console.log(`${logPrefix} request-start method=${req.method}`)
+  console.log(`${logPrefix} 收到請求 method=${req.method}`)
 
   let user = null
   try {
@@ -402,7 +402,7 @@ export default async function handler(req, res) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
-  console.log(`${logPrefix} auth-ok user=${maskUserId(user.id)}`)
+  console.log(`${logPrefix} 認證通過 user=${maskUserId(user.id)}`)
 
   // AI_ACTIVE_GEMINI_KEY=primary（預設）→ 用 SECRET_API_KEY，備援 SYSTEM_GEMINI_API_KEY
   // AI_ACTIVE_GEMINI_KEY=secondary         → 用 SYSTEM_GEMINI_API_KEY，備援 SECRET_API_KEY
@@ -477,11 +477,7 @@ export default async function handler(req, res) {
     return
   }
   console.log(
-    `${logPrefix} request-body model=${model} routeKey=${routeKey || 'none'} hasAnswerKey=${Boolean(
-      answerKey
-    )} hasAnswerKeyRef=${Boolean(answerKeyRef)} answerKeyType=${answerKey ? typeof answerKey : 'none'} gradingMode=${gradingMode} staged=${enableStagedGrading} splitModeOverride=${
-      readAnswerSplitMode === null ? 'none' : readAnswerSplitMode
-    }`
+    `${logPrefix} 解析 model=${model} 路由=${routeKey || 'none'} 有答案卷=${Boolean(answerKey)} 有 ref=${Boolean(answerKeyRef)} 批改模式=${gradingMode}${enableStagedGrading ? ' 階段化' : ''}`
   )
 
   // 🆕 處理 AnswerKey 緩存邏輯
@@ -778,9 +774,7 @@ export default async function handler(req, res) {
     }
 
     console.log(
-      `${logPrefix} response status=${responseStatus} resolvedRoute=${
-        pipelineResult.resolvedRouteKey
-      } pipeline=${pipelineResult.pipelineMeta?.pipeline || 'unknown'}`
+      `${logPrefix} 回應 status=${responseStatus} 路由=${pipelineResult.resolvedRouteKey} pipeline=${pipelineResult.pipelineMeta?.pipeline || 'unknown'}`
     )
 
     // 批改結果摘要 log（grading.evaluate 時才輸出）

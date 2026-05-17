@@ -26,9 +26,7 @@ const DEFAULT_TIMEOUT_MS = 45000  // bumped 15s → 45s：PaddleOCR 處理被降
  */
 export function isOcrAssistEnabled() {
   const raw = getEnvValue('OCR_ASSIST_CLASSIFY_ENABLED')
-  const enabled = !!raw && String(raw).trim().toLowerCase() === 'true'
-  console.log(`[ocr-client] isOcrAssistEnabled() = ${enabled} (raw="${raw || ''}")`)
-  return enabled
+  return !!raw && String(raw).trim().toLowerCase() === 'true'
 }
 
 function getOcrConfig() {
@@ -59,7 +57,7 @@ export async function runOcrOnImage(imageBytes, mimeType, opts = {}) {
   const filename = opts.filename || 'submission' + extFor(mimeType)
   const sizeKB = imageBytes ? (imageBytes.length / 1024).toFixed(1) : '0'
   const maxRetries = 2  // 2026-05-17 加 retry：cloudflare tunnel 偶爾 502/503/504、retry 通常救回
-  console.log(`[ocr-client] runOcrOnImage → ${filename} ${sizeKB}KB timeout=${timeoutMs}ms url=${config.url}`)
+  console.log(`[OCR] 送出 ${filename} ${sizeKB}KB timeout=${timeoutMs}ms`)
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const blob = new Blob([imageBytes], { type: mimeType })
@@ -102,7 +100,7 @@ export async function runOcrOnImage(imageBytes, mimeType, opts = {}) {
         return null
       }
       const retryNote = attempt > 0 ? ` (after ${attempt} retry)` : ''
-      console.log(`[ocr-client] OCR ${resp.status} OK after ${elapsedMs}ms → ${data.detections.length} detections, image_size=${JSON.stringify(data.image_size)}${retryNote}`)
+      console.log(`[OCR] 回應=${resp.status} 耗時=${elapsedMs}ms 偵測=${data.detections.length} 圖片=${JSON.stringify(data.image_size)}${retryNote}`)
       return { ...data, elapsedMs }
     } catch (e) {
       const elapsedMs = Date.now() - t0
@@ -291,19 +289,19 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
   const isAnswerOnly = answerSheetMode === 'answer_only'
   // 依模式決定要查的 flag
   const enabled = isAnswerOnly ? isOcrAssistAnswerOnlyEnabled() : isOcrAssistEnabled()
-  console.log(`[ocr-client.prepareHints] entry mode=${answerSheetMode} enabled=${enabled} questions=${answerKeyQuestions?.length || 0} bytes=${imageBytes?.length || 0} cropTop=${inputCropTopRatio}`)
+  console.log(`[OCR.prepare] 模式=${answerSheetMode} 啟用=${enabled} 題數=${answerKeyQuestions?.length || 0} 圖大小=${imageBytes?.length || 0}B 頂部裁切=${inputCropTopRatio}`)
   if (!enabled) {
-    console.log(`[ocr-client.prepareHints] skipped: feature_flag_off`)
+    console.log(`[OCR.prepare] 跳過：feature flag 關閉`)
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'feature_flag_off', mode: answerSheetMode } }
   }
   if (!imageBytes || !answerKeyQuestions || answerKeyQuestions.length === 0) {
-    console.log(`[ocr-client.prepareHints] skipped: empty_input`)
+    console.log(`[OCR.prepare] 跳過：輸入為空`)
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'empty_input', mode: answerSheetMode } }
   }
 
   let ocrResult = await runOcrOnImage(imageBytes, mimeType, opts)
   if (!ocrResult) {
-    console.log(`[ocr-client.prepareHints] skipped: ocr_failed (runOcrOnImage returned null)`)
+    console.log(`[OCR.prepare] 跳過：OCR 失敗`)
     return { extraSection: '', ocrResult: null, candidatesByQid: {}, stats: { skipped: 'ocr_failed', mode: answerSheetMode } }
   }
 
@@ -327,7 +325,7 @@ export async function prepareOcrHintsForClassify({ imageBytes, mimeType, answerK
       detections: adjustedDetections,
       overlapAdjusted: { inputCropTopRatio: +inputCropTopRatio.toFixed(3), overlapPxInOcr, overlapHeaderCount }
     }
-    console.log(`[ocr-client.prepareHints] overlap-adjusted: -${overlapPxInOcr}px y, ${overlapHeaderCount} detections in overlap region (kept for group detection)`)
+    console.log(`[OCR.prepare] 重疊區校正：-${overlapPxInOcr}px y、${overlapHeaderCount} 偵測在重疊區（保留供題組偵測）`)
   }
 
   // ── candidates generator router ──

@@ -150,9 +150,8 @@ export async function callGeminiGenerateContent({
       console.warn(
         `[ai-model-adapter] 503-fallback switching to model=${currentModel} fallbackIndex=${i}`
       )
-    } else if (shouldStrip) {
-      console.log(`[ai-model-adapter] strip thinkingConfig for Pro model=${currentModel}`)
     }
+    // 2026-05-17: 拿掉 strip thinkingConfig log（每個 Pro call 都印一次、純雜訊）
 
     const result = await callSingleModel({
       apiKey,

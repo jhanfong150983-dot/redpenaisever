@@ -46,8 +46,14 @@ function createPipelineRunId(requestId = '') {
   return normalizedRequestId ? `${normalizedRequestId}-${suffix}` : suffix
 }
 
+// 2026-05-17: 縮 prefix——pipelineRunId 取後 6 碼、移除冗長 hash、log 變得乾淨可掃
+function shortRunId(pipelineRunId) {
+  const s = String(pipelineRunId || '')
+  return s.length > 6 ? s.slice(-6) : s
+}
+
 function logStageStart(pipelineRunId, stageName) {
-  console.log(`[AI-5STAGE][${pipelineRunId}] start stage=${stageName}`)
+  console.log(`[階段][${shortRunId(pipelineRunId)}] ${stageName} 開始`)
 }
 
 function logStageEnd(pipelineRunId, stageName, stageResponse) {
@@ -56,11 +62,11 @@ function logStageEnd(pipelineRunId, stageName, stageResponse) {
   const modelLatencyMs = Number(stageResponse?.modelLatencyMs) || 0
   const warningCount = Array.isArray(stageResponse?.warnings) ? stageResponse.warnings.length : 0
   console.log(
-    `[AI-5STAGE][${pipelineRunId}] end stage=${stageName} status=${status} prepareMs=${prepareLatencyMs} modelMs=${modelLatencyMs} warnings=${warningCount}`
+    `[階段][${shortRunId(pipelineRunId)}] ${stageName} 結束 狀態=${status} 模型=${modelLatencyMs}ms${warningCount > 0 ? ` 警告=${warningCount}` : ''}`
   )
   if (warningCount > 0) {
     console.warn(
-      `[AI-5STAGE][${pipelineRunId}] stage=${stageName} warningList=${stageResponse.warnings.join(', ')}`
+      `[階段][${shortRunId(pipelineRunId)}] ${stageName} 警告列表：${stageResponse.warnings.join(', ')}`
     )
   }
 }
@@ -361,11 +367,13 @@ function shouldLogStaged(configuredLevel, requiredLevel = 'basic') {
 
 function logStaged(pipelineRunId, configuredLevel, message, payload, requiredLevel = 'basic') {
   if (!shouldLogStaged(configuredLevel, requiredLevel)) return
+  // 2026-05-17: 縮 prefix — 拿掉冗長 hash 跟 [basic] 標籤、log 乾淨可掃
+  const prefix = `[批改][${shortRunId(pipelineRunId)}]`
   if (payload === undefined) {
-    console.log(`[AI-5STAGE][${pipelineRunId}][${requiredLevel}] ${message}`)
+    console.log(`${prefix} ${message}`)
     return
   }
-  console.log(`[AI-5STAGE][${pipelineRunId}][${requiredLevel}] ${message}`, payload)
+  console.log(`${prefix} ${message}`, payload)
 }
 
 function truncateLogText(value, maxLength = 2000) {

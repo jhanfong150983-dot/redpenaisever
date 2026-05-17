@@ -94,16 +94,14 @@ export async function runAiPipeline({
   // answer_sheet_mode 對 extract / classify / explain pipeline 的分支都重要，log 到 orchestrator 入口便於追蹤
   const dispatchedAnswerSheetMode = internalContext?.answerSheetMode || 'with_questions'
   console.log(
-    `${logPrefix} start requestedRoute=${
-      normalizedRequestedRouteKey || 'none'
-    } resolvedRoute=${resolvedRouteKey} model=${model} staged=${shouldRunStagedGrading} answerSheetMode=${dispatchedAnswerSheetMode}`
+    `${logPrefix} 啟動 路由=${resolvedRouteKey} 模型=${model}${shouldRunStagedGrading ? ' 階段化' : ''} 模式=${dispatchedAnswerSheetMode}`
   )
   if (dispatchedAnswerSheetMode === 'answer_only') {
-    console.log(`${logPrefix} [answer_only] dispatched route=${resolvedRouteKey}`)
+    console.log(`${logPrefix} [純答案卡] 派發路由=${resolvedRouteKey}`)
   }
 
   if (isPhaseA) {
-    console.log(`${logPrefix} phase-a route=${resolvedRouteKey}`)
+    console.log(`${logPrefix} 進入 Phase A`)
     try {
       pipelineResult = await runStagedGradingPhaseA({
         apiKey, model, contents, payload, routeHint, internalContext
@@ -162,7 +160,7 @@ export async function runAiPipeline({
       pipelineResult = null
     }
   } else if (isPhaseAArbiter) {
-    console.log(`${logPrefix} phase-a-arbiter route=${resolvedRouteKey}`)
+    console.log(`${logPrefix} 進入 Phase A Arbiter（AI3 獨立 call）`)
     try {
       pipelineResult = await runStagedGradingPhaseAArbiter({
         apiKey, model, contents, payload, routeHint, internalContext
@@ -212,7 +210,7 @@ export async function runAiPipeline({
       }
     }
   } else if (isPhaseB) {
-    console.log(`${logPrefix} phase-b route=${resolvedRouteKey}`)
+    console.log(`${logPrefix} 進入 Phase B`)
     try {
       // phaseAResult can come from internalContext (server-internal) or from payload (client-submitted)
       const phaseAResult = internalContext?.phaseAResult ?? payload?.phaseAResult
@@ -348,7 +346,7 @@ export async function runAiPipeline({
         : pipelineResult.metrics || {}
   }
   console.log(
-    `${logPrefix} completed route=${resolvedRouteKey} pipeline=${pipelineMeta.pipeline} status=${responseStatus} prepareMs=${pipelineMeta.prepareLatencyMs} modelMs=${pipelineMeta.modelLatencyMs} warnings=${pipelineMeta.warnings.length}`
+    `${logPrefix} 完成 路由=${resolvedRouteKey} pipeline=${pipelineMeta.pipeline} status=${responseStatus} 準備=${pipelineMeta.prepareLatencyMs}ms 模型=${pipelineMeta.modelLatencyMs}ms 警告=${pipelineMeta.warnings.length}`
   )
 
   if (pipelineResult.data && typeof pipelineResult.data === 'object') {
