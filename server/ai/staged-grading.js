@@ -7922,6 +7922,15 @@ export async function runStagedGradingPhaseB({
   // gradeBand: 'high' (年級 10-12) → 多選用大考中心扣分公式；其他（含 NULL/k9）→ 現行公式
   // 由 client 從 assignment.classroomId → classroom.grade 推算後傳入；server 不主動查 DB
   const gradeBand = payload?.gradeBand === 'high' ? 'high' : 'k9'
+  // 2026-05-18: Phase B 獨立 model override（accessor + explain 用 Flash 即夠）
+  // env STAGED_PHASE_B_MODEL_OVERRIDE 設成 'gemini-3-flash-preview' 切 Flash
+  const phaseBModelOverride = process.env.STAGED_PHASE_B_MODEL_OVERRIDE
+  const phaseBModel = (typeof phaseBModelOverride === 'string' && phaseBModelOverride.trim())
+    ? phaseBModelOverride.trim()
+    : model
+  if (phaseBModel !== model) {
+    logStaged(pipelineRunId, 'basic', `[B] Phase B 用獨立 model 覆寫：${phaseBModel}（原 ${model}、env STAGED_PHASE_B_MODEL_OVERRIDE 設定）`)
+  }
   logStaged(pipelineRunId, stagedLogLevel, `PhaseB begin gradeBand=${gradeBand} (multi_choice 公式: ${gradeBand === 'high' ? '大考中心 -2/錯' : 'K-9 比例'})`)
 
   const inlineImages = extractInlineImages(contents)
@@ -8014,8 +8023,8 @@ export async function runStagedGradingPhaseB({
     logStageStart(pipelineRunId, 'Accessor-p1')
     logStageStart(pipelineRunId, 'Accessor-p2')
     const [accessorResp1, accessorResp2] = await Promise.all([
-      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] }),
-      executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
+      executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] }),
+      executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
     ])
     logStageEnd(pipelineRunId, 'Accessor-p1', accessorResp1)
     logStageEnd(pipelineRunId, 'Accessor-p2', accessorResp2)
@@ -8042,7 +8051,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed1 || typeof parsed1 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p1-retry')
-      const retryResp1 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] })
+      const retryResp1 = await executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-p1-retry', retryResp1)
       stageResponses.push(retryResp1)
       parsed1 = retryResp1.ok ? parseCandidateJson(retryResp1.data) : null
@@ -8064,7 +8073,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed2 || typeof parsed2 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p2-retry')
-      const retryResp2 = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
+      const retryResp2 = await executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-p2-retry', retryResp2)
       stageResponses.push(retryResp2)
       parsed2 = retryResp2.ok ? parseCandidateJson(retryResp2.data) : null
@@ -8090,7 +8099,7 @@ export async function runStagedGradingPhaseB({
     const accessorPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint, gradeBand)
     logStageStart(pipelineRunId, 'Accessor')
     const accessorResponse = await executeStage({
-      apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+      apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
       stageContents: [{ role: 'user', parts: buildAccessorParts(accessorPrompt, allAnswerIds, calcCropMap) }]
     })
@@ -8114,7 +8123,7 @@ export async function runStagedGradingPhaseB({
     if (!accessorParsed || typeof accessorParsed !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-retry')
-      const retryResp = await executeStage({ apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(accessorPrompt, allAnswerIds, calcCropMap) }] })
+      const retryResp = await executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(accessorPrompt, allAnswerIds, calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-retry', retryResp)
       stageResponses.push(retryResp)
       accessorParsed = retryResp.ok ? parseCandidateJson(retryResp.data) : null
@@ -8150,7 +8159,7 @@ export async function runStagedGradingPhaseB({
     const retryContents = [{ role: 'user', parts: buildAccessorParts(retryPrompt, allAnswerIds, calcCropMap) }]
     logStageStart(pipelineRunId, 'Accessor-qg-retry')
     const retryAccessorResp = await executeStage({
-      apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+      apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint,
       routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
       stageContents: retryContents
     })
@@ -8206,7 +8215,7 @@ export async function runStagedGradingPhaseB({
     logStageStart(pipelineRunId, 'explain')
     const explainResponse = await executeStage({
       apiKey,
-      model,
+      model: phaseBModel,
       payload,
       timeoutMs: getRemainingBudget(),
       routeHint,
@@ -8235,7 +8244,7 @@ export async function runStagedGradingPhaseB({
       logStaged(pipelineRunId, stagedLogLevel, 'explain quality FAIL → retry (1/1)')
       logStageStart(pipelineRunId, 'explain-qg-retry')
       const retryExplainResp = await executeStage({
-        apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+        apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_EXPLAIN,
         stageContents: [{ role: 'user', parts: [{ text: explainPrompt }, ...explainImageParts] }]
       })
