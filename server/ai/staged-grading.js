@@ -16,6 +16,7 @@ import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from 
 import { isOcrAssistEnabled, prepareOcrHintsForClassify, isOcrRowAnchorEnabled } from './ocr-client.js'
 import { buildOcrHintsSection, applyOcrBboxOverride } from './bbox-anchor-match.js'
 import { applyRowAnchorOverride } from './bbox-row-anchor-match.js'
+import { applyMathEqBlankOverride } from './bbox-math-eq-blank.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -5530,6 +5531,25 @@ export async function runStagedGradingPhaseA({
       }
       ocrAssistMeta.perPage[0].rowAnchorOverrides = rowOverrides
     }
+
+    // 🆕 math 算式 □ AI override v2 (crop-based)：對 hint 含「算式」+「□」的 qids
+    // 用 classify bbox.y crop 該題附近（y±0.03）、送 Pro 3.1 找精準 □ 位置
+    try {
+      const submissionImg = inlineImages[0].inlineData
+      const { alignedQuestions: mathOverriddenQs, overrides: mathOverrides } = await applyMathEqBlankOverride(
+        classifyResult.alignedQuestions,
+        { mimeType: submissionImg.mimeType, data: submissionImg.data },
+        answerKey,
+        { model, apiKey, logger: (msg) => logStaged(pipelineRunId, stagedLogLevel, msg) }
+      )
+      if (mathOverrides.length > 0) {
+        classifyResult = { ...classifyResult, alignedQuestions: mathOverriddenQs }
+        logStaged(pipelineRunId, stagedLogLevel, 'classify math-eq-blank override v2 (single-page)', { count: mathOverrides.length, samples: mathOverrides.slice(0, 3) })
+        ocrAssistMeta.perPage[0].mathEqBlankOverrides = mathOverrides
+      }
+    } catch (e) {
+      logStaged(pipelineRunId, stagedLogLevel, 'math-eq-blank v2 single-page failed (non-fatal)', { error: e?.message })
+    }
   } else {
     // Multi-page: split merged image into individual pages, one classify call per page (parallel).
     // Each call gets ONLY its page's image → AI outputs bbox in single-page coords (0~1)
@@ -5804,6 +5824,24 @@ export async function runStagedGradingPhaseA({
         unmappedQuestionIds: normalizedResults.flatMap((n) => n.unmappedQuestionIds),
         pixelBboxRejected: normalizedResults.flatMap((n) => n.pixelBboxRejected ?? [])
       }, classifyQuestionSpecs)
+
+      // 🆕 math 算式 □ AI override v2 (crop-based) — multi-page split path
+      try {
+        const submissionImg = inlineImages[0].inlineData
+        const { alignedQuestions: mathOverriddenQs, overrides: mathOverrides } = await applyMathEqBlankOverride(
+          classifyResult.alignedQuestions,
+          { mimeType: submissionImg.mimeType, data: submissionImg.data },
+          answerKey,
+          { model, apiKey, logger: (msg) => logStaged(pipelineRunId, stagedLogLevel, msg) }
+        )
+        if (mathOverrides.length > 0) {
+          classifyResult = { ...classifyResult, alignedQuestions: mathOverriddenQs }
+          logStaged(pipelineRunId, stagedLogLevel, 'classify math-eq-blank override v2 (multi-page)', { count: mathOverrides.length, samples: mathOverrides.slice(0, 3) })
+          if (ocrAssistMeta.perPage[0]) ocrAssistMeta.perPage[0].mathEqBlankOverrides = mathOverrides
+        }
+      } catch (e) {
+        logStaged(pipelineRunId, stagedLogLevel, 'math-eq-blank v2 multi-page failed (non-fatal)', { error: e?.message })
+      }
     }
   }
 
