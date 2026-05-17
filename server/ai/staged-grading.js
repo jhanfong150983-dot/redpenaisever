@@ -7922,6 +7922,11 @@ export async function runStagedGradingPhaseB({
   // gradeBand: 'high' (年級 10-12) → 多選用大考中心扣分公式；其他（含 NULL/k9）→ 現行公式
   // 由 client 從 assignment.classroomId → classroom.grade 推算後傳入；server 不主動查 DB
   const gradeBand = payload?.gradeBand === 'high' ? 'high' : 'k9'
+  // 2026-05-18: Phase B 拆 2 個獨立 HTTP call、各自吃 300s budget、client 端 loading UI 可精準切換 stage
+  //   call 1 — grading.phase_b_accessor (payload.stopAfterAccessor=true): 跑 accessor、回 _phaseBAccessorContext
+  //   call 2 — grading.phase_b (existing) 帶 _phaseBAccessorContext: 跳過 accessor、跑 explain + 最終 build
+  const stopAfterAccessor = payload?.stopAfterAccessor === true
+  const precomputedAccessorContext = payload?._phaseBAccessorContext || internalContext?._phaseBAccessorContext || null
   // 2026-05-18: Phase B 獨立 model override（accessor + explain 用 Flash 即夠）
   // env STAGED_PHASE_B_MODEL_OVERRIDE 設成 'gemini-3-flash-preview' 切 Flash
   const phaseBModelOverride = process.env.STAGED_PHASE_B_MODEL_OVERRIDE
@@ -8012,7 +8017,11 @@ export async function runStagedGradingPhaseB({
   const canSplitAccessor = page1AnswerIds.length > 0 && page2AnswerIds.length > 0
 
   let accessorResult
-  if (canSplitAccessor) {
+  // 2026-05-18: precomputedAccessorContext 路徑——拆 phase_b_explain 出獨立 call、跳過 accessor
+  if (precomputedAccessorContext) {
+    accessorResult = precomputedAccessorContext.accessorResult
+    logStaged(pipelineRunId, 'basic', `[B] 跳過 accessor、用前一階段傳入的 _phaseBAccessorContext (scores=${accessorResult?.scores?.length || 0})`)
+  } else if (canSplitAccessor) {
     const p1Ids = new Set([...otherAnswerIds, ...page1AnswerIds])
     const p2Ids = new Set(page2AnswerIds)
     const filterAk = (ids) => ({ ...answerKey, questions: (answerKey?.questions || []).filter((q) => ids.has(ensureString(q?.id).trim())) })
@@ -8196,6 +8205,34 @@ export async function runStagedGradingPhaseB({
     .filter((s) => s?.isCorrect !== true || s?.needExplain === true)
     .map((s) => ensureString(s?.questionId).trim())
     .filter(Boolean)
+
+  // 2026-05-18: stopAfterAccessor early-return（拆 explain 出獨立 HTTP call）
+  // 走到這裡：accessor 跑完、explainQuestionIds 算好。
+  // explain 改成第二支 endpoint（grading.phase_b_explain）跑、client loading UI 才能精準切換 stage。
+  if (stopAfterAccessor) {
+    const stageLatencyMsSoFar = stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0)
+    logStaged(pipelineRunId, 'basic', `[B] 早退（stopAfterAccessor）→ 等 client 打 phase_b_explain`, {
+      pipelineRunId,
+      accessorScoreCount: accessorScores.length,
+      explainQuestionCount: explainQuestionIds.length,
+      stageLatencyMsSoFar
+    })
+    return {
+      phaseBAccessorComplete: true,
+      _phaseBAccessorContext: {
+        pipelineRunId,
+        stagedLogLevel,
+        accessorResult,
+        finalReadAnswerResult,
+        explainQuestionIds,
+        gradeBand,
+        domainHint: internalContext?.domainHint,
+        answerSheetMode,
+        hasBooklet,
+        stageLatencyMsSoFar
+      }
+    }
+  }
 
   // ── B2: EXPLAIN (僅限 isFullScore=false) ─────────────────────────────────
   let explainResult = { details: [], mistakes: [], weaknesses: [], suggestions: [] }

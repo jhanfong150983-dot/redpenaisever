@@ -91,6 +91,8 @@ export async function runAiPipeline({
   const isPhaseAClassify = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A_CLASSIFY
   const isPhaseAArbiter = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A_ARBITER
   const isPhaseB = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B
+  const isPhaseBAccessor = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B_ACCESSOR
+  const isPhaseBExplain = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B_EXPLAIN
 
   // answer_sheet_mode 對 extract / classify / explain pipeline 的分支都重要，log 到 orchestrator 入口便於追蹤
   const dispatchedAnswerSheetMode = internalContext?.answerSheetMode || 'with_questions'
@@ -223,11 +225,21 @@ export async function runAiPipeline({
         pipelineMeta: { pipeline: 'grading-phase-a-arbiter-failure', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
       }
     }
-  } else if (isPhaseB) {
+  } else if (isPhaseB || isPhaseBAccessor || isPhaseBExplain) {
     // 2026-05-17: 支援 fromCache 模式（重新批改）——payload.fromCache=true 時、不需要 phaseAResult、
     // 由 runStagedGradingPhaseB 內部從 submissions.phase_a_state 讀。
+    // 2026-05-18: 拆 phase_b_accessor / phase_b_explain 給 client loading UI 精準切換 stage
     const fromCache = payload?.fromCache === true
-    console.log(`${logPrefix} 進入 Phase B${fromCache ? '（fromCache 重新批改模式）' : ''}`)
+    // accessor 階段強制 stopAfterAccessor=true
+    const effectivePayload = isPhaseBAccessor
+      ? { ...payload, stopAfterAccessor: true }
+      : payload
+    const phaseBLabel = isPhaseBAccessor
+      ? 'Phase B Accessor（批改評分獨立 call）'
+      : isPhaseBExplain
+        ? 'Phase B Explain（生成引導獨立 call）'
+        : `Phase B${fromCache ? '（fromCache 重新批改模式）' : ''}`
+    console.log(`${logPrefix} 進入 ${phaseBLabel}`)
     try {
       // phaseAResult can come from internalContext (server-internal) or from payload (client-submitted)
       const phaseAResult = internalContext?.phaseAResult ?? payload?.phaseAResult
@@ -236,10 +248,18 @@ export async function runAiPipeline({
         throw new Error('phase-b requires phaseAResult (in payload or internalContext) or fromCache=true')
       }
       pipelineResult = await runStagedGradingPhaseB({
-        apiKey, model, contents, payload, routeHint, internalContext,
+        apiKey, model, contents, payload: effectivePayload, routeHint, internalContext,
         phaseAResult,
         finalAnswers
       })
+      // 2026-05-18: accessor 階段早退、wrap _phaseBAccessorContext 給 client
+      if (pipelineResult?.phaseBAccessorComplete) {
+        pipelineResult = {
+          status: 200,
+          data: { candidates: [{ content: { parts: [{ text: JSON.stringify(pipelineResult) }] } }] },
+          pipelineMeta: { pipeline: 'grading-phase-b-accessor', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+        }
+      }
     } catch (error) {
       console.warn(`${logPrefix} phase-b crashed`, error)
       // Phase B cannot fall back to single-shot — the generic pipeline has no Phase B
@@ -271,7 +291,7 @@ export async function runAiPipeline({
   }
 
   if (!pipelineResult) {
-    if (shouldRunStagedGrading || isPhaseA || isPhaseAClassify || isPhaseAArbiter || isPhaseB) {
+    if (shouldRunStagedGrading || isPhaseA || isPhaseAClassify || isPhaseAArbiter || isPhaseB || isPhaseBAccessor || isPhaseBExplain) {
       console.warn(`${logPrefix} staged-unavailable fallback=single-shot`)
     }
     console.log(`${logPrefix} single-shot route=${resolvedRouteKey}`)
