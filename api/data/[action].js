@@ -2862,7 +2862,8 @@ async function handleSync(req, res) {
         supabaseDb.from('assignments').select('*').eq('owner_id', ownerId),
         supabaseDb
           .from('submissions')
-          .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result')
+          // 2026-05-17: 加 phase_a_state + final_answers 進 sync select、給 client 卡片狀態計算用
+          .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result, phase_a_state, final_answers')
           .eq('owner_id', ownerId),
         supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
         supabaseDb.from('gradebook_custom_columns').select('*').eq('owner_id', ownerId),
