@@ -5297,6 +5297,64 @@ export async function runStagedGradingPhaseA({
     }
   }
 
+  // 2026-05-17: HTTP error wrapper — 把模型 HTTP error (400/503/504) 包成 pipelineFailure
+  // 解決前端只看到 generic「批改失敗」、看不到具體原因（如 Pro 不支援 thinking_level）
+  const buildHttpErrorReturn = (stage, response) => {
+    const status = Number(response?.status) || 500
+    const dataPreview = JSON.stringify(response?.data || {}).slice(0, 300)
+    let userMessage
+    let userAction
+    let reasonCode
+    if (status === 400) {
+      reasonCode = 'MODEL_400_BAD_REQUEST'
+      userMessage = `批改失敗：AI 模型 ${model} 拒絕請求 (400)、可能是模型參數不相容或 prompt 格式問題`
+      userAction = '請聯絡工程師檢查 model config、可能需切換模型版本'
+    } else if (status === 503) {
+      reasonCode = 'MODEL_503_OVERLOAD'
+      userMessage = `批改失敗：AI 服務忙線中 (503)`
+      userAction = '稍後 1-2 分鐘再重試'
+    } else if (status === 504 || status === 408) {
+      reasonCode = 'MODEL_TIMEOUT'
+      userMessage = `批改失敗：AI 回應 timeout (${status})、可能是圖片太大或網路問題`
+      userAction = '重試一次、或檢查作業圖片是否過大'
+    } else if (status === 429) {
+      reasonCode = 'MODEL_RATE_LIMIT'
+      userMessage = `批改失敗：API 配額用盡 (429)`
+      userAction = '稍後重試、或聯絡管理員加額度'
+    } else {
+      reasonCode = `MODEL_HTTP_${status}`
+      userMessage = `批改失敗：AI 模型回應錯誤 (${status})`
+      userAction = '重試一次、若持續失敗請聯絡工程師'
+    }
+    const failure = {
+      stage,
+      reasonCode,
+      userMessage,
+      userAction,
+      technical: { httpStatus: status, model, dataPreview }
+    }
+    logStaged(pipelineRunId, 'basic', `PhaseA HTTP ERROR at ${stage}`, failure)
+    if (internalContext?.ownerId) {
+      try {
+        saveGradingStageLog({
+          ownerId: internalContext.ownerId,
+          assignmentId: internalContext.assignmentId || payload?.assignmentId || '',
+          submissionId: internalContext.submissionId || payload?.submissionId || '',
+          pipelineRunId,
+          phase: 'phase_a',
+          model,
+          logData: { pipelineFailure: failure, failedAtStage: stage }
+        }).catch((e) => logStaged(pipelineRunId, 'basic', 'HTTP-error stage_log write failed', { error: e?.message }))
+      } catch (e) { /* non-fatal */ }
+    }
+    return {
+      phaseAComplete: false,
+      pipelineFailure: failure,
+      questionResults: [],
+      stableCount: 0, diffCount: 0, unstableCount: 0, needsReviewCount: 0
+    }
+  }
+
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
@@ -5416,10 +5474,7 @@ export async function runStagedGradingPhaseA({
     logStageEnd(pipelineRunId, 'classify-p1', classifyResponse)
     stageResponses.push(classifyResponse)
     if (!classifyResponse.ok) {
-      return {
-        status: classifyResponse.status, data: classifyResponse.data,
-        pipelineMeta: { pipeline: STAGED_PIPELINE_NAME, prepareLatencyMs: classifyResponse.prepareLatencyMs, modelLatencyMs: classifyResponse.modelLatencyMs, warnings: classifyResponse.warnings, metrics: { stage: 'classify' } }
-      }
+      return buildHttpErrorReturn('classify', classifyResponse)
     }
     if (classifyResponse.warnings.length > 0) stageWarnings.push(...classifyResponse.warnings.map((w) => `[classify-p1] ${w}`))
     const classifyParsed = parseCandidateJson(classifyResponse.data)
@@ -6116,17 +6171,7 @@ export async function runStagedGradingPhaseA({
   stageResponses.push(readAnswerResponse, reReadAnswerResponse)
 
   if (!readAnswerResponse.ok) {
-    return {
-      status: readAnswerResponse.status,
-      data: readAnswerResponse.data,
-      pipelineMeta: {
-        pipeline: STAGED_PIPELINE_NAME,
-        prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
-        modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
-        warnings: stageResponses.flatMap((r) => r.warnings || []),
-        metrics: { stage: 'read_answer' }
-      }
-    }
+    return buildHttpErrorReturn('read_answer', readAnswerResponse)
   }
   if (readAnswerResponse.warnings.length > 0) {
     stageWarnings.push(...readAnswerResponse.warnings.map((w) => `[ReadAnswer] ${w}`))
