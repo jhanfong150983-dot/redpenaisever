@@ -5249,7 +5249,10 @@ export async function runStagedGradingPhaseA({
   const stageResponses = []
   const stageWarnings = []
   const pipelineStartedAt = Date.now()
-  const PIPELINE_BUDGET_MS = 250_000
+  // 2026-05-17: 250→290s。Vercel function maxDuration=300s、留 10s 給 response handling
+  // 原 250s 在 Pro 3.1 + math-eq-blank + read parallel 後、AI3-arbiter 跑不到、fallback 純字串比對
+  // 拉到 290s 後、AI3 有 ~40s LLM 語意比對空間
+  const PIPELINE_BUDGET_MS = 290_000
   const getRemainingBudget = () => Math.max(1000, PIPELINE_BUDGET_MS - (Date.now() - pipelineStartedAt))
 
   // Build a failure-return payload when retry exhausted at any FAIL gate.
