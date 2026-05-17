@@ -7840,13 +7840,47 @@ export async function runStagedGradingPhaseB({
       throw new Error(`runStagedGradingPhaseB fromCache: 找不到 submission=${submissionIdForCache} 的 phase_a_state`)
     }
     const cachedState = cached.phase_a_state
-    phaseAResult = { _phaseContext: {
-      answerKey: cachedState.answerKey,
-      questionIds: cachedState.questionIds,
-      classifyResult: cachedState.classifyResult,
-      pipelineRunId: cachedState.pipelineRunId,
-      stagedLogLevel: cachedState.stagedLogLevel
-    } }
+    // 2026-05-18: 從 cached state 重建 questionResults（Phase B 後續 line 8232 mapByQuestionId 需要）
+    // 用 read1 / read2 / arbiterDecisions / alignedQuestions 拼回 PhaseAQuestionResult[]
+    const r1ByQid = new Map((Array.isArray(cachedState.readAnswer1) ? cachedState.readAnswer1 : [])
+      .map((r) => [r.questionId, r]))
+    const r2ByQid = new Map((Array.isArray(cachedState.readAnswer2) ? cachedState.readAnswer2 : [])
+      .map((r) => [r.questionId, r]))
+    const arbByQid = new Map((Array.isArray(cachedState.arbiterDecisions) ? cachedState.arbiterDecisions : [])
+      .map((d) => [d.questionId, d]))
+    const alignedQs = Array.isArray(cachedState.classifyResult?.alignedQuestions)
+      ? cachedState.classifyResult.alignedQuestions : []
+    const reconstructedQuestionResults = alignedQs.map((aq) => {
+      const r1 = r1ByQid.get(aq.questionId)
+      const r2 = r2ByQid.get(aq.questionId)
+      const arb = arbByQid.get(aq.questionId)
+      return {
+        questionId: aq.questionId,
+        questionType: aq.questionType,
+        readAnswer1: r1 ? { status: r1.status, studentAnswer: r1.answer } : { status: 'unreadable', studentAnswer: '' },
+        readAnswer2: r2 ? { status: r2.status, studentAnswer: r2.answer } : { status: 'unreadable', studentAnswer: '' },
+        arbiterResult: arb ? {
+          arbiterStatus: arb.arbiterStatus,
+          finalAnswer: arb.finalAnswer,
+          consistent: arb.consistent
+        } : undefined,
+        consistencyStatus: arb?.consistent === true ? 'stable' : arb?.consistent === false ? 'diff' : 'unstable',
+        answerBbox: aq.answerBbox,
+        bboxCorrected: !!aq.bboxCorrected,
+        framingReason: aq.framingReason
+      }
+    })
+
+    phaseAResult = {
+      questionResults: reconstructedQuestionResults,
+      _phaseContext: {
+        answerKey: cachedState.answerKey,
+        questionIds: cachedState.questionIds,
+        classifyResult: cachedState.classifyResult,
+        pipelineRunId: cachedState.pipelineRunId,
+        stagedLogLevel: cachedState.stagedLogLevel
+      }
+    }
     // 優先用 payload 帶來的 finalAnswers（老師可能剛改）、否則用 DB 快取的
     if (!Array.isArray(finalAnswers) || finalAnswers.length === 0) {
       if (Array.isArray(cached.final_answers) && cached.final_answers.length > 0) {
