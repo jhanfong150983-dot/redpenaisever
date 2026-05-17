@@ -224,13 +224,16 @@ export async function runAiPipeline({
       }
     }
   } else if (isPhaseB) {
-    console.log(`${logPrefix} 進入 Phase B`)
+    // 2026-05-17: 支援 fromCache 模式（重新批改）——payload.fromCache=true 時、不需要 phaseAResult、
+    // 由 runStagedGradingPhaseB 內部從 submissions.phase_a_state 讀。
+    const fromCache = payload?.fromCache === true
+    console.log(`${logPrefix} 進入 Phase B${fromCache ? '（fromCache 重新批改模式）' : ''}`)
     try {
       // phaseAResult can come from internalContext (server-internal) or from payload (client-submitted)
       const phaseAResult = internalContext?.phaseAResult ?? payload?.phaseAResult
       const finalAnswers = payload?.finalAnswers ?? internalContext?.finalAnswers ?? []
-      if (!phaseAResult) {
-        throw new Error('phase-b requires phaseAResult (in payload or internalContext)')
+      if (!phaseAResult && !fromCache) {
+        throw new Error('phase-b requires phaseAResult (in payload or internalContext) or fromCache=true')
       }
       pipelineResult = await runStagedGradingPhaseB({
         apiKey, model, contents, payload, routeHint, internalContext,

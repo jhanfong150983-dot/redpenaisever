@@ -12,7 +12,7 @@ import {
   validateReadAccessorConsistency,
   buildPipelineFailure
 } from './quality-gates.js'
-import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog } from './stage-log-writer.js'
+import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog, persistPhaseAState, persistFinalAnswers, loadPhaseAState, clearPhaseAState } from './stage-log-writer.js'
 import { isOcrAssistEnabled, prepareOcrHintsForClassify, isOcrRowAnchorEnabled } from './ocr-client.js'
 import { buildOcrHintsSection, applyOcrBboxOverride } from './bbox-anchor-match.js'
 import { applyRowAnchorOverride } from './bbox-row-anchor-match.js'
@@ -5229,6 +5229,16 @@ export async function runStagedGradingPhaseA({
   const precomputedClassifyContext = payload?._phaseAClassifyContext || internalContext?._phaseAClassifyContext || null
   const pipelineRunId = precomputedClassifyContext?.pipelineRunId
     || createPipelineRunId(internalContext?.requestId)
+
+  // 2026-05-17: 「重新截取」清空模式——僅在 classify call 觸發、清掉 submissions 表上的 phase_a_state /
+  // final_answers / grading_result / score 等舊資料（stage_logs 保留 audit）
+  if (stopAfterClassify && payload?.clearForRerun === true) {
+    const submissionIdToClear = internalContext?.submissionId || payload?.submissionId
+    if (submissionIdToClear) {
+      console.log(`[PhaseA-classify][${pipelineRunId}] clearForRerun=true、清空 submission=${submissionIdToClear} 舊資料`)
+      await clearPhaseAState(submissionIdToClear)
+    }
+  }
   const stagedLogLevel = getStagedLogLevel()
   const resolvedAnswerKey = internalContext?.resolvedAnswerKey
   const { answerKey, convertedShortAnswerIds } =
@@ -7735,13 +7745,40 @@ export async function runStagedGradingPhaseAArbiter({
     }
   }
 
-  logStaged(pipelineRunId, 'basic', `[A3] 離場 整段耗時=${Math.round((Date.now() - pipelineStartedAt) / 1000)}s`)
-
   // 重建 classifyResult-like 物件給 _internal（Phase B 需要 alignedQuestions）
   const reconstructedClassifyResult = {
     coverage: classifySummary?.coverage,
     alignedQuestions: alignedQuestionsLite || []
   }
+
+  // 2026-05-17: Phase A 完成、寫 phase_a_state 進 submissions、讓 Phase B「重新批改」(fromCache) 可以從這裡讀
+  // 不用 client round-trip 整份 _phaseContext
+  const submissionIdForPersist = internalContext?.submissionId || payload?.submissionId
+  if (submissionIdForPersist) {
+    const phaseAStateToPersist = {
+      version: 1,
+      pipelineRunId,
+      stagedLogLevel,
+      model,
+      answerKey,
+      questionIds,
+      classifyResult: reconstructedClassifyResult,
+      // 額外帶 read1 / read2 答案、給「重新批改」時老師複查需要
+      readAnswer1: readAnswer1Mini || [],
+      readAnswer2: readAnswer2Mini || [],
+      // 帶 arbiter 決策、給「重新批改」時 default finalAnswers 用
+      arbiterDecisions: questionResults.map((qr) => ({
+        questionId: qr.questionId,
+        arbiterStatus: qr.arbiterResult?.arbiterStatus,
+        finalAnswer: qr.arbiterResult?.finalAnswer,
+        consistent: qr.arbiterResult?.consistent
+      })),
+      savedAt: new Date().toISOString()
+    }
+    await persistPhaseAState(submissionIdForPersist, phaseAStateToPersist)
+  }
+
+  logStaged(pipelineRunId, 'basic', `[A3] 離場 整段耗時=${Math.round((Date.now() - pipelineStartedAt) / 1000)}s`)
 
   return {
     phaseAComplete: true,
@@ -7778,6 +7815,43 @@ export async function runStagedGradingPhaseB({
   phaseAResult,
   finalAnswers
 }) {
+  // 2026-05-17: fromCache 模式——當 payload.fromCache=true 且有 submissionId、
+  // 從 submissions.phase_a_state + final_answers 讀、不從 client round-trip 取。
+  // 用途：「重新批改」（XX 分 → Phase B 重跑、用快取的 Phase A 結果）
+  const fromCache = payload?.fromCache === true
+  const submissionIdForCache = internalContext?.submissionId || payload?.submissionId || null
+  if (fromCache && submissionIdForCache && !phaseAResult) {
+    const cached = await loadPhaseAState(submissionIdForCache)
+    if (!cached?.phase_a_state) {
+      throw new Error(`runStagedGradingPhaseB fromCache: 找不到 submission=${submissionIdForCache} 的 phase_a_state`)
+    }
+    const cachedState = cached.phase_a_state
+    phaseAResult = { _phaseContext: {
+      answerKey: cachedState.answerKey,
+      questionIds: cachedState.questionIds,
+      classifyResult: cachedState.classifyResult,
+      pipelineRunId: cachedState.pipelineRunId,
+      stagedLogLevel: cachedState.stagedLogLevel
+    } }
+    // 優先用 payload 帶來的 finalAnswers（老師可能剛改）、否則用 DB 快取的
+    if (!Array.isArray(finalAnswers) || finalAnswers.length === 0) {
+      if (Array.isArray(cached.final_answers) && cached.final_answers.length > 0) {
+        finalAnswers = cached.final_answers
+        console.log(`[PhaseB fromCache] 用 DB 快取的 final_answers count=${finalAnswers.length}`)
+      } else if (Array.isArray(cachedState.arbiterDecisions)) {
+        // 連 final_answers 都沒有？用 arbiter 決策當預設（適用於剛跑完 Phase A、老師沒改過的 case）
+        finalAnswers = cachedState.arbiterDecisions
+          .filter((d) => d.arbiterStatus === 'arbitrated_agree' || d.finalAnswer)
+          .map((d) => ({
+            questionId: d.questionId,
+            finalStudentAnswer: d.finalAnswer || '',
+            finalAnswerSource: 'ai_read1'
+          }))
+        console.log(`[PhaseB fromCache] 用 arbiterDecisions 推估 final_answers count=${finalAnswers.length}`)
+      }
+    }
+  }
+
   // Accept _internal (server-internal path) or _phaseContext (client round-trip path)
   const internalState = phaseAResult?._internal || phaseAResult?._phaseContext
   if (!internalState) {
@@ -8191,6 +8265,13 @@ export async function runStagedGradingPhaseB({
       model,
       logData: phaseBLogData
     }).catch(() => {})
+  }
+
+  // 2026-05-17: Phase B 完成、寫 final_answers 進 submissions
+  // 「重新批改」(fromCache) 可以從這裡讀、或從這裡讀來預設 finalAnswers
+  const submissionIdForFA = internalContext?.submissionId || payload?.submissionId
+  if (submissionIdForFA && Array.isArray(finalAnswers) && finalAnswers.length > 0) {
+    await persistFinalAnswers(submissionIdForFA, finalAnswers)
   }
 
   const usageMetadata = aggregateUsageMetadata(stageResponses)

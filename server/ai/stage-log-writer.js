@@ -8,6 +8,116 @@
 import { getSupabaseAdmin } from '../_supabase.js'
 
 /**
+ * 2026-05-17: Phase A 完成後寫 phase_a_state 進 submissions。
+ * Phase B「重新批改」(fromCache) 從這裡讀、不用整份重跑 Phase A。
+ *
+ * @param {string} submissionId
+ * @param {object} state - 序列化的 Phase A 狀態（answerKey / questionIds / classifyResult / ...）
+ * @returns {Promise<boolean>} 寫入成功與否（fire-and-forget、失敗只 log）
+ */
+export async function persistPhaseAState(submissionId, state) {
+  if (!submissionId || !state) return false
+  try {
+    const supabase = getSupabaseAdmin()
+    const { error } = await supabase
+      .from('submissions')
+      .update({ phase_a_state: state })
+      .eq('id', submissionId)
+    if (error) {
+      console.warn(`[persistPhaseAState] update error submission=${submissionId}:`, error.message)
+      return false
+    }
+    console.log(`[persistPhaseAState] saved submission=${submissionId}`)
+    return true
+  } catch (err) {
+    console.warn(`[persistPhaseAState] error:`, err?.message)
+    return false
+  }
+}
+
+/**
+ * 2026-05-17: Phase B 完成後 / 老師確認時寫 final_answers 進 submissions。
+ *
+ * @param {string} submissionId
+ * @param {Array} finalAnswers - [{ questionId, finalStudentAnswer, finalAnswerSource }]
+ * @returns {Promise<boolean>}
+ */
+export async function persistFinalAnswers(submissionId, finalAnswers) {
+  if (!submissionId || !Array.isArray(finalAnswers)) return false
+  try {
+    const supabase = getSupabaseAdmin()
+    const { error } = await supabase
+      .from('submissions')
+      .update({ final_answers: finalAnswers })
+      .eq('id', submissionId)
+    if (error) {
+      console.warn(`[persistFinalAnswers] update error submission=${submissionId}:`, error.message)
+      return false
+    }
+    console.log(`[persistFinalAnswers] saved submission=${submissionId} count=${finalAnswers.length}`)
+    return true
+  } catch (err) {
+    console.warn(`[persistFinalAnswers] error:`, err?.message)
+    return false
+  }
+}
+
+/**
+ * 2026-05-17: 「重新截取」前清空 phase_a_state、final_answers、grading_result、score。
+ * stage_logs 保留（audit 用）。
+ */
+export async function clearPhaseAState(submissionId) {
+  if (!submissionId) return false
+  try {
+    const supabase = getSupabaseAdmin()
+    const { error } = await supabase
+      .from('submissions')
+      .update({
+        phase_a_state: null,
+        final_answers: null,
+        grading_result: null,
+        score: null,
+        ai_score: null,
+        score_source: null,
+        graded_at: null
+      })
+      .eq('id', submissionId)
+    if (error) {
+      console.warn(`[clearPhaseAState] update error submission=${submissionId}:`, error.message)
+      return false
+    }
+    console.log(`[clearPhaseAState] cleared submission=${submissionId}`)
+    return true
+  } catch (err) {
+    console.warn(`[clearPhaseAState] error:`, err?.message)
+    return false
+  }
+}
+
+/**
+ * 2026-05-17: 從 DB 讀 phase_a_state（給 Phase B fromCache 用）
+ */
+export async function loadPhaseAState(submissionId) {
+  if (!submissionId) return null
+  try {
+    const supabase = getSupabaseAdmin()
+    const { data, error } = await supabase
+      .from('submissions')
+      .select('phase_a_state, final_answers')
+      .eq('id', submissionId)
+      .maybeSingle()
+    if (error) {
+      console.warn(`[loadPhaseAState] error submission=${submissionId}:`, error.message)
+      return null
+    }
+    return data || null
+  } catch (err) {
+    console.warn(`[loadPhaseAState] error:`, err?.message)
+    return null
+  }
+}
+
+/**
  * 從 Phase A 結果提取要存的結構化數據
  */
 export function extractPhaseALogData({
