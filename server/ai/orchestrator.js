@@ -88,6 +88,7 @@ export async function runAiPipeline({
     resolvedRouteKey === AI_ROUTE_KEYS.GRADING_EVALUATE &&
     internalContext?.enableStagedGrading !== false
   const isPhaseA = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A
+  const isPhaseAClassify = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A_CLASSIFY
   const isPhaseAArbiter = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_A_ARBITER
   const isPhaseB = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B
 
@@ -100,11 +101,15 @@ export async function runAiPipeline({
     console.log(`${logPrefix} [純答案卡] 派發路由=${resolvedRouteKey}`)
   }
 
-  if (isPhaseA) {
-    console.log(`${logPrefix} 進入 Phase A`)
+  if (isPhaseA || isPhaseAClassify) {
+    // 2026-05-17: phase_a_classify route 強制設 stopAfterClassify=true（OCR + classify + 後處理後早退）
+    const effectivePayload = isPhaseAClassify
+      ? { ...payload, stopAfterClassify: true }
+      : payload
+    console.log(`${logPrefix} 進入 ${isPhaseAClassify ? 'Phase A Classify（OCR + classify 獨立 call）' : 'Phase A'}`)
     try {
       pipelineResult = await runStagedGradingPhaseA({
-        apiKey, model, contents, payload, routeHint, internalContext
+        apiKey, model, contents, payload: effectivePayload, routeHint, internalContext
       })
       // classifyOnly mode: return bbox results directly
       if (pipelineResult?.classifyOnly) {
@@ -114,8 +119,17 @@ export async function runAiPipeline({
           pipelineMeta: { pipeline: 'grading-classify-only', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
         }
       }
+      // 2026-05-17: stopAfterClassify early-return — 包進 standard pipeline response、
+      // client 收到後帶 _phaseAClassifyContext 打第二個 endpoint (phase_a with phaseAStopBeforeArbiter)
+      else if (pipelineResult?.phaseAClassifyComplete) {
+        pipelineResult = {
+          status: 200,
+          data: { candidates: [{ content: { parts: [{ text: JSON.stringify(pipelineResult) }] } }] },
+          pipelineMeta: { pipeline: 'grading-phase-a-classify', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+        }
+      }
       // 2026-05-17: stopBeforeArbiter early-return — 包進 standard pipeline response、
-      // client 收到後帶 _phaseAReadContext 打第二個 endpoint (phase_a_arbiter)
+      // client 收到後帶 _phaseAReadContext 打第三個 endpoint (phase_a_arbiter)
       else if (pipelineResult?.phaseAReadyForArbiter) {
         pipelineResult = {
           status: 200,
@@ -254,7 +268,7 @@ export async function runAiPipeline({
   }
 
   if (!pipelineResult) {
-    if (shouldRunStagedGrading || isPhaseA || isPhaseAArbiter || isPhaseB) {
+    if (shouldRunStagedGrading || isPhaseA || isPhaseAClassify || isPhaseAArbiter || isPhaseB) {
       console.warn(`${logPrefix} staged-unavailable fallback=single-shot`)
     }
     console.log(`${logPrefix} single-shot route=${resolvedRouteKey}`)

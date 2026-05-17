@@ -5219,13 +5219,16 @@ export async function runStagedGradingPhaseA({
   routeHint = {},
   internalContext = {}
 }) {
-  // 2026-05-17: 拆 arbiter 出獨立 HTTP call（GRADING_PHASE_A_ARBITER）。
-  // payload.phaseAStopBeforeArbiter=true 時、跑完 OCR+classify+read+pre-arbiter overrides 後早退、
-  // 把純文字狀態（questionResultsRaw + bboxes + ocrAssistedQids 等）放 _phaseAReadContext 回 client、
-  // client 帶 context 打第二個 endpoint（runStagedGradingPhaseAArbiter）跑 AI3 + 最終 build。
-  // 各 call 各吃 300s Vercel budget、AI3 不再被擠死。
+  // 2026-05-17: 拆 phase A 成 3 個 HTTP call、各吃自己的 300s budget：
+  //   1. phase_a_classify（payload.stopAfterClassify=true）：OCR + classify + bbox post-process、回 _phaseAClassifyContext
+  //   2. phase_a（payload._phaseAClassifyContext 帶入 + phaseAStopBeforeArbiter=true）：跳 classify、做 crop + read + pre-overrides、回 _phaseAReadContext
+  //   3. phase_a_arbiter（payload._phaseAReadContext 帶入）：AI3 + 最終 build
+  // 拆 read 出來是因為 5 並行 Vertex 變慢、AI1 偶爾飆 197s 撞 290s budget；獨立 300s 後絕對跑得完。
+  const stopAfterClassify = payload?.stopAfterClassify === true
   const stopBeforeArbiter = payload?.phaseAStopBeforeArbiter === true
-  const pipelineRunId = createPipelineRunId(internalContext?.requestId)
+  const precomputedClassifyContext = payload?._phaseAClassifyContext || internalContext?._phaseAClassifyContext || null
+  const pipelineRunId = precomputedClassifyContext?.pipelineRunId
+    || createPipelineRunId(internalContext?.requestId)
   const stagedLogLevel = getStagedLogLevel()
   const resolvedAnswerKey = internalContext?.resolvedAnswerKey
   const { answerKey, convertedShortAnswerIds } =
@@ -5262,7 +5265,14 @@ export async function runStagedGradingPhaseA({
   const submissionSource = payload?.submissionSource || internalContext?.submissionSource || null
   logStaged(pipelineRunId, stagedLogLevel, `PhaseA begin model=${model} questionCount=${questionIds.length} answerKeyPages=${answerKeyImageParts.length} answerSheetMode=${answerSheetMode} submissionSource=${submissionSource || 'unset'}`)
   // 2026-05-17: 中文 log——讓人在 Vercel log stream 一眼掃到階段邊界
-  logStaged(pipelineRunId, 'basic', `[A1] 進場 題目數=${questionIds.length} 模式=${answerSheetMode} 模型=${model}${stopBeforeArbiter ? ' (拆解模式：跑完 read 後早退)' : ''}`)
+  const modeLabel = stopAfterClassify
+    ? '只跑 classify、跑完早退'
+    : precomputedClassifyContext
+      ? `跳過 classify（用傳入的 _phaseAClassifyContext）、${stopBeforeArbiter ? '跑完 read 後早退' : '一氣跑到底'}`
+      : stopBeforeArbiter
+        ? '跑完 read 後早退'
+        : '一氣跑到底'
+  logStaged(pipelineRunId, 'basic', `[A1] 進場 題目數=${questionIds.length} 模式=${answerSheetMode} 模型=${model} 拆解模式=${modeLabel}`)
 
   const stageResponses = []
   const stageWarnings = []
@@ -5391,6 +5401,12 @@ export async function runStagedGradingPhaseA({
   }
 
   // ── A1: CLASSIFY (含 answerBbox) ─────────────────────────────────────────
+  // 2026-05-17: 提升 4 個變數到 if-block 外、讓「跳過 classify (precomputedClassifyContext)」路徑也能設定
+  let classifyResult
+  let classifyAligned
+  let totalPages
+  let ocrAssistMeta = { enabled: false, perPage: [] }
+
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
   // Fallback: if pageBreaks is empty but questionIds have multi-page prefixes (1-*, 2-*, 3-*, ...),
@@ -5428,9 +5444,19 @@ export async function runStagedGradingPhaseA({
   }
   const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
 
+  // 2026-05-17: 拆 classify 出獨立 HTTP call — 若 client 帶 _phaseAClassifyContext、
+  // 直接 reuse 前一階段的 classifyResult、跳過整段 OCR + classify + bbox 後處理 + QG。
+  if (precomputedClassifyContext) {
+    classifyResult = precomputedClassifyContext.classifyResult
+    classifyAligned = classifyResult?.alignedQuestions || []
+    totalPages = precomputedClassifyContext.totalPages || 1
+    ocrAssistMeta = precomputedClassifyContext.ocrAssistMeta || { enabled: false, perPage: [] }
+    logStaged(pipelineRunId, 'basic', `[A1] 跳過 OCR + classify、用前一階段傳入的 _phaseAClassifyContext (題目=${classifyAligned.length} 頁=${totalPages})`)
+  } else {
   // 🆕 OCR-assist metadata 收集（用於 stage_logs 寫入）
   // Schema: { enabled: bool, perPage: [{ page, stats, candidates }] }
-  const ocrAssistMeta = { enabled: isOcrAssistEnabled(), perPage: [] }
+  // 2026-05-17: 從 const 改 reassign（hoisted at top of A1）
+  ocrAssistMeta = { enabled: isOcrAssistEnabled(), perPage: [] }
   logStaged(pipelineRunId, 'basic', 'OCR-assist init', {
     enabled: ocrAssistMeta.enabled,
     answerSheetMode
@@ -5461,7 +5487,7 @@ export async function runStagedGradingPhaseA({
     .filter(([, ids]) => ids.length > 0)
     .sort(([a], [b]) => a - b)
 
-  let classifyResult
+  // classifyResult hoisted to A1 top
   // Per-page classify: one call per page, all dispatched in parallel.
 
   logStageStart(pipelineRunId, 'classify')
@@ -5869,7 +5895,7 @@ export async function runStagedGradingPhaseA({
     }
   }
 
-  let classifyAligned = classifyResult.alignedQuestions
+  classifyAligned = classifyResult.alignedQuestions
   logStaged(pipelineRunId, stagedLogLevel, 'classify normalized-summary', {
     coverage: classifyResult.coverage,
     visibleCount: classifyAligned.filter((q) => q.visible).length,
@@ -5882,7 +5908,7 @@ export async function runStagedGradingPhaseA({
   // Classify bbox is in full-image coordinates (0~1 across all merged pages).
   // Convert akHint.y to full-image space for meaningful comparison.
   const akByIdForLog = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
-  const totalPages = pageEntries.length || 1
+  totalPages = pageEntries.length || 1
   logStaged(pipelineRunId, stagedLogLevel, 'classify bbox detail', classifyAligned
     .filter((q) => q.visible)
     .map((q) => {
@@ -6068,6 +6094,31 @@ export async function runStagedGradingPhaseA({
     }
   }
   // ── End Classify Quality Gate ─────────────────────────────────────────────
+  } // 2026-05-17: 結束「!precomputedClassifyContext」分支（OCR + classify + bbox 後處理 + QG）
+
+  // 2026-05-17: stopAfterClassify early-return（拆 classify 出獨立 HTTP call）
+  // 走到這裡：classifyResult / classifyAligned / totalPages / ocrAssistMeta 已就緒、
+  // client 帶 _phaseAClassifyContext 打第二個 endpoint (phase_a, 帶 phaseAStopBeforeArbiter=true) 跑 read。
+  if (stopAfterClassify) {
+    const stageLatencySoFar = stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0)
+    logStaged(pipelineRunId, 'basic', `[A1] 早退（stopAfterClassify）→ 等 client 打 phase_a (read)`, {
+      pipelineRunId,
+      classifyBboxCount: classifyAligned.length,
+      totalPages,
+      stageLatencyMsSoFar: stageLatencySoFar
+    })
+    return {
+      phaseAClassifyComplete: true,
+      _phaseAClassifyContext: {
+        pipelineRunId,
+        stagedLogLevel,
+        classifyResult,
+        totalPages,
+        ocrAssistMeta: ocrAssistMeta.perPage.length > 0 ? ocrAssistMeta : { enabled: false, perPage: [] },
+        stageLatencyMsSoFar: stageLatencySoFar
+      }
+    }
+  }
 
   // Bbox padding 已拿掉 — classify prompt 已要求 AI 「bbox 比 □ 各邊外推 3-5% 頁寬」、
   // 我們再加 0.02 padding 等於雙重 padding、會把 bbox 推進印刷字 / 鄰格文字範圍。
