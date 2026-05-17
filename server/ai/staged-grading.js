@@ -5229,6 +5229,15 @@ export async function runStagedGradingPhaseA({
   const precomputedClassifyContext = payload?._phaseAClassifyContext || internalContext?._phaseAClassifyContext || null
   const pipelineRunId = precomputedClassifyContext?.pipelineRunId
     || createPipelineRunId(internalContext?.requestId)
+  // 2026-05-18: read stage 可獨立切 model（Pro 3.1 read 太慢、AI2 281s timeout）
+  // 設 STAGED_READ_MODEL_OVERRIDE=gemini-3-flash-preview 切 Flash、不設用 classify 同一 model
+  // 範圍：AI1 read / AI2 read / word_problem final / calc final / mismatch retry / English spelling verify
+  // 不影響：classify（仍用 model param）
+  const readModelOverride = process.env.STAGED_READ_MODEL_OVERRIDE
+  const readModel = (typeof readModelOverride === 'string' && readModelOverride.trim()) ? readModelOverride.trim() : model
+  if (readModel !== model) {
+    logStaged(pipelineRunId, 'basic', `[A2] read stage 用獨立 model 覆寫：${readModel}（原 ${model}、env STAGED_READ_MODEL_OVERRIDE 設定）`)
+  }
 
   // 2026-05-17: 「重新截取」清空模式——僅在 classify call 觸發、清掉 submissions 表上的 phase_a_state /
   // final_answers / grading_result / score 等舊資料（stage_logs 保留 audit）
@@ -6271,10 +6280,10 @@ export async function runStagedGradingPhaseA({
     ai2CropCount: ai2Parts.filter((p) => p.inlineData).length
   })
   const parallelCalls = [
-    // AI1: detail read (crop images only)
+    // AI1: detail read (crop images only) — 2026-05-18 用 readModel
     executeStage({
       apiKey,
-      model,
+      model: readModel,
       payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
       timeoutMs: getRemainingBudget(),
       routeHint,
@@ -6284,7 +6293,7 @@ export async function runStagedGradingPhaseA({
     // AI2: review read (same crops as AI1, but knows correct answers — acts as reviewer)
     executeStage({
       apiKey,
-      model,
+      model: readModel,
       payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
       timeoutMs: getRemainingBudget(),
       routeHint,
@@ -6299,7 +6308,7 @@ export async function runStagedGradingPhaseA({
     parallelCalls.push(
       executeStage({
         apiKey,
-        model,
+        model: readModel,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
@@ -6318,7 +6327,7 @@ export async function runStagedGradingPhaseA({
     parallelCalls.push(
       executeStage({
         apiKey,
-        model,
+        model: readModel,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
@@ -6396,7 +6405,7 @@ export async function runStagedGradingPhaseA({
         const focusedPrompt = buildFocusedBracketReadPrompt(q.questionId)
         const bracketResponse = await executeStage({
           apiKey,
-          model,
+          model: readModel,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
@@ -6445,7 +6454,7 @@ export async function runStagedGradingPhaseA({
         const focusedPrompt = buildFocusedCheckboxReadPrompt(questionId, questionType)
         const focusedResponse = await executeStage({
           apiKey,
-          model,
+          model: readModel,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
@@ -6495,7 +6504,7 @@ export async function runStagedGradingPhaseA({
       })
       const fallbackResponse = await executeStage({
         apiKey,
-        model,
+        model: readModel,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
@@ -6581,7 +6590,7 @@ export async function runStagedGradingPhaseA({
         const [res1, res2] = await Promise.all([
           executeStage({
             apiKey,
-            model,
+            model: readModel,
             payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
             timeoutMs: getRemainingBudget(),
             routeHint,
@@ -6590,7 +6599,7 @@ export async function runStagedGradingPhaseA({
           }),
           executeStage({
             apiKey,
-            model,
+            model: readModel,
             payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
             timeoutMs: getRemainingBudget(),
             routeHint,
@@ -6705,7 +6714,7 @@ export async function runStagedGradingPhaseA({
 
     const retryResponse = await executeStage({
       apiKey,
-      model,
+      model: readModel,
       payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
       timeoutMs: getRemainingBudget(),
       routeHint,
@@ -6963,7 +6972,7 @@ Return JSON:
       try {
         logStaged(pipelineRunId, stagedLogLevel, 'english-spelling-verify begin', { count: spellingItems.length })
         const spellingResponse = await executeStage({
-          apiKey, model,
+          apiKey, model: readModel,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
@@ -7126,7 +7135,7 @@ Return JSON:
       logStageStart(pipelineRunId, 'AI3-arbiter')
       const arbiterResponse = await executeStage({
         apiKey,
-        model,
+        model: readModel,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
@@ -7187,7 +7196,7 @@ Return JSON:
         const retryPrompt = buildArbiterPrompt(arbiterItemsForAI3)
         const retryResp = await executeStage({
           apiKey,
-          model,
+          model: readModel,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
@@ -7426,6 +7435,11 @@ export async function runStagedGradingPhaseAArbiter({
   routeHint = {},
   internalContext = {}
 }) {
+  // 2026-05-18: arbiter call 跟 read 同套 model 邏輯（env STAGED_READ_MODEL_OVERRIDE）
+  // arbiter 是純文字 LLM call、Flash 完全夠、跟 read 階段一起切
+  const readModelOverride = process.env.STAGED_READ_MODEL_OVERRIDE
+  const readModel = (typeof readModelOverride === 'string' && readModelOverride.trim()) ? readModelOverride.trim() : model
+
   const phaseAReadContext = payload?._phaseAReadContext || internalContext?._phaseAReadContext
   if (!phaseAReadContext || typeof phaseAReadContext !== 'object') {
     throw new Error('runStagedGradingPhaseAArbiter: _phaseAReadContext is required')
@@ -7485,7 +7499,7 @@ export async function runStagedGradingPhaseAArbiter({
       logStageStart(pipelineRunId, 'AI3-arbiter')
       const arbiterResponse = await executeStage({
         apiKey,
-        model,
+        model: readModel,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
@@ -7535,7 +7549,7 @@ export async function runStagedGradingPhaseAArbiter({
         const retryPrompt = buildArbiterPrompt(arbiterItems)
         const retryResp = await executeStage({
           apiKey,
-          model,
+          model: readModel,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
