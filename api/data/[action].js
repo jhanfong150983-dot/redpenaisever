@@ -3149,7 +3149,12 @@ async function handleSync(req, res) {
             : undefined,
           gradedAt: gradedAt ?? undefined,
           correctionCount: row.correction_count ?? undefined,
-          updatedAt: updatedAt ?? undefined
+          updatedAt: updatedAt ?? undefined,
+          // 2026-05-18: 補上 Phase A / Phase B 分離設計的 cached state
+          // 之前 SELECT 有抓但 response map 漏出、導致 client 卡片 deriveCardStage
+          // 無法取得 phase_a_state、Phase A 完成的卡片回退顯示「已上傳」
+          phaseAState: row.phase_a_state ?? undefined,
+          finalAnswers: row.final_answers ?? undefined
         })
       })
 
