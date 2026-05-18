@@ -6372,12 +6372,25 @@ export async function runStagedGradingPhaseA({
     stageWarnings.push(...readAnswerResponse.warnings.map((w) => `[ReadAnswer] ${w}`))
   }
   let readAnswerParsed = parseCandidateJson(readAnswerResponse.data)
-  if (!readAnswerParsed || typeof readAnswerParsed !== 'object') {
-    throw new Error('PhaseA read_answer parse failed')
-  }
   let reReadAnswerParsed = reReadAnswerResponse?.ok
     ? parseCandidateJson(reReadAnswerResponse.data)
     : null
+  // 2026-05-18: AI1 parse 失敗時的診斷 + fallback
+  //   原本 AI1 parse 失敗就直接 throw、整個 phase-a crash、fallback 到 single-shot 回 400
+  //   改成：先印 raw text 上 Vercel log 給診斷、然後若 AI2 parse 成功就用 AI2 當 AI1（讓 phase-a 還是能跑完）
+  //   AI1+AI2 都失敗才 throw
+  if (!readAnswerParsed || typeof readAnswerParsed !== 'object') {
+    const ai1RawText = String(extractCandidateText(readAnswerResponse?.data) || '').slice(0, 800)
+    console.warn(`[PhaseA][${pipelineRunId}] AI1 read_answer parse failed、AI1 raw text preview (前 800 字)：`, ai1RawText)
+    if (reReadAnswerParsed && typeof reReadAnswerParsed === 'object') {
+      console.warn(`[PhaseA][${pipelineRunId}] AI1 parse 失敗、但 AI2 OK、用 AI2 結果代替 AI1 繼續跑`)
+      readAnswerParsed = reReadAnswerParsed
+    } else {
+      const ai2RawText = String(extractCandidateText(reReadAnswerResponse?.data) || '').slice(0, 800)
+      console.warn(`[PhaseA][${pipelineRunId}] AI2 也 parse 失敗、AI2 raw text preview：`, ai2RawText)
+      throw new Error('PhaseA read_answer parse failed (AI1 + AI2 都讀不到合法 JSON)')
+    }
+  }
 
   // Log per-question read results for debugging
   const readAnswerLogMode = getReadAnswerLogMode()
