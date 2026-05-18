@@ -5427,6 +5427,10 @@ export async function runStagedGradingPhaseA({
   let ocrAssistMeta = { enabled: false, perPage: [] }
 
   const answerKeyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+  // 2026-05-18: 提前定義 akByIdForLog 到 function-scope；
+  // 之前只在 classify 區塊（line ~5929）定義、Phase A 拆 call 後跳過 classify 的路徑
+  // 後續 E↔F 模糊偵測 (line 6870) 會 throw ReferenceError 整個 phase-a crash
+  const akByIdForLog = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
   let pageBreaks = Array.isArray(payload?.pageBreaks) ? payload.pageBreaks : []
   // Fallback: if pageBreaks is empty but questionIds have multi-page prefixes (1-*, 2-*, 3-*, ...),
   // estimate equal-split pageBreaks so per-page classify can still work.
@@ -5926,7 +5930,7 @@ export async function runStagedGradingPhaseA({
   // Answer key bbox is in per-page coordinates (0~1 within that page).
   // Classify bbox is in full-image coordinates (0~1 across all merged pages).
   // Convert akHint.y to full-image space for meaningful comparison.
-  const akByIdForLog = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
+  // akByIdForLog 已在 function 開頭定義（line ~5430）、給後續 E↔F 等檢查共用
   totalPages = pageEntries.length || 1
   logStaged(pipelineRunId, stagedLogLevel, 'classify bbox detail', classifyAligned
     .filter((q) => q.visible)
