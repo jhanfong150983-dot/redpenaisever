@@ -97,6 +97,7 @@ export async function clearPhaseAState(submissionId) {
 /**
  * 2026-05-17: 從 DB 讀 phase_a_state（給 Phase B fromCache 用）
  * 2026-05-18: 同步抓 assignments.answer_key（live），給 fromCache path 蓋掉快取版、避免老師改答案後重批不生效
+ *   注意：submissions.assignment_id 沒 FK 到 assignments.id、PostgREST embed 不可用、拆兩個 query
  */
 export async function loadPhaseAState(submissionId) {
   if (!submissionId) return null
@@ -104,7 +105,7 @@ export async function loadPhaseAState(submissionId) {
     const supabase = getSupabaseAdmin()
     const { data, error } = await supabase
       .from('submissions')
-      .select('phase_a_state, final_answers, assignment:assignments(answer_key)')
+      .select('phase_a_state, final_answers, assignment_id')
       .eq('id', submissionId)
       .maybeSingle()
     if (error) {
@@ -112,10 +113,23 @@ export async function loadPhaseAState(submissionId) {
       return null
     }
     if (!data) return null
+    let liveAnswerKey = null
+    if (data.assignment_id) {
+      const { data: asgn, error: asgnErr } = await supabase
+        .from('assignments')
+        .select('answer_key')
+        .eq('id', data.assignment_id)
+        .maybeSingle()
+      if (asgnErr) {
+        console.warn(`[loadPhaseAState] assignment fetch error submission=${submissionId} assignment=${data.assignment_id}:`, asgnErr.message)
+      } else {
+        liveAnswerKey = asgn?.answer_key || null
+      }
+    }
     return {
       phase_a_state: data.phase_a_state,
       final_answers: data.final_answers,
-      live_answer_key: data.assignment?.answer_key || null
+      live_answer_key: liveAnswerKey
     }
   } catch (err) {
     console.warn(`[loadPhaseAState] error:`, err?.message)
