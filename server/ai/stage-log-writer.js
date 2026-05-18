@@ -96,6 +96,7 @@ export async function clearPhaseAState(submissionId) {
 
 /**
  * 2026-05-17: 從 DB 讀 phase_a_state（給 Phase B fromCache 用）
+ * 2026-05-18: 同步抓 assignments.answer_key（live），給 fromCache path 蓋掉快取版、避免老師改答案後重批不生效
  */
 export async function loadPhaseAState(submissionId) {
   if (!submissionId) return null
@@ -103,14 +104,19 @@ export async function loadPhaseAState(submissionId) {
     const supabase = getSupabaseAdmin()
     const { data, error } = await supabase
       .from('submissions')
-      .select('phase_a_state, final_answers')
+      .select('phase_a_state, final_answers, assignment:assignments(answer_key)')
       .eq('id', submissionId)
       .maybeSingle()
     if (error) {
       console.warn(`[loadPhaseAState] error submission=${submissionId}:`, error.message)
       return null
     }
-    return data || null
+    if (!data) return null
+    return {
+      phase_a_state: data.phase_a_state,
+      final_answers: data.final_answers,
+      live_answer_key: data.assignment?.answer_key || null
+    }
   } catch (err) {
     console.warn(`[loadPhaseAState] error:`, err?.message)
     return null

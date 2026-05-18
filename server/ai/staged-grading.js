@@ -7888,10 +7888,21 @@ export async function runStagedGradingPhaseB({
       }
     })
 
+    // 2026-05-18: answerKey 用 assignments 的 live 版、不用 phase_a_state.answerKey 快取
+    //   原 bug：老師改 assignment.answer_key 後按重新批改、accessor 仍用快取舊答案、分數不變
+    //   修法：fromCache path 永遠抓 live；phase_a_state 只該快取 classify/read 結果（bbox/學生筆跡）、不該快取標準答案
+    const liveAnswerKey = cached.live_answer_key || cachedState.answerKey
+    if (cached.live_answer_key && cachedState.answerKey) {
+      const cachedAnsJson = JSON.stringify(cachedState.answerKey?.questions || [])
+      const liveAnsJson = JSON.stringify(cached.live_answer_key?.questions || [])
+      if (cachedAnsJson !== liveAnsJson) {
+        console.log(`[PhaseB fromCache] answerKey drift detected (cached vs live) submission=${submissionIdForCache}、用 live 版`)
+      }
+    }
     phaseAResult = {
       questionResults: reconstructedQuestionResults,
       _phaseContext: {
-        answerKey: cachedState.answerKey,
+        answerKey: liveAnswerKey,
         questionIds: cachedState.questionIds,
         classifyResult: cachedState.classifyResult,
         pipelineRunId: cachedState.pipelineRunId,
