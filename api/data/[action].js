@@ -223,6 +223,31 @@ function applyNoStoreHeaders(res) {
   res.setHeader('Expires', '0')
 }
 
+/**
+ * 用 .range() 分頁把整張表全撈下來、繞過 PostgREST 預設 cap (1000 筆)。
+ *
+ * 用法：傳入一個 builder thunk、每次呼叫都回傳一個全新的 query（已套好 .from / .select /
+ * .eq 等 filter、但「不要」自己 call .range / .limit）。helper 會 clone-and-range 跑分頁。
+ *
+ * 為什麼回傳跟 supabase-js 一致的 { data, error } 格式：讓現有 caller 不用改 (Result.error /
+ * Result.data 的解構照舊)。
+ *
+ * 2026-05-19: 佳軒老師 1040 submissions 被 cap 切掉 40 筆、學生上傳卻顯示「尚未繳交」就是
+ * 這個 cap 沒處理。
+ */
+async function fetchAllPaginated(queryBuilder, pageSize = 1000) {
+  const all = []
+  for (let offset = 0; ; offset += pageSize) {
+    const query = queryBuilder()
+    const { data, error } = await query.range(offset, offset + pageSize - 1)
+    if (error) return { data: null, error }
+    if (!Array.isArray(data)) return { data: all, error: null }
+    all.push(...data)
+    if (data.length < pageSize) break
+  }
+  return { data: all, error: null }
+}
+
 function extractCandidateText(data) {
   const candidates = Array.isArray(data?.candidates) ? data.candidates : []
   return candidates
@@ -2876,6 +2901,9 @@ async function handleSync(req, res) {
 
   if (req.method === 'GET') {
     try {
+      // 2026-05-19: PostgREST 預設 cap 1000 筆、submissions 超量會被切（佳軒老師 1040 筆只回 1000、
+      // 老師看到「有些學生顯示尚未繳交」其實學生已上傳）。fetchAllPaginated 用 .range() 分頁撈全。
+      // submissions 跟 deleted_records 已知會成長到 cap、用分頁；其他表格資料量小、保持單次 query。
       const [
         classroomsResult,
         studentsResult,
@@ -2890,19 +2918,23 @@ async function handleSync(req, res) {
         supabaseDb.from('classrooms').select('*').eq('owner_id', ownerId),
         supabaseDb.from('students').select('*').eq('owner_id', ownerId),
         supabaseDb.from('assignments').select('*').eq('owner_id', ownerId),
-        supabaseDb
-          .from('submissions')
-          // 2026-05-17: 加 phase_a_state + final_answers 進 sync select、給 client 卡片狀態計算用
-          .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result, phase_a_state, final_answers')
-          .eq('owner_id', ownerId),
+        fetchAllPaginated(() =>
+          supabaseDb
+            .from('submissions')
+            // 2026-05-17: 加 phase_a_state + final_answers 進 sync select、給 client 卡片狀態計算用
+            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result, phase_a_state, final_answers')
+            .eq('owner_id', ownerId)
+        ),
         supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
         supabaseDb.from('gradebook_custom_columns').select('*').eq('owner_id', ownerId),
         supabaseDb.from('gradebook_custom_scores').select('*').eq('owner_id', ownerId),
         supabaseDb.from('answer_key_templates').select('*').eq('owner_id', ownerId),
-        supabaseDb
-          .from('deleted_records')
-          .select('table_name, record_id, deleted_at')
-          .eq('owner_id', ownerId)
+        fetchAllPaginated(() =>
+          supabaseDb
+            .from('deleted_records')
+            .select('table_name, record_id, deleted_at')
+            .eq('owner_id', ownerId)
+        )
       ])
 
       if (classroomsResult.error) {
