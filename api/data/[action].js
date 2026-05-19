@@ -7305,21 +7305,58 @@ async function handleAssignmentStateSummary(req, res) {
   }
 
   const supabaseDb = getSupabaseAdmin()
-  const { data, error } = await supabaseDb
-    .from('assignment_student_state')
-    .select('assignment_id, student_id, status')
-    .eq('owner_id', user.id)
-    .in('assignment_id', assignmentIds)
+  // Pull state rows + latest non-correction graded submissions in parallel so
+  // we can attach an authoritative mistakeCount per (assignment, student).
+  // Local Dexie gradingResult is local-first (teacher edits win), which can
+  // leave stale mistake arrays after a server-side re-grade — the home
+  // overview must rely on server data instead.
+  const [stateResult, submissionsResult] = await Promise.all([
+    supabaseDb
+      .from('assignment_student_state')
+      .select('assignment_id, student_id, status')
+      .eq('owner_id', user.id)
+      .in('assignment_id', assignmentIds),
+    supabaseDb
+      .from('submissions')
+      .select('assignment_id, student_id, grading_result, graded_at, updated_at, source, status')
+      .eq('owner_id', user.id)
+      .in('assignment_id', assignmentIds)
+      .neq('source', 'student_correction')
+      .eq('status', 'graded')
+  ])
 
-  if (error) {
-    res.status(500).json({ error: error.message })
+  if (stateResult.error) {
+    res.status(500).json({ error: stateResult.error.message })
+    return
+  }
+  if (submissionsResult.error) {
+    res.status(500).json({ error: submissionsResult.error.message })
     return
   }
 
+  const latestByKey = new Map()
+  for (const row of submissionsResult.data || []) {
+    const key = `${row.assignment_id}|${row.student_id}`
+    const rankedAt = toNumber(row.graded_at) ?? toMillis(row.updated_at) ?? 0
+    const existing = latestByKey.get(key)
+    if (!existing || rankedAt >= existing.rankedAt) {
+      latestByKey.set(key, { row, rankedAt })
+    }
+  }
+
   const byAssignment = {}
-  for (const row of data || []) {
+  for (const row of stateResult.data || []) {
     if (!byAssignment[row.assignment_id]) byAssignment[row.assignment_id] = []
-    byAssignment[row.assignment_id].push({ studentId: row.student_id, status: row.status })
+    const key = `${row.assignment_id}|${row.student_id}`
+    const entry = latestByKey.get(key)
+    const mistakeCount = entry
+      ? parseMistakesFromGradingResult(entry.row.grading_result).length
+      : null
+    byAssignment[row.assignment_id].push({
+      studentId: row.student_id,
+      status: row.status,
+      mistakeCount
+    })
   }
 
   res.status(200).json({ byAssignment })
