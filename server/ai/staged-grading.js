@@ -1123,6 +1123,7 @@ function getContainmentPreferredRaw(read1, read2, questionType) {
 }
 
 // 將老師確認的 finalAnswers 陣列轉換為 readAnswerResult 格式（供 Accessor 使用）
+// 2026-05-20: 保留 source 欄位、Phase B 可區分 'manual'（老師人工編輯）→ 走 deterministic 跳過 Accessor LLM
 function finalAnswersToReadAnswerResult(finalAnswers) {
   const answers = Array.isArray(finalAnswers)
     ? finalAnswers.map((a) => {
@@ -1134,11 +1135,50 @@ function finalAnswersToReadAnswerResult(finalAnswers) {
         return {
           questionId: ensureString(a?.questionId, '').trim(),
           studentAnswerRaw: raw || (status === 'blank' ? '未作答' : '無法辨識'),
-          status
+          status,
+          source: ensureString(a?.finalAnswerSource, '').trim() || null
         }
       })
     : []
   return { answers }
+}
+
+// 2026-05-20: 單位等價標準化（給 manual-edit deterministic match 用）
+// 把 latin 單位轉成中文、讓 "144cm³" 跟 "144立方公分" 能 match
+// 跟 Accessor prompt 的 UNIT EQUIVALENCE TABLE 對齊
+const UNIT_CANONICAL_PAIRS = [
+  ['立方公里', '立方公里'], ['立方公尺', '立方公尺'], ['立方公分', '立方公分'], ['立方公釐', '立方公釐'],
+  ['平方公里', '平方公里'], ['平方公尺', '平方公尺'], ['平方公分', '平方公分'], ['平方公釐', '平方公釐'],
+  ['km³', '立方公里'], ['m³', '立方公尺'], ['cm³', '立方公分'], ['mm³', '立方公釐'],
+  ['km²', '平方公里'], ['m²', '平方公尺'], ['㎡', '平方公尺'], ['cm²', '平方公分'], ['mm²', '平方公釐'],
+  ['km/h', '公里/小時'], ['m/s', '公尺/秒'], ['m/min', '公尺/分鐘'], ['km/min', '公里/分鐘'],
+  ['km', '公里'], ['cm', '公分'], ['mm', '公釐'],
+  ['kg', '公斤'], ['mg', '毫克'],
+  ['mL', '毫升'], ['ml', '毫升'],
+  ['hr', '小時'], ['sec', '秒'], ['min', '分鐘'],
+  ['m', '公尺'], ['g', '公克'], ['L', '公升'], ['h', '小時'], ['s', '秒']
+].sort((a, b) => b[0].length - a[0].length)  // 長的先 replace、避免 m 吃到 mm/km/cm
+
+function canonicalizeUnits(s) {
+  if (!s) return ''
+  let r = String(s)
+  for (const [from, to] of UNIT_CANONICAL_PAIRS) {
+    if (from === to) continue
+    r = r.split(from).join(to)
+  }
+  return r
+}
+
+// Deterministic match：老師人工編輯 final 跟 expected 比對、normalize + 單位等價
+function manualEditDeterministicMatch(studentText, expectedText) {
+  const a = canonicalizeUnits(normalizeAnswerForComparison(studentText || ''))
+  const b = canonicalizeUnits(normalizeAnswerForComparison(expectedText || ''))
+  if (!a || !b) return false
+  if (a === b) return true
+  // 移除所有空白後再比一次（學生可能寫 "144 立方公分" expected "144立方公分"）
+  const aNoSpace = a.replace(/\s+/g, '')
+  const bNoSpace = b.replace(/\s+/g, '')
+  return aNoSpace === bNoSpace
 }
 
 function mapByQuestionId(items, itemToQuestionId) {
@@ -3640,61 +3680,75 @@ FILL-BLANK (questions in FILL-BLANK list):
 
   const calculationRules = calculationIds.length > 0 ? `
 CALCULATION (questions in CALCULATION list):
-- 🚨 CALCULATION QUESTION STRUCTURE:
-  A calculation question has TWO parts:
-  1. FIRST LINE (printed question): a formula ending with "=( )" or "=(   )" — the student writes their FINAL ANSWER inside the parentheses. This is THE answer.
-  2. BELOW THE FIRST LINE: the student's handwritten calculation process (scratch work).
+- 🚨 OUTPUT FINAL ANSWER ONLY (2026-05-20 update):
+  Calculation questions have:
+  1. FIRST LINE (printed): formula "...=( )" — student writes FINAL ANSWER in parentheses.
+  2. BELOW: handwritten scratch work (calculation process).
+  Accessor stage will evaluate the calculation process visually from the crop image.
+  Your job is ONLY to extract the student's FINAL ANSWER as a single value.
 
-  🚨 READING PRIORITY:
-  - FIRST: Read what the student wrote INSIDE the parentheses "( )" on the first line. This is the studentFinalAnswer.
-  - THEN: Read the calculation process below (line by line).
-  - The parentheses answer is ALWAYS the student's intended final answer, even if the calculation process below shows a different result.
-  - If the parentheses are empty → the student did not write a final answer → use the last line of calculation process as fallback.
+- READING PRIORITY:
+  - FIRST: Read what the student wrote INSIDE the parentheses "( )" on the first line.
+  - FALLBACK (only if parentheses empty): take the LAST "=N" or "答:N" line from the calculation process as the final answer.
+  - The parentheses answer is ALWAYS the student's intended final answer, even if the process below shows a different result.
 
-  🚨 BOUNDARY RULE:
-  - If you see ANOTHER printed formula line with "=( )" pattern below the calculation process, that is the NEXT question — STOP reading. Do NOT read across question boundaries.
-  - Content inside the NEXT question's parentheses belongs to the NEXT question, not this one.
+- OUTPUT FORMAT:
+  - studentAnswerRaw = JUST the final value (with unit if printed/written, e.g. "15", "15公分", "15cm").
+  - Do NOT include calculation steps, equation signs, "=" prefix, or process lines.
+  - Single token output: a number, a number+unit, a fraction, a decimal.
+  - Example: parentheses contain "150" → output "150"
+  - Example: parentheses empty, last line "=24" → output "24"
+  - Example: written "答: 25公分" → output "25公分"
 
-- LINE-BY-LINE TRANSCRIPTION (for the calculation process below the first line):
-  Scan the student's work area from TOP to BOTTOM. For each PHYSICAL LINE of handwriting, output exactly what that line contains. Separate lines with "\\n" (newline) in studentAnswerRaw.
-  - Each physical line of handwriting = one output line. Do NOT merge multiple lines into one. Do NOT split one line into multiple.
-  - The number of output lines MUST MATCH the number of physical handwritten lines visible in the image.
-  - FORBIDDEN: inserting steps the student did not write. If the student jumped from step A directly to step C, output A and C only — do NOT insert step B.
-  - FORBIDDEN: rewriting or reorganizing the student's work in a "cleaner" or "more logical" order.
-  - You are a line-by-line photocopier. You have ZERO math knowledge. You cannot tell if a step is "missing" because you do not understand math.
-- Copy exactly as written: "25×6=150" → output "25×6=150"; wrong calc "6+3=8" → output "6+3=8".
-- Include the final answer line if present (e.g. "答: 150" or just "= 150").
-- STRIP printed question labels: do NOT include any printed label that appears before the student's formula (e.g. "東北亞：", "A：", "B：", "①：", "(1)"). Output only from the first digit, operator, or bracket of the student's written content.
-- If the work area is blank (no fresh marks) → status="blank".
-- SELF-CORRECTION (student crossed out with blue/black ink): If a line is crossed out by the student, SKIP that line entirely. Read only the final version the student intended.
-- VERTICAL FORMAT (直式): If the student uses a vertical layout (直式加/減/乘/除), convert it to a horizontal equation for output. This counts as ONE output line. Copy the student's written numbers exactly — do NOT recalculate or correct errors.
-  - 直式除法: identify dividend (被除數), divisor (除數), quotient (商), remainder (餘數 if any). Output as "[dividend]÷[divisor]=[quotient]" or "[dividend]÷[divisor]=[quotient]…[remainder]" if remainder > 0.
-  - 直式乘法: identify multiplicand, multiplier, product. Output as "[multiplicand]×[multiplier]=[product]".
-  - 直式加法/減法: output as "[top]±[bottom]=[result]".
-  - CRITICAL: Copy the student's written numbers as-is. If the student wrote a wrong quotient (e.g. 25 instead of 26), output 25. NEVER verify or correct the arithmetic.
-- Example (3-line student work):
-  Student wrote three lines:
-    1/2×2/3+2/3
-    =3/3
-    =1
-  Output: studentAnswerRaw = "1/2×2/3+2/3\\n=3/3\\n=1" (3 lines, matching 3 physical lines)
-  WRONG output: "1/2×2/3+2/3 = 1/3+2/3 = 1" (merged into 1 line, inserted a step "1/3+2/3" that student never wrote)
+- BOUNDARY RULE:
+  - If you see ANOTHER printed "=( )" pattern below, that's the NEXT question — content inside next question's parentheses belongs to the next question.
+
+- COPYING RULE:
+  - Copy the student's written digits EXACTLY. Do NOT recalculate or correct.
+  - Wrong arithmetic in process → that's Accessor's job to judge, not yours.
+  - Wrong final answer (e.g. student wrote 145 instead of 144) → output "145".
+
+- STATUS:
+  - Parentheses empty AND no calculation process → status="blank", studentAnswerRaw="未作答"
+  - Process exists but no extractable final → use LAST "=N" line. If unidentifiable → status="unreadable".
+
+- STRIP printed labels (e.g. "東北亞：", "A：") from the answer.
+- SELF-CORRECTION: if student crossed out a final value and wrote new, use the NEW one.
 ` : ''
 
   // word_problem rules: if (domain, word_problem) has a specialization, use it (replaces generic).
-  // Otherwise emit the generic rule. Generic includes math-flavored bits (答: prefix, 直式)
-  // that apply when domain is 數學 or unspecified.
+  // 2026-05-20: 改成只輸出 final answer、Accessor 看 crop 評列式
   const wordProblemRules = (() => {
     if (wordProblemIds.length === 0) return ''
     const override = TYPE_DOMAIN_OVERRIDES.word_problem?.[domainHint]
     if (override) return `\n${override}\n`
     return `
 WORD-PROBLEM (questions in WORD-PROBLEM list):
-- 🚨 LINE-BY-LINE TRANSCRIPTION: Same rule as CALCULATION — scan top to bottom, one output line per physical handwritten line, separated by "\\n". Output line count must match physical line count.
-- FORBIDDEN: inserting steps, merging lines, or reorganizing the student's work.
-- Include the final answer sentence if present (e.g. "答: 小明走了120公尺").
-- If the work area is blank (no fresh marks) → status="blank".
-- VERTICAL FORMAT (直式): Same conversion rule as CALCULATION above — convert 直式 to horizontal equation (counts as one line), copy student's numbers faithfully without correction.
+- 🚨 OUTPUT FINAL ANSWER ONLY (2026-05-20 update):
+  Word problems have calculation work + final answer sentence (e.g. "答: 小明走了120公尺", "A: 144cm³").
+  Accessor stage will evaluate the calculation process visually from the crop image.
+  Your job is ONLY to extract the final answer value as a single token.
+
+- HOW TO FIND THE FINAL ANSWER:
+  - FIRST: look for "答:", "A:", "Ans:" prefix — the value after it IS the final answer.
+  - FALLBACK: if no answer-sentence prefix, take the LAST "=N" or last-line numeric result.
+  - Multiple candidates (student wrote then crossed out): use the FINAL non-crossed version.
+
+- OUTPUT FORMAT:
+  - studentAnswerRaw = JUST the final value with unit (e.g. "120公尺", "144cm³", "$50", "3又1/2杯").
+  - Do NOT include "答:" / "A:" prefix in output (extract the value only).
+  - Do NOT include calculation steps, equations, or process lines.
+  - Example: written "答: 小明走了120公尺" → output "120公尺"
+  - Example: written "A: 144cm³" → output "144cm³"
+  - Example: no 答:, last line "=24" → output "24"
+
+- COPYING RULE:
+  - Copy the student's written value EXACTLY. Do NOT recalculate or correct.
+  - Wrong final answer (e.g. student wrote 145 instead of 144) → output "145".
+
+- STATUS:
+  - No 答:/A: AND no calculation result → status="blank", studentAnswerRaw="未作答"
+  - Has work but no extractable final value → status="unreadable"
 `
   })()
 
@@ -8008,14 +8062,84 @@ export async function runStagedGradingPhaseB({
   // 將老師確認的 finalAnswers 轉為 readAnswerResult 格式
   const finalReadAnswerResult = finalAnswersToReadAnswerResult(finalAnswers)
 
+  // ── 2026-05-20: Phase 0 + Phase 2 — calc/word_problem 特殊處理 ─────────────
+  // Phase 0：manual-edit 過的 word_problem/calculation → 跳過 Accessor LLM、走 deterministic
+  //   理由：老師既然手動編輯 final answer、就代表他親眼確認過原圖、信任他、不讓 AI 再用同一張可能爛的 crop 反咬。
+  // Phase 2：final answer 跟 expected 不一致的題 → Accessor 收 prompt 但不收 crop
+  //   理由：final 已錯、不需 crop 評列式品質、直接 0 分；也省 token。
+  const calcTypes = new Set(['calculation', 'word_problem'])
+  const akQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+  const akQById = new Map(akQuestions.map((q) => [ensureString(q?.id).trim(), q]))
+
+  // Phase 0：找出 manual-edited word_problem/calculation 題
+  const manualBypassIds = new Set()
+  const deterministicScores = []  // 等等要 merge 進 accessorResult.scores
+  for (const ans of finalReadAnswerResult.answers) {
+    if (ans?.source !== 'manual') continue
+    const q = akQById.get(ans.questionId)
+    if (!q || !calcTypes.has(q?.questionCategory)) continue
+    manualBypassIds.add(ans.questionId)
+    const studentText = ans.studentAnswerRaw
+    const expectedText = ensureString(q?.answer, '')
+    const isBlank = ans.status === 'blank'
+    const isUnreadable = ans.status === 'unreadable'
+    let isMatch = false
+    if (!isBlank && !isUnreadable) {
+      isMatch = manualEditDeterministicMatch(studentText, expectedText)
+    }
+    const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+    deterministicScores.push({
+      questionId: ans.questionId,
+      isCorrect: isMatch,
+      score: isMatch ? maxScore : 0,
+      maxScore,
+      errorType: isMatch ? 'none' : (isBlank ? 'blank' : isUnreadable ? 'unreadable' : 'calculation'),
+      reason: isMatch
+        ? '老師人工確認最終答案、與標準相符'
+        : (isBlank ? '老師人工確認、未作答'
+          : isUnreadable ? '老師人工確認、無法辨識'
+          : '老師人工確認最終答案、與標準不符'),
+      confidence: 100,
+      studentFinalAnswer: studentText,
+      needExplain: !isMatch && !isBlank && !isUnreadable,
+      _manualBypass: true
+    })
+  }
+  if (manualBypassIds.size > 0) {
+    logStaged(pipelineRunId, 'basic', `[B-Phase0] manual-bypass word_problem/calculation`, {
+      count: manualBypassIds.size,
+      questionIds: [...manualBypassIds]
+    })
+  }
+
+  // Phase 2：找出 final ≠ expected 的 word_problem/calculation 題 (不含 manualBypass)
+  const finalMismatchIds = new Set()
+  for (const ans of finalReadAnswerResult.answers) {
+    if (manualBypassIds.has(ans.questionId)) continue
+    if (ans.status !== 'read') continue
+    const q = akQById.get(ans.questionId)
+    if (!q || !calcTypes.has(q?.questionCategory)) continue
+    const studentText = ans.studentAnswerRaw
+    const expectedText = ensureString(q?.answer, '')
+    if (!manualEditDeterministicMatch(studentText, expectedText)) {
+      finalMismatchIds.add(ans.questionId)
+    }
+  }
+  if (finalMismatchIds.size > 0) {
+    logStaged(pipelineRunId, 'basic', `[B-Phase2] final mismatch → skip crop for Accessor`, {
+      count: finalMismatchIds.size
+    })
+  }
+
   // ── Crop calculation/word_problem questions for Accessor visual grading ──
   // Accessor needs to see the student's handwritten work (not just AI-transcribed text)
   // to accurately judge calculation process, fraction notation, etc.
+  // 2026-05-20: skip crop for manualBypassIds (Accessor 不跑) + finalMismatchIds (final 已錯、不需評列式)
   const calcCropMap = new Map() // questionId → { data, mimeType }
-  const calcTypes = new Set(['calculation', 'word_problem'])
   if (inlineImages.length > 0 && classifyResult) {
     const calcQuestions = (Array.isArray(classifyResult) ? classifyResult : classifyResult?.questions || [])
       .filter((q) => q.visible && q.answerBbox && calcTypes.has(q.questionType))
+      .filter((q) => !manualBypassIds.has(q.questionId) && !finalMismatchIds.has(q.questionId))
     if (calcQuestions.length > 0) {
       const img = inlineImages[0]?.inlineData
       if (img?.data && img?.mimeType) {
@@ -8034,7 +8158,9 @@ export async function runStagedGradingPhaseB({
         }
         logStaged(pipelineRunId, stagedLogLevel, 'PhaseB calc crop for Accessor', {
           candidates: cropTargets.length,
-          succeeded: calcCropMap.size
+          succeeded: calcCropMap.size,
+          skippedManual: manualBypassIds.size,
+          skippedMismatch: finalMismatchIds.size
         })
       }
     }
@@ -8055,18 +8181,36 @@ export async function runStagedGradingPhaseB({
     return parts
   }
 
+  // 2026-05-20: manualBypassIds 由下方 Accessor input filter 處理
+  // 不動 finalReadAnswerResult.answers 本身、保持完整、給 downstream（mergeResults / cross-stage QG）用
+
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
-  const allAnswerIds = finalReadAnswerResult.answers.map((a) => ensureString(a?.questionId).trim())
+  // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
+  const allAnswerIds = finalReadAnswerResult.answers
+    .map((a) => ensureString(a?.questionId).trim())
+    .filter((id) => id && !manualBypassIds.has(id))
   const page1AnswerIds = allAnswerIds.filter((id) => id.startsWith('1-'))
   const page2AnswerIds = allAnswerIds.filter((id) => id.startsWith('2-'))
   const otherAnswerIds = allAnswerIds.filter((id) => !id.startsWith('1-') && !id.startsWith('2-'))
   const canSplitAccessor = page1AnswerIds.length > 0 && page2AnswerIds.length > 0
+  // 2026-05-20: 給 Accessor 的 readAnswerResult 也要剔除 manualBypassIds
+  const accessorReadAnswerResult = manualBypassIds.size > 0
+    ? { answers: finalReadAnswerResult.answers.filter((a) => !manualBypassIds.has(a.questionId)) }
+    : finalReadAnswerResult
+  // 2026-05-20: 給 Accessor 的 answerKey 也要剔除 manualBypassIds（不要塞那些題的 spec 給 LLM）
+  const accessorAnswerKey = manualBypassIds.size > 0
+    ? { ...answerKey, questions: akQuestions.filter((q) => !manualBypassIds.has(ensureString(q?.id).trim())) }
+    : answerKey
 
   let accessorResult
   // 2026-05-18: precomputedAccessorContext 路徑——拆 phase_b_explain 出獨立 call、跳過 accessor
   if (precomputedAccessorContext) {
     accessorResult = precomputedAccessorContext.accessorResult
     logStaged(pipelineRunId, 'basic', `[B] 跳過 accessor、用前一階段傳入的 _phaseBAccessorContext (scores=${accessorResult?.scores?.length || 0})`)
+  } else if (allAnswerIds.length === 0) {
+    // 2026-05-20: 所有題都被 manualBypassIds 拿掉 → 不跑 Accessor、deterministic scores 完整覆蓋
+    accessorResult = { scores: [] }
+    logStaged(pipelineRunId, 'basic', `[B] 所有題目都是 manual-bypass、跳過 Accessor LLM`)
   } else if (canSplitAccessor) {
     const p1Ids = new Set([...otherAnswerIds, ...page1AnswerIds])
     const p2Ids = new Set(page2AnswerIds)
@@ -8151,7 +8295,7 @@ export async function runStagedGradingPhaseB({
     const result2 = normalizeAccessorResult(parsed2, ak2, rar2.answers, internalContext?.domainHint)
     accessorResult = { scores: [...(result1.scores || []), ...(result2.scores || [])] }
   } else {
-    const accessorPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint, gradeBand)
+    const accessorPrompt = buildAccessorPrompt(accessorAnswerKey, accessorReadAnswerResult, internalContext?.domainHint, gradeBand)
     logStageStart(pipelineRunId, 'Accessor')
     const accessorResponse = await executeStage({
       apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint,
@@ -8197,7 +8341,14 @@ export async function runStagedGradingPhaseB({
         }
       }
     }
-    accessorResult = normalizeAccessorResult(accessorParsed, answerKey, finalReadAnswerResult.answers, internalContext?.domainHint)
+    accessorResult = normalizeAccessorResult(accessorParsed, accessorAnswerKey, accessorReadAnswerResult.answers, internalContext?.domainHint)
+  }
+  // 2026-05-20: 合併 deterministic scores (manual-bypass) 進 accessorResult
+  if (deterministicScores.length > 0) {
+    const existing = Array.isArray(accessorResult?.scores) ? accessorResult.scores : []
+    const existingIds = new Set(existing.map((s) => ensureString(s?.questionId).trim()))
+    const toAdd = deterministicScores.filter((s) => !existingIds.has(s.questionId))
+    accessorResult = { ...accessorResult, scores: [...existing, ...toAdd] }
   }
   // ── Accessor Quality Gate ─────────────────────────────────────────────────
   const accessorExpectedIds = Array.isArray(finalReadAnswerResult?.answers)
@@ -8210,7 +8361,8 @@ export async function runStagedGradingPhaseB({
   if (accessorQG.severity === QG_SEVERITY.FAIL && !accessorResult._retried) {
     logStaged(pipelineRunId, stagedLogLevel, 'accessor quality FAIL → retry (1/1)')
     // Re-run accessor using single-page prompt (full question set)
-    const retryPrompt = buildAccessorPrompt(answerKey, finalReadAnswerResult, internalContext?.domainHint, gradeBand)
+    // 2026-05-20: 用 accessorAnswerKey / accessorReadAnswerResult、跟主流程一致排除 manualBypassIds
+    const retryPrompt = buildAccessorPrompt(accessorAnswerKey, accessorReadAnswerResult, internalContext?.domainHint, gradeBand)
     const retryContents = [{ role: 'user', parts: buildAccessorParts(retryPrompt, allAnswerIds, calcCropMap) }]
     logStageStart(pipelineRunId, 'Accessor-qg-retry')
     const retryAccessorResp = await executeStage({
@@ -8223,7 +8375,13 @@ export async function runStagedGradingPhaseB({
     if (retryAccessorResp.ok) {
       const retryParsed = parseCandidateJson(retryAccessorResp.data)
       if (retryParsed && typeof retryParsed === 'object') {
-        const retryResult = normalizeAccessorResult(retryParsed, answerKey, finalReadAnswerResult.answers, internalContext?.domainHint)
+        let retryResult = normalizeAccessorResult(retryParsed, accessorAnswerKey, accessorReadAnswerResult.answers, internalContext?.domainHint)
+        // 重新合併 deterministic scores (manual-bypass) 進 retry 結果
+        if (deterministicScores.length > 0) {
+          const existingIds = new Set((retryResult.scores || []).map((s) => ensureString(s?.questionId).trim()))
+          const toAdd = deterministicScores.filter((s) => !existingIds.has(s.questionId))
+          retryResult = { ...retryResult, scores: [...(retryResult.scores || []), ...toAdd] }
+        }
         const retryQG = validateAccessorQuality(retryResult, accessorExpectedIds)
         logStaged(pipelineRunId, 'basic', 'accessor retry quality-gate', {
           severity: retryQG.severity, warnings: retryQG.warnings
