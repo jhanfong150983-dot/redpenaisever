@@ -22,7 +22,10 @@
  * 跟 bracket_gap / single_choice / cell_anchor / lcs 平行存在、output schema 一致。
  */
 
-const SUB_CELL_TYPES = new Set(['multi_fill', 'fill_blank', 'fill_variants'])
+// 2026-05-19: 只對 multi_fill 開啟、fill_blank/fill_variants 維持 5/17 純 AI classify 決策。
+// multi_fill 因為答案短（如 "A,D" 3 字）、AI 按字寬框 bbox 偏窄（~0.07）涵蓋不到完整答題格、
+// OCR 找 (N)label 算出完整 cell bbox（label 到下一個 sibling 左緣）救援。
+const SUB_CELL_TYPES = new Set(['multi_fill'])
 
 const TRAD_TO_SIMP = {
   '彥':'彦','凱':'凯','對':'对','長':'长','說':'说','麼':'么','個':'个','幾':'几',
@@ -115,6 +118,19 @@ function findSubCellRow(detections, subOrdinal, subLabel) {
 
 /**
  * Main entry：對 answerKey 含 sub-cell anchorHint 的 questions 配 candidates。
+ *
+ * 2026-05-19 修改：candidate bbox 從「label row only」擴成「完整 cell area」(label.x1 → next sibling label.x1)。
+ * 之前只回 label row bbox、applyOcrBboxOverride width_floor 救得很有限；現在直接給完整 cell area、
+ * applyOcrBboxOverride 一次性把 AI 窄 bbox union 到全 cell 寬。
+ *
+ * 邏輯：
+ *   1. parse anchorHint → 每題 subOrdinal + subLabel
+ *   2. 在 OCR detections 找 (subOrdinal)subLabel pattern 的 row
+ *   3. 按 sectionKey + parentOrdinal 把同題的 siblings 分組
+ *   4. 同組內按 subOrdinal 排序、用 y 中心相差 < 0.8 × rowH 判定「同 row」(橫向排列)
+ *   5. cell bbox = [this.label.x1, next sibling.label.x1] (同 row)，最後一個用 imgW
+ *   6. 非同 row（垂直排列、罕見）回退到 label row bbox
+ *
  * Output schema 同 buildAnchorCandidates。
  */
 export function buildSubCellAnchorCandidates(answerKeyQuestions, ocrDetections, imageSize) {
@@ -124,7 +140,7 @@ export function buildSubCellAnchorCandidates(answerKeyQuestions, ocrDetections, 
     parsedCount: 0,
     matchedCount: 0,
     matchRate: 0,
-    assignmentMethod: 'sub_cell_anchor'
+    assignmentMethod: 'sub_cell_anchor_cell_area'
   }
   if (!Array.isArray(answerKeyQuestions) || !Array.isArray(ocrDetections)) {
     return { candidatesByQid: {}, stats }
@@ -136,21 +152,66 @@ export function buildSubCellAnchorCandidates(answerKeyQuestions, ocrDetections, 
   stats.totalCandidates = candidates.length
   if (candidates.length === 0) return { candidatesByQid: {}, stats }
 
+  // 第一遍：parse + findRow、收集所有 matches
+  const matches = []
   for (const q of candidates) {
     const parsed = parseSubCellHint(q.anchorHint)
     if (!parsed) continue
     stats.parsedCount++
-
     const found = findSubCellRow(ocrDetections, parsed.subOrdinal, parsed.subLabel)
     if (!found) continue
+    matches.push({ q, parsed, row: found.det, score: found.score })
+  }
 
-    result[q.id] = [{
-      idx: found.idx,
-      text: `sub-cell (${parsed.sectionKey}/Q${parsed.parentOrdinal}/(${parsed.subOrdinal})${parsed.subLabel}): ${(found.det.rec_text || '').slice(0, 30)}`,
-      bbox: found.det.bbox,
-      score: found.score
-    }]
-    stats.matchedCount++
+  // 第二遍：按 sectionKey + parentOrdinal 分組
+  const groups = new Map()
+  for (const m of matches) {
+    const groupKey = `${m.parsed.sectionKey}::${m.parsed.parentOrdinal}`
+    if (!groups.has(groupKey)) groups.set(groupKey, [])
+    groups.get(groupKey).push(m)
+  }
+
+  const [imgW] = imageSize || [1, 1]
+
+  // 第三遍：每組算 cell bbox
+  for (const group of groups.values()) {
+    // 按 subOrdinal 排序
+    group.sort((a, b) => a.parsed.subOrdinal - b.parsed.subOrdinal)
+
+    for (let i = 0; i < group.length; i++) {
+      const m = group[i]
+      const nextM = group[i + 1]
+      const labelY1 = m.row.bbox[1]
+      const labelY2 = m.row.bbox[3]
+      const rowH = labelY2 - labelY1
+      const labelYCenter = (labelY1 + labelY2) / 2
+
+      // 判斷下一個 sibling 是不是同 row (橫向)
+      let sameRowAsNext = false
+      if (nextM) {
+        const nextYCenter = (nextM.row.bbox[1] + nextM.row.bbox[3]) / 2
+        sameRowAsNext = Math.abs(labelYCenter - nextYCenter) < rowH * 0.8
+      }
+
+      // 算 cell bbox
+      const cellX1 = m.row.bbox[0]
+      let cellX2
+      if (sameRowAsNext) {
+        // 同 row：cell 到下一個 sibling 左緣（-1px 避免完全重疊）
+        cellX2 = Math.max(cellX1 + 1, nextM.row.bbox[0] - 1)
+      } else {
+        // 不同 row 或最後一個 sibling：cell 延伸到 imgW
+        cellX2 = imgW
+      }
+
+      result[m.q.id] = [{
+        idx: 0,
+        text: `cell (${m.parsed.sectionKey}/Q${m.parsed.parentOrdinal}/(${m.parsed.subOrdinal})${m.parsed.subLabel}): w=${cellX2 - cellX1}px`,
+        bbox: [cellX1, labelY1, cellX2, labelY2],
+        score: m.score
+      }]
+      stats.matchedCount++
+    }
   }
 
   stats.matchRate = stats.totalCandidates > 0 ? +(stats.matchedCount / stats.totalCandidates).toFixed(3) : 0
