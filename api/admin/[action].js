@@ -3397,6 +3397,7 @@ async function handleQuality(req, res, supabaseAdmin) {
       return res.status(200).send(md)
     }
     if (mode === 'assignments') return res.status(200).json(await qualityAssignmentList(supabaseAdmin, days))
+    if (mode === 'by_type') return res.status(200).json(await qualityByType(supabaseAdmin, days))
     return res.status(400).json({ error: 'Unknown mode' })
   } catch (err) {
     console.error('[admin/quality] error:', err)
@@ -3455,9 +3456,10 @@ async function qualityOverview(db, days) {
   const sinceIso = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
 
   // 最近 N 天 stage_log（只看 Phase A、因為 Phase B/accessor 的 needs_review_count 是 null）
+  // read_answer_1/2 用來算「AI 雙人都讀不出」率（status=unreadable 雙人都中）
   const { data: logs, error } = await db
     .from('grading_stage_logs')
-    .select('submission_id, assignment_id, created_at, needs_review_count, classify, consistency, total_score')
+    .select('submission_id, assignment_id, created_at, needs_review_count, classify, consistency, total_score, read_answer_1, read_answer_2')
     .gte('created_at', sinceIso)
     .not('classify', 'is', null)  // 只取 Phase A 那筆、避免 Phase B 蓋掉 needs_review_count
     .order('created_at', { ascending: false })
@@ -3472,10 +3474,59 @@ async function qualityOverview(db, days) {
   const rows = [...latest.values()]
   const total = rows.length
 
+  // 取對應 submissions.final_answers（老師最終決策、含「無法辨識」標記）
+  // 分批避免 PostgREST .in() URL overflow（>~200 ID 切批）
+  const submissionIds = [...latest.keys()]
+  const finalAnswersBySid = new Map()
+  const CHUNK = 200
+  for (let i = 0; i < submissionIds.length; i += CHUNK) {
+    const slice = submissionIds.slice(i, i + CHUNK)
+    const { data: subs } = await db
+      .from('submissions')
+      .select('id, final_answers')
+      .in('id', slice)
+    for (const s of subs || []) finalAnswersBySid.set(s.id, s.final_answers || [])
+  }
+
   // 計各指標
   const reviewCounts = rows.map((r) => r.needs_review_count || 0)
   const reviewedCount = reviewCounts.filter((c) => c > 0).length
   const avgReview = total ? reviewCounts.reduce((a, b) => a + b, 0) / total : 0
+
+  // KPI ① 老師標「無法辨識」率、① b AI 雙人都讀不出率
+  // 分母：rows 對應的全部 read_answer_1 題數（每份 × 該份題數）
+  // ① 分子：final_answers 內 finalStudentAnswer='無法辨識' 或 finalAnswerSource='unrecognizable'
+  // ①b 分子：read_answer_1[i].status='unreadable' && read_answer_2[同 qid].status='unreadable'
+  let totalQuestions = 0
+  let teacherUnrecognizable = 0
+  let dualUnreadable = 0
+  let submissionsWithFinalAnswers = 0
+  // per-day buckets for new KPIs
+  const dayKpi = new Map() // day -> { totalQ, teacherUnrec, dualUnread, faSubs }
+  for (const r of rows) {
+    const day = String(r.created_at).slice(0, 10)
+    if (!dayKpi.has(day)) dayKpi.set(day, { totalQ: 0, teacherUnrec: 0, dualUnread: 0, faSubs: 0 })
+    const bucket = dayKpi.get(day)
+
+    const r1 = Array.isArray(r.read_answer_1) ? r.read_answer_1 : []
+    const r2 = Array.isArray(r.read_answer_2) ? r.read_answer_2 : []
+    const r2ByQid = new Map(r2.map((q) => [q.questionId, q]))
+    for (const q of r1) {
+      totalQuestions++
+      bucket.totalQ++
+      const s1 = q.status
+      const s2 = r2ByQid.get(q.questionId)?.status
+      if (s1 === 'unreadable' && s2 === 'unreadable') { dualUnreadable++; bucket.dualUnread++ }
+    }
+    const fa = finalAnswersBySid.get(r.submission_id) || []
+    if (fa.length > 0) { submissionsWithFinalAnswers++; bucket.faSubs++ }
+    for (const a of fa) {
+      if (a?.finalStudentAnswer === '無法辨識' || a?.finalAnswerSource === 'unrecognizable') {
+        teacherUnrecognizable++
+        bucket.teacherUnrec++
+      }
+    }
+  }
   // OCR-assist 整體命中率：「所有 matcher 加起來的最終 candidates」/「該頁可被 anchor 的題數」
   // - with_questions 模式：分母 = stats.inlineCount（LCS+Dice schema、含 fill_blank 系列 + single_choice）
   // - answer_only 模式：分母 = stats.totalQuestions（cell_anchor schema、所有題都該配）
@@ -3515,11 +3566,17 @@ async function qualityOverview(db, days) {
     .map(([day, dayRows]) => {
       const rc = dayRows.map((r) => r.needs_review_count || 0)
       const rev = rc.filter((c) => c > 0).length
+      const k = dayKpi.get(day) || { totalQ: 0, teacherUnrec: 0, dualUnread: 0, faSubs: 0 }
       return {
         day,
         count: dayRows.length,
         review_rate: dayRows.length ? +(rev / dayRows.length).toFixed(3) : 0,
-        avg_review: dayRows.length ? +(rc.reduce((a, b) => a + b, 0) / dayRows.length).toFixed(2) : 0
+        avg_review: dayRows.length ? +(rc.reduce((a, b) => a + b, 0) / dayRows.length).toFixed(2) : 0,
+        total_questions: k.totalQ,
+        teacher_unrecognizable_count: k.teacherUnrec,
+        teacher_unrecognizable_rate: k.totalQ ? +(k.teacherUnrec / k.totalQ).toFixed(4) : null,
+        dual_unreadable_count: k.dualUnread,
+        dual_unreadable_rate: k.totalQ ? +(k.dualUnread / k.totalQ).toFixed(4) : 0
       }
     })
 
@@ -3565,10 +3622,18 @@ async function qualityOverview(db, days) {
   return {
     days_window: days,
     total_submissions: total,
+    total_questions: totalQuestions,
     review_rate: total ? +(reviewedCount / total).toFixed(3) : 0,
     avg_needs_review: +avgReview.toFixed(2),
     avg_ocr_match_rate: avgOcrMatch != null ? +avgOcrMatch.toFixed(3) : null,
     stuck_correction_count: stuckCount,
+    // KPI ①：老師複核後標「無法辨識」題數 / 全部題數（bbox 品質 ground truth）
+    teacher_unrecognizable_count: teacherUnrecognizable,
+    teacher_unrecognizable_rate: totalQuestions ? +(teacherUnrecognizable / totalQuestions).toFixed(4) : null,
+    submissions_with_final_answers: submissionsWithFinalAnswers,
+    // KPI ①b：AI1 + AI2 都 unreadable 題數 / 全部題數（AI 雙人投降、bbox 沒框到字的先導指標）
+    dual_unreadable_count: dualUnreadable,
+    dual_unreadable_rate: totalQuestions ? +(dualUnreadable / totalQuestions).toFixed(4) : 0,
     daily,
     by_assignment: byAssignment
   }
@@ -3802,6 +3867,147 @@ async function qualityRead(db, assignmentId) {
     ai3_missed_format_examples: ai3MissedFormat,
     submission_review_ranking: submissionReviewRanking
   }
+}
+
+// ── 題型品質分析（系統層級、past N 天）──
+// 三個 ground-truth 指標 per 題型：
+//   ①  老師標「無法辨識」率（final_answers.finalStudentAnswer='無法辨識' 或 finalAnswerSource='unrecognizable'）
+//   ①b AI 雙人都讀不出率（read_answer_1.status='unreadable' && read_answer_2[同 qid].status='unreadable'）
+//   ②  進 review 率（arbiter[qid].consistent === false）
+// 分母統一：read_answer_1 視角的題數
+async function qualityByType(db, days) {
+  const sinceIso = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
+
+  // 1) 抓 Phase A stage_logs（read_answer_1/2 + arbiter）
+  const { data: logs, error } = await db
+    .from('grading_stage_logs')
+    .select('submission_id, assignment_id, created_at, read_answer_1, read_answer_2, arbiter')
+    .gte('created_at', sinceIso)
+    .not('classify', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(2000)
+  if (error) throw new Error(error.message)
+
+  // 去重：每 submission 留最新一筆
+  const latest = new Map()
+  for (const r of logs || []) if (!latest.has(r.submission_id)) latest.set(r.submission_id, r)
+  const rows = [...latest.values()]
+
+  // 2) 批次抓 submissions.final_answers + assignment_id
+  const submissionIds = [...latest.keys()]
+  const finalAnswersBySid = new Map()
+  const CHUNK = 200
+  for (let i = 0; i < submissionIds.length; i += CHUNK) {
+    const slice = submissionIds.slice(i, i + CHUNK)
+    const { data: subs } = await db
+      .from('submissions')
+      .select('id, final_answers')
+      .in('id', slice)
+    for (const s of subs || []) finalAnswersBySid.set(s.id, s.final_answers || [])
+  }
+
+  // 3) 抓 assignments.answer_key → 建 (assignment_id × qid) → questionType map
+  const assignmentIds = [...new Set(rows.map((r) => r.assignment_id).filter(Boolean))]
+  const typeByQid = new Map() // key: `${assignmentId}|${qid}` -> questionType
+  for (let i = 0; i < assignmentIds.length; i += CHUNK) {
+    const slice = assignmentIds.slice(i, i + CHUNK)
+    const { data: ass } = await db
+      .from('assignments')
+      .select('id, answer_key')
+      .in('id', slice)
+    for (const a of ass || []) {
+      const ak = typeof a.answer_key === 'string' ? safeJsonParse(a.answer_key) : a.answer_key
+      const qs = Array.isArray(ak?.questions) ? ak.questions : []
+      for (const q of qs) {
+        const qid = q?.id
+        const qtype = q?.questionType || 'unknown'
+        if (qid) typeByQid.set(`${a.id}|${qid}`, qtype)
+      }
+    }
+  }
+
+  // 4) 聚合 per 題型
+  // tally: type -> { total, teacherUnrec, dualUnread, enteredReview, submissionsWithFinalAnswers }
+  const tally = new Map()
+  const ensure = (t) => {
+    if (!tally.has(t)) tally.set(t, { total: 0, teacherUnrec: 0, dualUnread: 0, enteredReview: 0 })
+    return tally.get(t)
+  }
+
+  let totalQuestions = 0
+  let totalTeacherUnrec = 0
+  let totalDualUnread = 0
+  let totalEnteredReview = 0
+  let submissionsWithFinalAnswers = 0
+
+  for (const r of rows) {
+    const r1 = Array.isArray(r.read_answer_1) ? r.read_answer_1 : []
+    const r2 = Array.isArray(r.read_answer_2) ? r.read_answer_2 : []
+    const arb = Array.isArray(r.arbiter) ? r.arbiter : []
+    const r2ByQid = new Map(r2.map((q) => [q.questionId, q]))
+    const arbByQid = new Map(arb.map((a) => [a.questionId, a]))
+    const fa = finalAnswersBySid.get(r.submission_id) || []
+    const faByQid = new Map(fa.map((a) => [a.questionId, a]))
+    if (fa.length > 0) submissionsWithFinalAnswers++
+
+    for (const q of r1) {
+      const qid = q.questionId
+      const qtype = typeByQid.get(`${r.assignment_id}|${qid}`) || 'unknown'
+      const bucket = ensure(qtype)
+      bucket.total++
+      totalQuestions++
+
+      const s1 = q.status
+      const s2 = r2ByQid.get(qid)?.status
+      if (s1 === 'unreadable' && s2 === 'unreadable') {
+        bucket.dualUnread++
+        totalDualUnread++
+      }
+
+      const arbItem = arbByQid.get(qid)
+      if (arbItem && arbItem.consistent === false) {
+        bucket.enteredReview++
+        totalEnteredReview++
+      }
+
+      const faItem = faByQid.get(qid)
+      if (faItem?.finalStudentAnswer === '無法辨識' || faItem?.finalAnswerSource === 'unrecognizable') {
+        bucket.teacherUnrec++
+        totalTeacherUnrec++
+      }
+    }
+  }
+
+  const byType = [...tally.entries()]
+    .map(([type, v]) => ({
+      type,
+      total_questions: v.total,
+      teacher_unrecognizable_count: v.teacherUnrec,
+      teacher_unrecognizable_rate: v.total ? +(v.teacherUnrec / v.total).toFixed(4) : null,
+      dual_unreadable_count: v.dualUnread,
+      dual_unreadable_rate: v.total ? +(v.dualUnread / v.total).toFixed(4) : 0,
+      entered_review_count: v.enteredReview,
+      entered_review_rate: v.total ? +(v.enteredReview / v.total).toFixed(4) : 0
+    }))
+    .sort((a, b) => b.total_questions - a.total_questions)
+
+  return {
+    days_window: days,
+    total_submissions: rows.length,
+    total_questions: totalQuestions,
+    submissions_with_final_answers: submissionsWithFinalAnswers,
+    teacher_unrecognizable_count: totalTeacherUnrec,
+    teacher_unrecognizable_rate: totalQuestions ? +(totalTeacherUnrec / totalQuestions).toFixed(4) : null,
+    dual_unreadable_count: totalDualUnread,
+    dual_unreadable_rate: totalQuestions ? +(totalDualUnread / totalQuestions).toFixed(4) : 0,
+    entered_review_count: totalEnteredReview,
+    entered_review_rate: totalQuestions ? +(totalEnteredReview / totalQuestions).toFixed(4) : 0,
+    by_type: byType
+  }
+}
+
+function safeJsonParse(s) {
+  try { return JSON.parse(s) } catch { return null }
 }
 
 // ── Markdown export ──
