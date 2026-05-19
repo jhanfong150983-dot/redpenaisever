@@ -2283,12 +2283,30 @@ const CLASSIFY_TYPE_RULES = {
 
   table_cell: `▸ table_cell
   答題區視覺形式: 整張表格（多列 × 多欄、清晰格線）
-  bbox 公式:
-    bbox.x      = 表格最左格線 - 0.005
-    bbox.x + w  = 表格最右格線 + 0.005
-    bbox.y      = 表格最上格線 - 0.005
-    bbox.y + h  = 表格最下格線 + 0.005
-  bbox.h ≥ 0.05（整表高度通常 0.10-0.30）
+
+  bbox 公式（依 spec.tableMeta 動態解讀、N=totalRows、M=totalCols）:
+    bbox.x      = 表格最左外緣格線 - 0.005
+    bbox.x + w  = 表格最右外緣格線 + 0.005
+    bbox.y      = row 1（最上列）外緣格線 - 0.010   ← 包含表頭
+    bbox.y + h  = row N（最下列）外緣格線 + 0.020   ← 留 padding 給拍照透視
+  bbox.h ≥ N × 0.025
+
+  🚨🚨🚨 完整覆蓋鐵則:
+    · bbox **必須**包含全部 N 列：上自 row 1「rowHeaders[0]」、下至 row N「rowHeaders[N-1]」
+    · bbox **必須**包含全部 M 欄：左自 col 1、右至 col M
+    · 學生答案通常在 row N「rowHeaders[N-1]」、**最容易被切到** — 特別確認其底邊完全在 bbox 內
+
+  🚨 拍照透視補償:
+    · 學生用手機拍紙、紙張可能略傾斜、表格在影像中不一定是完美水平矩形
+    · 寧可底部多預留 0.02-0.04 padding、也不要切掉答案列的底邊
+
+  SELF-CHECK（output 前必過）:
+    ① bbox 內可數出 N 個完整橫向列?
+    ② row 1「rowHeaders[0]」的頂邊在 bbox 內?
+    ③ row N「rowHeaders[N-1]」的底邊在 bbox 內?（**最常出錯**）
+    ④ 最左欄與最右欄是否都在 bbox 內?
+    任一 N → 重新框
+
   用 spec.tableMeta.rowHeaders/colHeaders 找表頭定位；tableRefBbox 為 layout hint
   🚨 嚴禁: 框單一 cell；輸出 1 question = 1 整表 bbox`,
 
