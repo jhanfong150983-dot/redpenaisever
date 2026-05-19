@@ -217,25 +217,25 @@ export default async function handler(req, res) {
 
       if (orphanedProfile) {
         // 找到孤立的 1Campus 帳號，將所有資料搬移到新 Google 帳號
+        // 透過 plpgsql function 包進單一 DB transaction：失敗會整段 rollback、ext_id 不會被改、可重試
         console.log('[callback] orphaned 1Campus profile found, merging:', { oldUserId: orphanedProfile.id, newUserId: user.id })
         const oldUserId = orphanedProfile.id
-        const ownerTables = [
-          'folders', 'assignments', 'submissions', 'classrooms', 'students',
-          'campus_classroom_sync', 'ability_aggregates', 'ability_dictionary',
-          'assignment_student_state', 'assignment_tag_aggregates', 'assignment_tag_state',
-          'correction_attempt_logs', 'correction_question_items', 'deleted_records',
-          'domain_tag_aggregates', 'tag_ability_map', 'tag_dictionary',
-          'tag_dictionary_state', 'teacher_preferences'
-        ]
-        for (const table of ownerTables) {
-          await supabaseAdmin.from(table).update({ owner_id: user.id }).eq('owner_id', oldUserId)
+        const { data: mergeData, error: mergeErr } = await supabaseAdmin.rpc('merge_1campus_into_google', {
+          old_id: oldUserId,
+          new_id: user.id
+        })
+        if (mergeErr) {
+          console.error('[callback] merge RPC failed:', { oldUserId, newUserId: user.id, error: mergeErr.message })
+          res.status(500).json({ error: '帳號合併失敗' })
+          return
         }
-        await supabaseAdmin
-          .from('external_identities')
-          .update({ user_id: user.id, updated_at: nowIso })
-          .eq('user_id', oldUserId)
-        await supabaseAdmin.from('profiles').delete().eq('id', oldUserId)
-        await supabaseAdmin.auth.admin.deleteUser(oldUserId).catch(() => {})
+        console.log('[callback] merge success:', { oldUserId, newUserId: user.id, affected: mergeData })
+
+        // auth.users 在 DB transaction 外處理；失敗只 log
+        const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(oldUserId)
+        if (delErr) {
+          console.error('[callback] auth.admin.deleteUser failed (non-blocking):', { oldUserId, message: delErr.message })
+        }
       }
 
       // 創建新 Google profile，若有孤立帳號則繼承其 permission_tier 與 ink_balance

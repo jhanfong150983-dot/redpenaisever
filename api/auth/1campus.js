@@ -689,41 +689,27 @@ async function handleOAuthInitiate(req, res) {
 // ============================================================
 
 async function mergeCampus1IntoGoogleAccount(supabaseAdmin, oldUserId, googleUserId) {
-  const nowIso = new Date().toISOString()
-
-  // 搬移所有 owner_id 指向舊帳號的資料表
-  const ownerTables = [
-    'folders',
-    'assignments',
-    'submissions',
-    'classrooms',
-    'students',
-    'campus_classroom_sync',
-    'ability_aggregates',
-    'ability_dictionary',
-    'assignment_student_state',
-    'assignment_tag_aggregates',
-    'assignment_tag_state',
-    'correction_attempt_logs',
-    'correction_question_items',
-    'deleted_records',
-    'domain_tag_aggregates',
-    'tag_ability_map',
-    'tag_dictionary',
-    'tag_dictionary_state',
-    'teacher_preferences'
-  ]
-  for (const table of ownerTables) {
-    await supabaseAdmin.from(table).update({ owner_id: googleUserId }).eq('owner_id', oldUserId)
+  // 用 plpgsql function 把整段資料搬移包進單一 DB transaction：
+  // 任何一步失敗 → RAISE EXCEPTION → 全 rollback → ext_id 不會被改 → 可重試
+  // 內含 dedup、UPDATE 全 owner_id/actor_user_id/created_by 欄位、verification、刪 profile
+  const { data, error } = await supabaseAdmin.rpc('merge_1campus_into_google', {
+    old_id: oldUserId,
+    new_id: googleUserId
+  })
+  if (error) {
+    console.error('[merge] RPC failed:', { oldUserId, googleUserId, error: error.message })
+    throw new Error(`merge_1campus_into_google failed: ${error.message}`)
   }
-  await supabaseAdmin
-    .from('external_identities')
-    .update({ user_id: googleUserId, updated_at: nowIso })
-    .eq('user_id', oldUserId)
+  console.log('[merge] success:', { oldUserId, googleUserId, affected: data })
 
-  // 所有資料搬移完畢後，刪除舊的 1Campus 虛擬帳號
-  await supabaseAdmin.from('profiles').delete().eq('id', oldUserId)
-  await supabaseAdmin.auth.admin.deleteUser(oldUserId)
+  // auth.users 在 DB transaction 外處理；失敗只 log、不影響主流程
+  // （ext_id 已轉走、profile 已刪，孤兒 auth user 不會被任何 production 路徑誤觸發）
+  const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(oldUserId)
+  if (delErr) {
+    console.error('[merge] auth.admin.deleteUser failed (non-blocking):', {
+      oldUserId, message: delErr.message
+    })
+  }
 }
 
 async function handleOAuthCallback(req, res) {
@@ -876,9 +862,12 @@ async function handleOAuthCallback(req, res) {
         .maybeSingle()
 
       if (googleProfile) {
+        // 使用 finalUserId（identityData 的真實 user_id）而非 campus1UserId
+        // 過去 bug：state cookie 帶來的 campus1UserId 可能跟 ext_id.user_id 不一致，
+        // 導致 ownerTables UPDATE WHERE owner_id=campus1UserId 命中 0 row，silent failure
         await mergeCampus1IntoGoogleAccount(
           supabaseAdmin,
-          campus1UserId,
+          finalUserId,
           googleProfile.id
         )
         finalUserId = googleProfile.id
