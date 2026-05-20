@@ -3571,6 +3571,8 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
   }
 
   // 只拉選中那一筆 Phase A 的大欄位
+  // ⚠️ 必須 filter phase='phase_a'、因為 Phase A 跟 Phase B 共用同一個 pipeline_run_id
+  // 不加 phase filter 會撈到 2 筆 → maybeSingle 噴 "JSON object requested, multiple rows"
   let log = null
   if (targetRunId) {
     const { data: logRow, error: logErr } = await db
@@ -3578,6 +3580,7 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
       .select('pipeline_run_id, classify, read_answer_1, read_answer_2, arbiter, needs_review_count')
       .eq('submission_id', submissionId)
       .eq('pipeline_run_id', targetRunId)
+      .eq('phase', 'phase_a')
       .maybeSingle()
     if (logErr) throw new Error(logErr.message)
     log = logRow || null
