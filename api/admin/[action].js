@@ -3449,31 +3449,42 @@ async function qualityAssignmentList(db, day) {
 
 // ── Submission list（某 assignment 下、按學生）──
 async function qualitySubmissionList(db, assignmentId) {
-  // 一份卷子預設 2 筆 stage_log：Phase A（含 read_answer_1/2/arbiter）+ Phase B（accessor）
-  // 抓全部 log 用來算 runCount / phaseACount / phaseBCount，但 sidebar 顯示資料只用最新 Phase A
-  const { data: allLogs, error } = await db
-    .from('grading_stage_logs')
-    .select('submission_id, created_at, needs_review_count, read_answer_1, phase')
-    .eq('assignment_id', assignmentId)
-    .order('created_at', { ascending: false })
-    .limit(5000)
-  if (error) throw new Error(error.message)
+  // ⚠️ DB-safety: 拆兩個 query、避免一次 SELECT 拉所有 log 的 read_answer_1 JSONB
+  //   - countsQuery: 只拿 phase metadata 算 runCount/phaseACount/phaseBCount（無 JSONB、~30B/row）
+  //   - phaseAQuery: filter Phase A only、SELECT read_answer_1、最新一筆給 sidebar 用
+  // 之前一次 SELECT 5000 筆 read_answer_1 JSONB → 把 DB 打爆。教訓：拉大欄位前先 filter。
+  const [countsRes, phaseARes] = await Promise.all([
+    db.from('grading_stage_logs')
+      .select('submission_id, phase')
+      .eq('assignment_id', assignmentId)
+      .limit(5000),
+    db.from('grading_stage_logs')
+      .select('submission_id, created_at, needs_review_count, read_answer_1')
+      .eq('assignment_id', assignmentId)
+      .not('read_answer_1', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(2000)
+  ])
+  if (countsRes.error) throw new Error(countsRes.error.message)
+  if (phaseARes.error) throw new Error(phaseARes.error.message)
 
-  // 每份 submission 統計 + 取最新 Phase A log
-  const statsBySid = new Map()  // sid → { latestPhaseA, runCount, phaseACount, phaseBCount }
-  for (const r of allLogs || []) {
+  // run counts per submission
+  const countsBySid = new Map()
+  for (const r of countsRes.data || []) {
     const sid = r.submission_id
-    if (!statsBySid.has(sid)) {
-      statsBySid.set(sid, { latestPhaseA: null, runCount: 0, phaseACount: 0, phaseBCount: 0 })
-    }
-    const stats = statsBySid.get(sid)
-    stats.runCount += 1
-    if (r.phase === 'phase_a' || r.read_answer_1 != null) stats.phaseACount += 1
-    if (r.phase === 'phase_b') stats.phaseBCount += 1
-    if (r.read_answer_1 != null && !stats.latestPhaseA) stats.latestPhaseA = r
+    if (!countsBySid.has(sid)) countsBySid.set(sid, { runCount: 0, phaseACount: 0, phaseBCount: 0 })
+    const c = countsBySid.get(sid)
+    c.runCount += 1
+    if (r.phase === 'phase_a') c.phaseACount += 1
+    else if (r.phase === 'phase_b') c.phaseBCount += 1
   }
-  // 只保留有 Phase A 的 sid（沒 Phase A 代表訂正卷等非 admin/quality 關心的 case）
-  const sids = [...statsBySid.entries()].filter(([, s]) => s.latestPhaseA).map(([sid]) => sid)
+
+  // 每份取最新 Phase A
+  const latestPhaseABySid = new Map()
+  for (const r of phaseARes.data || []) {
+    if (!latestPhaseABySid.has(r.submission_id)) latestPhaseABySid.set(r.submission_id, r)
+  }
+  const sids = [...latestPhaseABySid.keys()]
   if (sids.length === 0) return { assignmentId, submissions: [] }
 
   const { data: subs } = await db
@@ -3487,8 +3498,8 @@ async function qualitySubmissionList(db, assignmentId) {
   const studentById = new Map((students || []).map((s) => [s.id, s]))
 
   const submissions = (subs || []).map((s) => {
-    const stats = statsBySid.get(s.id)
-    const log = stats?.latestPhaseA
+    const log = latestPhaseABySid.get(s.id)
+    const counts = countsBySid.get(s.id) || { runCount: 0, phaseACount: 0, phaseBCount: 0 }
     const student = s.student_id ? studentById.get(s.student_id) : null
     const totalQuestions = Array.isArray(log?.read_answer_1) ? log.read_answer_1.length : 0
     return {
@@ -3501,9 +3512,9 @@ async function qualitySubmissionList(db, assignmentId) {
       totalQuestions,
       needsReviewCount: log?.needs_review_count || 0,
       gradedAt: s.graded_at || null,
-      runCount: stats?.runCount || 0,
-      phaseACount: stats?.phaseACount || 0,
-      phaseBCount: stats?.phaseBCount || 0
+      runCount: counts.runCount,
+      phaseACount: counts.phaseACount,
+      phaseBCount: counts.phaseBCount
     }
   }).sort((a, b) => {
     const sa = a.seatNumber ?? 9999
@@ -3529,42 +3540,59 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
     throw err
   }
 
-  const [assRes, stuRes, allLogsRes] = await Promise.all([
+  // ⚠️ DB-safety: 拆兩個 query、不要一次 SELECT 全部 log + 大 JSONB（classify 可達 500KB/筆）
+  //   - timeline query: 只拉 metadata（無 JSONB、~50B/row）→ 給 runs[] 用
+  //   - 確定要顯示的 run 後、再單獨 SELECT 那一筆的大欄位（classify/read_answer_1/2/arbiter）
+  // 之前 LIMIT 50 + 全 SELECT 大欄位 → 一次 detail call 拉 1-5MB、密集點學生就把 DB 打爆
+  const [assRes, stuRes, runsRes] = await Promise.all([
     db.from('assignments').select('id, title, total_pages, doc_type').eq('id', sub.assignment_id).maybeSingle(),
     sub.student_id
       ? db.from('students').select('id, name, seat_number').eq('id', sub.student_id).maybeSingle()
       : Promise.resolve({ data: null }),
-    // 拉這份 submission 全部 stage_logs、給 runs timeline 用
     db.from('grading_stage_logs')
-      .select('pipeline_run_id, phase, model, created_at, needs_review_count, total_score, classify, read_answer_1, read_answer_2, arbiter')
+      .select('pipeline_run_id, phase, model, created_at, needs_review_count, total_score')
       .eq('submission_id', submissionId)
       .order('created_at', { ascending: true })
       .limit(50)
   ])
   const assignment = assRes?.data || null
   const student = stuRes?.data || null
-  const allLogs = allLogsRes?.data || []
+  const allRuns = runsRes?.data || []
 
-  // 選定要顯示的 Phase A log：若 pipelineRunId 帶了優先選該 run；否則用最新 Phase A
-  const phaseALogs = allLogs.filter((l) => l.read_answer_1 != null)
-  let log = null
+  // 選定要顯示的 Phase A run
+  const phaseARuns = allRuns.filter((r) => r.phase === 'phase_a')
+  let targetRunId = null
   if (pipelineRunId) {
-    log = phaseALogs.find((l) => l.pipeline_run_id === pipelineRunId) || null
+    const found = phaseARuns.find((r) => r.pipeline_run_id === pipelineRunId)
+    if (found) targetRunId = found.pipeline_run_id
   }
-  if (!log) {
-    log = phaseALogs.length > 0 ? phaseALogs[phaseALogs.length - 1] : null  // 最新一筆 Phase A
+  if (!targetRunId && phaseARuns.length > 0) {
+    targetRunId = phaseARuns[phaseARuns.length - 1].pipeline_run_id  // 最新 Phase A
   }
 
-  // runs timeline：所有 log 的 metadata（不含 bbox / read 大欄位、檔案小）
-  const runs = allLogs.map((l) => ({
-    pipelineRunId: l.pipeline_run_id,
-    phase: l.phase || (l.read_answer_1 != null ? 'phase_a' : 'phase_b'),
-    model: l.model || null,
-    createdAt: l.created_at,
-    needsReviewCount: l.needs_review_count ?? null,
-    totalScore: l.total_score ?? null,
-    hasPhaseAData: l.read_answer_1 != null,
-    isSelected: log?.pipeline_run_id != null && l.pipeline_run_id === log.pipeline_run_id
+  // 只拉選中那一筆 Phase A 的大欄位
+  let log = null
+  if (targetRunId) {
+    const { data: logRow, error: logErr } = await db
+      .from('grading_stage_logs')
+      .select('pipeline_run_id, classify, read_answer_1, read_answer_2, arbiter, needs_review_count')
+      .eq('submission_id', submissionId)
+      .eq('pipeline_run_id', targetRunId)
+      .maybeSingle()
+    if (logErr) throw new Error(logErr.message)
+    log = logRow || null
+  }
+
+  // runs timeline：用 metadata-only 結果
+  const runs = allRuns.map((r) => ({
+    pipelineRunId: r.pipeline_run_id,
+    phase: r.phase || null,
+    model: r.model || null,
+    createdAt: r.created_at,
+    needsReviewCount: r.needs_review_count ?? null,
+    totalScore: r.total_score ?? null,
+    hasPhaseAData: r.phase === 'phase_a',
+    isSelected: targetRunId != null && r.pipeline_run_id === targetRunId
   }))
 
   // 簽 storage URL（image_url 是 path 或完整 URL）
