@@ -3381,14 +3381,13 @@ async function handleQuality(req, res, supabaseAdmin) {
   const mode = String(req.query?.mode || 'assignments')
   const assignmentId = req.query?.assignmentId ? String(req.query.assignmentId) : null
   const submissionId = req.query?.submissionId ? String(req.query.submissionId) : null
-  // from/to: YYYY-MM-DD（含當日、UTC 解讀；若未帶 from 預設過去 7 天、未帶 to 預設今天）
-  const fromStr = req.query?.from ? String(req.query.from) : null
-  const toStr = req.query?.to ? String(req.query.to) : null
+  // date: YYYY-MM-DD（哪一天有批改、未帶預設今天、UTC 解讀）
+  const dateStr = req.query?.date ? String(req.query.date) : null
 
   try {
     if (mode === 'assignments') {
-      const range = parseDateRange(fromStr, toStr)
-      return res.status(200).json(await qualityAssignmentList(supabaseAdmin, range))
+      const day = parseDateForDay(dateStr)
+      return res.status(200).json(await qualityAssignmentList(supabaseAdmin, day))
     }
     if (mode === 'submissions') {
       if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
@@ -3405,29 +3404,22 @@ async function handleQuality(req, res, supabaseAdmin) {
   }
 }
 
-// ── Date range helper（YYYY-MM-DD inclusive、未帶預設過去 7 天 ~ 今天）──
-function parseDateRange(fromStr, toStr) {
+// ── Single-day helper（YYYY-MM-DD、未帶預設今天 UTC）──
+function parseDateForDay(dateStr) {
   const dayRe = /^\d{4}-\d{2}-\d{2}$/
   const now = new Date()
   const today = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`
-  const to = (toStr && dayRe.test(toStr)) ? toStr : today
-  let from = fromStr && dayRe.test(fromStr) ? fromStr : null
-  if (!from) {
-    const past = new Date(now.getTime() - 7 * 24 * 3600 * 1000)
-    from = `${past.getUTCFullYear()}-${String(past.getUTCMonth() + 1).padStart(2, '0')}-${String(past.getUTCDate()).padStart(2, '0')}`
-  }
+  const date = (dateStr && dayRe.test(dateStr)) ? dateStr : today
   return {
-    fromIso: `${from}T00:00:00.000Z`,
-    toIso: `${to}T23:59:59.999Z`,
-    from,
-    to
+    date,
+    fromIso: `${date}T00:00:00.000Z`,
+    toIso: `${date}T23:59:59.999Z`
   }
 }
 
-// ── Assignment list（給前端 dropdown 用）──
-async function qualityAssignmentList(db, range) {
-  const { fromIso, toIso, from, to } = range
-  // 找該時間區間有 grading_stage_logs 的 assignment
+// ── Assignment list（給前端 dropdown 用、某一天有批改的作業）──
+async function qualityAssignmentList(db, day) {
+  const { fromIso, toIso, date } = day
   const { data, error } = await db
     .from('grading_stage_logs')
     .select('assignment_id, created_at')
@@ -3441,7 +3433,7 @@ async function qualityAssignmentList(db, range) {
     counts.set(r.assignment_id, (counts.get(r.assignment_id) || 0) + 1)
   }
   const aids = [...counts.keys()]
-  if (aids.length === 0) return { assignments: [], from, to }
+  if (aids.length === 0) return { assignments: [], date }
   const { data: ass } = await db
     .from('assignments')
     .select('id, title, total_pages, doc_type, created_at')
@@ -3450,8 +3442,7 @@ async function qualityAssignmentList(db, range) {
     assignments: (ass || [])
       .map((a) => ({ ...a, log_count: counts.get(a.id) || 0 }))
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
-    from,
-    to
+    date
   }
 }
 
