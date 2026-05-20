@@ -3531,12 +3531,22 @@ async function qualitySubmissionDetail(db, submissionId) {
   }
 
   // bbox：from classify.ocrAssist.perPage[].classifyBboxes
+  // ⚠️ submissions/<id>.webp 是垂直堆疊的 merged 多頁圖，但每頁 bbox 是 normalized 到該「單頁」(y ∈ [0,1])。
+  // 直接畫在 merged 圖上 page 1+ 會跑版到 page 0、所以這裡轉換成 merged-image 相對座標：
+  //   mergedY = (pageIdx + bbox.y) / totalPages
+  //   mergedH = bbox.h / totalPages
+  // 假設所有 page 等高（teacher_scan 走 PDF rasterize 一律相同 dpi 故等高）
   const bboxByQid = new Map()
   const perPage = log?.classify?.ocrAssist?.perPage || []
+  const pageCount = perPage.length || 1
   perPage.forEach((p, pageIdx) => {
     for (const item of p?.classifyBboxes || []) {
       if (item?.qid && item?.bbox) {
-        bboxByQid.set(item.qid, { page: pageIdx, bbox: item.bbox })
+        const b = item.bbox
+        const mergedBbox = pageCount > 1
+          ? { x: b.x, y: (pageIdx + b.y) / pageCount, w: b.w, h: b.h / pageCount }
+          : b
+        bboxByQid.set(item.qid, { page: pageIdx, bbox: mergedBbox })
       }
     }
   })
