@@ -37,6 +37,7 @@ const ALLOWED_SUBMISSION_SOURCES = new Set([
 const HOMEWORK_IMAGES_BUCKET = 'homework-images'
 const STUDENT_CORRECTION_MODEL =
   getEnvValue('STUDENT_CORRECTION_MODEL') ||
+  getEnvValue('AI_MODEL') ||
   getEnvValue('SYSTEM_GEMINI_MODEL') ||
   'gemini-3-flash-preview'
 
@@ -7192,7 +7193,7 @@ ${studentLines || '（無錯誤）'}
       console.warn(`${logPrefix} ink balance check failed (non-fatal):`, e?.message)
     }
 
-    const summaryModel = getEnvValue('SYSTEM_GEMINI_MODEL') || 'gemini-3-flash-preview'
+    const summaryModel = getEnvValue('SYSTEM_GEMINI_MODEL') || getEnvValue('AI_MODEL') || 'gemini-3-flash-preview'
     const SUMMARY_TIMEOUT_MS = 120_000
     // 組合 multimodal parts：圖片（若有）+ 文字 prompt
     const summaryParts = []

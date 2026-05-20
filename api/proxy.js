@@ -442,7 +442,7 @@ export default async function handler(req, res) {
   }
 
   const {
-    model,
+    model: requestedModel,
     contents,
     inkSessionId,
     answerKey,
@@ -454,6 +454,14 @@ export default async function handler(req, res) {
     answerSheetMode: requestedAnswerSheetMode,
     ...payload
   } = body || {}
+  // 2026-05-20: AI_MODEL 全系統 model 覆寫——Vercel 一個 env 控所有 stage 的 model。
+  // client 傳的 model 會被蓋過（含 classify、其他 client-driven calls）。
+  // 仍可被 STAGED_READ_MODEL_OVERRIDE / STAGED_PHASE_B_MODEL_OVERRIDE 進一步覆寫（stage-level granular）
+  const aiModelOverride = getEnvValue('AI_MODEL')
+  const model = aiModelOverride || requestedModel
+  if (aiModelOverride && requestedModel && requestedModel !== aiModelOverride) {
+    console.log(`${logPrefix} AI_MODEL 覆寫 client model：${requestedModel} → ${aiModelOverride}`)
+  }
   const normalizedAnswerKeyPayload = normalizeAnswerKeyPayload(answerKey, logPrefix)
   const headerGradingMode = readSingleHeaderValue(req?.headers?.['x-grading-pipeline-mode'])
   const envGradingMode = getEnvValue('AI_GRADING_PIPELINE_MODE') || process.env.AI_GRADING_PIPELINE_MODE
