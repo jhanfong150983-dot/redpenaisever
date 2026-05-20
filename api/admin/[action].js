@@ -3372,270 +3372,31 @@ export default async function handler(req, res) {
 }
 
 // ========== QUALITY DASHBOARD ==========
-// 開發者用、看批改品質指標、不顯示給老師/學生
-// /api/admin/quality?mode=overview|bbox|read|export[&assignmentId=xxx&days=N]
+// 開發者用、逐份檢視批改品質（原圖 + bbox + AI1/AI2 read），不顯示給老師/學生
+// /api/admin/quality?mode=assignments[&days=N]
+// /api/admin/quality?mode=submissions&assignmentId=xxx
+// /api/admin/quality?mode=submission_detail&submissionId=xxx
 
 async function handleQuality(req, res, supabaseAdmin) {
-  const mode = String(req.query?.mode || 'overview')
+  const mode = String(req.query?.mode || 'assignments')
   const assignmentId = req.query?.assignmentId ? String(req.query.assignmentId) : null
-  const days = Math.min(Math.max(Number(req.query?.days) || 7, 1), 90)
+  const submissionId = req.query?.submissionId ? String(req.query.submissionId) : null
+  const days = Math.min(Math.max(Number(req.query?.days) || 30, 1), 90)
 
   try {
-    if (mode === 'overview') return res.status(200).json(await qualityOverview(supabaseAdmin, days))
-    if (mode === 'bbox') {
-      if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
-      return res.status(200).json(await qualityBbox(supabaseAdmin, assignmentId))
-    }
-    if (mode === 'read') {
-      if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
-      return res.status(200).json(await qualityRead(supabaseAdmin, assignmentId))
-    }
-    if (mode === 'export') {
-      if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
-      const md = await qualityExportMarkdown(supabaseAdmin, assignmentId)
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-      return res.status(200).send(md)
-    }
     if (mode === 'assignments') return res.status(200).json(await qualityAssignmentList(supabaseAdmin, days))
-    if (mode === 'by_type') return res.status(200).json(await qualityByType(supabaseAdmin, days))
+    if (mode === 'submissions') {
+      if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
+      return res.status(200).json(await qualitySubmissionList(supabaseAdmin, assignmentId))
+    }
+    if (mode === 'submission_detail') {
+      if (!submissionId) return res.status(400).json({ error: 'submissionId required' })
+      return res.status(200).json(await qualitySubmissionDetail(supabaseAdmin, submissionId))
+    }
     return res.status(400).json({ error: 'Unknown mode' })
   } catch (err) {
     console.error('[admin/quality] error:', err)
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Quality query failed' })
-  }
-}
-
-// ── Helpers ──
-
-function normalizeAnswer(s) {
-  if (s == null) return ''
-  let v = String(s)
-  if (/未作答|未填寫|沒寫|無作答/.test(v)) return '∅'  // 標準化「沒寫」
-  // 只處理「不會改變語意」的差異：
-  //   - 答案標記符的差異（A: vs A= vs 答：vs 答=）
-  //   - 全形/半形標點（，,、；; 等）
-  //   - 空白 / 換行 / Tab
-  //   - 純排版裝飾符（⧉、|、─、表格分隔線）
-  // **不動文字內容**——學生寫錯字「裡 vs 理」「即便 vs 及便」要當真實質差、給老師看
-  v = v
-    .replace(/(答|[A-Z])\s*[=:：＝]/gi, '$1')        // 「A:」「A=」「答:」「答=」 → 只留 A 或 答
-    .replace(/[\s　\n\r\t]/g, '')                    // 各種空白 / 換行 / Tab
-    .replace(/[，,、]/g, '')                         // 中英文逗號 / 頓號
-    .replace(/[。.]/g, '')                           // 中英文句號
-    .replace(/[；;]/g, '')                            // 中英文分號
-    .replace(/[：:]/g, '')                            // 中英文冒號（剩餘的、不接 A 開頭）
-    .replace(/[！!？?]/g, '')                         // 驚嘆問號
-    .replace(/[⧉│┤├─━]/g, '')                       // 排版裝飾分隔符
-    .replace(/[（）()【】\[\]「」『』]/g, '')          // 括號
-  // 注意：保留中英文大小寫差異（A vs a 在某些選擇題有意義）
-  return v
-}
-
-function classifyDiff(a, b) {
-  const na = normalizeAnswer(a)
-  const nb = normalizeAnswer(b)
-  if (a === b) return 'identical'
-  if (na === nb) return 'format_only'
-  if (na === '∅' || nb === '∅') return 'one_blank'
-  return 'substantive'
-}
-
-function percentile(arr, p) {
-  if (arr.length === 0) return null
-  const sorted = [...arr].sort((x, y) => x - y)
-  const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * p))
-  return sorted[idx]
-}
-
-function median(arr) {
-  return percentile(arr, 0.5)
-}
-
-// ── Overview: 過去 N 天系統健康度 ──
-async function qualityOverview(db, days) {
-  const sinceIso = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
-
-  // 最近 N 天 stage_log（只看 Phase A、因為 Phase B/accessor 的 needs_review_count 是 null）
-  // read_answer_1/2 用來算「AI 雙人都讀不出」率（status=unreadable 雙人都中）
-  const { data: logs, error } = await db
-    .from('grading_stage_logs')
-    .select('submission_id, assignment_id, created_at, needs_review_count, classify, consistency, total_score, read_answer_1, read_answer_2')
-    .gte('created_at', sinceIso)
-    .not('classify', 'is', null)  // 只取 Phase A 那筆、避免 Phase B 蓋掉 needs_review_count
-    .order('created_at', { ascending: false })
-    .limit(2000)
-  if (error) throw new Error(error.message)
-
-  // 去重 — 每 submission 留最新一筆
-  const latest = new Map()
-  for (const log of logs || []) {
-    if (!latest.has(log.submission_id)) latest.set(log.submission_id, log)
-  }
-  const rows = [...latest.values()]
-  const total = rows.length
-
-  // 取對應 submissions.final_answers（老師最終決策、含「無法辨識」標記）
-  // 分批避免 PostgREST .in() URL overflow（>~200 ID 切批）
-  const submissionIds = [...latest.keys()]
-  const finalAnswersBySid = new Map()
-  const CHUNK = 200
-  for (let i = 0; i < submissionIds.length; i += CHUNK) {
-    const slice = submissionIds.slice(i, i + CHUNK)
-    const { data: subs } = await db
-      .from('submissions')
-      .select('id, final_answers')
-      .in('id', slice)
-    for (const s of subs || []) finalAnswersBySid.set(s.id, s.final_answers || [])
-  }
-
-  // 計各指標
-  const reviewCounts = rows.map((r) => r.needs_review_count || 0)
-  const reviewedCount = reviewCounts.filter((c) => c > 0).length
-  const avgReview = total ? reviewCounts.reduce((a, b) => a + b, 0) / total : 0
-
-  // KPI ① 老師標「無法辨識」率、① b AI 雙人都讀不出率
-  // 分母：rows 對應的全部 read_answer_1 題數（每份 × 該份題數）
-  // ① 分子：final_answers 內 finalStudentAnswer='無法辨識' 或 finalAnswerSource='unrecognizable'
-  // ①b 分子：read_answer_1[i].status='unreadable' && read_answer_2[同 qid].status='unreadable'
-  let totalQuestions = 0
-  let teacherUnrecognizable = 0
-  let dualUnreadable = 0
-  let submissionsWithFinalAnswers = 0
-  // per-day buckets for new KPIs
-  const dayKpi = new Map() // day -> { totalQ, teacherUnrec, dualUnread, faSubs }
-  for (const r of rows) {
-    const day = String(r.created_at).slice(0, 10)
-    if (!dayKpi.has(day)) dayKpi.set(day, { totalQ: 0, teacherUnrec: 0, dualUnread: 0, faSubs: 0 })
-    const bucket = dayKpi.get(day)
-
-    const r1 = Array.isArray(r.read_answer_1) ? r.read_answer_1 : []
-    const r2 = Array.isArray(r.read_answer_2) ? r.read_answer_2 : []
-    const r2ByQid = new Map(r2.map((q) => [q.questionId, q]))
-    for (const q of r1) {
-      totalQuestions++
-      bucket.totalQ++
-      const s1 = q.status
-      const s2 = r2ByQid.get(q.questionId)?.status
-      if (s1 === 'unreadable' && s2 === 'unreadable') { dualUnreadable++; bucket.dualUnread++ }
-    }
-    const fa = finalAnswersBySid.get(r.submission_id) || []
-    if (fa.length > 0) { submissionsWithFinalAnswers++; bucket.faSubs++ }
-    for (const a of fa) {
-      if (a?.finalStudentAnswer === '無法辨識' || a?.finalAnswerSource === 'unrecognizable') {
-        teacherUnrecognizable++
-        bucket.teacherUnrec++
-      }
-    }
-  }
-  // OCR-assist 整體命中率：「所有 matcher 加起來的最終 candidates」/「該頁可被 anchor 的題數」
-  // - with_questions 模式：分母 = stats.inlineCount（LCS+Dice schema、含 fill_blank 系列 + single_choice）
-  // - answer_only 模式：分母 = stats.totalQuestions（cell_anchor schema、所有題都該配）
-  let totalInline = 0
-  let totalMatched = 0
-  for (const r of rows) {
-    const perPage = r.classify?.ocrAssist?.perPage || []
-    for (const p of perPage) {
-      // 分母：依 stats schema 取不同欄位
-      const denom = p?.stats?.inlineCount || p?.stats?.totalQuestions || 0
-      if (denom === 0) continue
-      // 分子：p.candidates 是所有 matcher merge 完的最終結果
-      const finalMatched = p?.candidates ? Object.keys(p.candidates).length : 0
-      totalInline += denom
-      totalMatched += Math.min(finalMatched, denom)
-    }
-  }
-  const avgOcrMatch = totalInline > 0 ? totalMatched / totalInline : null
-
-  // 卡住 submissions（pending_grading / grading_in_progress、source=student_correction）
-  const { data: stuck } = await db
-    .from('submissions')
-    .select('id, source, status, created_at')
-    .in('status', ['pending_grading', 'pending_grading_retry', 'grading_in_progress'])
-    .eq('source', 'student_correction')
-  const stuckCount = stuck?.length || 0
-
-  // 每日聚合
-  const byDay = new Map()
-  for (const r of rows) {
-    const day = String(r.created_at).slice(0, 10)
-    if (!byDay.has(day)) byDay.set(day, [])
-    byDay.get(day).push(r)
-  }
-  const daily = [...byDay.entries()]
-    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-    .map(([day, dayRows]) => {
-      const rc = dayRows.map((r) => r.needs_review_count || 0)
-      const rev = rc.filter((c) => c > 0).length
-      const k = dayKpi.get(day) || { totalQ: 0, teacherUnrec: 0, dualUnread: 0, faSubs: 0 }
-      return {
-        day,
-        count: dayRows.length,
-        review_rate: dayRows.length ? +(rev / dayRows.length).toFixed(3) : 0,
-        avg_review: dayRows.length ? +(rc.reduce((a, b) => a + b, 0) / dayRows.length).toFixed(2) : 0,
-        total_questions: k.totalQ,
-        teacher_unrecognizable_count: k.teacherUnrec,
-        teacher_unrecognizable_rate: k.totalQ ? +(k.teacherUnrec / k.totalQ).toFixed(4) : null,
-        dual_unreadable_count: k.dualUnread,
-        dual_unreadable_rate: k.totalQ ? +(k.dualUnread / k.totalQ).toFixed(4) : 0
-      }
-    })
-
-  // 按 assignment 拆解 OCR rate（讓 user 一眼看到哪份拉低總分）
-  const byAssignmentMap = new Map()
-  for (const r of rows) {
-    const perPage = r.classify?.ocrAssist?.perPage || []
-    for (const p of perPage) {
-      const denom = p?.stats?.inlineCount || p?.stats?.totalQuestions || 0
-      const matched = p?.candidates ? Object.keys(p.candidates).length : 0
-      if (!byAssignmentMap.has(r.assignment_id)) {
-        byAssignmentMap.set(r.assignment_id, { aid: r.assignment_id, pages: 0, inline: 0, matched: 0, submissions: new Set() })
-      }
-      const entry = byAssignmentMap.get(r.assignment_id)
-      entry.pages++
-      entry.inline += denom
-      entry.matched += Math.min(matched, denom || matched)
-      entry.submissions.add(r.submission_id)
-    }
-  }
-  const assignmentIds = [...byAssignmentMap.keys()]
-  const titleMap = new Map()
-  if (assignmentIds.length > 0) {
-    const { data: ass } = await db
-      .from('assignments')
-      .select('id, title, answer_sheet_mode')
-      .in('id', assignmentIds)
-    for (const a of ass || []) titleMap.set(a.id, { title: a.title, mode: a.answer_sheet_mode })
-  }
-  const byAssignment = [...byAssignmentMap.values()]
-    .map((e) => ({
-      assignment_id: e.aid,
-      title: titleMap.get(e.aid)?.title || '(無標題)',
-      mode: titleMap.get(e.aid)?.mode || null,
-      submissions: e.submissions.size,
-      pages: e.pages,
-      inline: e.inline,
-      matched: e.matched,
-      rate: e.inline > 0 ? +(e.matched / e.inline).toFixed(3) : null
-    }))
-    .sort((a, b) => b.pages - a.pages)
-
-  return {
-    days_window: days,
-    total_submissions: total,
-    total_questions: totalQuestions,
-    review_rate: total ? +(reviewedCount / total).toFixed(3) : 0,
-    avg_needs_review: +avgReview.toFixed(2),
-    avg_ocr_match_rate: avgOcrMatch != null ? +avgOcrMatch.toFixed(3) : null,
-    stuck_correction_count: stuckCount,
-    // KPI ①：老師複核後標「無法辨識」題數 / 全部題數（bbox 品質 ground truth）
-    teacher_unrecognizable_count: teacherUnrecognizable,
-    teacher_unrecognizable_rate: totalQuestions ? +(teacherUnrecognizable / totalQuestions).toFixed(4) : null,
-    submissions_with_final_answers: submissionsWithFinalAnswers,
-    // KPI ①b：AI1 + AI2 都 unreadable 題數 / 全部題數（AI 雙人投降、bbox 沒框到字的先導指標）
-    dual_unreadable_count: dualUnreadable,
-    dual_unreadable_rate: totalQuestions ? +(dualUnreadable / totalQuestions).toFixed(4) : 0,
-    daily,
-    by_assignment: byAssignment
   }
 }
 
@@ -3667,443 +3428,185 @@ async function qualityAssignmentList(db, days) {
   }
 }
 
-// ── BBox 一致性分析 ──
-async function qualityBbox(db, assignmentId) {
-  // 取 assignment 所有 stage_log（每 submission 最新）
+// ── Submission list（某 assignment 下、按學生）──
+async function qualitySubmissionList(db, assignmentId) {
   const { data: logs, error } = await db
     .from('grading_stage_logs')
-    .select('submission_id, created_at, classify')
+    .select('submission_id, created_at, needs_review_count, read_answer_1')
     .eq('assignment_id', assignmentId)
-    .not('classify', 'is', null)
     .order('created_at', { ascending: false })
     .limit(2000)
   if (error) throw new Error(error.message)
-  const latest = new Map()
+  const latestBySid = new Map()
   for (const r of logs || []) {
-    if (!latest.has(r.submission_id)) latest.set(r.submission_id, r)
+    if (!latestBySid.has(r.submission_id)) latestBySid.set(r.submission_id, r)
   }
-  const rows = [...latest.values()]
+  const sids = [...latestBySid.keys()]
+  if (sids.length === 0) return { assignmentId, submissions: [] }
 
-  // 收集 classifyBboxes（per qid）+ matcher stats
-  const bboxByQid = new Map()  // qid → [{submissionId, x,y,w,h, page}]
-  const matcherStats = { blankParen: { matched: 0, parsed: 0 }, bracketGap: { matched: 0, parsed: 0 },
-    singleChoice: { matched: 0, parsed: 0 }, subCell: { matched: 0, parsed: 0 } }
-  const ocrCoverageZero = []  // {sid, qid}
+  const { data: subs } = await db
+    .from('submissions')
+    .select('id, student_id, image_url, graded_at, source, status')
+    .in('id', sids)
+  const studentIds = [...new Set((subs || []).map((s) => s.student_id).filter(Boolean))]
+  const { data: students } = studentIds.length > 0
+    ? await db.from('students').select('id, name, seat_number').in('id', studentIds)
+    : { data: [] }
+  const studentById = new Map((students || []).map((s) => [s.id, s]))
 
-  for (const r of rows) {
-    const perPage = r.classify?.ocrAssist?.perPage || []
-    perPage.forEach((p, pageIdx) => {
-      // matcher stats
-      const s = p?.stats || {}
-      const bp = s.blankParen, bg = s.bracketGap, sc = s.singleChoiceStructural, sub = s.subCell
-      if (bp) { matcherStats.blankParen.matched += bp.matchedCount || 0; matcherStats.blankParen.parsed += bp.parsedCount || 0 }
-      if (bg) { matcherStats.bracketGap.matched += bg.matchedCount || 0; matcherStats.bracketGap.parsed += bg.parsedCount || 0 }
-      if (sc) { matcherStats.singleChoice.matched += sc.matchedCount || 0; matcherStats.singleChoice.parsed += sc.parsedCount || 0 }
-      if (sub) { matcherStats.subCell.matched += sub.matchedCount || 0; matcherStats.subCell.parsed += sub.parsedCount || 0 }
-
-      // classify bboxes
-      const cb = p?.classifyBboxes || []
-      const candidates = p?.candidates || {}
-      for (const item of cb) {
-        const qid = item.qid
-        const b = item.bbox || {}
-        if (!bboxByQid.has(qid)) bboxByQid.set(qid, [])
-        bboxByQid.get(qid).push({
-          submissionId: r.submission_id,
-          page: pageIdx,
-          x: b.x, y: b.y, w: b.w, h: b.h
-        })
-        // OCR coverage zero check
-        const cand = candidates[qid]
-        if (!cand || (Array.isArray(cand) && cand.length === 0)) {
-          ocrCoverageZero.push({ submissionId: r.submission_id, qid })
-        }
-      }
-    })
-  }
-
-  // 每 qid 算 median + 找 outlier
-  const qidStats = []
-  const outliers = []
-  for (const [qid, list] of bboxByQid.entries()) {
-    if (list.length < 3) continue  // 樣本太少不算
-    const xs = list.map((l) => l.x).filter((v) => typeof v === 'number')
-    const ys = list.map((l) => l.y).filter((v) => typeof v === 'number')
-    const ws = list.map((l) => l.w).filter((v) => typeof v === 'number')
-    const mx = median(xs), my = median(ys), mw = median(ws)
-    qidStats.push({
-      qid, n: list.length,
-      median_x: +mx.toFixed(3), median_y: +my.toFixed(3), median_w: +mw.toFixed(3)
-    })
-    // 偏離閾值 0.06（normalized、約 6% 頁寬）
-    for (const item of list) {
-      const dx = Math.abs((item.x || 0) - mx)
-      const dy = Math.abs((item.y || 0) - my)
-      if (dx > 0.06 || dy > 0.06) {
-        outliers.push({
-          submissionId: item.submissionId, qid,
-          dev_x: +dx.toFixed(3), dev_y: +dy.toFixed(3),
-          your_bbox: { x: item.x, y: item.y, w: item.w, h: item.h },
-          class_median: { x: +mx.toFixed(3), y: +my.toFixed(3), w: +mw.toFixed(3) }
-        })
-      }
+  const submissions = (subs || []).map((s) => {
+    const log = latestBySid.get(s.id)
+    const student = s.student_id ? studentById.get(s.student_id) : null
+    const totalQuestions = Array.isArray(log?.read_answer_1) ? log.read_answer_1.length : 0
+    return {
+      submissionId: s.id,
+      studentId: s.student_id || null,
+      studentName: student?.name || '(未綁定)',
+      seatNumber: student?.seat_number ?? null,
+      source: s.source || null,
+      status: s.status || null,
+      totalQuestions,
+      needsReviewCount: log?.needs_review_count || 0,
+      gradedAt: s.graded_at || null
     }
-  }
+  }).sort((a, b) => {
+    const sa = a.seatNumber ?? 9999
+    const sb = b.seatNumber ?? 9999
+    if (sa !== sb) return sa - sb
+    return String(a.studentName).localeCompare(String(b.studentName), 'zh-Hant')
+  })
 
-  // 每份 submission 偏離題數
-  const outlierByStudent = new Map()
-  for (const o of outliers) {
-    outlierByStudent.set(o.submissionId, (outlierByStudent.get(o.submissionId) || 0) + 1)
-  }
-  const submissionOutlierRanking = [...outlierByStudent.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([sid, count]) => ({ submissionId: sid, outlier_count: count }))
-
-  return {
-    assignmentId,
-    total_submissions: rows.length,
-    matcher_stats: Object.fromEntries(Object.entries(matcherStats).map(([k, v]) => [
-      k,
-      { ...v, rate: v.parsed ? +(v.matched / v.parsed).toFixed(3) : null }
-    ])),
-    qid_stats: qidStats.sort((a, b) => (a.qid < b.qid ? -1 : 1)),
-    outliers: outliers.sort((a, b) => (b.dev_x + b.dev_y) - (a.dev_x + a.dev_y)).slice(0, 30),
-    submission_outlier_ranking: submissionOutlierRanking,
-    ocr_coverage_zero: ocrCoverageZero.slice(0, 30)
-  }
+  return { assignmentId, submissions }
 }
 
-// ── Read AI 不一致分析 ──
-// 設計：AI1/AI2 raw 文字差異是 *診斷*（看 OCR 階段在哪些 case 不穩）、
-// 不代表會送 review。AI3 已經 normalize 大半（特別是計算題只比最終答案）。
-// 真正的「送 review」是 arbiter.consistent === false。
-async function qualityRead(db, assignmentId) {
-  const { data: logs, error } = await db
-    .from('grading_stage_logs')
-    .select('submission_id, created_at, read_answer_1, read_answer_2, needs_review_count, arbiter')
-    .eq('assignment_id', assignmentId)
-    .not('read_answer_1', 'is', null)
-    .not('read_answer_2', 'is', null)
-    .order('created_at', { ascending: false })
-    .limit(2000)
-  if (error) throw new Error(error.message)
-  const latest = new Map()
-  for (const r of logs || []) {
-    if (!latest.has(r.submission_id)) latest.set(r.submission_id, r)
-  }
-  const rows = [...latest.values()]
-
-  let totalQuestions = 0
-  // diff_breakdown：raw 文字差異統計（純診斷、不等於送 review）
-  const diffsByType = { identical: 0, format_only: 0, one_blank: 0, substantive: 0 }
-  // ai3_inconsistent_by_diff：cross-reference AI3 真實送 review 數、依 diff 類別拆
-  // - format_only + AI3=inconsistent → AI3 漏 normalize 的真正 noise（值得關注）
-  // - substantive + AI3=inconsistent → 真實送 review（系統設計如此、不是 bug）
-  const ai3InconsistentByDiff = { identical: 0, format_only: 0, one_blank: 0, substantive: 0 }
-  const formatExamples = []
-  const blankExamples = []
-  const substantiveExamples = []
-  // ai3MissedFormat：AI3 真的送 review 但 raw 比對是 format_only 的 case（AI3 應該 normalize 卻沒抓到）
-  const ai3MissedFormat = []
-  const reviewByCount = new Map()
-
-  for (const r of rows) {
-    const r1 = Array.isArray(r.read_answer_1) ? r.read_answer_1 : []
-    const r2 = Array.isArray(r.read_answer_2) ? r.read_answer_2 : []
-    const arb = Array.isArray(r.arbiter) ? r.arbiter : []
-    const r2ByQid = new Map(r2.map((q) => [q.questionId, q]))
-    const arbByQid = new Map(arb.map((a) => [a.questionId, a]))
-    for (const q of r1) {
-      const qid = q.questionId
-      const a1 = q.answer
-      const a2 = r2ByQid.get(qid)?.answer
-      totalQuestions++
-      const diff = classifyDiff(a1, a2)
-      diffsByType[diff]++
-      // AI3 對該題的 consistent 決策（true = 自動 normalize 通過、false = 送 review）
-      const arbItem = arbByQid.get(qid)
-      const ai3Inconsistent = arbItem ? arbItem.consistent === false : false
-      if (ai3Inconsistent) ai3InconsistentByDiff[diff]++
-      if (diff === 'format_only' && formatExamples.length < 30) {
-        formatExamples.push({ submissionId: r.submission_id, qid, a1, a2, ai3Consistent: arbItem?.consistent ?? null })
-      } else if (diff === 'one_blank' && blankExamples.length < 30) {
-        blankExamples.push({ submissionId: r.submission_id, qid, a1, a2, ai3Consistent: arbItem?.consistent ?? null })
-      } else if (diff === 'substantive' && substantiveExamples.length < 30) {
-        substantiveExamples.push({ submissionId: r.submission_id, qid, a1, a2, ai3Consistent: arbItem?.consistent ?? null })
-      }
-      // 若 raw=format_only 但 AI3 還是送 review → 收集起來、提示 prompt 改善方向
-      if (diff === 'format_only' && ai3Inconsistent && ai3MissedFormat.length < 30) {
-        ai3MissedFormat.push({ submissionId: r.submission_id, qid, a1, a2 })
-      }
-    }
-    if (r.needs_review_count > 0) reviewByCount.set(r.submission_id, r.needs_review_count)
+// ── Submission detail（單份卷子的 bbox + read + arbiter + final answer）──
+async function qualitySubmissionDetail(db, submissionId) {
+  const { data: sub, error: sErr } = await db
+    .from('submissions')
+    .select('id, assignment_id, student_id, image_url, graded_at, final_answers, grading_result, source, status')
+    .eq('id', submissionId)
+    .maybeSingle()
+  if (sErr) throw new Error(sErr.message)
+  if (!sub) {
+    const err = new Error('Submission not found')
+    err.status = 404
+    throw err
   }
 
-  const submissionReviewRanking = [...reviewByCount.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([sid, count]) => ({ submissionId: sid, needs_review_count: count }))
-
-  const totalAi3Inconsistent =
-    ai3InconsistentByDiff.identical +
-    ai3InconsistentByDiff.format_only +
-    ai3InconsistentByDiff.one_blank +
-    ai3InconsistentByDiff.substantive
-
-  return {
-    assignmentId,
-    total_submissions: rows.length,
-    total_questions: totalQuestions,
-    // 診斷指標：raw 文字差異拆解（含 AI3 已自動 normalize 的份）
-    diff_breakdown: diffsByType,
-    // 真實 review 統計：AI3 實際判 inconsistent 的數量
-    ai3_inconsistent_total: totalAi3Inconsistent,
-    ai3_inconsistent_by_diff: ai3InconsistentByDiff,
-    format_examples: formatExamples,
-    blank_examples: blankExamples,
-    substantive_examples: substantiveExamples,
-    // AI3 沒處理好的格式差異（少數應該 normalize 卻送 review 的 case）
-    ai3_missed_format_examples: ai3MissedFormat,
-    submission_review_ranking: submissionReviewRanking
-  }
-}
-
-// ── 題型品質分析（系統層級、past N 天）──
-// 三個 ground-truth 指標 per 題型：
-//   ①  老師標「無法辨識」率（final_answers.finalStudentAnswer='無法辨識' 或 finalAnswerSource='unrecognizable'）
-//   ①b AI 雙人都讀不出率（read_answer_1.status='unreadable' && read_answer_2[同 qid].status='unreadable'）
-//   ②  進 review 率（arbiter[qid].consistent === false）
-// 分母統一：read_answer_1 視角的題數
-async function qualityByType(db, days) {
-  const sinceIso = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
-
-  // 1) 抓 Phase A stage_logs（read_answer_1/2 + arbiter）
-  const { data: logs, error } = await db
-    .from('grading_stage_logs')
-    .select('submission_id, assignment_id, created_at, read_answer_1, read_answer_2, arbiter')
-    .gte('created_at', sinceIso)
-    .not('classify', 'is', null)
-    .order('created_at', { ascending: false })
-    .limit(2000)
-  if (error) throw new Error(error.message)
-
-  // 去重：每 submission 留最新一筆
-  const latest = new Map()
-  for (const r of logs || []) if (!latest.has(r.submission_id)) latest.set(r.submission_id, r)
-  const rows = [...latest.values()]
-
-  // 2) 批次抓 submissions.final_answers + assignment_id
-  const submissionIds = [...latest.keys()]
-  const finalAnswersBySid = new Map()
-  const CHUNK = 200
-  for (let i = 0; i < submissionIds.length; i += CHUNK) {
-    const slice = submissionIds.slice(i, i + CHUNK)
-    const { data: subs } = await db
-      .from('submissions')
-      .select('id, final_answers')
-      .in('id', slice)
-    for (const s of subs || []) finalAnswersBySid.set(s.id, s.final_answers || [])
-  }
-
-  // 3) 抓 assignments.answer_key → 建 (assignment_id × qid) → questionType map
-  const assignmentIds = [...new Set(rows.map((r) => r.assignment_id).filter(Boolean))]
-  const typeByQid = new Map() // key: `${assignmentId}|${qid}` -> questionType
-  for (let i = 0; i < assignmentIds.length; i += CHUNK) {
-    const slice = assignmentIds.slice(i, i + CHUNK)
-    const { data: ass } = await db
-      .from('assignments')
-      .select('id, answer_key')
-      .in('id', slice)
-    for (const a of ass || []) {
-      const ak = typeof a.answer_key === 'string' ? safeJsonParse(a.answer_key) : a.answer_key
-      const qs = Array.isArray(ak?.questions) ? ak.questions : []
-      for (const q of qs) {
-        const qid = q?.id
-        const qtype = q?.questionType || 'unknown'
-        if (qid) typeByQid.set(`${a.id}|${qid}`, qtype)
-      }
-    }
-  }
-
-  // 4) 聚合 per 題型
-  // tally: type -> { total, teacherUnrec, dualUnread, enteredReview, submissionsWithFinalAnswers }
-  const tally = new Map()
-  const ensure = (t) => {
-    if (!tally.has(t)) tally.set(t, { total: 0, teacherUnrec: 0, dualUnread: 0, enteredReview: 0 })
-    return tally.get(t)
-  }
-
-  let totalQuestions = 0
-  let totalTeacherUnrec = 0
-  let totalDualUnread = 0
-  let totalEnteredReview = 0
-  let submissionsWithFinalAnswers = 0
-
-  for (const r of rows) {
-    const r1 = Array.isArray(r.read_answer_1) ? r.read_answer_1 : []
-    const r2 = Array.isArray(r.read_answer_2) ? r.read_answer_2 : []
-    const arb = Array.isArray(r.arbiter) ? r.arbiter : []
-    const r2ByQid = new Map(r2.map((q) => [q.questionId, q]))
-    const arbByQid = new Map(arb.map((a) => [a.questionId, a]))
-    const fa = finalAnswersBySid.get(r.submission_id) || []
-    const faByQid = new Map(fa.map((a) => [a.questionId, a]))
-    if (fa.length > 0) submissionsWithFinalAnswers++
-
-    for (const q of r1) {
-      const qid = q.questionId
-      const qtype = typeByQid.get(`${r.assignment_id}|${qid}`) || 'unknown'
-      const bucket = ensure(qtype)
-      bucket.total++
-      totalQuestions++
-
-      const s1 = q.status
-      const s2 = r2ByQid.get(qid)?.status
-      if (s1 === 'unreadable' && s2 === 'unreadable') {
-        bucket.dualUnread++
-        totalDualUnread++
-      }
-
-      const arbItem = arbByQid.get(qid)
-      if (arbItem && arbItem.consistent === false) {
-        bucket.enteredReview++
-        totalEnteredReview++
-      }
-
-      const faItem = faByQid.get(qid)
-      if (faItem?.finalStudentAnswer === '無法辨識' || faItem?.finalAnswerSource === 'unrecognizable') {
-        bucket.teacherUnrec++
-        totalTeacherUnrec++
-      }
-    }
-  }
-
-  const byType = [...tally.entries()]
-    .map(([type, v]) => ({
-      type,
-      total_questions: v.total,
-      teacher_unrecognizable_count: v.teacherUnrec,
-      teacher_unrecognizable_rate: v.total ? +(v.teacherUnrec / v.total).toFixed(4) : null,
-      dual_unreadable_count: v.dualUnread,
-      dual_unreadable_rate: v.total ? +(v.dualUnread / v.total).toFixed(4) : 0,
-      entered_review_count: v.enteredReview,
-      entered_review_rate: v.total ? +(v.enteredReview / v.total).toFixed(4) : 0
-    }))
-    .sort((a, b) => b.total_questions - a.total_questions)
-
-  return {
-    days_window: days,
-    total_submissions: rows.length,
-    total_questions: totalQuestions,
-    submissions_with_final_answers: submissionsWithFinalAnswers,
-    teacher_unrecognizable_count: totalTeacherUnrec,
-    teacher_unrecognizable_rate: totalQuestions ? +(totalTeacherUnrec / totalQuestions).toFixed(4) : null,
-    dual_unreadable_count: totalDualUnread,
-    dual_unreadable_rate: totalQuestions ? +(totalDualUnread / totalQuestions).toFixed(4) : 0,
-    entered_review_count: totalEnteredReview,
-    entered_review_rate: totalQuestions ? +(totalEnteredReview / totalQuestions).toFixed(4) : 0,
-    by_type: byType
-  }
-}
-
-function safeJsonParse(s) {
-  try { return JSON.parse(s) } catch { return null }
-}
-
-// ── Markdown export ──
-async function qualityExportMarkdown(db, assignmentId) {
-  const [bbox, read, assInfo] = await Promise.all([
-    qualityBbox(db, assignmentId),
-    qualityRead(db, assignmentId),
-    db.from('assignments').select('id, title, doc_type, total_pages').eq('id', assignmentId).maybeSingle()
-      .then((r) => r.data)
+  const [assRes, stuRes, logRes] = await Promise.all([
+    db.from('assignments').select('id, title, total_pages, doc_type').eq('id', sub.assignment_id).maybeSingle(),
+    sub.student_id
+      ? db.from('students').select('id, name, seat_number').eq('id', sub.student_id).maybeSingle()
+      : Promise.resolve({ data: null }),
+    db.from('grading_stage_logs')
+      .select('classify, read_answer_1, read_answer_2, arbiter, needs_review_count, created_at')
+      .eq('submission_id', submissionId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
   ])
-  const title = assInfo?.title || assignmentId
-  const lines = []
-  lines.push(`# 批改品質報告 — ${title}`)
-  lines.push(`assignment_id: \`${assignmentId}\``)
-  lines.push(`產生時間: ${new Date().toISOString()}`)
-  lines.push('')
-  lines.push(`## 概覽`)
-  lines.push(`- submission 數: **${bbox.total_submissions}**`)
-  lines.push(`- 總題數（AI1 視角）: ${read.total_questions}`)
-  lines.push(`- **AI3 實際送 review: ${read.ai3_inconsistent_total} 題**（這是真正會排隊給老師人工複核的數量）`)
-  lines.push('')
-  lines.push(`### AI1/AI2 raw 文字差異（診斷用、不等於送 review）`)
-  lines.push(`AI3 會自動 normalize 計算題的步驟差異、prefix 差異、半全形等格式不同。下表只看 AI1 跟 AI2 原始字串差異、`)
-  lines.push(`「送 review」要看上面那行的 AI3 inconsistent 數。`)
-  lines.push('')
-  lines.push(`| diff 類型 | raw 數量 | 其中 AI3 送 review | 說明 |`)
-  lines.push(`|---|---|---|---|`)
-  lines.push(`| identical | ${read.diff_breakdown.identical} | ${read.ai3_inconsistent_by_diff.identical} | AI1=AI2 完全相同 |`)
-  lines.push(`| format_only | ${read.diff_breakdown.format_only} | ${read.ai3_inconsistent_by_diff.format_only} | 純空白/標點/前綴差異（AI3 normalize 後通常 consistent） |`)
-  lines.push(`| one_blank | ${read.diff_breakdown.one_blank} | ${read.ai3_inconsistent_by_diff.one_blank} | 一方 blank、另一方有答案（通常需 review） |`)
-  lines.push(`| substantive | ${read.diff_breakdown.substantive} | ${read.ai3_inconsistent_by_diff.substantive} | 內容真不一致（多數會送 review） |`)
-  lines.push('')
-  lines.push(`## Matcher 命中率`)
-  lines.push('| matcher | matched | parsed | rate |')
-  lines.push('|---|---|---|---|')
-  for (const [k, v] of Object.entries(bbox.matcher_stats)) {
-    lines.push(`| ${k} | ${v.matched} | ${v.parsed} | ${v.rate != null ? (v.rate * 100).toFixed(0) + '%' : '-'} |`)
-  }
-  lines.push('')
-  lines.push(`## BBox outlier（偏離班級中位數 > 6%）`)
-  if (bbox.outliers.length === 0) {
-    lines.push('（無）')
+  const assignment = assRes?.data || null
+  const student = stuRes?.data || null
+  const log = logRes?.data || null
+
+  // 簽 storage URL（image_url 是 path 或完整 URL）
+  let imageUrl = null
+  const rawImage = sub.image_url || `submissions/${sub.id}.webp`
+  if (/^(https?:|data:|blob:)/i.test(rawImage)) {
+    imageUrl = rawImage
   } else {
-    lines.push('| submission | qid | dev_x | dev_y | your(x,y) | median(x,y) |')
-    lines.push('|---|---|---|---|---|---|')
-    for (const o of bbox.outliers.slice(0, 20)) {
-      lines.push(`| ${o.submissionId.slice(-8)} | ${o.qid} | ${o.dev_x} | ${o.dev_y} | (${o.your_bbox.x},${o.your_bbox.y}) | (${o.class_median.x},${o.class_median.y}) |`)
+    try {
+      const { data: signed } = await db.storage
+        .from('homework-images')
+        .createSignedUrl(rawImage, 3600)
+      imageUrl = signed?.signedUrl || null
+    } catch (e) {
+      console.warn('[admin/quality] signed url failed:', e?.message)
     }
   }
-  lines.push('')
-  lines.push(`## 框錯的學生 top 10（outlier 數）`)
-  for (const r of bbox.submission_outlier_ranking) {
-    lines.push(`- \`${r.submissionId}\` → ${r.outlier_count} 題偏離`)
-  }
-  lines.push('')
-  lines.push(`## OCR coverage = 0（classify bbox 沒包到 OCR row）`)
-  if (bbox.ocr_coverage_zero.length === 0) {
-    lines.push('（無）')
-  } else {
-    for (const c of bbox.ocr_coverage_zero.slice(0, 20)) {
-      lines.push(`- \`${c.submissionId.slice(-8)}\` → ${c.qid}`)
+
+  // bbox：from classify.ocrAssist.perPage[].classifyBboxes
+  const bboxByQid = new Map()
+  const perPage = log?.classify?.ocrAssist?.perPage || []
+  perPage.forEach((p, pageIdx) => {
+    for (const item of p?.classifyBboxes || []) {
+      if (item?.qid && item?.bbox) {
+        bboxByQid.set(item.qid, { page: pageIdx, bbox: item.bbox })
+      }
     }
+  })
+
+  // qid → type（從 alignedQuestions / 或 read_answer 也可帶）
+  const typeByQid = new Map()
+  const aligned = log?.classify?.alignedQuestions || []
+  for (const q of aligned) {
+    if (q?.questionId) typeByQid.set(q.questionId, q.questionType || q.type || null)
   }
-  lines.push('')
-  lines.push(`## Read 格式差異範例（AI1≠AI2 raw、但多數 AI3 已 normalize）`)
-  for (const e of read.format_examples.slice(0, 15)) {
-    const ai3 = e.ai3Consistent === false ? '⚠️ AI3 送 review' : e.ai3Consistent === true ? 'AI3 通過' : ''
-    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid} ${ai3}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
-  }
-  lines.push('')
-  if (read.ai3_missed_format_examples.length > 0) {
-    lines.push(`## ⚠️ AI3 應 normalize 卻送 review 的 format diff（值得 prompt 調整）`)
-    for (const e of read.ai3_missed_format_examples.slice(0, 15)) {
-      lines.push(`- ${e.submissionId.slice(-8)} ${e.qid}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
+
+  const r1Arr = Array.isArray(log?.read_answer_1) ? log.read_answer_1 : []
+  const r2Arr = Array.isArray(log?.read_answer_2) ? log.read_answer_2 : []
+  const arbArr = Array.isArray(log?.arbiter) ? log.arbiter : []
+  const r1Map = new Map(r1Arr.map((q) => [q.questionId, q]))
+  const r2Map = new Map(r2Arr.map((q) => [q.questionId, q]))
+  const arbMap = new Map(arbArr.map((a) => [a.questionId, a]))
+
+  const finalArr = Array.isArray(sub.final_answers) ? sub.final_answers : []
+  const finalMap = new Map(finalArr.map((f) => [f.questionId, f]))
+
+  const mistakes = Array.isArray(sub.grading_result?.mistakes) ? sub.grading_result.mistakes : []
+  const mistakeSet = new Set(mistakes.map((m) => m.questionId).filter(Boolean))
+
+  // union 所有 qid，題序按 1-2-3 自然排序
+  const qids = new Set([
+    ...bboxByQid.keys(),
+    ...r1Map.keys(),
+    ...r2Map.keys()
+  ])
+
+  const questions = [...qids].map((qid) => {
+    const bb = bboxByQid.get(qid)
+    const r1 = r1Map.get(qid)
+    const r2 = r2Map.get(qid)
+    const arb = arbMap.get(qid)
+    const final = finalMap.get(qid)
+    return {
+      qid,
+      type: typeByQid.get(qid) || null,
+      page: bb?.page ?? 0,
+      bbox: bb?.bbox || null,
+      ai1: r1 ? { answer: r1.answer ?? '', status: r1.status || null } : null,
+      ai2: r2 ? { answer: r2.answer ?? '', status: r2.status || null } : null,
+      arbiterConsistent: arb?.consistent ?? null,
+      finalAnswer: final?.finalStudentAnswer ?? null,
+      finalAnswerSource: final?.finalAnswerSource ?? final?.source ?? null,
+      isMistake: mistakeSet.has(qid)
     }
-    lines.push('')
+  }).sort((a, b) => sortQidNumeric(a.qid, b.qid))
+
+  return {
+    submissionId,
+    assignmentId: sub.assignment_id,
+    assignmentTitle: assignment?.title || '',
+    totalPages: assignment?.total_pages || 1,
+    studentName: student?.name || '(未綁定)',
+    seatNumber: student?.seat_number ?? null,
+    source: sub.source || null,
+    status: sub.status || null,
+    imageUrl,
+    needsReviewCount: log?.needs_review_count || 0,
+    questions
   }
-  lines.push(`## Read 一邊未作答`)
-  for (const e of read.blank_examples.slice(0, 15)) {
-    const ai3 = e.ai3Consistent === false ? '⚠️ AI3 送 review' : e.ai3Consistent === true ? 'AI3 通過' : ''
-    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid} ${ai3}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
-  }
-  lines.push('')
-  lines.push(`## Read 內容真不一致`)
-  for (const e of read.substantive_examples.slice(0, 15)) {
-    const ai3 = e.ai3Consistent === false ? '⚠️ AI3 送 review' : e.ai3Consistent === true ? 'AI3 通過' : ''
-    lines.push(`- ${e.submissionId.slice(-8)} ${e.qid} ${ai3}: AI1=\`${e.a1}\` vs AI2=\`${e.a2}\``)
-  }
-  lines.push('')
-  lines.push(`## needsReview top 10`)
-  for (const r of read.submission_review_ranking) {
-    lines.push(`- \`${r.submissionId}\` → ${r.needs_review_count} 題進 review`)
-  }
-  return lines.join('\n')
 }
 
+function sortQidNumeric(a, b) {
+  const pa = String(a).split('-').map((n) => parseInt(n, 10) || 0)
+  const pb = String(b).split('-').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
 // ========== ANNOUNCEMENTS ==========
 async function handleAnnouncements(req, res, supabaseAdmin, adminUser) {
   if (req.method === 'GET') {
