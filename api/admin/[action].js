@@ -3430,10 +3430,13 @@ async function qualityAssignmentList(db, days) {
 
 // ── Submission list（某 assignment 下、按學生）──
 async function qualitySubmissionList(db, assignmentId) {
+  // 每份 submission 通常有 2 筆 stage_log：Phase A（含 read_answer_1/2/arbiter）+ Phase B（accessor、其他欄位 null）
+  // 直接抓 Phase A 那筆（read_answer_1 NOT NULL）即可
   const { data: logs, error } = await db
     .from('grading_stage_logs')
     .select('submission_id, created_at, needs_review_count, read_answer_1')
     .eq('assignment_id', assignmentId)
+    .not('read_answer_1', 'is', null)
     .order('created_at', { ascending: false })
     .limit(2000)
   if (error) throw new Error(error.message)
@@ -3498,9 +3501,11 @@ async function qualitySubmissionDetail(db, submissionId) {
     sub.student_id
       ? db.from('students').select('id, name, seat_number').eq('id', sub.student_id).maybeSingle()
       : Promise.resolve({ data: null }),
+    // 每份 submission 通常 2 筆 log：抓 Phase A（read_answer_1 不為 null）那筆才有 bbox+read 資料
     db.from('grading_stage_logs')
       .select('classify, read_answer_1, read_answer_2, arbiter, needs_review_count, created_at')
       .eq('submission_id', submissionId)
+      .not('read_answer_1', 'is', null)
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle()
