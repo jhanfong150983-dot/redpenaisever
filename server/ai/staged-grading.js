@@ -14,7 +14,10 @@ import {
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog, persistPhaseAState, persistFinalAnswers, loadPhaseAState, clearPhaseAState } from './stage-log-writer.js'
 import { isOcrAssistEnabled, prepareOcrHintsForClassify, isOcrRowAnchorEnabled } from './ocr-client.js'
-import { buildOcrHintsSection, applyOcrBboxOverride } from './bbox-anchor-match.js'
+import { buildOcrHintsSection } from './bbox-anchor-match.js'
+// 2026-05-20: applyOcrBboxOverride (width_floor + x_shift) 已移除
+// 原因：實證上把 AI bbox 跟 OCR row candidate union 容易拉爆跨題（fill_blank 多次踩雷）。
+// 新原則：bbox 來源只有兩條——OCR (row/sub_cell full replace) 或 AI (raw classify)、不再混用。
 import { applyRowAnchorOverride } from './bbox-row-anchor-match.js'
 import { applyMathEqBlankOverride } from './bbox-math-eq-blank.js'
 
@@ -5647,21 +5650,6 @@ export async function runStagedGradingPhaseA({
     }
     ocrAssistMeta.perPage[0].classifyBboxes = classifyBboxesBefore
 
-    // 🆕 Post-classify OCR bbox override（單頁 path）：narrow / x-shifted bbox 用 padded candidate 覆寫
-    if (ocrAssistMeta.perPage[0]?.candidates && Object.keys(ocrAssistMeta.perPage[0].candidates).length > 0) {
-      const ocrSize = ocrAssistMeta.perPage[0].imageSize || [inlineImages[0].inlineData.width || 1, inlineImages[0].inlineData.height || 1]
-      const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
-        classifyResult.alignedQuestions,
-        ocrAssistMeta.perPage[0].candidates,
-        ocrSize
-      )
-      if (overrides.length > 0) {
-        classifyResult = { ...classifyResult, alignedQuestions: overriddenQs }
-        logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (single-page)', { count: overrides.length, samples: overrides.slice(0, 5) })
-      }
-      ocrAssistMeta.perPage[0].overrides = overrides
-    }
-
     // 🆕 Row anchor full-replace override（single_choice/multi_choice/true_false）
     // 跟 candidatesByQid 走的 adjust override 不同：row anchor 是「OCR 鎖題號 row、bbox 全替換」、
     // 信任度高、不做 narrow / x-shift 判斷。詳見 bbox-row-anchor-match.js
@@ -5794,18 +5782,6 @@ export async function runStagedGradingPhaseA({
       }
       fallbackMeta.classifyBboxes = classifyBboxesBefore
 
-      // Post-classify OCR bbox override（只在有 candidates 時跑）
-      if (fallbackMeta.candidates && Object.keys(fallbackMeta.candidates).length > 0 && fallbackMeta.imageSize) {
-        const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
-          classifyResult.alignedQuestions, fallbackMeta.candidates, fallbackMeta.imageSize
-        )
-        if (overrides.length > 0) {
-          classifyResult = { ...classifyResult, alignedQuestions: overriddenQs }
-          logStaged(pipelineRunId, stagedLogLevel, 'classify OCR bbox override (multi-page fallback)', { count: overrides.length, samples: overrides.slice(0, 5) })
-        }
-        fallbackMeta.overrides = overrides
-      }
-
       // 🆕 Row anchor full-replace override（multi-page fallback path）
       if (fallbackMeta.rowAnchorBboxes && Object.keys(fallbackMeta.rowAnchorBboxes).length > 0) {
         const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides } = applyRowAnchorOverride(
@@ -5921,18 +5897,6 @@ export async function runStagedGradingPhaseA({
           ocrAssistMeta.perPage.push(pageMeta)
         }
         pageMeta.classifyBboxes = classifyBboxesBefore
-
-        // Post-classify OCR bbox override（只在有 candidates 時跑）
-        if (pageMeta.candidates && Object.keys(pageMeta.candidates).length > 0 && pageMeta.imageSize) {
-          const { alignedQuestions: overriddenQs, overrides } = applyOcrBboxOverride(
-            norm.alignedQuestions, pageMeta.candidates, pageMeta.imageSize
-          )
-          if (overrides.length > 0) {
-            norm = { ...norm, alignedQuestions: overriddenQs }
-            allOverrides.push(...overrides.map(o => ({ ...o, page: pageEntries[i][0] })))
-          }
-          pageMeta.overrides = overrides
-        }
 
         // 🆕 Row anchor full-replace override（multi-page split path）
         if (pageMeta.rowAnchorBboxes && Object.keys(pageMeta.rowAnchorBboxes).length > 0) {
