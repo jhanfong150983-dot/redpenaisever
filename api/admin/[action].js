@@ -3530,23 +3530,39 @@ async function qualitySubmissionDetail(db, submissionId) {
     }
   }
 
-  // bbox：from classify.ocrAssist.perPage[].classifyBboxes
-  // ⚠️ submissions/<id>.webp 是垂直堆疊的 merged 多頁圖，但每頁 bbox 是 normalized 到該「單頁」(y ∈ [0,1])。
-  // 直接畫在 merged 圖上 page 1+ 會跑版到 page 0、所以這裡轉換成 merged-image 相對座標：
-  //   mergedY = (pageIdx + bbox.y) / totalPages
-  //   mergedH = bbox.h / totalPages
-  // 假設所有 page 等高（teacher_scan 走 PDF rasterize 一律相同 dpi 故等高）
+  // bbox：取「實際送進 crop + read 的最終 bbox」、不是 AI raw classify
+  //   優先序：rowAnchorOverrides.after > overrides.after > classifyBboxes.bbox
+  //   (row anchor 是 full replace、跑在 OCR width_floor/x_shift 之後)
+  // ⚠️ submissions/<id>.webp 是垂直堆疊的 merged 多頁圖、但每頁 bbox 是 normalized 到該「單頁」(y ∈ [0,1])。
+  //   page 1+ 的 bbox 要 offset 才能畫在 merged 圖上：mergedY = (pageIdx + bbox.y) / pageCount
+  //   假設所有 page 等高（teacher_scan 走 PDF rasterize 一律相同 dpi 故等高）
   const bboxByQid = new Map()
+  const bboxSourceByQid = new Map()  // qid → 'raw' | 'ocr_override' | 'row_anchor'
   const perPage = log?.classify?.ocrAssist?.perPage || []
   const pageCount = perPage.length || 1
+  const toMerged = (b, pageIdx) => pageCount > 1
+    ? { x: b.x, y: (pageIdx + b.y) / pageCount, w: b.w, h: b.h / pageCount }
+    : b
   perPage.forEach((p, pageIdx) => {
+    // 1) raw classifyBboxes
     for (const item of p?.classifyBboxes || []) {
       if (item?.qid && item?.bbox) {
-        const b = item.bbox
-        const mergedBbox = pageCount > 1
-          ? { x: b.x, y: (pageIdx + b.y) / pageCount, w: b.w, h: b.h / pageCount }
-          : b
-        bboxByQid.set(item.qid, { page: pageIdx, bbox: mergedBbox })
+        bboxByQid.set(item.qid, { page: pageIdx, bbox: toMerged(item.bbox, pageIdx) })
+        bboxSourceByQid.set(item.qid, 'raw')
+      }
+    }
+    // 2) OCR width_floor + x_shift overrides
+    for (const ovr of p?.overrides || []) {
+      if (ovr?.questionId && ovr?.after) {
+        bboxByQid.set(ovr.questionId, { page: pageIdx, bbox: toMerged(ovr.after, pageIdx) })
+        bboxSourceByQid.set(ovr.questionId, 'ocr_override')
+      }
+    }
+    // 3) row anchor full-replace（最後跑、優先級最高）
+    for (const ovr of p?.rowAnchorOverrides || []) {
+      if (ovr?.qid && ovr?.after) {
+        bboxByQid.set(ovr.qid, { page: pageIdx, bbox: toMerged(ovr.after, pageIdx) })
+        bboxSourceByQid.set(ovr.qid, 'row_anchor')
       }
     }
   })
@@ -3589,6 +3605,7 @@ async function qualitySubmissionDetail(db, submissionId) {
       type: typeByQid.get(qid) || null,
       page: bb?.page ?? 0,
       bbox: bb?.bbox || null,
+      bboxSource: bboxSourceByQid.get(qid) || null,  // 'raw' | 'ocr_override' | 'row_anchor'
       ai1: r1 ? { answer: r1.answer ?? '', status: r1.status || null } : null,
       ai2: r2 ? { answer: r2.answer ?? '', status: r2.status || null } : null,
       arbiterConsistent: arb?.consistent ?? null,
