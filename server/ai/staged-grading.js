@@ -6855,7 +6855,8 @@ export async function runStagedGradingPhaseA({
   readAnswerResult = { ...readAnswerResult, answers: unorderedRemap.answers }
 
   // Normalize read2 (independent — no mismatch flags)
-  const reReadAnswerResult = reReadAnswerParsed
+  // 2026-05-20: 改 let、後面 read QG FAIL retry 會重新賦值
+  let reReadAnswerResult = reReadAnswerParsed
     ? applySelectionDisplayNormalization(
         normalizeReadAnswerResult(reReadAnswerParsed, questionIds, new Set()),
         answerKey
@@ -6864,13 +6865,14 @@ export async function runStagedGradingPhaseA({
 
   // ── Read Answer Quality Gate ────────────────────────────────────────────
   const visibleQuestionIds = classifyAligned.filter((q) => q.visible).map((q) => q.questionId)
-  const readQG = validateReadAnswerQuality(readAnswerResult, reReadAnswerResult, visibleQuestionIds, classifyAligned)
+  // 2026-05-20: readQG / classifyReadQG 改 let、retry 會重新賦值
+  let readQG = validateReadAnswerQuality(readAnswerResult, reReadAnswerResult, visibleQuestionIds, classifyAligned)
   logStaged(pipelineRunId, 'basic', 'read-answer quality-gate', {
     severity: readQG.severity, warnings: readQG.warnings, metrics: readQG.metrics
   })
 
   // ── Cross-stage: Classify → Read consistency ──────────────────────────────
-  const classifyReadQG = validateClassifyReadConsistency(classifyResult, readAnswerResult)
+  let classifyReadQG = validateClassifyReadConsistency(classifyResult, readAnswerResult)
   logStaged(pipelineRunId, stagedLogLevel, 'cross-stage classify→read quality-gate', {
     severity: classifyReadQG.severity, warnings: classifyReadQG.warnings, metrics: classifyReadQG.metrics
   })
@@ -6899,11 +6901,73 @@ export async function runStagedGradingPhaseA({
       `[A2] read 品質檢查=${qgLabel} 比對=${cmp} 不一致=${diff} 比率=${rate.toFixed(3)}${disagreeQids.length > 0 ? ' 不一致題號=' + disagreeQids.join(',') : ''}`)
   }
 
-  // Read / cross-stage FAIL → 整份失敗、不繼續走 arbiter。
-  // 設計理由：classify 階段已 retry 過一次（若 classify QG 觸發），read FAIL 的 root cause
-  // 多半是 bbox 系統性問題。再 retry read 不會修好 root cause，浪費 AI call。
-  // 直接走失敗路徑、讓老師重批這份（系統會重跑 classify）。
+  // 2026-05-20: Read QG FAIL → 先 retry 一次再決定失敗。
+  // 舊設計（fail-fast、不 retry）對 bbox 系統性問題合理、但對 transient 失敗（AI2 整個 stage 空、
+  // JSON parse 偶發壞掉、Gemini timeout）不合理——這些 retry 一次就好。
+  // 14 嚴一華 case：AI2 整空 → 沒 retry → 25/25 默默送 review。
+  // 新流程：FAIL → 重跑 AI1+AI2 → 再驗 QG → 第二次 FAIL 才整份失敗。
+  let readRetryAttempted = false
   if (readQG.severity === QG_SEVERITY.FAIL || classifyReadQG.severity === QG_SEVERITY.FAIL) {
+    readRetryAttempted = true
+    logStaged(pipelineRunId, 'basic', '[A2] read QG FAIL → 自動重跑 AI1+AI2 一次再驗', {
+      readQG: readQG.warnings, classifyReadQG: classifyReadQG.warnings
+    })
+    const retryResults = await Promise.all([
+      executeStage({
+        apiKey,
+        model: readModel,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+        stageContents: [{ role: 'user', parts: ai1Parts }]
+      }),
+      executeStage({
+        apiKey,
+        model: readModel,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+        stageContents: [{ role: 'user', parts: ai2Parts }]
+      })
+    ])
+    stageResponses.push(...retryResults)
+    const retryAi1 = retryResults[0]
+    const retryAi2 = retryResults[1]
+    logStaged(pipelineRunId, 'basic',
+      `[A2-retry] AI1=${retryAi1?.status} AI2=${retryAi2?.status}`)
+
+    if (retryAi1.ok) {
+      const retryAi1Parsed = parseCandidateJson(retryAi1.data)
+      const retryAi2Parsed = retryAi2?.ok ? parseCandidateJson(retryAi2.data) : null
+      if (retryAi1Parsed && typeof retryAi1Parsed === 'object') {
+        readAnswerResult = applySelectionDisplayNormalization(
+          normalizeReadAnswerResult(retryAi1Parsed, questionIds, new Set()),
+          answerKey
+        )
+      }
+      if (retryAi2Parsed && typeof retryAi2Parsed === 'object') {
+        reReadAnswerResult = applySelectionDisplayNormalization(
+          normalizeReadAnswerResult(retryAi2Parsed, questionIds, new Set()),
+          answerKey
+        )
+      } else if (Array.isArray(retryAi2Parsed?.answers) === false && retryAi2?.ok === false) {
+        // retry AI2 也壞掉、保留原本的 reReadAnswerResult（可能還是空、會在下面 QG 再被擋）
+      }
+      // 注意：retry 不重套 bracket/checkbox/multi_fill overrides——這些是 edge case 補強、
+      // 對「整個 stage 失敗」的 transient 案例影響很小、為了簡單先省略
+      readQG = validateReadAnswerQuality(readAnswerResult, reReadAnswerResult, visibleQuestionIds, classifyAligned)
+      classifyReadQG = validateClassifyReadConsistency(classifyResult, readAnswerResult)
+      logStaged(pipelineRunId, 'basic',
+        `[A2-retry] read QG=${readQG.severity} crossQG=${classifyReadQG.severity}`,
+        { readWarnings: readQG.warnings, crossWarnings: classifyReadQG.warnings })
+    }
+  }
+  // 第二次仍 FAIL（或 retry call 本身 HTTP 失敗）→ 真的失敗、給前端 userMessage + 觸發手動重批 UI
+  if (readQG.severity === QG_SEVERITY.FAIL || classifyReadQG.severity === QG_SEVERITY.FAIL) {
+    logStaged(pipelineRunId, 'basic',
+      `[A2] read QG ${readRetryAttempted ? '重跑後仍 FAIL' : 'FAIL'} → PhaseA 失敗`)
     return buildFailureReturn('read', [readQG, classifyReadQG], { readAnswerResult, reReadAnswerResult })
   }
 

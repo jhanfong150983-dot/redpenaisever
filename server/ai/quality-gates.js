@@ -537,6 +537,13 @@ export function validateReadAnswerQuality(readResult1, readResult2, expectedQues
   metrics.ai2Count = answers2.length
   metrics.expectedCount = expectedCount
   metrics.missingIdCount = missingIds.length
+
+  // ── AI2 整個 stage 空（Gemini transient / JSON parse / quota）── 2026-05-20
+  // 不加這條的話、QG 只看 AI1、AI2 整個空也會 PASS、然後 arbiter 把所有題判 inconsistent
+  // → 默默把整份卷 needs_review_count 拉到 100%、老師收到 25/25 review
+  if (expectedCount > 0 && answers2.length === 0) {
+    warnings.push('FAIL:READ_AI2_EMPTY_STAGE')
+  }
   metrics.coverageRate = +coverageRate.toFixed(3)
   if (expectedCount > 0 && coverageRate < 0.8) {
     warnings.push(`FAIL:READ_LOW_COVERAGE(${ai1Ids.size}/${expectedCount})`)
