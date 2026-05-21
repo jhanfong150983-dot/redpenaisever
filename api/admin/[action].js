@@ -3,6 +3,7 @@ import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
 import { getEnvValue } from '../../server/_env.js'
 import { runAiPipeline } from '../../server/ai/orchestrator.js'
+import { MODEL_FLASH } from '../../server/ai/model-config.js'
 
 const PENDING_TTL_MINUTES = 30
 const TAG_QUIET_MINUTES = 5
@@ -10,7 +11,9 @@ const TAG_MAX_WAIT_MINUTES = 30
 const TAG_MIN_SAMPLE_COUNT = 5
 const TAG_TOP_ISSUES = 50
 const TAG_LIMIT = 8
-const TAG_MODEL = getEnvValue('TAG_MODEL') || getEnvValue('AI_MODEL') || 'gemini-3-flash-preview'
+// 2026-05-21: model 由 model-config.js 統一管理（admin tag aggregation 用 FLASH 即可）
+// orchestrator 內 executeSinglePipelineCall 會依 routeKey 再查一次、這裡只是 label
+const TAG_MODEL = MODEL_FLASH
 const TAG_PROMPT_VERSION = 'v1.0'
 const DICT_MERGE_QUIET_MINUTES = 10
 const DICT_MERGE_MIN_LABELS = 4
@@ -3157,6 +3160,163 @@ async function aggregateAssignmentTags(supabaseAdmin, stateRow) {
   return { assignmentId, status: 'ready', sampleCount }
 }
 
+// ========== TOKEN USAGE DASHBOARD ==========
+// 2026-05-21: 後台 Token 用量分析
+// GET /api/admin/analytics?action=token-usage&from=YYYY-MM-DD&to=YYYY-MM-DD&userId=xxx
+// 老師本位視角：學生用 AI 算在 billing_user_id（老師 owner_id）名下
+async function handleTokenUsage(req, res, supabaseAdmin) {
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' })
+  }
+
+  try {
+    // 預設區間：最近 30 天（含今天）
+    const now = new Date()
+    const defaultFrom = new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000)
+    const fromStr = String(req.query?.from || '').trim() || defaultFrom.toISOString().split('T')[0]
+    const toStr = String(req.query?.to || '').trim() || now.toISOString().split('T')[0]
+    const userId = String(req.query?.userId || '').trim() || null
+
+    // 加上一天讓 to 涵蓋整日
+    const fromIso = `${fromStr}T00:00:00.000Z`
+    const toIso = new Date(`${toStr}T23:59:59.999Z`).toISOString()
+
+    // ── 撈 token 用量（依 billing_user_id 聚合）──
+    const usageQuery = (from, to) => {
+      let q = supabaseAdmin
+        .from('ink_session_usage')
+        .select('billing_user_id, route_key, model_name, input_tokens, output_tokens, total_tokens, created_at')
+        .gte('created_at', fromIso)
+        .lte('created_at', toIso)
+      if (userId) q = q.eq('billing_user_id', userId)
+      return q.range(from, to)
+    }
+    const usageRows = await fetchAllRows(usageQuery)
+
+    // ── 撈老師清單（給 dropdown） ──
+    // 1. 從 ink_session_usage 撈出有用量的 billing_user_id
+    // 2. join profiles 撈 name/email
+    // 3. 過濾 admin
+    const billingIdsWithUsage = await fetchAllRows((from, to) =>
+      supabaseAdmin
+        .from('ink_session_usage')
+        .select('billing_user_id')
+        .not('billing_user_id', 'is', null)
+        .range(from, to)
+    )
+    const uniqueBillingIds = Array.from(new Set(billingIdsWithUsage.map(r => r.billing_user_id).filter(Boolean)))
+    let teachers = []
+    if (uniqueBillingIds.length > 0) {
+      // 分批 IN clause（避免 URL 過長）
+      const CHUNK = 200
+      for (let i = 0; i < uniqueBillingIds.length; i += CHUNK) {
+        const chunk = uniqueBillingIds.slice(i, i + CHUNK)
+        const { data: profileRows } = await supabaseAdmin
+          .from('profiles')
+          .select('id, name, email, role')
+          .in('id', chunk)
+        if (Array.isArray(profileRows)) {
+          teachers.push(...profileRows.filter(p => p.role !== 'admin'))
+        }
+      }
+      teachers.sort((a, b) => String(a.name || a.email || '').localeCompare(String(b.name || b.email || '')))
+    }
+
+    // ── 成本計算 helper（依實際 model 真實 Gemini rate） ──
+    // gemini-3.5-flash: $1.50 input / $9.00 output per 1M
+    // gemini-2.5-flash: $0.075 input / $0.30 output per 1M
+    // 未知 model: 用 3.5-flash rate 保守估
+    function modelRates(modelName) {
+      const m = String(modelName || '').toLowerCase()
+      if (m.includes('2.5-flash-lite')) return { inUsd: 0.10, outUsd: 0.40 }
+      if (m.includes('2.5-flash')) return { inUsd: 0.075, outUsd: 0.30 }
+      if (m.includes('3.5-flash')) return { inUsd: 1.50, outUsd: 9.00 }
+      if (m.includes('3-flash-preview')) return { inUsd: 1.50, outUsd: 9.00 }
+      if (m.includes('pro')) return { inUsd: 1.25, outUsd: 5.00 }
+      return { inUsd: 1.50, outUsd: 9.00 }
+    }
+    const USD_TO_TWD = 33
+
+    function rowCostTwd(row) {
+      const rates = modelRates(row.model_name)
+      const usd = (Number(row.input_tokens) || 0) * rates.inUsd / 1_000_000
+        + (Number(row.output_tokens) || 0) * rates.outUsd / 1_000_000
+      return usd * USD_TO_TWD
+    }
+
+    // ── Summary ──
+    let totalIn = 0, totalOut = 0, totalUsd = 0
+    for (const r of usageRows) {
+      totalIn += Number(r.input_tokens) || 0
+      totalOut += Number(r.output_tokens) || 0
+      const rates = modelRates(r.model_name)
+      totalUsd += (Number(r.input_tokens) || 0) * rates.inUsd / 1_000_000
+        + (Number(r.output_tokens) || 0) * rates.outUsd / 1_000_000
+    }
+    const summary = {
+      totalCalls: usageRows.length,
+      totalInputTokens: totalIn,
+      totalOutputTokens: totalOut,
+      totalUsdCost: +totalUsd.toFixed(4),
+      totalTwdCost: +(totalUsd * USD_TO_TWD).toFixed(2)
+    }
+
+    // ── byStage ──
+    const stageMap = {}
+    for (const r of usageRows) {
+      const key = r.route_key || '(unknown)'
+      if (!stageMap[key]) stageMap[key] = { route_key: key, calls: 0, input: 0, output: 0, twd: 0 }
+      stageMap[key].calls += 1
+      stageMap[key].input += Number(r.input_tokens) || 0
+      stageMap[key].output += Number(r.output_tokens) || 0
+      stageMap[key].twd += rowCostTwd(r)
+    }
+    const byStage = Object.values(stageMap)
+      .map(s => ({ ...s, twd: +s.twd.toFixed(2) }))
+      .sort((a, b) => b.input + b.output - (a.input + a.output))
+
+    // ── byModel ──
+    const modelMap = {}
+    for (const r of usageRows) {
+      const key = r.model_name || '(unknown)'
+      if (!modelMap[key]) modelMap[key] = { model_name: key, calls: 0, input: 0, output: 0, twd: 0 }
+      modelMap[key].calls += 1
+      modelMap[key].input += Number(r.input_tokens) || 0
+      modelMap[key].output += Number(r.output_tokens) || 0
+      modelMap[key].twd += rowCostTwd(r)
+    }
+    const byModel = Object.values(modelMap)
+      .map(m => ({ ...m, twd: +m.twd.toFixed(2) }))
+      .sort((a, b) => b.input + b.output - (a.input + a.output))
+
+    // ── timeSeries（per date × per stage tokens）──
+    // 給 stacked area chart 用
+    const timeMap = {}  // { 'YYYY-MM-DD': { route_key: total_tokens } }
+    for (const r of usageRows) {
+      const date = String(r.created_at).split('T')[0]
+      const stage = r.route_key || '(unknown)'
+      const tokens = (Number(r.input_tokens) || 0) + (Number(r.output_tokens) || 0)
+      if (!timeMap[date]) timeMap[date] = {}
+      timeMap[date][stage] = (timeMap[date][stage] || 0) + tokens
+    }
+    const timeSeries = Object.entries(timeMap)
+      .map(([date, stages]) => ({ date, stages }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+
+    res.status(200).json({
+      params: { from: fromStr, to: toStr, userId },
+      summary,
+      byStage,
+      byModel,
+      timeSeries,
+      teachers: teachers.map(t => ({ id: t.id, name: t.name, email: t.email }))
+    })
+  } catch (e) {
+    console.error('[admin/token-usage] failed:', e)
+    res.status(500).json({ error: e?.message || 'Internal error' })
+  }
+}
+
 async function handleAggregateTags(req, res, supabaseAdmin) {
   if (req.method !== 'POST' && req.method !== 'GET') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -3358,6 +3518,10 @@ export default async function handler(req, res) {
 
   if (action === 'analytics') {
     return await handleAnalytics(req, res, supabaseAdmin)
+  }
+
+  if (action === 'token-usage') {
+    return await handleTokenUsage(req, res, supabaseAdmin)
   }
 
   if (action === 'announcements') {

@@ -12,6 +12,7 @@ import { getEnvValue } from '../../server/_env.js'
 import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
+import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import {
   isValidDsns,
@@ -35,11 +36,9 @@ const ALLOWED_SUBMISSION_SOURCES = new Set([
   'student_correction'
 ])
 const HOMEWORK_IMAGES_BUCKET = 'homework-images'
-const STUDENT_CORRECTION_MODEL =
-  getEnvValue('STUDENT_CORRECTION_MODEL') ||
-  getEnvValue('AI_MODEL') ||
-  getEnvValue('SYSTEM_GEMINI_MODEL') ||
-  'gemini-3-flash-preview'
+// 2026-05-21: model 由 model-config.js 統一管理（學生訂正含 OCR、用 PRO）
+// orchestrator 內 executeSinglePipelineCall 會依 routeKey=grading.recheck 再查一次、這裡只是 label
+const STUDENT_CORRECTION_MODEL = MODEL_PRO
 
 const DEFAULT_TEACHER_PREFERENCES = {
   student_portal_enabled: true,
@@ -7355,7 +7354,10 @@ ${studentLines || '（無錯誤）'}
       console.warn(`${logPrefix} ink balance check failed (non-fatal):`, e?.message)
     }
 
-    const summaryModel = getEnvValue('SYSTEM_GEMINI_MODEL') || getEnvValue('AI_MODEL') || 'gemini-3-flash-preview'
+    // 2026-05-21: model 由 model-config.js 統一管理（report 走 REPORT_TEACHER_SUMMARY → FLASH）
+    // orchestrator 內 executeSinglePipelineCall 會依 routeKey 再查一次、這裡只是 label
+    const { MODEL_FLASH } = await import('../../server/ai/model-config.js')
+    const summaryModel = MODEL_FLASH
     const SUMMARY_TIMEOUT_MS = 120_000
     // 組合 multimodal parts：圖片（若有）+ 文字 prompt
     const summaryParts = []

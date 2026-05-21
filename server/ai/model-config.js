@@ -1,0 +1,79 @@
+/**
+ * model-config.js — 2026-05-21 model 分流配置中央化
+ *
+ * 設計原則：
+ *   1. 只 2 個 env var：MODEL_PRO / MODEL_FLASH（換 model 時改這 2 個即可）
+ *   2. 每個 stage 用哪個 tier 寫死在 code（產品決策、進 PR review）
+ *   3. 透過 STAGE_MODEL[routeKey] 統一查詢、不再散在各檔
+ *
+ * Tier 分類邏輯：
+ *   - PRO   = 視覺定位 / OCR 類 stage（容錯低、改錯一個 token 全套錯）
+ *   - FLASH = 純文字 / 邏輯 / 報表類 stage（小 model 夠用、便宜 20 倍）
+ *
+ * 切換時機（A/B test 完成後動 code）：
+ *   - READ 系列暫時設 PRO；通過 A/B 對比後可改 FLASH
+ *
+ * fallback chain：
+ *   - PRO 503 overload → 自動 fallback 到 FLASH → 再 fallback 到 hardcoded
+ */
+
+import { AI_ROUTE_KEYS } from './routes.js'
+
+export const MODEL_PRO = process.env.MODEL_PRO || 'gemini-3.5-flash'
+export const MODEL_FLASH = process.env.MODEL_FLASH || 'gemini-2.5-flash'
+
+// 503 overload 自動 fallback 順序
+export const FALLBACK_CHAIN = [MODEL_FLASH, 'gemini-3-flash-preview']
+
+/**
+ * stage → model 對應表
+ * key 是 AI_ROUTE_KEYS 裡的 routeKey
+ */
+export const STAGE_MODEL = Object.freeze({
+  // ──────────────────────────────────────────────────
+  // 🔴 視覺定位 / OCR — 用 PRO
+  // ──────────────────────────────────────────────────
+  [AI_ROUTE_KEYS.GRADING_CLASSIFY]: MODEL_PRO,         // Phase A1 切題 bbox
+  [AI_ROUTE_KEYS.GRADING_PHASE_A_CLASSIFY]: MODEL_PRO, // 同 GRADING_CLASSIFY
+  [AI_ROUTE_KEYS.GRADING_READ_ANSWER]: MODEL_PRO,      // Phase A2 學生答案 OCR（A/B 後可改 FLASH）
+  [AI_ROUTE_KEYS.GRADING_DETAIL_READ]: MODEL_PRO,      // 細讀（含圖）
+  [AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER]: MODEL_PRO,   // Read 重讀
+  [AI_ROUTE_KEYS.GRADING_PHASE_A_READ]: MODEL_PRO,     // 同 read
+  [AI_ROUTE_KEYS.GRADING_RECHECK]: MODEL_PRO,          // 學生訂正重批（含 OCR）
+  [AI_ROUTE_KEYS.ANSWER_KEY_LOCATE]: MODEL_PRO,        // 答案卷 bbox 定位（同 classify 性質）
+  [AI_ROUTE_KEYS.PERSPECTIVE_DETECT_CORNERS]: MODEL_PRO, // 紙張四角偵測
+
+  // ──────────────────────────────────────────────────
+  // ✅ 純文字 / 邏輯 / 報表 — 用 FLASH
+  // ──────────────────────────────────────────────────
+  [AI_ROUTE_KEYS.GRADING_ARBITER]: MODEL_FLASH,            // Phase A3 一致性判官（純文字比對）
+  [AI_ROUTE_KEYS.GRADING_PHASE_A_ARBITER]: MODEL_FLASH,    // 同 ARBITER
+  [AI_ROUTE_KEYS.GRADING_CONSISTENCY_JUDGE]: MODEL_FLASH,  // 同 ARBITER（路由 alias）
+  [AI_ROUTE_KEYS.GRADING_ACCESSOR]: MODEL_FLASH,           // Phase B1 算分
+  [AI_ROUTE_KEYS.GRADING_PHASE_B_ACCESSOR]: MODEL_FLASH,   // 同 ACCESSOR
+  [AI_ROUTE_KEYS.GRADING_EXPLAIN]: MODEL_FLASH,            // Phase B2 錯題解釋
+  [AI_ROUTE_KEYS.GRADING_PHASE_B_EXPLAIN]: MODEL_FLASH,    // 同 EXPLAIN
+  [AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT]: MODEL_FLASH,         // 答案卷題目辨識（印刷 OCR、FLASH 夠）
+  [AI_ROUTE_KEYS.ANSWER_KEY_REANALYZE]: MODEL_FLASH,       // 答案卷重新分析
+  [AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS]: MODEL_FLASH,    // 108 課綱概念標記
+  [AI_ROUTE_KEYS.REPORT_TEACHER_SUMMARY]: MODEL_FLASH,     // 老師週報
+  [AI_ROUTE_KEYS.REPORT_DOMAIN_DIAGNOSIS]: MODEL_FLASH,    // 學生領域診斷
+  [AI_ROUTE_KEYS.ADMIN_TAG_AGGREGATION]: MODEL_FLASH,      // admin 標籤聚合
+
+  // ──────────────────────────────────────────────────
+  // Legacy / 預設
+  // ──────────────────────────────────────────────────
+  [AI_ROUTE_KEYS.GRADING_EVALUATE]: MODEL_FLASH,           // 舊 single-shot 批改（保留兼容）
+  [AI_ROUTE_KEYS.GRADING_PHASE_A]: MODEL_PRO,              // Phase A wrapper（內部各 stage 各自查）
+  [AI_ROUTE_KEYS.GRADING_PHASE_B]: MODEL_FLASH,            // Phase B wrapper（內部各 stage 各自查）
+  [AI_ROUTE_KEYS.UNKNOWN]: MODEL_FLASH                     // 未知路由用便宜的
+})
+
+/**
+ * 依 routeKey 取得對應 model
+ * 找不到就回 MODEL_FLASH（最便宜的 default）
+ */
+export function resolveStageModel(routeKey) {
+  if (!routeKey) return MODEL_FLASH
+  return STAGE_MODEL[routeKey] || MODEL_FLASH
+}

@@ -1,6 +1,7 @@
 import { getPipeline } from './pipelines.js'
 import { callGeminiGenerateContent } from './model-adapter.js'
 import { AI_ROUTE_KEYS } from './routes.js'
+import { STAGE_MODEL, MODEL_PRO, MODEL_FLASH, FALLBACK_CHAIN, resolveStageModel } from './model-config.js'
 import {
   QG_SEVERITY,
   validateClassifyQuality,
@@ -4945,13 +4946,17 @@ function filterPayloadForGemini(payload) {
 
 async function executeStage({
   apiKey,
-  model,
+  model: _legacyModel,  // 2026-05-21: 不再用，由 STAGE_MODEL[routeKey] 統一決定。保留參數簽名相容
   payload,
   timeoutMs,
   routeHint,
   routeKey,
   stageContents
 }) {
+  // 2026-05-21: model 分流——每個 routeKey 查 STAGE_MODEL 取 PRO/FLASH
+  // 視覺類 (classify / read / locate / perspective) → MODEL_PRO
+  // 純文字類 (arbiter / accessor / explain / report) → MODEL_FLASH
+  const model = resolveStageModel(routeKey)
   const pipeline = getPipeline(routeKey)
 
   const prepareStartedAt = Date.now()
@@ -4972,7 +4977,7 @@ async function executeStage({
       contents: preparedRequest.contents,
       payload: filterPayloadForGemini(preparedRequest.payload),
       timeoutMs,
-      fallbackModels: ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+      fallbackModels: FALLBACK_CHAIN
     })
   } catch (err) {
     const modelLatencyMs = Date.now() - modelStartedAt
@@ -5316,15 +5321,11 @@ export async function runStagedGradingPhaseA({
   const precomputedClassifyContext = payload?._phaseAClassifyContext || internalContext?._phaseAClassifyContext || null
   const pipelineRunId = precomputedClassifyContext?.pipelineRunId
     || createPipelineRunId(internalContext?.requestId)
-  // 2026-05-18: read stage 可獨立切 model（Pro 3.1 read 太慢、AI2 281s timeout）
-  // 設 STAGED_READ_MODEL_OVERRIDE=gemini-3-flash-preview 切 Flash、不設用 classify 同一 model
-  // 範圍：AI1 read / AI2 read / word_problem final / calc final / mismatch retry / English spelling verify
-  // 不影響：classify（仍用 model param）
-  const readModelOverride = process.env.STAGED_READ_MODEL_OVERRIDE
-  const readModel = (typeof readModelOverride === 'string' && readModelOverride.trim()) ? readModelOverride.trim() : model
-  if (readModel !== model) {
-    logStaged(pipelineRunId, 'basic', `[A2] read stage 用獨立 model 覆寫：${readModel}（原 ${model}、env STAGED_READ_MODEL_OVERRIDE 設定）`)
-  }
+  // 2026-05-21: model 分流移到 executeStage 內統一查 STAGE_MODEL[routeKey]
+  // 舊 STAGED_READ_MODEL_OVERRIDE env var 已拔除（改用 model-config.js）
+  // readModel 變數保留供 applyMathEqBlankOverride 等非 executeStage 路徑用
+  const readModel = STAGE_MODEL[AI_ROUTE_KEYS.GRADING_READ_ANSWER]
+  logStaged(pipelineRunId, 'basic', `[A2] read stage model=${readModel}（由 model-config.js 決定）`)
 
   // 2026-05-17: 「重新截取」清空模式——僅在 classify call 觸發、清掉 submissions 表上的 phase_a_state /
   // final_answers / grading_result / score 等舊資料（stage_logs 保留 audit）
@@ -5953,7 +5954,7 @@ export async function runStagedGradingPhaseA({
           classifyResult.alignedQuestions,
           { mimeType: submissionImg.mimeType, data: submissionImg.data },
           answerKey,
-          { model, apiKey, logger: (msg) => logStaged(pipelineRunId, stagedLogLevel, msg) }
+          { model: MODEL_PRO, apiKey, logger: (msg) => logStaged(pipelineRunId, stagedLogLevel, msg) }
         )
         if (mathOverrides.length > 0) {
           classifyResult = { ...classifyResult, alignedQuestions: mathOverriddenQs }
@@ -7564,10 +7565,9 @@ export async function runStagedGradingPhaseAArbiter({
   routeHint = {},
   internalContext = {}
 }) {
-  // 2026-05-18: arbiter call 跟 read 同套 model 邏輯（env STAGED_READ_MODEL_OVERRIDE）
-  // arbiter 是純文字 LLM call、Flash 完全夠、跟 read 階段一起切
-  const readModelOverride = process.env.STAGED_READ_MODEL_OVERRIDE
-  const readModel = (typeof readModelOverride === 'string' && readModelOverride.trim()) ? readModelOverride.trim() : model
+  // 2026-05-21: model 分流移到 executeStage 內查 STAGE_MODEL[routeKey]
+  // arbiter 純文字 LLM call → FLASH；舊 STAGED_READ_MODEL_OVERRIDE 已拔
+  const readModel = STAGE_MODEL[AI_ROUTE_KEYS.GRADING_ARBITER]
 
   const phaseAReadContext = payload?._phaseAReadContext || internalContext?._phaseAReadContext
   if (!phaseAReadContext || typeof phaseAReadContext !== 'object') {
@@ -8067,15 +8067,10 @@ export async function runStagedGradingPhaseB({
   //   call 2 — grading.phase_b (existing) 帶 _phaseBAccessorContext: 跳過 accessor、跑 explain + 最終 build
   const stopAfterAccessor = payload?.stopAfterAccessor === true
   const precomputedAccessorContext = payload?._phaseBAccessorContext || internalContext?._phaseBAccessorContext || null
-  // 2026-05-18: Phase B 獨立 model override（accessor + explain 用 Flash 即夠）
-  // env STAGED_PHASE_B_MODEL_OVERRIDE 設成 'gemini-3-flash-preview' 切 Flash
-  const phaseBModelOverride = process.env.STAGED_PHASE_B_MODEL_OVERRIDE
-  const phaseBModel = (typeof phaseBModelOverride === 'string' && phaseBModelOverride.trim())
-    ? phaseBModelOverride.trim()
-    : model
-  if (phaseBModel !== model) {
-    logStaged(pipelineRunId, 'basic', `[B] Phase B 用獨立 model 覆寫：${phaseBModel}（原 ${model}、env STAGED_PHASE_B_MODEL_OVERRIDE 設定）`)
-  }
+  // 2026-05-21: model 分流移到 executeStage 內查 STAGE_MODEL[routeKey]
+  // accessor / explain 都是純文字 → MODEL_FLASH；舊 STAGED_PHASE_B_MODEL_OVERRIDE 已拔
+  const phaseBModel = STAGE_MODEL[AI_ROUTE_KEYS.GRADING_ACCESSOR]
+  logStaged(pipelineRunId, 'basic', `[B] Phase B model=${phaseBModel}（由 model-config.js 決定）`)
   logStaged(pipelineRunId, stagedLogLevel, `PhaseB begin gradeBand=${gradeBand} (multi_choice 公式: ${gradeBand === 'high' ? '大考中心 -2/錯' : 'K-9 比例'})`)
 
   const inlineImages = extractInlineImages(contents)

@@ -1,6 +1,7 @@
 import { getPipeline } from './pipelines.js'
 import { callGeminiGenerateContent } from './model-adapter.js'
 import { AI_ROUTE_KEYS, normalizeRouteKey, resolveRouteKey } from './routes.js'
+import { resolveStageModel, FALLBACK_CHAIN } from './model-config.js'
 import {
   runStagedGradingEvaluate,
   runStagedGradingPhaseA,
@@ -17,10 +18,14 @@ async function executeSinglePipelineCall({
   timeoutMs,
   routeKey
 }) {
+  // 2026-05-21: model 分流——一律以 routeKey 查 STAGE_MODEL，不再吃外部 model 參數
+  // 視覺類 (classify / locate / read / perspective) → MODEL_PRO
+  // 純文字類 (arbiter / accessor / explain / report / tag) → MODEL_FLASH
+  const stageModel = resolveStageModel(routeKey)
   const pipeline = getPipeline(routeKey)
   const prepareStartedAt = Date.now()
   const preparedRequest = await pipeline.prepare({
-    model,
+    model: stageModel,
     contents,
     payload,
     routeHint
@@ -33,7 +38,8 @@ async function executeSinglePipelineCall({
     model: preparedRequest.model,
     contents: preparedRequest.contents,
     payload: preparedRequest.payload,
-    timeoutMs
+    timeoutMs,
+    fallbackModels: FALLBACK_CHAIN
   })
   const modelLatencyMs = Date.now() - modelStartedAt
 
@@ -369,6 +375,9 @@ export async function runAiPipeline({
     requestId,
     requestedRouteKey: normalizedRequestedRouteKey || null,
     resolvedRouteKey,
+    // 2026-05-21: 帶上實際用的 model（給 ink_session_usage 寫入用）
+    // 直接查 STAGE_MODEL[routeKey]、跟 executeStage 內邏輯一致
+    actualModel: resolveStageModel(resolvedRouteKey),
     pipeline: pipelineResult.pipelineMeta?.pipeline || pipelineResult.pipelineName,
     prepareLatencyMs:
       Number(pipelineResult.pipelineMeta?.prepareLatencyMs) || Number(pipelineResult.prepareLatencyMs) || 0,

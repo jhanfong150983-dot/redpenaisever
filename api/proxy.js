@@ -11,6 +11,7 @@ import { getAuthUser } from '../server/_auth.js'
 import { getSupabaseAdmin } from '../server/_supabase.js'
 import { getEnvValue } from '../server/_env.js'
 import { runAiPipeline } from '../server/ai/orchestrator.js'
+import { MODEL_FLASH } from '../server/ai/model-config.js'
 import { resolveBillingUserId } from '../server/billing-user.js'
 import crypto from 'crypto'
 
@@ -454,14 +455,10 @@ export default async function handler(req, res) {
     answerSheetMode: requestedAnswerSheetMode,
     ...payload
   } = body || {}
-  // 2026-05-20: AI_MODEL 全系統 model 覆寫——Vercel 一個 env 控所有 stage 的 model。
-  // client 傳的 model 會被蓋過（含 classify、其他 client-driven calls）。
-  // 仍可被 STAGED_READ_MODEL_OVERRIDE / STAGED_PHASE_B_MODEL_OVERRIDE 進一步覆寫（stage-level granular）
-  const aiModelOverride = getEnvValue('AI_MODEL')
-  const model = aiModelOverride || requestedModel
-  if (aiModelOverride && requestedModel && requestedModel !== aiModelOverride) {
-    console.log(`${logPrefix} AI_MODEL 覆寫 client model：${requestedModel} → ${aiModelOverride}`)
-  }
+  // 2026-05-21: model 由 server/ai/model-config.js 統一管理（MODEL_PRO / MODEL_FLASH 2 個 env）
+  // orchestrator.executeSinglePipelineCall + staged-grading.executeStage 內部會以 routeKey 查 STAGE_MODEL
+  // proxy 層 model 變數只是個 placeholder（傳下去會被 orchestrator 覆寫），給 client 傳什麼都行
+  const model = requestedModel || MODEL_FLASH
   const normalizedAnswerKeyPayload = normalizeAnswerKeyPayload(answerKey, logPrefix)
   const headerGradingMode = readSingleHeaderValue(req?.headers?.['x-grading-pipeline-mode'])
   const envGradingMode = getEnvValue('AI_GRADING_PIPELINE_MODE') || process.env.AI_GRADING_PIPELINE_MODE
@@ -479,13 +476,13 @@ export default async function handler(req, res) {
     normalizeReadAnswerSplitMode(headerSplitMode) ??
     normalizeReadAnswerSplitMode(envSplitMode)
 
-  if (!model || !Array.isArray(contents)) {
-    console.warn(`${logPrefix} bad-request missing model or contents`)
-    res.status(400).json({ error: 'Missing model or contents' })
+  if (!Array.isArray(contents)) {
+    console.warn(`${logPrefix} bad-request missing contents`)
+    res.status(400).json({ error: 'Missing contents' })
     return
   }
   console.log(
-    `${logPrefix} 解析 model=${model} 路由=${routeKey || 'none'} 有答案卷=${Boolean(answerKey)} 有 ref=${Boolean(answerKeyRef)} 批改模式=${gradingMode}${enableStagedGrading ? ' 階段化' : ''}`
+    `${logPrefix} 解析 路由=${routeKey || 'none'} 有答案卷=${Boolean(answerKey)} 有 ref=${Boolean(answerKeyRef)} 批改模式=${gradingMode}${enableStagedGrading ? ' 階段化' : ''}（實際 model 由 routeKey 查 STAGE_MODEL）`
   )
 
   // 🆕 處理 AnswerKey 緩存邏輯
@@ -695,6 +692,8 @@ export default async function handler(req, res) {
         } else if (hasValidInkSession && inkSessionId) {
           // session usage 記在 actor（學生本人）名下，方便追蹤是哪個學生用了多少
           // 真正的扣款在 session 結算時，會 resolve 到 billingUserId（老師）
+          // 2026-05-21: 補上 route_key + model_name + billing_user_id 給後台 token dashboard 分析
+          const pipelineInfo = data._pipeline || {}
           const { error: usageError } = await supabaseAdmin
             .from('ink_session_usage')
             .insert({
@@ -703,7 +702,10 @@ export default async function handler(req, res) {
               input_tokens: cost.inputTokens,
               output_tokens: cost.outputTokens,
               total_tokens: cost.totalTokens,
-              usage_metadata: data.usageMetadata
+              usage_metadata: data.usageMetadata,
+              route_key: pipelineInfo.resolvedRouteKey || null,
+              model_name: pipelineInfo.actualModel || null,
+              billing_user_id: billingUserId
             })
 
           if (usageError) {
