@@ -2,6 +2,7 @@ import { getPipeline } from './pipelines.js'
 import { callGeminiGenerateContent } from './model-adapter.js'
 import { AI_ROUTE_KEYS, normalizeRouteKey, resolveRouteKey } from './routes.js'
 import { resolveStageModel, FALLBACK_CHAIN } from './model-config.js'
+import { recordTokenUsage, extractModelNameFromResult } from '../ink-usage-tracker.js'
 import {
   runStagedGradingEvaluate,
   runStagedGradingPhaseA,
@@ -42,6 +43,15 @@ async function executeSinglePipelineCall({
     fallbackModels: FALLBACK_CHAIN
   })
   const modelLatencyMs = Date.now() - modelStartedAt
+
+  // 2026-05-22: 寫 ink_session_usage 1 row（trackContext 從 ALS 拿）
+  if (modelResponse?.ok && modelResponse?.data?.usageMetadata) {
+    await recordTokenUsage({
+      usageMetadata: modelResponse.data.usageMetadata,
+      routeKey,
+      modelName: extractModelNameFromResult(modelResponse, preparedRequest.model)
+    })
+  }
 
   let validation = { warnings: [], metrics: {} }
   if (modelResponse.ok && modelResponse.data && typeof modelResponse.data === 'object') {

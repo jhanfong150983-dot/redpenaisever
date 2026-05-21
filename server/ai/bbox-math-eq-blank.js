@@ -20,6 +20,8 @@
  */
 
 import { callGeminiGenerateContent } from './model-adapter.js'
+import { AI_ROUTE_KEYS } from './routes.js'
+import { recordTokenUsage, extractModelNameFromResult } from '../ink-usage-tracker.js'
 
 function isMathEqBlankQid(question) {
   if (!question) return false
@@ -99,6 +101,14 @@ w/h 必須 > 0、x/y/w/h 都 0~1。只回 JSON、不要 markdown。`
     contents: [{ role: 'user', parts: [{ inline_data: { mime_type: cropInfo.mimeType, data: cropInfo.base64 } }, { text: prompt }] }],
     payload: { generationConfig: { temperature: 0, responseMimeType: 'application/json' } }
   })
+  // 2026-05-22: 寫 ink_session_usage 1 row（math □ override 是視覺 bbox 偵測、用 classify routeKey 分類）
+  if (result?.ok && result?.data?.usageMetadata) {
+    await recordTokenUsage({
+      usageMetadata: result.data.usageMetadata,
+      routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+      modelName: extractModelNameFromResult(result, model)
+    })
+  }
   if (!result.ok) {
     logger?.(`math-eq-blank crop classify failed status=${result.status}`)
     return null

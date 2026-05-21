@@ -1,9 +1,10 @@
 import { resolveBillingUserId } from './billing-user.js'
-
-const INK_EXCHANGE_RATE = 33
-const INPUT_USD_PER_MILLION = 0.5
-const OUTPUT_USD_PER_MILLION = 3
-const PLATFORM_FEE_TWD = 1
+import {
+  INK_EXCHANGE_RATE,
+  INPUT_USD_PER_MILLION,
+  OUTPUT_USD_PER_MILLION,
+  PLATFORM_FEE_TWD
+} from './pricing-config.js'
 
 export function computeInkPointsFromTokens({
   inputTokens,
@@ -20,7 +21,8 @@ export function computeInkPointsFromTokens({
     (safeOutputTokens / 1_000_000) * OUTPUT_USD_PER_MILLION
   const baseTwd = baseUsd * INK_EXCHANGE_RATE
   const baseTwdRounded = Math.ceil(baseTwd)
-  const platformFee = baseTwd >= 1 ? PLATFORM_FEE_TWD : 0
+  // 2026-05-22: 拔掉 baseTwd>=1 條件——學生訂正 / 微 call 也要收平台費
+  const platformFee = PLATFORM_FEE_TWD
   const points = baseTwdRounded + platformFee
 
   return {

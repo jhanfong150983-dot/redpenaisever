@@ -173,10 +173,14 @@ ${answerKeyJson}
   return newContents
 }
 
-const INK_EXCHANGE_RATE = 33
-const INPUT_USD_PER_MILLION = 0.5
-const OUTPUT_USD_PER_MILLION = 3
-const PLATFORM_FEE_TWD = 1
+// 2026-05-22: pricing 常數搬到 server/pricing-config.js 中央化
+import {
+  INK_EXCHANGE_RATE,
+  INPUT_USD_PER_MILLION,
+  OUTPUT_USD_PER_MILLION,
+  PLATFORM_FEE_TWD
+} from '../server/pricing-config.js'
+import { trackingContext } from '../server/ink-usage-tracker.js'
 
 function computeInkPoints(usageMetadata) {
   const inputTokens = Number(usageMetadata?.promptTokenCount) || 0
@@ -188,7 +192,8 @@ function computeInkPoints(usageMetadata) {
     (outputTokens / 1_000_000) * OUTPUT_USD_PER_MILLION
   const baseTwd = baseUsd * INK_EXCHANGE_RATE
   const baseTwdRounded = Math.ceil(baseTwd)
-  const platformFee = baseTwd >= 1 ? PLATFORM_FEE_TWD : 0
+  // 2026-05-22: 拔掉 baseTwd>=1 條件 (跟 ink-session.js 對齊)
+  const platformFee = PLATFORM_FEE_TWD
   const points = baseTwdRounded + platformFee
 
   return {
@@ -644,33 +649,45 @@ export default async function handler(req, res) {
   }
 
   try {
-    const pipelineResult = await runAiPipeline({
-      apiKey,
-      model,
-      contents: processedContents,
-      payload,
-      requestedRouteKey: routeKey,
-      routeHint: {
-        hasResolvedAnswerKey: Boolean(resolvedAnswerKey),
-        hasAnswerKeyRef: Boolean(answerKeyRef),
-        hasAnswerKeyPayload: Boolean(normalizedAnswerKeyPayload)
+    // 2026-05-22: trackingContext 把 user / billing / admin / session 等 ALS 鋪好
+    // 各層 callGeminiGenerateContent 完成後可直接呼叫 recordTokenUsage()、不必每層手動傳
+    const pipelineResult = await trackingContext.run(
+      {
+        supabaseAdmin,
+        actorUserId,
+        billingUserId,
+        isAdmin,
+        inkSessionId
       },
-      internalContext: {
-        resolvedAnswerKey,
-        requestId,
-        enableStagedGrading,
-        gradingMode,
-        readAnswerSplitMode,
-        answerKeyImages,
-        answerSheetMode,
-        questionBookletImages,
-        domainHint: payload?.domain || undefined,
-        ownerId: user.id,
-        assignmentId: payload?.assignmentId || undefined,
-        submissionId: payload?.submissionId || undefined,
-        assignmentTotalPages  // 🆕 給 staged-grading 判定 ID 自動切頁
-      }
-    })
+      () =>
+        runAiPipeline({
+          apiKey,
+          model,
+          contents: processedContents,
+          payload,
+          requestedRouteKey: routeKey,
+          routeHint: {
+            hasResolvedAnswerKey: Boolean(resolvedAnswerKey),
+            hasAnswerKeyRef: Boolean(answerKeyRef),
+            hasAnswerKeyPayload: Boolean(normalizedAnswerKeyPayload)
+          },
+          internalContext: {
+            resolvedAnswerKey,
+            requestId,
+            enableStagedGrading,
+            gradingMode,
+            readAnswerSplitMode,
+            answerKeyImages,
+            answerSheetMode,
+            questionBookletImages,
+            domainHint: payload?.domain || undefined,
+            ownerId: user.id,
+            assignmentId: payload?.assignmentId || undefined,
+            submissionId: payload?.submissionId || undefined,
+            assignmentTotalPages  // 🆕 給 staged-grading 判定 ID 自動切頁
+          }
+        })
+    )
 
     const responseStatus = Number(pipelineResult.status) || 500
     const responseOk = responseStatus >= 200 && responseStatus < 300
@@ -686,55 +703,16 @@ export default async function handler(req, res) {
         const cost = computeInkPoints(data.usageMetadata)
         let inkSummary = null
 
-        // Admin 不扣墨水（但 token 用量仍要寫入、給後台 dashboard 分析、標 is_admin_test=true）
+        // 2026-05-22: ink_session_usage 寫入下沉到各 AI call 層（executeStage /
+        // executeSinglePipelineCall / applyMathEqBlankOverride）透過 trackingContext.run
+        // 取得 actor/billing/admin/session、避免本層 aggregated 寫 + 雙寫
         if (isAdmin) {
           inkSummary = { chargedPoints: 0, balanceBefore: currentBalance, balanceAfter: currentBalance, applied: true, adminBypass: true }
-          // 2026-05-21: admin 測試 token 用量也寫入 ink_session_usage、標 is_admin_test=true
-          // session_id 可能為 null（admin 通常不走 ink session 流程）
-          const pipelineInfo = data._pipeline || {}
-          const { error: adminUsageError } = await supabaseAdmin
-            .from('ink_session_usage')
-            .insert({
-              user_id: actorUserId,
-              session_id: inkSessionId || null,
-              input_tokens: cost.inputTokens,
-              output_tokens: cost.outputTokens,
-              total_tokens: cost.totalTokens,
-              usage_metadata: data.usageMetadata,
-              route_key: pipelineInfo.resolvedRouteKey || null,
-              model_name: pipelineInfo.actualModel || null,
-              billing_user_id: billingUserId,
-              is_admin_test: true
-            })
-          if (adminUsageError) {
-            console.warn('Admin token usage insert failed:', adminUsageError)
-          }
         } else if (hasValidInkSession && inkSessionId) {
-          // session usage 記在 actor（學生本人）名下，方便追蹤是哪個學生用了多少
-          // 真正的扣款在 session 結算時，會 resolve 到 billingUserId（老師）
-          // 2026-05-21: 補上 route_key + model_name + billing_user_id 給後台 token dashboard 分析
-          const pipelineInfo = data._pipeline || {}
-          const { error: usageError } = await supabaseAdmin
-            .from('ink_session_usage')
-            .insert({
-              user_id: actorUserId,
-              session_id: inkSessionId,
-              input_tokens: cost.inputTokens,
-              output_tokens: cost.outputTokens,
-              total_tokens: cost.totalTokens,
-              usage_metadata: data.usageMetadata,
-              route_key: pipelineInfo.resolvedRouteKey || null,
-              model_name: pipelineInfo.actualModel || null,
-              billing_user_id: billingUserId
-            })
-
-          if (usageError) {
-            console.warn('Ink session usage insert failed:', usageError)
-          } else {
-            inkSummary = {
-              pending: true,
-              sessionId: inkSessionId
-            }
+          // 真實扣款在 session 結算時、由 settleInkSession 累加 ink_session_usage 所有 row
+          inkSummary = {
+            pending: true,
+            sessionId: inkSessionId
           }
         }
 
