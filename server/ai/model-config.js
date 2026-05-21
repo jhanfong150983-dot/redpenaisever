@@ -11,7 +11,7 @@
  *   - FLASH = 純文字 / 邏輯 / 報表類 stage（小 model 夠用、便宜 20 倍）
  *
  * 切換時機（A/B test 完成後動 code）：
- *   - READ 系列暫時設 PRO；通過 A/B 對比後可改 FLASH
+ *   - READ 系列 2026-05-21 已切到 FLASH（user 決定不 A/B、pro 3.1 + AI2 校對 prompt 偶發整份判 blank）
  *
  * fallback chain：
  *   - PRO 503 overload → 自動 fallback 到 FLASH → 再 fallback 到 hardcoded
@@ -35,11 +35,15 @@ export const STAGE_MODEL = Object.freeze({
   // ──────────────────────────────────────────────────
   [AI_ROUTE_KEYS.GRADING_CLASSIFY]: MODEL_PRO,         // Phase A1 切題 bbox
   [AI_ROUTE_KEYS.GRADING_PHASE_A_CLASSIFY]: MODEL_PRO, // 同 GRADING_CLASSIFY
-  [AI_ROUTE_KEYS.GRADING_READ_ANSWER]: MODEL_PRO,      // Phase A2 學生答案 OCR（A/B 後可改 FLASH）
-  [AI_ROUTE_KEYS.GRADING_DETAIL_READ]: MODEL_PRO,      // 細讀（含圖）
-  [AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER]: MODEL_PRO,   // Read 重讀
-  [AI_ROUTE_KEYS.GRADING_PHASE_A_READ]: MODEL_PRO,     // 同 read
-  [AI_ROUTE_KEYS.GRADING_RECHECK]: MODEL_PRO,          // 學生訂正重批（含 OCR）
+  // ⚠️ 2026-05-21: READ 系列從 PRO 切到 FLASH（user 不 A/B 直接換）
+  // 原因：MODEL_PRO=gemini-3.1-pro-preview + AI2 校對 prompt 偶發整份判 blank
+  //   (社會期中考實證 3/9 submission 重症：80%+ AI2 blank、AI1 同樣 crop 卻 read 到答案)
+  // FLASH 沒這個化學反應、且便宜 ~20x
+  [AI_ROUTE_KEYS.GRADING_READ_ANSWER]: MODEL_FLASH,    // Phase A2 學生答案 OCR
+  [AI_ROUTE_KEYS.GRADING_DETAIL_READ]: MODEL_FLASH,    // AI1 細讀（含 crop 圖）
+  [AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER]: MODEL_FLASH, // AI2 校對 re-read
+  [AI_ROUTE_KEYS.GRADING_PHASE_A_READ]: MODEL_FLASH,   // 同 read
+  [AI_ROUTE_KEYS.GRADING_RECHECK]: MODEL_PRO,          // 學生訂正重批（含 OCR、保留 PRO）
   [AI_ROUTE_KEYS.ANSWER_KEY_LOCATE]: MODEL_PRO,        // 答案卷 bbox 定位（同 classify 性質）
   [AI_ROUTE_KEYS.PERSPECTIVE_DETECT_CORNERS]: MODEL_PRO, // 紙張四角偵測
 
