@@ -3737,17 +3737,27 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
   // 只拉選中那一筆 Phase A 的大欄位
   // ⚠️ 必須 filter phase='phase_a'、因為 Phase A 跟 Phase B 共用同一個 pipeline_run_id
   // 不加 phase filter 會撈到 2 筆 → maybeSingle 噴 "JSON object requested, multiple rows"
+  // Phase B 同 pipeline_run_id 的 accessor 一併拉、給每題的批改分數 + 理由用
   let log = null
+  let phaseBLog = null
   if (targetRunId) {
-    const { data: logRow, error: logErr } = await db
-      .from('grading_stage_logs')
-      .select('pipeline_run_id, classify, read_answer_1, read_answer_2, arbiter, needs_review_count')
-      .eq('submission_id', submissionId)
-      .eq('pipeline_run_id', targetRunId)
-      .eq('phase', 'phase_a')
-      .maybeSingle()
-    if (logErr) throw new Error(logErr.message)
-    log = logRow || null
+    const [phaseARes, phaseBRes] = await Promise.all([
+      db.from('grading_stage_logs')
+        .select('pipeline_run_id, classify, read_answer_1, read_answer_2, arbiter, needs_review_count')
+        .eq('submission_id', submissionId)
+        .eq('pipeline_run_id', targetRunId)
+        .eq('phase', 'phase_a')
+        .maybeSingle(),
+      db.from('grading_stage_logs')
+        .select('pipeline_run_id, accessor, total_score')
+        .eq('submission_id', submissionId)
+        .eq('pipeline_run_id', targetRunId)
+        .eq('phase', 'phase_b')
+        .maybeSingle()
+    ])
+    if (phaseARes.error) throw new Error(phaseARes.error.message)
+    log = phaseARes.data || null
+    phaseBLog = phaseBRes.data || null
   }
 
   // runs timeline：用 metadata-only 結果
@@ -3835,6 +3845,10 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
   const mistakes = Array.isArray(sub.grading_result?.mistakes) ? sub.grading_result.mistakes : []
   const mistakeSet = new Set(mistakes.map((m) => m.questionId).filter(Boolean))
 
+  // Phase B accessor per qid（B1 批改結果：score / maxScore / isCorrect / reason）
+  const accessorArr = Array.isArray(phaseBLog?.accessor) ? phaseBLog.accessor : []
+  const accessorMap = new Map(accessorArr.map((a) => [a.questionId, a]))
+
   // union 所有 qid，題序按 1-2-3 自然排序
   const qids = new Set([
     ...bboxByQid.keys(),
@@ -3848,6 +3862,7 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
     const r2 = r2Map.get(qid)
     const arb = arbMap.get(qid)
     const final = finalMap.get(qid)
+    const acc = accessorMap.get(qid)
     return {
       qid,
       type: typeByQid.get(qid) || null,
@@ -3859,7 +3874,12 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
       arbiterConsistent: arb?.consistent ?? null,
       finalAnswer: final?.finalStudentAnswer ?? null,
       finalAnswerSource: final?.finalAnswerSource ?? final?.source ?? null,
-      isMistake: mistakeSet.has(qid)
+      isMistake: mistakeSet.has(qid),
+      // Phase B 批改：分數 + 對錯 + 批改理由（只在錯題時前端顯示 reason）
+      score: acc?.score ?? null,
+      maxScore: acc?.maxScore ?? null,
+      isCorrect: typeof acc?.isCorrect === 'boolean' ? acc.isCorrect : null,
+      scoringReason: acc?.reason || null
     }
   }).sort((a, b) => sortQidNumeric(a.qid, b.qid))
 
