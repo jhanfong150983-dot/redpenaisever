@@ -4985,6 +4985,7 @@ async function executeStage({
     return {
       routeKey,
       pipelineName: pipeline.name,
+      stageModel: preparedRequest.model,
       status: errStatus,
       ok: false,
       data: { error: err?.message || 'model call failed', code: 'STAGE_CALL_FAILED' },
@@ -5008,6 +5009,7 @@ async function executeStage({
   return {
     routeKey,
     pipelineName: pipeline.name,
+    stageModel: preparedRequest.model,
     status: Number(modelResponse.status) || 500,
     ok: Boolean(modelResponse.ok),
     data: modelResponse.data,
@@ -5452,12 +5454,14 @@ export async function runStagedGradingPhaseA({
   const buildHttpErrorReturn = async (stage, response) => {
     const status = Number(response?.status) || 500
     const dataPreview = JSON.stringify(response?.data || {}).slice(0, 300)
+    // 2026-05-21: 用 stage 實際 model（response.stageModel）、不是外層 phase_a 的 model
+    const stageModel = response?.stageModel || model
     let userMessage
     let userAction
     let reasonCode
     if (status === 400) {
       reasonCode = 'MODEL_400_BAD_REQUEST'
-      userMessage = `批改失敗：AI 模型 ${model} 拒絕請求 (400)、可能是模型參數不相容或 prompt 格式問題`
+      userMessage = `批改失敗：AI 模型 ${stageModel} 拒絕請求 (400)、可能是模型參數不相容或 prompt 格式問題`
       userAction = '請聯絡工程師檢查 model config、可能需切換模型版本'
     } else if (status === 503) {
       reasonCode = 'MODEL_503_OVERLOAD'
@@ -5481,7 +5485,7 @@ export async function runStagedGradingPhaseA({
       reasonCode,
       userMessage,
       userAction,
-      technical: { httpStatus: status, model, dataPreview }
+      technical: { httpStatus: status, model: stageModel, dataPreview }
     }
     logStaged(pipelineRunId, 'basic', `PhaseA HTTP ERROR at ${stage}`, failure)
     if (internalContext?.ownerId) {

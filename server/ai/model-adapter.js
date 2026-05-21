@@ -138,11 +138,11 @@ export async function callGeminiGenerateContent({
   const allModels = [model, ...fallbackModels]
   let lastResult = null
 
-  // 2026-05-17: Pro 3.x preview 不支援 thinking_level='MINIMAL' (Flash-only flag)
-  // 對 Pro 模型一律 strip thinkingConfig、避免 400 reject
-  // 2026-05-20: gemini-3.5-flash + thinking_level=MINIMAL 會偷懶輸出 pixel bbox 而非
-  // normalized [0,1]，整批被 classify quality gate 拒絕。一併 strip 避免踩坑
-  const isProModel = (m) => typeof m === 'string' && (/pro/i.test(m) || /3\.5.*flash/i.test(m))
+  // 2026-05-17: Pro 3.x preview 不支援 thinking_level='MINIMAL' (Flash-only flag)、對 Pro strip
+  // 2026-05-20: gemini-3.5-flash + thinking_level=MINIMAL 會偷懶輸出 pixel bbox、一併 strip
+  // 2026-05-21: gemini-2.5-flash 也不吃 thinking config（read 切到 FLASH 時遇到 400 reject）
+  //   結論：我們現用的所有 model 都不該帶 thinking config、改成「flash 或 pro 都 strip」
+  const isProModel = (m) => typeof m === 'string' && (/pro/i.test(m) || /flash/i.test(m))
 
   for (let i = 0; i < allModels.length; i++) {
     const currentModel = allModels[i]
