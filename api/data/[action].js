@@ -1980,6 +1980,153 @@ async function handleCorrectionDashboard(req, res) {
   }
 }
 
+// Natural-sort question IDs like "1-2-1" < "1-2-10" — split by '-', compare numerically
+function compareQuestionIdsNatural(a, b) {
+  const pa = String(a || '').split('-').map((s) => parseInt(s, 10))
+  const pb = String(b || '').split('-').map((s) => parseInt(s, 10))
+  const len = Math.max(pa.length, pb.length)
+  for (let i = 0; i < len; i++) {
+    const ai = Number.isFinite(pa[i]) ? pa[i] : 0
+    const bi = Number.isFinite(pb[i]) ? pb[i] : 0
+    if (ai !== bi) return ai - bi
+  }
+  return String(a).localeCompare(String(b))
+}
+
+// Teacher generates correction notice PDF data (one entry per student)
+async function handleCorrectionNotice(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const assignmentId =
+    typeof req.query?.assignmentId === 'string' ? req.query.assignmentId.trim() : ''
+  if (!assignmentId) {
+    res.status(400).json({ error: 'Missing assignmentId' })
+    return
+  }
+
+  const rawStudentIds =
+    typeof req.query?.studentIds === 'string' ? req.query.studentIds.trim() : ''
+  const requestedStudentIds = rawStudentIds
+    ? rawStudentIds.split(',').map((s) => s.trim()).filter(Boolean)
+    : null
+
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const { data: assignment, error: assignmentError } = await supabaseDb
+      .from('assignments')
+      .select('id, title, classroom_id')
+      .eq('id', assignmentId)
+      .eq('owner_id', user.id)
+      .maybeSingle()
+
+    if (assignmentError) throw new Error(assignmentError.message)
+    if (!assignment) {
+      res.status(404).json({ error: 'Assignment not found' })
+      return
+    }
+
+    const [studentsResult, classroomResult] = await Promise.all([
+      supabaseDb
+        .from('students')
+        .select('id, name, seat_number')
+        .eq('owner_id', user.id)
+        .eq('classroom_id', assignment.classroom_id),
+      supabaseDb
+        .from('classrooms')
+        .select('name')
+        .eq('id', assignment.classroom_id)
+        .eq('owner_id', user.id)
+        .maybeSingle()
+    ])
+    if (studentsResult.error) throw new Error(studentsResult.error.message)
+    if (classroomResult.error) throw new Error(classroomResult.error.message)
+
+    let students = studentsResult.data || []
+    if (requestedStudentIds && requestedStudentIds.length > 0) {
+      const idSet = new Set(requestedStudentIds)
+      students = students.filter((s) => idSet.has(s.id))
+    }
+
+    const { data: submissionRows, error: submissionsError } = await supabaseDb
+      .from('submissions')
+      .select('id, student_id, grading_result, score, source, status, graded_at, updated_at')
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .neq('source', 'student_correction')
+      .or('graded_at.not.is.null,status.eq.graded')
+    if (submissionsError) throw new Error(submissionsError.message)
+
+    const latestByStudent = new Map()
+    for (const row of submissionRows || []) {
+      if (!row.student_id) continue
+      const rankedAt = toNumber(row.graded_at) ?? toMillis(row.updated_at) ?? 0
+      const existing = latestByStudent.get(row.student_id)
+      const existingRank = existing
+        ? toNumber(existing.graded_at) ?? toMillis(existing.updated_at) ?? 0
+        : -1
+      if (!existing || rankedAt >= existingRank) {
+        latestByStudent.set(row.student_id, row)
+      }
+    }
+
+    const className = classroomResult.data?.name || ''
+    const noticeStudents = students
+      .map((student) => {
+        const latest = latestByStudent.get(student.id) || null
+        const gradingResult = latest?.grading_result || null
+        const details = Array.isArray(gradingResult?.details) ? gradingResult.details : []
+        const totalCount = details.length
+        const mistakes = parseMistakesFromGradingResult(gradingResult)
+        const mistakeQuestionIds = mistakes
+          .map((m) => String(m.questionId || '').trim())
+          .filter(Boolean)
+          .sort(compareQuestionIdsNatural)
+        const mistakeCount = mistakeQuestionIds.length
+        const correctCount = Math.max(0, totalCount - mistakeCount)
+        const accuracy = totalCount > 0 ? Math.round((correctCount / totalCount) * 100) : null
+        const score = latest && Number.isFinite(latest.score) ? Number(latest.score) : null
+        return {
+          studentId: student.id,
+          name: student.name || '',
+          seatNumber: Number.isFinite(student.seat_number) ? student.seat_number : null,
+          className,
+          totalCount,
+          correctCount,
+          mistakeCount,
+          accuracy,
+          score,
+          mistakeQuestionIds
+        }
+      })
+      .sort((a, b) => {
+        const sa = Number.isFinite(a.seatNumber) ? a.seatNumber : 99999
+        const sb = Number.isFinite(b.seatNumber) ? b.seatNumber : 99999
+        if (sa !== sb) return sa - sb
+        return String(a.name).localeCompare(String(b.name))
+      })
+
+    res.status(200).json({
+      assignmentId,
+      assignmentTitle: assignment.title || '',
+      className,
+      students: noticeStudents
+    })
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : '讀取訂正通知單資料失敗'
+    })
+  }
+}
+
 // Teacher fetches disputed items for a specific student (for the dispute review panel)
 async function handleCorrectionDisputes(req, res) {
   if (req.method !== 'GET') {
@@ -6658,6 +6805,10 @@ export default async function handler(req, res) {
   }
   if (action === 'correction-dashboard') {
     await handleCorrectionDashboard(req, res)
+    return
+  }
+  if (action === 'correction-notice') {
+    await handleCorrectionNotice(req, res)
     return
   }
   if (action === 'correction-dispatch-toggle') {
