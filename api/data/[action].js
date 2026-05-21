@@ -2173,6 +2173,7 @@ async function handleCorrectionDisputes(req, res) {
         hintText: String(row.hint_text ?? ''),
         disputeNote: row.dispute_note ?? undefined,
         cropImageUrl: typeof accessor?.crop_image_url === 'string' ? accessor.crop_image_url : undefined,
+        sourceSubmissionId: typeof accessor?.source_submission_id === 'string' ? accessor.source_submission_id : undefined,
         status: row.status
       }
     })

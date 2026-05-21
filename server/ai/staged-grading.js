@@ -1101,9 +1101,20 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   // 無最短長度限制，涵蓋如「英國人」(3字) 或「360」等短答案
   const [shorterA, longerA] = a1.length <= a2.length ? [a1, a2] : [a2, a1]
   if (shorterA.length > 0 && longerA.includes(shorterA) && longerA.length >= shorterA.length * 1.3) {
+    if (containmentDeltaLooksLikeAnswerSlot(longerA, shorterA)) return 'diff'
     return 'stable'
   }
   return 'diff'
+}
+
+// 多項答案題防誤判：若長答案比短答案多出的片段含「數字+面積/體積單位」結構
+// （如「36cm²」「180公分」），代表多出來的是另一個答案 slot、不是 AI 多讀的雜訊。
+// 例：AI1「540cm³」vs AI2「36cm², 540cm³」→ delta「36cm²」→ 是底面積這個 slot → diff
+function containmentDeltaLooksLikeAnswerSlot(longerA, shorterA) {
+  const idx = longerA.indexOf(shorterA)
+  if (idx < 0) return false
+  const delta = longerA.slice(0, idx) + longerA.slice(idx + shorterA.length)
+  return /\d+\s*(?:cm[²³]|m[²³]|km[²³]|mm[²³]|平方公[分尺里釐]|立方公[分尺里釐]|公[分尺里釐])/u.test(delta)
 }
 
 // 包含關係成立時，回傳應優先使用的原始答案（較短、較精確的那個）。
@@ -1119,6 +1130,7 @@ function getContainmentPreferredRaw(read1, read2, questionType) {
   if (shorterA.length === 0) return null
   if (!longerA.includes(shorterA)) return null
   if (longerA.length < shorterA.length * 1.3) return null
+  if (containmentDeltaLooksLikeAnswerSlot(longerA, shorterA)) return null
   // AI1 較短 → 預設用 AI1，無需覆寫
   if (a1IsShorter) return null
   // AI2 較短 → 回傳 AI2 原始答案
