@@ -102,8 +102,11 @@ export async function runAiPipeline({
 
   // answer_sheet_mode 對 extract / classify / explain pipeline 的分支都重要，log 到 orchestrator 入口便於追蹤
   const dispatchedAnswerSheetMode = internalContext?.answerSheetMode || 'with_questions'
+  // 2026-05-21: log 顯示「實際用的 model」（resolveStageModel 查 STAGE_MODEL）
+  // 不再印 client 傳上來的舊 model 字串（那只是 placeholder、會被覆寫）
+  const actualModelForLog = resolveStageModel(resolvedRouteKey)
   console.log(
-    `${logPrefix} 啟動 路由=${resolvedRouteKey} 模型=${model}${shouldRunStagedGrading ? ' 階段化' : ''} 模式=${dispatchedAnswerSheetMode}`
+    `${logPrefix} 啟動 路由=${resolvedRouteKey} 模型=${actualModelForLog}${shouldRunStagedGrading ? ' 階段化' : ''} 模式=${dispatchedAnswerSheetMode}`
   )
   if (dispatchedAnswerSheetMode === 'answer_only') {
     console.log(`${logPrefix} [純答案卡] 派發路由=${resolvedRouteKey}`)
