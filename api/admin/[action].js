@@ -436,6 +436,7 @@ async function handleUsers(req, res, supabaseAdmin) {
     const {
       userId,
       role,
+      role_manual: roleManual,
       permission_tier: permissionTier,
       ink_balance: inkBalance,
       ink_balance_delta: inkBalanceDelta,
@@ -470,6 +471,19 @@ async function handleUsers(req, res, supabaseAdmin) {
     if (nextRole) updates.role = nextRole
     if (nextTier) updates.permission_tier = nextTier
     if (typeof adminNote === 'string') updates.admin_note = adminNote
+
+    // role_manual：admin 手動指定身分（teacher/student/both/parent/...）。傳空字串或 null 清除覆寫
+    if (roleManual !== undefined) {
+      const allowed = ['admin', 'teacher', 'student', 'both', 'parent', 'school_admin', 'registered_inactive', 'unknown_inert']
+      if (roleManual === null || roleManual === '') {
+        updates.role_manual = null
+      } else if (typeof roleManual === 'string' && allowed.includes(roleManual)) {
+        updates.role_manual = roleManual
+      } else {
+        res.status(400).json({ error: '無效的 role_manual 值' })
+        return
+      }
+    }
 
     let ledgerEntry = null
     const currentBalance = typeof profile.ink_balance === 'number' ? profile.ink_balance : 0
@@ -1565,18 +1579,17 @@ async function handleUserStats(req, res, supabaseAdmin) {
   }
 
   try {
-    // 1. 取得所有非管理者帳號 — 分頁撈取
+    // 1. 從 profiles_with_inferred_role view 撈取（含 inferred_role / effective_role / 訊號旗標）
+    //    分類規則的 SSoT 在 view，這裡只負責 join 統計
     const allProfiles = await fetchAllRows((from, to) =>
       supabaseAdmin
-        .from('profiles')
-        .select('id, email, name, avatar_url, role, permission_tier, ink_balance, created_at, updated_at')
-        .neq('role', 'admin')
+        .from('profiles_with_inferred_role')
+        .select('id, email, name, avatar_url, role, role_manual, permission_tier, ink_balance, created_at, updated_at, inferred_role, effective_role, owns_classroom, owns_assignment, has_teacher_pref, imported_students, synced_campus, bound_as_student, acted_as_student, has_external_identity')
         .order('created_at', { ascending: false })
         .range(from, to)
     )
 
     // 2-6. 批量查詢統計資料（平行執行）— 全部使用分頁撈取
-    // 同時撈取 students.auth_user_id 用於區分學生帳號與教師帳號
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
     const [
       classroomStatsData,
@@ -1585,7 +1598,6 @@ async function handleUserStats(req, res, supabaseAdmin) {
       submissionStatsData,
       inkStatsData,
       classroomNamesData,
-      studentAuthUserData,
     ] = await Promise.all([
       fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('owner_id').range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('students').select('id, name, owner_id, classroom_id').range(from, to)),
@@ -1593,25 +1605,10 @@ async function handleUserStats(req, res, supabaseAdmin) {
       fetchAllRows((from, to) => supabaseAdmin.from('submissions').select('owner_id, student_id, graded_at, created_at').range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('ink_ledger').select('user_id, delta').lt('delta', 0).gte('created_at', thirtyDaysAgo).range(from, to)),
       fetchAllRows((from, to) => supabaseAdmin.from('classrooms').select('id, name').range(from, to)),
-      fetchAllRows((from, to) => supabaseAdmin.from('students').select('auth_user_id').not('auth_user_id', 'is', null).range(from, to)),
     ])
 
-    // 建立學生帳號 Set
-    const studentAuthUserIds = new Set(studentAuthUserData.map(s => s.auth_user_id))
-
-    // 建立「有教師活動」Set：有建班級或作業，或為 advanced tier，視為老師
-    const teacherActivityIds = new Set()
-    classroomStatsData.forEach(row => { if (row.owner_id) teacherActivityIds.add(row.owner_id) })
-    assignmentStatsData.forEach(row => { if (row.owner_id) teacherActivityIds.add(row.owner_id) })
-
-    // 只過濾「純學生」：在 students.auth_user_id 中、且沒任何教師訊號
-    // 雙重身份（老師＋學生）保留顯示
-    const users = allProfiles.filter(u => {
-      if (!studentAuthUserIds.has(u.id)) return true
-      if (teacherActivityIds.has(u.id)) return true
-      if (u.permission_tier === 'advanced') return true
-      return false
-    })
+    // 全部 profile 都回傳，讓前端依 effective_role 切 tab
+    const users = allProfiles
 
     // 班級數
     const classroomCountMap = {}
@@ -1668,7 +1665,7 @@ async function handleUserStats(req, res, supabaseAdmin) {
       })
     })
 
-    // 組合教師資料（包含所有非 admin 帳號）
+    // 組合 user 資料（全部非 admin 帳號 + 角色推導）
     const userStats = (users || [])
       .map(user => {
         const classroomCount = classroomCountMap[user.id] || 0
@@ -1687,6 +1684,9 @@ async function handleUserStats(req, res, supabaseAdmin) {
           avatarUrl: user.avatar_url,
           inkBalance: user.ink_balance || 0,
           role: user.role || 'user',
+          roleManual: user.role_manual || null,
+          inferredRole: user.inferred_role,
+          effectiveRole: user.effective_role,
           permissionTier: user.permission_tier || 'basic',
           createdAt: user.created_at,
           updatedAt: user.updated_at,
@@ -1700,7 +1700,17 @@ async function handleUserStats(req, res, supabaseAdmin) {
           lastActiveAt: user.updated_at,
           students,
           status,
-          isAlsoStudent: studentAuthUserIds.has(user.id),
+          isAlsoStudent: user.effective_role === 'both',
+          roleSignals: {
+            ownsClassroom: user.owns_classroom,
+            ownsAssignment: user.owns_assignment,
+            hasTeacherPref: user.has_teacher_pref,
+            importedStudents: user.imported_students,
+            syncedCampus: user.synced_campus,
+            boundAsStudent: user.bound_as_student,
+            actedAsStudent: user.acted_as_student,
+            hasExternalIdentity: user.has_external_identity,
+          },
         }
       })
 
