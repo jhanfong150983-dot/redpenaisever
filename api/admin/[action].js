@@ -3204,16 +3204,18 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     const usageRows = await fetchAllRows(usageQuery)
 
     // ── 撈老師清單（給 dropdown） ──
-    // 1. 從 ink_session_usage 撈出有用量的 billing_user_id
-    // 2. join profiles 撈 name/email
-    // 3. 過濾 admin
-    const billingIdsWithUsage = await fetchAllRows((from, to) =>
-      supabaseAdmin
+    // 2026-05-22: 只列「在這段時間區間內有用量」的老師、跟 fromIso/toIso 連動
+    // 也尊重 includeAdmin 篩選（關掉就不列 admin）
+    const billingIdsWithUsage = await fetchAllRows((from, to) => {
+      let q = supabaseAdmin
         .from('ink_session_usage')
         .select('billing_user_id')
         .not('billing_user_id', 'is', null)
-        .range(from, to)
-    )
+        .gte('created_at', fromIso)
+        .lte('created_at', toIso)
+      if (!includeAdmin) q = q.eq('is_admin_test', false)
+      return q.range(from, to)
+    })
     const uniqueBillingIds = Array.from(new Set(billingIdsWithUsage.map(r => r.billing_user_id).filter(Boolean)))
     let teachers = []
     if (uniqueBillingIds.length > 0) {
