@@ -5381,7 +5381,13 @@ export async function runStagedGradingPhaseA({
       : stopBeforeArbiter
         ? '跑完 read 後早退'
         : '一氣跑到底'
-  logStaged(pipelineRunId, 'basic', `[A1] 進場 題目數=${questionIds.length} 模式=${answerSheetMode} 模型=${model} 拆解模式=${modeLabel}`)
+  // 2026-05-21: 印每個 stage 實際用的 model（不是 client placeholder）
+  const classifyModel = resolveStageModel(AI_ROUTE_KEYS.GRADING_CLASSIFY)
+  const readModelLabel = resolveStageModel(AI_ROUTE_KEYS.GRADING_DETAIL_READ)
+  const arbiterModelLabel = resolveStageModel(AI_ROUTE_KEYS.GRADING_ARBITER)
+  logStaged(pipelineRunId, 'basic',
+    `[A1] 進場 題目數=${questionIds.length} 模式=${answerSheetMode} 拆解模式=${modeLabel}\n` +
+    `  classify=${classifyModel} read=${readModelLabel} arbiter=${arbiterModelLabel}`)
 
   const stageResponses = []
   const stageWarnings = []
