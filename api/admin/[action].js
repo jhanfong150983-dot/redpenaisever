@@ -3176,6 +3176,8 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     const fromStr = String(req.query?.from || '').trim() || defaultFrom.toISOString().split('T')[0]
     const toStr = String(req.query?.to || '').trim() || now.toISOString().split('T')[0]
     const userId = String(req.query?.userId || '').trim() || null
+    // 2026-05-21: 預設 includeAdmin=true（含 admin 測試）；前端可改 false 排除
+    const includeAdmin = String(req.query?.includeAdmin || 'true').toLowerCase() !== 'false'
 
     // 加上一天讓 to 涵蓋整日
     const fromIso = `${fromStr}T00:00:00.000Z`
@@ -3185,10 +3187,11 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     const usageQuery = (from, to) => {
       let q = supabaseAdmin
         .from('ink_session_usage')
-        .select('billing_user_id, route_key, model_name, input_tokens, output_tokens, total_tokens, created_at')
+        .select('billing_user_id, route_key, model_name, input_tokens, output_tokens, total_tokens, is_admin_test, created_at')
         .gte('created_at', fromIso)
         .lte('created_at', toIso)
       if (userId) q = q.eq('billing_user_id', userId)
+      if (!includeAdmin) q = q.eq('is_admin_test', false)
       return q.range(from, to)
     }
     const usageRows = await fetchAllRows(usageQuery)
@@ -3303,13 +3306,19 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       .map(([date, stages]) => ({ date, stages }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
+    // ── 額外統計：admin 測試的用量比例 ──
+    const adminCalls = usageRows.filter(r => r.is_admin_test).length
+    const realCalls = usageRows.length - adminCalls
+
     res.status(200).json({
-      params: { from: fromStr, to: toStr, userId },
+      params: { from: fromStr, to: toStr, userId, includeAdmin },
       summary,
       byStage,
       byModel,
       timeSeries,
-      teachers: teachers.map(t => ({ id: t.id, name: t.name, email: t.email }))
+      teachers: teachers.map(t => ({ id: t.id, name: t.name, email: t.email })),
+      adminTestCount: adminCalls,
+      realCallCount: realCalls
     })
   } catch (e) {
     console.error('[admin/token-usage] failed:', e)

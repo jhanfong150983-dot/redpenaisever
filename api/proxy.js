@@ -686,9 +686,29 @@ export default async function handler(req, res) {
         const cost = computeInkPoints(data.usageMetadata)
         let inkSummary = null
 
-        // Admin 不扣墨水
+        // Admin 不扣墨水（但 token 用量仍要寫入、給後台 dashboard 分析、標 is_admin_test=true）
         if (isAdmin) {
           inkSummary = { chargedPoints: 0, balanceBefore: currentBalance, balanceAfter: currentBalance, applied: true, adminBypass: true }
+          // 2026-05-21: admin 測試 token 用量也寫入 ink_session_usage、標 is_admin_test=true
+          // session_id 可能為 null（admin 通常不走 ink session 流程）
+          const pipelineInfo = data._pipeline || {}
+          const { error: adminUsageError } = await supabaseAdmin
+            .from('ink_session_usage')
+            .insert({
+              user_id: actorUserId,
+              session_id: inkSessionId || null,
+              input_tokens: cost.inputTokens,
+              output_tokens: cost.outputTokens,
+              total_tokens: cost.totalTokens,
+              usage_metadata: data.usageMetadata,
+              route_key: pipelineInfo.resolvedRouteKey || null,
+              model_name: pipelineInfo.actualModel || null,
+              billing_user_id: billingUserId,
+              is_admin_test: true
+            })
+          if (adminUsageError) {
+            console.warn('Admin token usage insert failed:', adminUsageError)
+          }
         } else if (hasValidInkSession && inkSessionId) {
           // session usage 記在 actor（學生本人）名下，方便追蹤是哪個學生用了多少
           // 真正的扣款在 session 結算時，會 resolve 到 billingUserId（老師）
