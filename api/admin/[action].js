@@ -3170,18 +3170,25 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
   }
 
   try {
-    // 預設區間：最近 30 天（含今天）
+    // 預設區間：最近 30 天（含今天）—— 用 Taipei timezone (UTC+8)
+    const TAIPEI_OFFSET = '+08:00'
     const now = new Date()
     const defaultFrom = new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000)
-    const fromStr = String(req.query?.from || '').trim() || defaultFrom.toISOString().split('T')[0]
-    const toStr = String(req.query?.to || '').trim() || now.toISOString().split('T')[0]
+    // 用 Taipei 本地時間轉 YYYY-MM-DD（避免拿到 UTC date）
+    const toTaipeiDateStr = (d) => {
+      const taipei = new Date(d.getTime() + 8 * 3600 * 1000)
+      return taipei.toISOString().split('T')[0]
+    }
+    const fromStr = String(req.query?.from || '').trim() || toTaipeiDateStr(defaultFrom)
+    const toStr = String(req.query?.to || '').trim() || toTaipeiDateStr(now)
     const userId = String(req.query?.userId || '').trim() || null
     // 2026-05-21: 預設 includeAdmin=true（含 admin 測試）；前端可改 false 排除
     const includeAdmin = String(req.query?.includeAdmin || 'true').toLowerCase() !== 'false'
 
-    // 加上一天讓 to 涵蓋整日
-    const fromIso = `${fromStr}T00:00:00.000Z`
-    const toIso = new Date(`${toStr}T23:59:59.999Z`).toISOString()
+    // 2026-05-22: fromStr/toStr 視為 Taipei 本地日期、轉成 UTC 區間查詢
+    // 例：from=2026-05-22 → Taipei 5/22 00:00 = UTC 5/21 16:00
+    const fromIso = new Date(`${fromStr}T00:00:00${TAIPEI_OFFSET}`).toISOString()
+    const toIso = new Date(`${toStr}T23:59:59.999${TAIPEI_OFFSET}`).toISOString()
 
     // ── 撈 token 用量（依 billing_user_id 聚合）──
     const usageQuery = (from, to) => {
@@ -3294,13 +3301,14 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
 
     // ── timeSeries（per date × per stage tokens）──
     // 給 stacked area chart 用
+    // 2026-05-22: 用 Taipei timezone 做 date grouping（避免半夜跑的測試被分到前一天）
     const timeMap = {}  // { 'YYYY-MM-DD': { route_key: total_tokens } }
     for (const r of usageRows) {
-      const date = String(r.created_at).split('T')[0]
+      const taipeiDate = toTaipeiDateStr(new Date(r.created_at))
       const stage = r.route_key || '(unknown)'
       const tokens = (Number(r.input_tokens) || 0) + (Number(r.output_tokens) || 0)
-      if (!timeMap[date]) timeMap[date] = {}
-      timeMap[date][stage] = (timeMap[date][stage] || 0) + tokens
+      if (!timeMap[taipeiDate]) timeMap[taipeiDate] = {}
+      timeMap[taipeiDate][stage] = (timeMap[taipeiDate][stage] || 0) + tokens
     }
     const timeSeries = Object.entries(timeMap)
       .map(([date, stages]) => ({ date, stages }))
