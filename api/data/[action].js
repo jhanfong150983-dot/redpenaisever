@@ -1197,6 +1197,10 @@ async function writeCorrectionQuestionItems(
           answerBbox
         })
       }
+      // 學生訂正：client 強制每題拍照上傳到 corrections/{sub}/{qid}.webp、accessor 沒裁到時 fallback 至此
+      if (!cropImageUrl && options.isStudentCorrection && sourceSubmissionId) {
+        cropImageUrl = `corrections/${sourceSubmissionId}/${questionId}.webp`
+      }
       return {
         mistake,
         questionId,
@@ -1565,7 +1569,8 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
         {
           sourceSubmissionId: row.id,
           sourceImageUrl: row.image_url,
-          preferPreviousAccessor: true
+          preferPreviousAccessor: true,
+          isStudentCorrection: true
         }
       )
 
@@ -6894,6 +6899,10 @@ const log = document.getElementById('log');
     await handleAssignmentStateSummary(req, res)
     return
   }
+  if (action === 'correction-history') {
+    await handleCorrectionHistory(req, res)
+    return
+  }
   if (action === 'refresh-assignment-summary') {
     await handleRefreshAssignmentSummary(req, res)
     return
@@ -7544,6 +7553,146 @@ async function handleAssignmentStateSummary(req, res) {
   }
 
   res.status(200).json({ byAssignment })
+}
+
+// ─────────────────────────────────────────────────────────
+// handleCorrectionHistory
+// GET /api/data/correction-history?studentId=xxx
+// 回傳該學生跨作業的訂正歷程 raw 資料、由 frontend 自行 join 成 timeline
+// ─────────────────────────────────────────────────────────
+async function handleCorrectionHistory(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  const studentId = typeof req.query?.studentId === 'string' ? req.query.studentId.trim() : ''
+  if (!studentId) {
+    res.status(400).json({ error: 'Missing studentId' })
+    return
+  }
+
+  const supabaseDb = getSupabaseAdmin()
+
+  const [studentResult, stateResult, attemptResult, itemResult] = await Promise.all([
+    supabaseDb
+      .from('students')
+      .select('id, classroom_id, seat_number, name')
+      .eq('owner_id', user.id)
+      .eq('id', studentId)
+      .maybeSingle(),
+    supabaseDb
+      .from('assignment_student_state')
+      .select(
+        'assignment_id, status, correction_attempt_count, correction_attempt_limit, last_status_reason, last_activity_at, updated_at'
+      )
+      .eq('owner_id', user.id)
+      .eq('student_id', studentId),
+    supabaseDb
+      .from('correction_attempt_logs')
+      .select(
+        'assignment_id, attempt_no, submission_id, result_status, wrong_question_count, created_at'
+      )
+      .eq('owner_id', user.id)
+      .eq('student_id', studentId)
+      .order('assignment_id')
+      .order('attempt_no'),
+    supabaseDb
+      .from('correction_question_items')
+      .select(
+        'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, status, accessor_result, created_at, updated_at'
+      )
+      .eq('owner_id', user.id)
+      .eq('student_id', studentId)
+      .order('assignment_id')
+      .order('question_id')
+      .order('attempt_no')
+  ])
+
+  if (studentResult.error) {
+    res.status(500).json({ error: studentResult.error.message }); return
+  }
+  if (!studentResult.data) {
+    res.status(404).json({ error: 'Student not found' }); return
+  }
+  if (stateResult.error) { res.status(500).json({ error: stateResult.error.message }); return }
+  if (attemptResult.error) { res.status(500).json({ error: attemptResult.error.message }); return }
+  if (itemResult.error) { res.status(500).json({ error: itemResult.error.message }); return }
+
+  const assignmentIds = Array.from(
+    new Set([
+      ...(stateResult.data || []).map((r) => r.assignment_id),
+      ...(attemptResult.data || []).map((r) => r.assignment_id),
+      ...(itemResult.data || []).map((r) => r.assignment_id)
+    ])
+  ).filter(Boolean)
+
+  let assignmentRows = []
+  if (assignmentIds.length > 0) {
+    const { data, error } = await supabaseDb
+      .from('assignments')
+      .select('id, classroom_id, title, domain, created_at')
+      .eq('owner_id', user.id)
+      .in('id', assignmentIds)
+    if (error) { res.status(500).json({ error: error.message }); return }
+    assignmentRows = data || []
+  }
+
+  res.status(200).json({
+    student: {
+      id: studentResult.data.id,
+      classroomId: studentResult.data.classroom_id,
+      seatNumber: studentResult.data.seat_number,
+      name: studentResult.data.name
+    },
+    assignments: assignmentRows.map((a) => ({
+      id: a.id,
+      classroomId: a.classroom_id,
+      title: a.title,
+      domain: a.domain,
+      createdAt: a.created_at
+    })),
+    states: (stateResult.data || []).map((r) => ({
+      assignmentId: r.assignment_id,
+      status: r.status,
+      correctionAttemptCount: r.correction_attempt_count,
+      correctionAttemptLimit: r.correction_attempt_limit,
+      lastStatusReason: r.last_status_reason,
+      lastActivityAt: r.last_activity_at,
+      updatedAt: r.updated_at
+    })),
+    attempts: (attemptResult.data || []).map((r) => ({
+      assignmentId: r.assignment_id,
+      attemptNo: r.attempt_no,
+      submissionId: r.submission_id,
+      resultStatus: r.result_status,
+      wrongQuestionCount: r.wrong_question_count,
+      createdAt: r.created_at
+    })),
+    questionItems: (itemResult.data || []).map((r) => {
+      const accessor = r.accessor_result && typeof r.accessor_result === 'object' ? r.accessor_result : null
+      return {
+        assignmentId: r.assignment_id,
+        attemptNo: r.attempt_no,
+        questionId: r.question_id,
+        questionText: r.question_text,
+        mistakeReason: r.mistake_reason,
+        hintText: r.hint_text,
+        status: r.status,
+        cropImageUrl: typeof accessor?.crop_image_url === 'string' ? accessor.crop_image_url : null,
+        sourceSubmissionId: typeof accessor?.source_submission_id === 'string' ? accessor.source_submission_id : null,
+        sourceImageUrl: typeof accessor?.source_image_url === 'string' ? accessor.source_image_url : null,
+        answerBbox: accessor?.answer_bbox ?? null,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      }
+    })
+  })
 }
 
 
