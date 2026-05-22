@@ -3652,7 +3652,7 @@ async function qualitySubmissionList(db, assignmentId) {
   // 之前一次 SELECT 5000 筆 read_answer_1 JSONB → 把 DB 打爆。教訓：拉大欄位前先 filter。
   const [countsRes, phaseARes] = await Promise.all([
     db.from('grading_stage_logs')
-      .select('submission_id, phase')
+      .select('submission_id, phase, created_at')
       .eq('assignment_id', assignmentId)
       .limit(5000),
     db.from('grading_stage_logs')
@@ -3665,8 +3665,9 @@ async function qualitySubmissionList(db, assignmentId) {
   if (countsRes.error) throw new Error(countsRes.error.message)
   if (phaseARes.error) throw new Error(phaseARes.error.message)
 
-  // run counts per submission
+  // run counts + 最新一次批改活動時間 per submission
   const countsBySid = new Map()
+  const lastActivityBySid = new Map()
   for (const r of countsRes.data || []) {
     const sid = r.submission_id
     if (!countsBySid.has(sid)) countsBySid.set(sid, { runCount: 0, phaseACount: 0, phaseBCount: 0 })
@@ -3674,6 +3675,10 @@ async function qualitySubmissionList(db, assignmentId) {
     c.runCount += 1
     if (r.phase === 'phase_a') c.phaseACount += 1
     else if (r.phase === 'phase_b') c.phaseBCount += 1
+    const ts = r.created_at
+    if (ts && (!lastActivityBySid.has(sid) || ts > lastActivityBySid.get(sid))) {
+      lastActivityBySid.set(sid, ts)
+    }
   }
 
   // 每份取最新 Phase A
@@ -3709,6 +3714,7 @@ async function qualitySubmissionList(db, assignmentId) {
       totalQuestions,
       needsReviewCount: log?.needs_review_count || 0,
       gradedAt: s.graded_at || null,
+      lastActivityAt: lastActivityBySid.get(s.id) || null,
       runCount: counts.runCount,
       phaseACount: counts.phaseACount,
       phaseBCount: counts.phaseBCount
