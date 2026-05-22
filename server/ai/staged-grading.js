@@ -3741,23 +3741,31 @@ CALCULATION (questions in CALCULATION list):
     if (override) return `\n${override}\n`
     return `
 WORD-PROBLEM (questions in WORD-PROBLEM list):
-- 🚨 OUTPUT FINAL ANSWER ONLY (2026-05-20 update):
-  Word problems have calculation work + final answer sentence (e.g. "答: 小明走了120公尺", "A: 144cm³").
+- 🚨 OUTPUT FINAL ANSWER ONLY (2026-05-22 update):
+  Word problems have calculation work + final answer sentence (e.g. "答: 小明走了120公尺", "答: 36 平方公分，540 立方公分", "A: 144cm³").
   Accessor stage will evaluate the calculation process visually from the crop image.
-  Your job is ONLY to extract the final answer value as a single token.
+  Your job is to extract the COMPLETE final answer — which may be ONE value OR MULTIPLE values for problems asking multiple quantities.
+
+- 🚨 MULTI-PART FINAL ANSWERS (critical):
+  Some problems ask for MULTIPLE final values (e.g. 求面積與體積、求長與寬).
+  The student's 答 line will contain ALL parts, typically separated by comma/space/換行.
+  YOU MUST OUTPUT ALL PARTS — never truncate to a single token.
+  - Example: 答 line shows "36 平方公分，540 立方公分" → output "36 平方公分，540 立方公分" (BOTH parts).
+  - Example: 答 line shows "180cm²、720cm³" → output "180cm²、720cm³" (BOTH parts).
+  - Example: 答 line shows just "144cm³" → output "144cm³" (single part is also fine).
+  - Counting hint: if the question stem says "求...與...", "求...及...", or "求...，...", expect TWO parts.
 
 - HOW TO FIND THE FINAL ANSWER:
-  - FIRST: look for "答:", "A:", "Ans:" prefix — the value after it IS the final answer.
-  - FALLBACK: if no answer-sentence prefix, take the LAST "=N" or last-line numeric result.
+  - FIRST: look for "答:", "答 :", "A:", "Ans:" prefix — read EVERYTHING on that line/after it until visual end of answer.
+  - 🚨 Multi-part answers may span ONE line (with separators) or TWO LINES — both count.
+  - FALLBACK: if no answer-sentence prefix, take the LAST "=N" or last-line numeric result (single part).
   - Multiple candidates (student wrote then crossed out): use the FINAL non-crossed version.
 
 - OUTPUT FORMAT:
-  - studentAnswerRaw = JUST the final value with unit (e.g. "120公尺", "144cm³", "$50", "3又1/2杯").
-  - Do NOT include "答:" / "A:" prefix in output (extract the value only).
+  - studentAnswerRaw = the COMPLETE final answer with units (e.g. "120公尺", "144cm³", "36cm²，540cm³", "3公尺、4公分").
+  - Do NOT include "答:" / "A:" prefix in output (extract the values only).
   - Do NOT include calculation steps, equations, or process lines.
-  - Example: written "答: 小明走了120公尺" → output "120公尺"
-  - Example: written "A: 144cm³" → output "144cm³"
-  - Example: no 答:, last line "=24" → output "24"
+  - Multi-part: keep the student's actual separator (、, ，, space, newline → space).
 
 - COPYING RULE:
   - Copy the student's written value EXACTLY. Do NOT recalculate or correct.
