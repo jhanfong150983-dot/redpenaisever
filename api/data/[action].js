@@ -2590,6 +2590,85 @@ async function handleManualGrade(req, res) {
   }
 }
 
+async function handleManualGradeRevert(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Invalid JSON body' })
+    return
+  }
+  const assignmentId = typeof body.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const studentId = typeof body.studentId === 'string' ? body.studentId.trim() : ''
+  if (!assignmentId || !studentId) {
+    res.status(400).json({ error: 'Missing required fields' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    // 認 state：必須是手動批改成績的紀錄
+    const { data: state, error: stateErr } = await supabaseDb
+      .from('assignment_student_state')
+      .select('current_submission_id, last_status_reason')
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .maybeSingle()
+    if (stateErr) throw new Error(stateErr.message)
+    if (!state || state.last_status_reason !== '教師手動批改成績') {
+      res.status(400).json({ error: '找不到可撤銷的手動標記紀錄' })
+      return
+    }
+    const stubId = state.current_submission_id
+    if (stubId) {
+      // 防呆：verify 真的是 stub（source=teacher_camera + 空 image_url + NULL grading_result）
+      // 任何一個不符就拒絕刪、避免誤殺真學生作業
+      const { data: sub, error: subErr } = await supabaseDb
+        .from('submissions')
+        .select('id, source, image_url, grading_result')
+        .eq('id', stubId)
+        .eq('owner_id', user.id)
+        .maybeSingle()
+      if (subErr) throw new Error(subErr.message)
+      if (sub) {
+        const isStub =
+          sub.source === 'teacher_camera' &&
+          !sub.image_url &&
+          sub.grading_result === null
+        if (!isStub) {
+          res.status(400).json({ error: 'current_submission 不是手動標記 stub、拒絕刪除' })
+          return
+        }
+        const { error: delErr } = await supabaseDb
+          .from('submissions')
+          .delete()
+          .eq('id', stubId)
+          .eq('owner_id', user.id)
+        if (delErr) throw new Error(delErr.message)
+      }
+    }
+    // 重置 state 回未上傳
+    await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
+      status: 'not_uploaded',
+      current_submission_id: null,
+      last_graded_submission_id: null,
+      graded_once: false,
+      upload_locked: false,
+      last_status_reason: null
+    })
+    res.status(200).json({ success: true, newStatus: 'not_uploaded' })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '撤銷手動標記失敗' })
+  }
+}
+
 async function handleCorrectionManualPass(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -6957,6 +7036,10 @@ const log = document.getElementById('log');
   }
   if (action === 'manual-grade') {
     await handleManualGrade(req, res)
+    return
+  }
+  if (action === 'manual-grade-revert') {
+    await handleManualGradeRevert(req, res)
     return
   }
   if (action === 'correction-manual-pass') {
