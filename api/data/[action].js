@@ -2614,15 +2614,29 @@ async function handleCorrectionManualPass(req, res) {
   const supabaseDb = getSupabaseAdmin()
   try {
     const now = new Date().toISOString()
-    // Resolve all open/disputed correction items for this student
-    const { error: updateError } = await supabaseDb
+    // Capture items being flipped — store original status in accessor_result.manually_passed
+    // so revert can restore each item back to its prior open/disputed state.
+    const { data: itemsToFlip, error: selectError } = await supabaseDb
       .from('correction_question_items')
-      .update({ status: 'resolved', updated_at: now })
+      .select('id, accessor_result, status')
       .eq('owner_id', user.id)
       .eq('assignment_id', assignmentId)
       .eq('student_id', studentId)
       .in('status', ['open', 'disputed'])
-    if (updateError) throw new Error(updateError.message)
+    if (selectError) throw new Error(selectError.message)
+    await Promise.all(
+      (itemsToFlip || []).map((item) => {
+        const accessor =
+          item.accessor_result && typeof item.accessor_result === 'object'
+            ? { ...item.accessor_result }
+            : {}
+        accessor.manually_passed = { from: item.status, at: now }
+        return supabaseDb
+          .from('correction_question_items')
+          .update({ status: 'resolved', updated_at: now, accessor_result: accessor })
+          .eq('id', item.id)
+      })
+    )
     // Mark correction as passed
     await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
       status: 'correction_passed',
@@ -2631,6 +2645,75 @@ async function handleCorrectionManualPass(req, res) {
     res.status(200).json({ success: true, newStatus: 'correction_passed' })
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : '手動通過訂正失敗' })
+  }
+}
+
+async function handleCorrectionManualPassRevert(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Invalid JSON body' })
+    return
+  }
+  const assignmentId = typeof body.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const studentId = typeof body.studentId === 'string' ? body.studentId.trim() : ''
+  if (!assignmentId || !studentId) {
+    res.status(400).json({ error: 'Missing required fields' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const now = new Date().toISOString()
+    // 找出有 manually_passed marker 的 resolved items
+    const { data: resolvedItems, error: selectError } = await supabaseDb
+      .from('correction_question_items')
+      .select('id, accessor_result')
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .eq('status', 'resolved')
+    if (selectError) throw new Error(selectError.message)
+    const itemsToRevert = (resolvedItems || []).filter(
+      (item) =>
+        item.accessor_result &&
+        typeof item.accessor_result === 'object' &&
+        item.accessor_result.manually_passed
+    )
+    if (itemsToRevert.length === 0) {
+      res.status(400).json({ error: '找不到可撤銷的手動通過紀錄' })
+      return
+    }
+    await Promise.all(
+      itemsToRevert.map((item) => {
+        const accessor =
+          item.accessor_result && typeof item.accessor_result === 'object'
+            ? { ...item.accessor_result }
+            : {}
+        const marker = accessor.manually_passed
+        const fromStatus = ['open', 'disputed'].includes(marker?.from) ? marker.from : 'open'
+        delete accessor.manually_passed
+        return supabaseDb
+          .from('correction_question_items')
+          .update({ status: fromStatus, updated_at: now, accessor_result: accessor })
+          .eq('id', item.id)
+      })
+    )
+    // 回到「待訂正」，學生端會看到要重新訂正
+    await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, {
+      status: 'correction_required',
+      last_status_reason: '教師撤銷手動通過'
+    })
+    res.status(200).json({ success: true, newStatus: 'correction_required', revertedCount: itemsToRevert.length })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '撤銷手動通過失敗' })
   }
 }
 
@@ -6878,6 +6961,10 @@ const log = document.getElementById('log');
   }
   if (action === 'correction-manual-pass') {
     await handleCorrectionManualPass(req, res)
+    return
+  }
+  if (action === 'correction-manual-pass-revert') {
+    await handleCorrectionManualPassRevert(req, res)
     return
   }
   if (action === 'report') {
