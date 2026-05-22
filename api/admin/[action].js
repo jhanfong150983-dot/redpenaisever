@@ -3598,16 +3598,20 @@ async function handleQuality(req, res, supabaseAdmin) {
   }
 }
 
-// ── Single-day helper（YYYY-MM-DD、未帶預設今天 UTC）──
+// ── Single-day helper（YYYY-MM-DD、未帶預設今天台灣時間）──
+// ⚠️ 切日界用台灣時區 +08:00、不用 UTC：老師早上 7 點批改、UTC 還在前一天
+//   選 2026-05-22 → 找台灣 5/22 00:00 ~ 23:59 = UTC 5/21 16:00 ~ 5/22 16:00
 function parseDateForDay(dateStr) {
   const dayRe = /^\d{4}-\d{2}-\d{2}$/
+  // today: 用台灣時區算今天的 YYYY-MM-DD
   const now = new Date()
-  const today = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`
+  const twNow = new Date(now.getTime() + 8 * 3600 * 1000)
+  const today = `${twNow.getUTCFullYear()}-${String(twNow.getUTCMonth() + 1).padStart(2, '0')}-${String(twNow.getUTCDate()).padStart(2, '0')}`
   const date = (dateStr && dayRe.test(dateStr)) ? dateStr : today
   return {
     date,
-    fromIso: `${date}T00:00:00.000Z`,
-    toIso: `${date}T23:59:59.999Z`
+    fromIso: `${date}T00:00:00.000+08:00`,
+    toIso: `${date}T23:59:59.999+08:00`
   }
 }
 
