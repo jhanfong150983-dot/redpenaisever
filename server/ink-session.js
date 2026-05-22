@@ -52,6 +52,23 @@ export async function settleInkSession({
     throw new Error('讀取批改會話用量失敗')
   }
 
+  // 2026-05-22: 沒實際打 AI（usageRows 空）→ 不結算、不收平台費
+  // 修「老師進 AI 批改畫面但沒批改、空 session 還是被扣 2 點」bug
+  if (!Array.isArray(usageRows) || usageRows.length === 0) {
+    return {
+      inkSummary: {
+        chargedPoints: 0,
+        balanceBefore: 0,
+        balanceAfter: 0,
+        applied: true,
+        skipped: 'no_usage'
+      },
+      cost: { points: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, baseUsd: 0, baseTwd: 0, baseTwdRounded: 0, platformFee: 0 },
+      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      usageCount: 0
+    }
+  }
+
   const totals = (usageRows ?? []).reduce(
     (acc, row) => {
       acc.inputTokens += Number(row?.input_tokens) || 0
