@@ -46,6 +46,11 @@ function extractSubmissionIdFromPath(path) {
   if (cropMatch && cropMatch[1]) {
     return String(cropMatch[1]).trim()
   }
+  // 學生訂正每題重拍：corrections/<submissionId>/<questionId>.webp（client 端 [action].js:5619 上傳的位置）
+  const correctionMatch = text.match(/^corrections\/(sub_[^/]+)\//i)
+  if (correctionMatch && correctionMatch[1]) {
+    return String(correctionMatch[1]).trim()
+  }
   return ''
 }
 
