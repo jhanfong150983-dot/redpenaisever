@@ -47,7 +47,10 @@ export async function recordTokenUsage({ usageMetadata, routeKey, modelName }) {
       route_key: routeKey || null,
       model_name: modelName || null,
       billing_user_id: ctx.billingUserId || ctx.actorUserId,
-      is_admin_test: Boolean(ctx.isAdmin)
+      is_admin_test: Boolean(ctx.isAdmin),
+      // 2026-05-23: 補上 assignment/submission 給「按作業拆解」分析
+      assignment_id: ctx.assignmentId || null,
+      submission_id: ctx.submissionId || null
     })
   if (error) {
     console.warn(

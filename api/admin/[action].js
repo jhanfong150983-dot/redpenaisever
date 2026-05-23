@@ -3201,10 +3201,11 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     const toIso = new Date(`${toStr}T23:59:59.999${TAIPEI_OFFSET}`).toISOString()
 
     // ── 撈 token 用量（依 billing_user_id 聚合）──
+    // 2026-05-23: SELECT 加 assignment_id / submission_id 給「按作業拆解」用
     const usageQuery = (from, to) => {
       let q = supabaseAdmin
         .from('ink_session_usage')
-        .select('billing_user_id, route_key, model_name, input_tokens, output_tokens, total_tokens, is_admin_test, created_at')
+        .select('billing_user_id, route_key, model_name, input_tokens, output_tokens, total_tokens, is_admin_test, assignment_id, submission_id, created_at')
         .gte('created_at', fromIso)
         .lte('created_at', toIso)
       if (userId) q = q.eq('billing_user_id', userId)
@@ -3326,6 +3327,64 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       .map(([date, stages]) => ({ date, stages }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
+    // ── byAssignment（按作業拆解 top 20）2026-05-23 新增 ──
+    const assignmentMap = {}
+    for (const r of usageRows) {
+      const aid = r.assignment_id
+      if (!aid) continue  // null 跳過（非批改類 AI call）
+      if (!assignmentMap[aid]) {
+        assignmentMap[aid] = {
+          assignment_id: aid,
+          calls: 0, input: 0, output: 0, twd: 0,
+          submission_ids: new Set()
+        }
+      }
+      assignmentMap[aid].calls += 1
+      assignmentMap[aid].input += Number(r.input_tokens) || 0
+      assignmentMap[aid].output += Number(r.output_tokens) || 0
+      assignmentMap[aid].twd += rowCostTwd(r)
+      if (r.submission_id) assignmentMap[aid].submission_ids.add(r.submission_id)
+    }
+    let byAssignment = Object.values(assignmentMap)
+      .map(a => ({
+        assignment_id: a.assignment_id,
+        calls: a.calls,
+        input: a.input,
+        output: a.output,
+        twd: +a.twd.toFixed(2),
+        submission_count: a.submission_ids.size
+      }))
+      .sort((a, b) => b.input + b.output - (a.input + a.output))
+      .slice(0, 20)  // top 20
+
+    // JOIN assignments 拿 title / domain / owner_id
+    if (byAssignment.length > 0) {
+      const aids = byAssignment.map(a => a.assignment_id)
+      const { data: assignRows } = await supabaseAdmin
+        .from('assignments')
+        .select('id, title, domain, owner_id')
+        .in('id', aids)
+      const ownerIds = Array.from(new Set((assignRows || []).map(a => a.owner_id).filter(Boolean)))
+      const ownerNameMap = {}
+      if (ownerIds.length > 0) {
+        const { data: ownerRows } = await supabaseAdmin
+          .from('profiles')
+          .select('id, name, email')
+          .in('id', ownerIds)
+        for (const o of (ownerRows || [])) {
+          ownerNameMap[o.id] = o.name || o.email || ''
+        }
+      }
+      const aMetaMap = {}
+      for (const a of (assignRows || [])) {
+        aMetaMap[a.id] = { title: a.title || '(未命名)', domain: a.domain || '', owner_name: ownerNameMap[a.owner_id] || '' }
+      }
+      byAssignment = byAssignment.map(a => ({
+        ...a,
+        ...(aMetaMap[a.assignment_id] || { title: '(已刪除)', domain: '', owner_name: '' })
+      }))
+    }
+
     // ── 額外統計：admin 測試的用量比例 ──
     const adminCalls = usageRows.filter(r => r.is_admin_test).length
     const realCalls = usageRows.length - adminCalls
@@ -3335,6 +3394,7 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       summary,
       byStage,
       byModel,
+      byAssignment,
       timeSeries,
       teachers: teachers.map(t => ({ id: t.id, name: t.name, email: t.email })),
       adminTestCount: adminCalls,

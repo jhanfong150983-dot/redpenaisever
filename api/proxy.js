@@ -657,7 +657,10 @@ export default async function handler(req, res) {
         actorUserId,
         billingUserId,
         isAdmin,
-        inkSessionId
+        inkSessionId,
+        // 2026-05-23: 帶 assignment/submission 給 recordTokenUsage 寫入 ink_session_usage
+        assignmentId: payload?.assignmentId || undefined,
+        submissionId: payload?.submissionId || undefined
       },
       () =>
         runAiPipeline({
