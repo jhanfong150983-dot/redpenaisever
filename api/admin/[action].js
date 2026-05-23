@@ -3267,6 +3267,18 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       return usd * USD_TO_TWD
     }
 
+    // 2026-05-23: route_key → 類別 mapping
+    // 用途：byCategory 聚合 + byAssignment 拆批改/報告/訂正
+    function routeToCategory(routeKey) {
+      const k = String(routeKey || '')
+      if (k.startsWith('grading.recheck')) return '訂正'
+      if (k.startsWith('grading.')) return '批改'
+      if (k.startsWith('report.')) return '報告'
+      if (k.startsWith('answer_key.')) return '答案卷'
+      if (k.startsWith('perspective.')) return '系統'
+      return '其他'
+    }
+
     // ── Summary ──
     let totalIn = 0, totalOut = 0, totalUsd = 0
     for (const r of usageRows) {
@@ -3327,7 +3339,29 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       .map(([date, stages]) => ({ date, stages }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
-    // ── byAssignment（按作業拆解 top 20）2026-05-23 新增 ──
+    // ── byCategory（每日 × 類別）2026-05-23 新增 ──
+    const categoryMap = {}     // { category: { calls, in, out, twd } }
+    const categoryDailyMap = {} // { date: { category: tokens } }
+    for (const r of usageRows) {
+      const cat = routeToCategory(r.route_key)
+      if (!categoryMap[cat]) categoryMap[cat] = { category: cat, calls: 0, input: 0, output: 0, twd: 0 }
+      categoryMap[cat].calls += 1
+      categoryMap[cat].input += Number(r.input_tokens) || 0
+      categoryMap[cat].output += Number(r.output_tokens) || 0
+      categoryMap[cat].twd += rowCostTwd(r)
+      const taipeiDate = toTaipeiDateStr(new Date(r.created_at))
+      if (!categoryDailyMap[taipeiDate]) categoryDailyMap[taipeiDate] = {}
+      categoryDailyMap[taipeiDate][cat] = (categoryDailyMap[taipeiDate][cat] || 0)
+        + (Number(r.input_tokens) || 0) + (Number(r.output_tokens) || 0)
+    }
+    const byCategory = Object.values(categoryMap)
+      .map(c => ({ ...c, twd: +c.twd.toFixed(2) }))
+      .sort((a, b) => b.input + b.output - (a.input + a.output))
+    const categoryDaily = Object.entries(categoryDailyMap)
+      .map(([date, cats]) => ({ date, categories: cats }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+
+    // ── byAssignment（按作業拆解 top 20，並拆批改/報告/訂正）2026-05-23 強化 ──
     const assignmentMap = {}
     for (const r of usageRows) {
       const aid = r.assignment_id
@@ -3336,13 +3370,21 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
         assignmentMap[aid] = {
           assignment_id: aid,
           calls: 0, input: 0, output: 0, twd: 0,
+          grading_calls: 0, grading_twd: 0,
+          report_calls: 0, report_twd: 0,
+          correction_calls: 0, correction_twd: 0,
           submission_ids: new Set()
         }
       }
+      const tw = rowCostTwd(r)
+      const cat = routeToCategory(r.route_key)
       assignmentMap[aid].calls += 1
       assignmentMap[aid].input += Number(r.input_tokens) || 0
       assignmentMap[aid].output += Number(r.output_tokens) || 0
-      assignmentMap[aid].twd += rowCostTwd(r)
+      assignmentMap[aid].twd += tw
+      if (cat === '批改') { assignmentMap[aid].grading_calls += 1; assignmentMap[aid].grading_twd += tw }
+      else if (cat === '報告') { assignmentMap[aid].report_calls += 1; assignmentMap[aid].report_twd += tw }
+      else if (cat === '訂正') { assignmentMap[aid].correction_calls += 1; assignmentMap[aid].correction_twd += tw }
       if (r.submission_id) assignmentMap[aid].submission_ids.add(r.submission_id)
     }
     let byAssignment = Object.values(assignmentMap)
@@ -3352,6 +3394,12 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
         input: a.input,
         output: a.output,
         twd: +a.twd.toFixed(2),
+        grading_calls: a.grading_calls,
+        grading_twd: +a.grading_twd.toFixed(2),
+        report_calls: a.report_calls,
+        report_twd: +a.report_twd.toFixed(2),
+        correction_calls: a.correction_calls,
+        correction_twd: +a.correction_twd.toFixed(2),
         submission_count: a.submission_ids.size
       }))
       .sort((a, b) => b.input + b.output - (a.input + a.output))
@@ -3394,6 +3442,8 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       summary,
       byStage,
       byModel,
+      byCategory,
+      categoryDaily,
       byAssignment,
       timeSeries,
       teachers: teachers.map(t => ({ id: t.id, name: t.name, email: t.email })),

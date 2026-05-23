@@ -14,6 +14,7 @@ import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
 import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
+import { trackingContext } from '../../server/ink-usage-tracker.js'
 import {
   isValidDsns,
   getJasmineAccessToken,
@@ -1791,13 +1792,27 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
     }
   })
 
-  const recheckResult = await runRecheckPipeline({
-    apiKey,
-    model: STUDENT_CORRECTION_MODEL,
-    correctionImages,
-    correctionItems: itemsWithAnswers,
-    requestId: submission.id
-  })
+  // 2026-05-23: 包 trackingContext 把 token 寫入 ink_session_usage
+  // 學生訂正：actor / billing 都打到 owner_id (老師)、有 assignment + submission 對應
+  const recheckResult = await trackingContext.run(
+    {
+      supabaseAdmin: supabaseDb,
+      actorUserId: submission.owner_id,
+      billingUserId: submission.owner_id,
+      isAdmin: false,
+      inkSessionId: null,
+      assignmentId: submission.assignment_id,
+      submissionId: submission.id
+    },
+    () =>
+      runRecheckPipeline({
+        apiKey,
+        model: STUDENT_CORRECTION_MODEL,
+        correctionImages,
+        correctionItems: itemsWithAnswers,
+        requestId: submission.id
+      })
+  )
 
   const expectedQuestionIds = correctionItems
     .map((item) => String(item?.question_id || '').trim())
@@ -7599,18 +7614,32 @@ ${studentLines || '（無錯誤）'}
     }
     summaryParts.push({ text: prompt })
 
-    const pipelineResult = await Promise.race([
-      runAiPipeline({
-        apiKey,
-        model: summaryModel,
-        contents: [{ role: 'user', parts: summaryParts }],
-        requestedRouteKey: 'report.teacher_summary',
-        routeHint: { source: 'data' }
-      }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('summary_generation_timeout: exceeded 240s')), SUMMARY_TIMEOUT_MS)
-      )
-    ])
+    // 2026-05-23: 包 trackingContext 把報告 token 寫入 ink_session_usage（給後台儀表板）
+    // 注意：報告自己也會直接扣 ink_balance（line 7610-7625）、跟 settlement 流程獨立
+    const pipelineResult = await trackingContext.run(
+      {
+        supabaseAdmin: supabaseDb,
+        actorUserId: user.id,
+        billingUserId: user.id,
+        isAdmin: isAdminUser,
+        inkSessionId: null,
+        assignmentId: assignmentId,
+        submissionId: null
+      },
+      () =>
+        Promise.race([
+          runAiPipeline({
+            apiKey,
+            model: summaryModel,
+            contents: [{ role: 'user', parts: summaryParts }],
+            requestedRouteKey: 'report.teacher_summary',
+            routeHint: { source: 'data' }
+          }),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('summary_generation_timeout: exceeded 240s')), SUMMARY_TIMEOUT_MS)
+          )
+        ])
+    )
 
     const ok = Number(pipelineResult.status) >= 200 && Number(pipelineResult.status) < 300
     if (!ok) {
