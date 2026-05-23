@@ -7298,7 +7298,7 @@ async function handleRefreshAssignmentSummary(req, res) {
     // 同時拉 answer_sheet_image_paths / question_booklet_image_paths 供 3b 取題目圖
     const { data: assignment, error: assignmentErr } = await supabaseDb
       .from('assignments')
-      .select('answer_key, answer_sheet_image_paths, question_booklet_image_paths, answer_sheet_mode')
+      .select('answer_key, answer_sheet_image_paths, question_booklet_image_paths, answer_sheet_mode, answer_key_template_id')
       .eq('id', assignmentId)
       .eq('owner_id', user.id)
       .maybeSingle()
@@ -7329,11 +7329,14 @@ async function handleRefreshAssignmentSummary(req, res) {
     }
 
     // 3b. 嘗試從 Supabase Storage 取得題目圖片（給 AI 看題目內容）
-    // 兩個來源（任一即可）：
+    // 三個來源（任一即可）：
     //   - answer-sheets/${assignmentId}/page-${i}.webp 是 with_questions 模式的卷子
-    //   - question_booklet_image_paths 是 answer_only 模式 user 另外上傳的題本
+    //   - question_booklet_image_paths 欄位（早期 answer_only 模式存欄位的路徑陣列）
+    //   - question-booklets/${assignmentId 或 templateId}/page-N.webp prefix scan（對齊 proxy.js:fetchQuestionBookletImages）
     // answer_only 模式時答題卡沒題目文字、必須讀題本才能讓 AI 看到題目
     const answerSheetImages = []
+    let bookletSource = 'none'
+    let bookletCount = 0
     try {
       // 路徑 A：固定 path 的 answer sheets（適用 with_questions 卷）
       for (let i = 0; i < 10; i++) {
@@ -7357,11 +7360,44 @@ async function handleRefreshAssignmentSummary(req, res) {
         const mimeType = p.toLowerCase().endsWith('.jpg') || p.toLowerCase().endsWith('.jpeg')
           ? 'image/jpeg' : 'image/webp'
         answerSheetImages.push({ mimeType, data: buffer.toString('base64') })
+        bookletCount++
       }
+      if (bookletCount > 0) bookletSource = 'column'
+
+      // 路徑 B fallback：answer_only 模式但 column 沒題本 → 走 prefix scan
+      // 對齊 proxy.js:fetchQuestionBookletImages：先 assignment-level、再 template-level
+      if (bookletCount === 0 && assignment?.answer_sheet_mode === 'answer_only') {
+        const bucket = supabaseDb.storage.from('homework-images')
+        const downloadBookletByPrefix = async (prefix) => {
+          const out = []
+          for (let i = 0; i < 20; i++) {
+            const { data, error } = await bucket.download(`${prefix}/page-${i}.webp`)
+            if (error || !data) break
+            const buf = Buffer.from(await data.arrayBuffer())
+            out.push({ mimeType: 'image/webp', data: buf.toString('base64') })
+          }
+          return out
+        }
+
+        let fallbackImages = await downloadBookletByPrefix(`question-booklets/${assignmentId}`)
+        let fallbackTag = 'prefix-assignment'
+
+        if (fallbackImages.length === 0 && assignment?.answer_key_template_id) {
+          fallbackImages = await downloadBookletByPrefix(`question-booklets/${assignment.answer_key_template_id}`)
+          fallbackTag = 'prefix-template'
+        }
+
+        if (fallbackImages.length > 0) {
+          answerSheetImages.push(...fallbackImages)
+          bookletCount = fallbackImages.length
+          bookletSource = fallbackTag
+        }
+      }
+
       if (answerSheetImages.length > 0) {
-        console.log(`${logPrefix} fetched ${answerSheetImages.length} image(s) for multimodal summary (mode=${assignment?.answer_sheet_mode || 'unknown'}, booklets=${bookletPaths.length})`)
+        console.log(`${logPrefix} fetched ${answerSheetImages.length} image(s) for multimodal summary (mode=${assignment?.answer_sheet_mode || 'unknown'}, booklets=${bookletCount}, bookletSource=${bookletSource})`)
       } else {
-        console.log(`${logPrefix} no images available (no answer-sheets/, no question_booklet_image_paths)`)
+        console.log(`${logPrefix} no images available (no answer-sheets/, no question booklets in column or prefix scans)`)
       }
     } catch (imgFetchErr) {
       console.warn(`${logPrefix} image fetch failed (non-fatal):`, imgFetchErr?.message || imgFetchErr)
