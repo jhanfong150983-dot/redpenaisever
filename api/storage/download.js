@@ -109,6 +109,8 @@ async function handleAnswerSheetDownload(req, res, user, supabaseDb) {
     ? req.query.assignmentId[0] : req.query?.assignmentId
   const pageIndexRaw = Array.isArray(req.query?.pageIndex)
     ? req.query.pageIndex[0] : req.query?.pageIndex
+  const prefixRaw = Array.isArray(req.query?.prefix)
+    ? req.query.prefix[0] : req.query?.prefix
 
   if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
   const pageIndex = pageIndexRaw !== undefined ? parseInt(pageIndexRaw, 10) : 0
@@ -118,8 +120,12 @@ async function handleAnswerSheetDownload(req, res, user, supabaseDb) {
   if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
   if (!own.assignment) { res.status(404).json({ error: 'Assignment not found' }); return }
 
+  // 預設 answer-sheets/...；?prefix=question-booklets 改抓 question-booklets/{assignmentId}/page-N.webp
+  const storagePath = prefixRaw === 'question-booklets'
+    ? `question-booklets/${assignmentId}/page-${pageIndex}.webp`
+    : answerSheetPath(assignmentId, pageIndex)
   const { data, error: downloadError } = await supabaseDb.storage
-    .from('homework-images').download(answerSheetPath(assignmentId, pageIndex))
+    .from('homework-images').download(storagePath)
   if (downloadError || !data) { res.status(404).json({ error: 'Image not found' }); return }
 
   const buffer = Buffer.from(await data.arrayBuffer())
@@ -134,6 +140,8 @@ async function handleTemplateAnswerSheetDownload(req, res, user, supabaseDb) {
     ? req.query.templateId[0] : req.query?.templateId
   const pageIndexRaw = Array.isArray(req.query?.pageIndex)
     ? req.query.pageIndex[0] : req.query?.pageIndex
+  const prefixRaw = Array.isArray(req.query?.prefix)
+    ? req.query.prefix[0] : req.query?.prefix
 
   if (!templateId) { res.status(400).json({ error: 'Missing templateId' }); return }
   const pageIndex = pageIndexRaw !== undefined ? parseInt(pageIndexRaw, 10) : 0
@@ -143,7 +151,10 @@ async function handleTemplateAnswerSheetDownload(req, res, user, supabaseDb) {
   if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
   if (!own.template) { res.status(404).json({ error: 'Template not found' }); return }
 
-  const storagePath = `template-answer-sheets/${templateId}/page-${pageIndex}.webp`
+  // 預設 template-answer-sheets/...；?prefix=question-booklets 改抓 question-booklets/{templateId}/page-N.webp
+  const storagePath = prefixRaw === 'question-booklets'
+    ? `question-booklets/${templateId}/page-${pageIndex}.webp`
+    : `template-answer-sheets/${templateId}/page-${pageIndex}.webp`
   const { data, error: downloadError } = await supabaseDb.storage
     .from('homework-images').download(storagePath)
   if (downloadError || !data) { res.status(404).json({ error: 'Image not found' }); return }
