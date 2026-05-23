@@ -7140,8 +7140,25 @@ async function handleAnnouncementActive(req, res) {
 
 // ─────────────────────────────────────────────────────────
 // handleGetConceptMap
-// GET /api/data/concept-map?grade=X
+// GET /api/data/concept-map?grade=X[&domain=Y]
+//   - grade: 1-12（必填）
+//   - domain: 國語/英語/數學/自然/社會（選填、過濾 subject、避免跨科干擾）
+//     - 未帶 domain 時回所有 grade=X 的概念（向後相容）
+//     - 帶不存在的 domain（例如國語還沒灌進 concept_map）→ 回空陣列
 // ─────────────────────────────────────────────────────────
+function mapDomainToSubjects(domain) {
+  if (!domain || typeof domain !== 'string') return null
+  switch (domain.trim()) {
+    case '國語': return ['chinese']
+    case '英語': case '英文': return ['english']
+    case '數學': return ['math']
+    // 自然涵蓋國小自然 + 國中分科（生/化/地/物）
+    case '自然': return ['science', 'nature_bio', 'nature_chem', 'nature_earth', 'nature_phy']
+    case '社會': return ['social']
+    default: return null
+  }
+}
+
 async function handleGetConceptMap(req, res) {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -7152,18 +7169,27 @@ async function handleGetConceptMap(req, res) {
     res.status(400).json({ error: 'Invalid grade parameter (must be 1–12)' })
     return
   }
+  const domainRaw = Array.isArray(req.query?.domain) ? req.query.domain[0] : req.query?.domain
+  const subjects = mapDomainToSubjects(domainRaw)
+  if (domainRaw && !subjects) {
+    console.warn(`[concept-map] unknown domain="${domainRaw}", returning empty items`)
+    res.status(200).json({ items: [] })
+    return
+  }
   try {
     const supabaseDb = getSupabaseAdmin()
-    const { data, error } = await supabaseDb
+    let query = supabaseDb
       .from('concept_map')
       .select('code, label, description')
       .eq('grade', grade)
-      .order('code', { ascending: true })
+    if (subjects) query = query.in('subject', subjects)
+    const { data, error } = await query.order('code', { ascending: true })
     if (error) {
       console.error('[concept-map] supabase error:', error)
       res.status(500).json({ error: 'DB error' })
       return
     }
+    console.log(`[concept-map] grade=${grade} domain=${domainRaw || '(none)'} subjects=${subjects ? subjects.join(',') : 'all'} items=${data?.length || 0}`)
     res.status(200).json({ items: data || [] })
   } catch (err) {
     console.error('[concept-map] error:', err)
