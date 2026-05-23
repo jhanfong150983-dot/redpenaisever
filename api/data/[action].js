@@ -7806,6 +7806,45 @@ async function handleCorrectionHistory(req, res) {
     ])
   ).filter(Boolean)
 
+  // 補抓 round-0 grading_result.mistakes：cqi 不會在原批改時就建、只在學生被標錯
+  // 後才建。學生第一次訂正就全對的 case 會有 attempts > 0 但 cqi = 0、timeline
+  // 完全空。從 round-0 mistakes 合成 fake cqi (attempt_no=0、resolved) 補回起點 + 訂正紀錄。
+  const cqiAssignmentIds = new Set((itemResult.data || []).map((r) => r.assignment_id))
+  const needSynthesisAssignmentIds = assignmentIds.filter((aid) => !cqiAssignmentIds.has(aid))
+  const synthesizedItems = []
+  if (needSynthesisAssignmentIds.length > 0) {
+    const { data: round0Subs, error: round0Err } = await supabaseDb
+      .from('submissions')
+      .select('assignment_id, grading_result')
+      .eq('owner_id', user.id)
+      .eq('student_id', studentId)
+      .eq('round', 0)
+      .in('assignment_id', needSynthesisAssignmentIds)
+    if (round0Err) { res.status(500).json({ error: round0Err.message }); return }
+    for (const sub of round0Subs || []) {
+      const mistakes = Array.isArray(sub.grading_result?.mistakes) ? sub.grading_result.mistakes : []
+      for (const m of mistakes) {
+        if (!m?.id) continue
+        synthesizedItems.push({
+          assignment_id: sub.assignment_id,
+          attempt_no: 0,
+          question_id: String(m.id),
+          question_text: m.question || null,
+          mistake_reason: m.reason || null,
+          hint_text: null,
+          status: 'resolved',
+          accessor_result: null,
+          dispute_note: null,
+          dispute_rejected_at: null,
+          dispute_rejection_note: null,
+          created_at: null,
+          updated_at: null,
+          __synthesized: true
+        })
+      }
+    }
+  }
+
   let assignmentRows = []
   if (assignmentIds.length > 0) {
     const { data, error } = await supabaseDb
@@ -7848,7 +7887,7 @@ async function handleCorrectionHistory(req, res) {
       wrongQuestionCount: r.wrong_question_count,
       createdAt: r.created_at
     })),
-    questionItems: (itemResult.data || []).map((r) => {
+    questionItems: ([...(itemResult.data || []), ...synthesizedItems]).map((r) => {
       const accessor = r.accessor_result && typeof r.accessor_result === 'object' ? r.accessor_result : null
       return {
         assignmentId: r.assignment_id,
