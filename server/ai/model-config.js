@@ -45,7 +45,11 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.GRADING_PHASE_A_READ]: MODEL_FLASH,   // 同 read
   [AI_ROUTE_KEYS.GRADING_RECHECK]: MODEL_PRO,          // 學生訂正重批（含 OCR、保留 PRO）
   [AI_ROUTE_KEYS.ANSWER_KEY_LOCATE]: MODEL_PRO,        // 答案卷 bbox 定位（同 classify 性質）
-  [AI_ROUTE_KEYS.PERSPECTIVE_DETECT_CORNERS]: MODEL_PRO, // 紙張四角偵測
+  // 2026-05-23: 紙張四角偵測切到 FLASH
+  // 原因：(1) 老師端 AssignmentImport 已 skip、只剩學生拍照觸發
+  //       (2) 找白色矩形邊緣是相對簡單視覺任務、FLASH 夠用
+  //       (3) PRO 對學生上傳量太貴、不划算
+  [AI_ROUTE_KEYS.PERSPECTIVE_DETECT_CORNERS]: MODEL_FLASH,
 
   // ──────────────────────────────────────────────────
   // ✅ 純文字 / 邏輯 / 報表 — 用 FLASH
