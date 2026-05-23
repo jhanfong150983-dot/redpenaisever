@@ -7779,7 +7779,7 @@ async function handleCorrectionHistory(req, res) {
     supabaseDb
       .from('correction_question_items')
       .select(
-        'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, status, accessor_result, created_at, updated_at'
+        'assignment_id, attempt_no, question_id, question_text, mistake_reason, hint_text, status, accessor_result, dispute_note, dispute_rejected_at, dispute_rejection_note, created_at, updated_at'
       )
       .eq('owner_id', user.id)
       .eq('student_id', studentId)
@@ -7862,6 +7862,9 @@ async function handleCorrectionHistory(req, res) {
         sourceSubmissionId: typeof accessor?.source_submission_id === 'string' ? accessor.source_submission_id : null,
         sourceImageUrl: typeof accessor?.source_image_url === 'string' ? accessor.source_image_url : null,
         answerBbox: accessor?.answer_bbox ?? null,
+        disputeNote: r.dispute_note,
+        disputeRejectedAt: r.dispute_rejected_at,
+        disputeRejectionNote: r.dispute_rejection_note,
         createdAt: r.created_at,
         updatedAt: r.updated_at
       }
