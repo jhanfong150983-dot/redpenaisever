@@ -468,14 +468,31 @@ const FIXED_CROP_W = 0.55  // 佔圖寬的 55%
 const FIXED_CROP_H = 0.20  // 佔圖高的 20%
 // word_problem 答案常寫在題框右下、AI classify bbox 易裁切到 → 往右下擴 10%（2026-05-24）
 const WORD_PROBLEM_INFLATE_RATIO = 0.10
+// multi_fill 答案常多代號、學生筆跡向左延伸出 cell、AI bbox 漏掉最前面字 → 左+0.03 右+0.01（2026-05-25）
+// 驗證：社會期中考 29 份 cohort、9 個被裁學生用此規則全部救回、19 個正常學生 cell 間 gap 0.20+ 不會 overlap
+const MULTI_FILL_PAD_LEFT = 0.03
+const MULTI_FILL_PAD_RIGHT = 0.01
 function inflateBboxForType(bbox, questionType) {
-  if (!bbox || questionType !== 'word_problem') return bbox
-  return {
-    x: bbox.x,
-    y: bbox.y,
-    w: Math.min(1 - bbox.x, bbox.w * (1 + WORD_PROBLEM_INFLATE_RATIO)),
-    h: Math.min(1 - bbox.y, bbox.h * (1 + WORD_PROBLEM_INFLATE_RATIO))
+  if (!bbox) return bbox
+  if (questionType === 'word_problem') {
+    return {
+      x: bbox.x,
+      y: bbox.y,
+      w: Math.min(1 - bbox.x, bbox.w * (1 + WORD_PROBLEM_INFLATE_RATIO)),
+      h: Math.min(1 - bbox.y, bbox.h * (1 + WORD_PROBLEM_INFLATE_RATIO))
+    }
   }
+  if (questionType === 'multi_fill') {
+    const newX = Math.max(0, bbox.x - MULTI_FILL_PAD_LEFT)
+    const newRight = Math.min(1, bbox.x + bbox.w + MULTI_FILL_PAD_RIGHT)
+    return {
+      x: newX,
+      y: bbox.y,
+      w: newRight - newX,
+      h: bbox.h
+    }
+  }
+  return bbox
 }
 
 export async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
