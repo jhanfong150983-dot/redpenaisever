@@ -472,6 +472,10 @@ const WORD_PROBLEM_INFLATE_RATIO = 0.10
 // 驗證：社會期中考 29 份 cohort、9 個被裁學生用此規則全部救回、19 個正常學生 cell 間 gap 0.20+ 不會 overlap
 const MULTI_FILL_PAD_LEFT = 0.03
 const MULTI_FILL_PAD_RIGHT = 0.01
+// fill_blank 失敗模式：右側 bbox 太緊、切到答案最後一位（如 "62." 漏掉 ".13"） → 左+0.005 右+0.03（2026-05-25）
+// 驗證：數練 p49-50 21 份、座 5/21 outlier 救回、其他 19 個正常 case 無破壞
+const FILL_BLANK_PAD_LEFT = 0.005
+const FILL_BLANK_PAD_RIGHT = 0.03
 function inflateBboxForType(bbox, questionType) {
   if (!bbox) return bbox
   if (questionType === 'word_problem') {
@@ -485,6 +489,16 @@ function inflateBboxForType(bbox, questionType) {
   if (questionType === 'multi_fill') {
     const newX = Math.max(0, bbox.x - MULTI_FILL_PAD_LEFT)
     const newRight = Math.min(1, bbox.x + bbox.w + MULTI_FILL_PAD_RIGHT)
+    return {
+      x: newX,
+      y: bbox.y,
+      w: newRight - newX,
+      h: bbox.h
+    }
+  }
+  if (questionType === 'fill_blank') {
+    const newX = Math.max(0, bbox.x - FILL_BLANK_PAD_LEFT)
+    const newRight = Math.min(1, bbox.x + bbox.w + FILL_BLANK_PAD_RIGHT)
     return {
       x: newX,
       y: bbox.y,
