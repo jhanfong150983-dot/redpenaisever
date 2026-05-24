@@ -7633,7 +7633,9 @@ ${studentLines || '（無錯誤）'}
             model: summaryModel,
             contents: [{ role: 'user', parts: summaryParts }],
             requestedRouteKey: 'report.teacher_summary',
-            routeHint: { source: 'data' }
+            routeHint: { source: 'data' },
+            // 強制嚴格 JSON 輸出、避免 Gemini Flash 對複雜 nested 結構吐單引號 / unquoted key
+            payload: { generationConfig: { responseMimeType: 'application/json', temperature: 0.2 } }
           }),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error('summary_generation_timeout: exceeded 240s')), SUMMARY_TIMEOUT_MS)
@@ -7690,7 +7692,23 @@ ${studentLines || '（無錯誤）'}
 
     const rawText = pipelineResult.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
     const cleanText = rawText.replace(/```json|```/g, '').trim()
-    const parsed = JSON.parse(cleanText)
+    let parsed
+    try {
+      parsed = JSON.parse(cleanText)
+    } catch (parseErr) {
+      // Gemini 偶發吐非標準 JSON (單引號 / unquoted key / trailing comma)
+      // 記錄 raw text 片段、寫 failed 狀態、不要 throw 整個 endpoint
+      console.error(`${logPrefix} JSON parse failed: ${parseErr.message}`)
+      console.error(`${logPrefix} raw text sample (first 800 chars):`, cleanText.slice(0, 800))
+      await supabaseDb.from('assignment_summaries').upsert(
+        { owner_id: user.id, assignment_id: assignmentId, status: 'failed',
+          error_message: `AI 回傳格式無法解析: ${parseErr.message}`,
+          updated_at: new Date().toISOString() },
+        { onConflict: 'owner_id,assignment_id' }
+      )
+      res.status(502).json({ success: false, error: 'AI 回傳格式無法解析、請重試一次' })
+      return
+    }
 
     // 6. 寫入 assignment_summaries
     const { error: readyUpsertErr } = await supabaseDb
