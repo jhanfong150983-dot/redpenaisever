@@ -466,6 +466,18 @@ function extractInlineImages(contents) {
 // useActualBbox=true：直接使用 bbox 的實際範圍（map_symbol / grid_geometry / connect_dots 等大面積區域用）
 const FIXED_CROP_W = 0.55  // 佔圖寬的 55%
 const FIXED_CROP_H = 0.20  // 佔圖高的 20%
+// word_problem 答案常寫在題框右下、AI classify bbox 易裁切到 → 往右下擴 10%（2026-05-24）
+const WORD_PROBLEM_INFLATE_RATIO = 0.10
+function inflateBboxForType(bbox, questionType) {
+  if (!bbox || questionType !== 'word_problem') return bbox
+  return {
+    x: bbox.x,
+    y: bbox.y,
+    w: Math.min(1 - bbox.x, bbox.w * (1 + WORD_PROBLEM_INFLATE_RATIO)),
+    h: Math.min(1 - bbox.y, bbox.h * (1 + WORD_PROBLEM_INFLATE_RATIO))
+  }
+}
+
 export async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
   if (!bbox || !imageBase64) return null
   try {
@@ -6306,7 +6318,7 @@ export async function runStagedGradingPhaseA({
     const inlineImage = inlineImages[0]
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
-        const bboxToUse = q.answerBbox
+        const bboxToUse = inflateBboxForType(q.answerBbox, q.questionType)
         // fill_blank 子題（括號型）用小 padding，避免裁切到上下相鄰的括號
         const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
         const cropPad = isParenSubQ ? +(0.01 / totalPages).toFixed(4)
@@ -7826,7 +7838,7 @@ export async function runStagedGradingPhaseAArbiter({
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
-          aq.answerBbox,
+          inflateBboxForType(aq.answerBbox, aq.questionType),
           true,
           cropPad
         )
@@ -8237,7 +8249,7 @@ export async function runStagedGradingPhaseB({
         const cropTargets = calcQuestions.slice(0, MAX_CALC_CROPS)
         const cropResults = await Promise.all(
           cropTargets.map(async (q) => {
-            const cropData = await cropInlineImageByBbox(img.data, img.mimeType, q.answerBbox, true, phaseBPad)
+            const cropData = await cropInlineImageByBbox(img.data, img.mimeType, inflateBboxForType(q.answerBbox, q.questionType), true, phaseBPad)
             return { questionId: q.questionId, cropData }
           })
         )
