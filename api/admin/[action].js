@@ -3777,7 +3777,7 @@ async function qualitySubmissionList(db, assignmentId) {
 
   // run counts + 最新一次批改活動時間 per submission
   const countsBySid = new Map()
-  const lastActivityBySid = new Map()
+  const lastActivityBySid = new Map()  // sid → { ts, phase }
   for (const r of countsRes.data || []) {
     const sid = r.submission_id
     if (!countsBySid.has(sid)) countsBySid.set(sid, { runCount: 0, phaseACount: 0, phaseBCount: 0 })
@@ -3786,8 +3786,9 @@ async function qualitySubmissionList(db, assignmentId) {
     if (r.phase === 'phase_a') c.phaseACount += 1
     else if (r.phase === 'phase_b') c.phaseBCount += 1
     const ts = r.created_at
-    if (ts && (!lastActivityBySid.has(sid) || ts > lastActivityBySid.get(sid))) {
-      lastActivityBySid.set(sid, ts)
+    const prev = lastActivityBySid.get(sid)
+    if (ts && (!prev || ts > prev.ts)) {
+      lastActivityBySid.set(sid, { ts, phase: r.phase || null })
     }
   }
 
@@ -3824,7 +3825,8 @@ async function qualitySubmissionList(db, assignmentId) {
       totalQuestions,
       needsReviewCount: log?.needs_review_count || 0,
       gradedAt: s.graded_at || null,
-      lastActivityAt: lastActivityBySid.get(s.id) || null,
+      lastActivityAt: lastActivityBySid.get(s.id)?.ts || null,
+      lastActivityPhase: lastActivityBySid.get(s.id)?.phase || null,
       runCount: counts.runCount,
       phaseACount: counts.phaseACount,
       phaseBCount: counts.phaseBCount
