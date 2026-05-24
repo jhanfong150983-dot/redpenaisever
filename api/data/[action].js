@@ -7634,8 +7634,50 @@ ${studentLines || '（無錯誤）'}
             contents: [{ role: 'user', parts: summaryParts }],
             requestedRouteKey: 'report.teacher_summary',
             routeHint: { source: 'data' },
-            // 強制嚴格 JSON 輸出、避免 Gemini Flash 對複雜 nested 結構吐單引號 / unquoted key
-            payload: { generationConfig: { responseMimeType: 'application/json', temperature: 0.2 } }
+            // 強制 structured output：responseMimeType 單獨用不夠（Flash 仍會漏 `}`），
+            // 必須搭配 responseSchema 才會走嚴格 schema 路徑、產出 100% valid JSON。
+            payload: {
+              generationConfig: {
+                responseMimeType: 'application/json',
+                temperature: 0.2,
+                responseSchema: {
+                  type: 'OBJECT',
+                  properties: {
+                    class_summary: { type: 'STRING' },
+                    class_suggestion: { type: 'STRING', nullable: true },
+                    error_groups: {
+                      type: 'ARRAY',
+                      items: {
+                        type: 'OBJECT',
+                        properties: {
+                          question_id: { type: 'STRING' },
+                          error_pattern: { type: 'STRING' },
+                          student_names: { type: 'ARRAY', items: { type: 'STRING' } },
+                          count: { type: 'INTEGER' },
+                          suggestion: { type: 'STRING' }
+                        },
+                        required: ['question_id', 'error_pattern', 'student_names', 'count']
+                      }
+                    },
+                    minority_summary: { type: 'STRING', nullable: true },
+                    minority_suggestion: { type: 'STRING', nullable: true },
+                    student_summaries: {
+                      type: 'ARRAY',
+                      items: {
+                        type: 'OBJECT',
+                        properties: {
+                          student_id: { type: 'STRING' },
+                          student_name: { type: 'STRING' },
+                          summary: { type: 'STRING' }
+                        },
+                        required: ['student_id', 'student_name', 'summary']
+                      }
+                    }
+                  },
+                  required: ['class_summary', 'error_groups', 'student_summaries']
+                }
+              }
+            }
           }),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error('summary_generation_timeout: exceeded 240s')), SUMMARY_TIMEOUT_MS)
