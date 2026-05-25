@@ -5474,6 +5474,11 @@ async function handleStudentSubmission(req, res) {
   let studentContextRef = null
   let assignmentIdRef = null
 
+  // 2026-05-25: 4 個 403 path 都加診斷 log，Vercel 上下次 403 直接看出哪條 + 為什麼
+  const authShort = String(user?.id || '').slice(0, 8)
+  const emailShort = String(user?.email || '').replace(/(?<=^.{3}).+?(?=@)/, '***')
+  const submitDbgPrefix = `[STUDENT-SUBMIT-DBG] auth=${authShort} email=${emailShort} assignmentId=${assignmentId} classroomKey=${classroomKey || 'none'}`
+
   try {
     const studentContexts = await resolveStudentContextsByAuthUser(
       supabaseDb,
@@ -5481,6 +5486,7 @@ async function handleStudentSubmission(req, res) {
       user.email
     )
     if (!studentContexts.length) {
+      console.warn(`${submitDbgPrefix} 403 reason=not_linked (resolveStudentContextsByAuthUser returned 0 rows; both auth_user_id and email lookups empty)`)
       res.status(403).json({ error: 'Student account is not linked' })
       return
     }
@@ -5489,6 +5495,8 @@ async function handleStudentSubmission(req, res) {
       ? studentContexts.find((context) => buildStudentClassroomKey(context) === classroomKey)
       : null
     if (classroomKey && !selectedContextFromKey) {
+      const candidateKeys = studentContexts.map((c) => buildStudentClassroomKey(c))
+      console.warn(`${submitDbgPrefix} 403 reason=invalid_classroom_context contextCount=${studentContexts.length} candidateKeys=${JSON.stringify(candidateKeys)}`)
       res.status(403).json({ error: 'Invalid classroom context' })
       return
     }
@@ -5503,6 +5511,7 @@ async function handleStudentSubmission(req, res) {
 
     if (assignmentError) throw new Error(assignmentError.message)
     if (!assignment) {
+      console.warn(`${submitDbgPrefix} 404 reason=assignment_not_found ownerIds=${JSON.stringify(ownerIds)}`)
       res.status(404).json({ error: 'Assignment not found' })
       return
     }
@@ -5518,6 +5527,8 @@ async function handleStudentSubmission(req, res) {
     })
 
     if (!studentContext) {
+      const contextSummary = studentContexts.map((c) => ({ classroomId: c.classroomId, ownerId: c.ownerId.slice(0, 8) }))
+      console.warn(`${submitDbgPrefix} 403 reason=forbidden_assignment_access assignment.classroomId=${assignment.classroom_id} assignment.ownerId=${String(assignment.owner_id).slice(0, 8)} hasClassroomKey=${!!classroomKey} contexts=${JSON.stringify(contextSummary)}`)
       res.status(403).json({ error: 'Forbidden assignment access' })
       return
     }
@@ -5525,6 +5536,7 @@ async function handleStudentSubmission(req, res) {
     const ownerId = studentContext.ownerId
     const preferences = await getTeacherPreferences(supabaseDb, ownerId)
     if (!preferences.student_portal_enabled) {
+      console.warn(`${submitDbgPrefix} 403 reason=portal_disabled ownerId=${ownerId.slice(0, 8)}`)
       res.status(403).json({ error: 'Student portal is disabled by teacher' })
       return
     }
