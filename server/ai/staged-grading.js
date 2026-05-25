@@ -475,48 +475,72 @@ function extractInlineImages(contents) {
 // useActualBbox=true：直接使用 bbox 的實際範圍（map_symbol / grid_geometry / connect_dots 等大面積區域用）
 const FIXED_CROP_W = 0.55  // 佔圖寬的 55%
 const FIXED_CROP_H = 0.20  // 佔圖高的 20%
-// word_problem 答案常寫在題框右下、AI classify bbox 易裁切到 → 往右下擴 10%（2026-05-24）
-const WORD_PROBLEM_INFLATE_RATIO = 0.10
-// multi_fill 答案常多代號、學生筆跡向左延伸出 cell、AI bbox 漏掉最前面字 → 左+0.03 右+0.01（2026-05-25）
-// 驗證：社會期中考 29 份 cohort、9 個被裁學生用此規則全部救回、19 個正常學生 cell 間 gap 0.20+ 不會 overlap
-const MULTI_FILL_PAD_LEFT = 0.03
-const MULTI_FILL_PAD_RIGHT = 0.01
-// fill_blank wide bbox（2026-05-26）：classify 已產整題幹 + 全部空格的 wide bbox（~0.4 頁寬）、
-// 不再需要為了補單位字而右邊多 pad 0.03。改成對稱 0.005 純安全邊距（防實拍透視造成切邊）。
-// 舊邏輯（左 0.005 / 右 0.03）保留為註解供回溯：是為了 tight bbox 補單位字救援；wide bbox 已內含單位、不再需要。
-const FILL_BLANK_PAD_LEFT = 0.005
-const FILL_BLANK_PAD_RIGHT = 0.005
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-05-26: 後處理層 type-aware padding
+// AI 回 tight bbox（無 padding）、code 在 crop 前統一加 deterministic padding
+// 原因：AI 加 padding 跨題不一致、累積 overlap、最末題易爆紙外（U5 cohort 驗證）
+// 改 prompt 拔 AI padding 後、必要的安全邊距由本表加、可調可關
+// ─────────────────────────────────────────────────────────────────────────────
+const DEFAULT_TYPE_PAD = { padX: 0.005, padY: 0.005 }
+const TYPE_PAD = {
+  // tight_answer 群組：緊框印刷標記、邊距小
+  single_choice:  { padX: 0.005, padY: 0.005 },
+  multi_choice:   { padX: 0.005, padY: 0.005 },
+  true_false:     { padX: 0.005, padY: 0.005 },
+  fill_variants:  { padX: 0.005, padY: 0.005 },
+  // multi_fill 救援：左不對稱補多（社會期中考 29 份 cohort 驗證、9 個 outlier 救回）
+  multi_fill:     { padLeft: 0.03, padRight: 0.01, padY: 0.005 },
+  // fill_blank wide bbox：對稱小 padding（已包整題幹、不需太多）
+  fill_blank:     { padX: 0.005, padY: 0.005 },
+  // table_cell：上下含格線、稍多 y padding（拍照透視補償）
+  table_cell:     { padX: 0.005, padY: 0.010 },
+  // matching / answer_with_context：整列範圍
+  matching:           { padX: 0.01, padY: 0.01 },
+  circle_select_one:  { padX: 0.01, padY: 0.005 },
+  circle_select_many: { padX: 0.01, padY: 0.005 },
+  single_check:       { padX: 0.01, padY: 0.005 },
+  multi_check:        { padX: 0.01, padY: 0.005 },
+  mark_in_text:       { padX: 0.01, padY: 0.005 },
+  // large_visual_area：題幹 + 工作區、學生筆跡可能延伸
+  word_problem:       { padX: 0.01, padY: 0.01 },
+  calculation:        { padX: 0.01, padY: 0.01 },
+  short_answer:       { padX: 0.01, padY: 0.01 },
+  ordering:           { padX: 0.01, padY: 0.01 },
+  map_symbol:         { padX: 0.01, padY: 0.01 },
+  grid_geometry:      { padX: 0.01, padY: 0.01 },
+  connect_dots:       { padX: 0.01, padY: 0.01 },
+  diagram_draw:       { padX: 0.01, padY: 0.01 },
+  diagram_color:      { padX: 0.01, padY: 0.01 },
+  // compound：兩段組合 + 學生筆跡
+  compound_circle_with_explain:   { padX: 0.01, padY: 0.01 },
+  compound_check_with_explain:    { padX: 0.01, padY: 0.01 },
+  compound_writein_with_explain:  { padX: 0.01, padY: 0.01 },
+  compound_judge_with_correction: { padX: 0.01, padY: 0.01 },
+  compound_judge_with_explain:    { padX: 0.01, padY: 0.01 },
+  multi_check_other:              { padX: 0.01, padY: 0.01 },
+  compound_chain_table:           { padX: 0.01, padY: 0.01 },
+  // map_fill：full image、不加 padding
+  map_fill: { padX: 0, padY: 0 }
+}
+
 function inflateBboxForType(bbox, questionType) {
   if (!bbox) return bbox
-  if (questionType === 'word_problem') {
-    return {
-      x: bbox.x,
-      y: bbox.y,
-      w: Math.min(1 - bbox.x, bbox.w * (1 + WORD_PROBLEM_INFLATE_RATIO)),
-      h: Math.min(1 - bbox.y, bbox.h * (1 + WORD_PROBLEM_INFLATE_RATIO))
-    }
+  const pad = TYPE_PAD[questionType] || DEFAULT_TYPE_PAD
+  // padX 可用對稱 (padX) 或不對稱 (padLeft / padRight)
+  const padLeft = (typeof pad.padLeft === 'number') ? pad.padLeft : pad.padX
+  const padRight = (typeof pad.padRight === 'number') ? pad.padRight : pad.padX
+  // clip 到 [0, 1] 防爆圖
+  const newX = Math.max(0, bbox.x - padLeft)
+  const newRight = Math.min(1, bbox.x + bbox.w + padRight)
+  const newY = Math.max(0, bbox.y - pad.padY)
+  const newBottom = Math.min(1, bbox.y + bbox.h + pad.padY)
+  return {
+    x: newX,
+    y: newY,
+    w: newRight - newX,
+    h: newBottom - newY
   }
-  if (questionType === 'multi_fill') {
-    const newX = Math.max(0, bbox.x - MULTI_FILL_PAD_LEFT)
-    const newRight = Math.min(1, bbox.x + bbox.w + MULTI_FILL_PAD_RIGHT)
-    return {
-      x: newX,
-      y: bbox.y,
-      w: newRight - newX,
-      h: bbox.h
-    }
-  }
-  if (questionType === 'fill_blank') {
-    const newX = Math.max(0, bbox.x - FILL_BLANK_PAD_LEFT)
-    const newRight = Math.min(1, bbox.x + bbox.w + FILL_BLANK_PAD_RIGHT)
-    return {
-      x: newX,
-      y: bbox.y,
-      w: newRight - newX,
-      h: bbox.h
-    }
-  }
-  return bbox
 }
 
 export async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
@@ -2342,7 +2366,9 @@ function normalizeLocateResult(parsed, questionIds) {
   return { locatedQuestions }
 }
 
-// Classify type rules v4.1: 每條規則包含「答題區視覺形式」+「bbox 公式」+「禁止」
+// Classify type rules v4.2 (2026-05-26): bbox 緊貼實際邊界、不加 padding
+// AI 回 tight bbox（無 ±0.005 / ±0.01 padding）、所有邊距由後處理層 inflateBboxForType 統一加
+// 拔 padding 原因：AI 加 padding 跨題不一致、累積 overlap 把最末題擠出紙外（U5 cohort 多案例驗證）
 const CLASSIFY_TYPE_RULES = {
   fill_blank: `▸ fill_blank（填空題、單一規則、不分視覺變體）
 
@@ -2361,11 +2387,12 @@ const CLASSIFY_TYPE_RULES = {
     · 同一題可能有 1 個空格（單空）或 N 個空格（合題、parts）
     · 即使學生未填、bbox 仍依「該題印刷題幹範圍」決定
 
-  wide bbox 公式（all fill_blank 共用）:
-    bbox.x      = 該題題號（如「1.」「2.」「(1)」）印刷左緣 - 0.005
-    bbox.x + w  = 該題最末字（含單位、句末標點）印刷右緣 + 0.005
-    bbox.y      = 題幹第一行頂部 - 0.005
-    bbox.y + h  = 題幹最後一行底部 + 0.005
+  wide bbox 公式（all fill_blank 共用、緊貼實際邊界、不加 padding）:
+    bbox.x      = 該題題號（如「1.」「2.」「(1)」）印刷左緣
+    bbox.x + w  = 該題最末字（含單位、句末標點）印刷右緣
+    bbox.y      = 題幹第一行頂部
+    bbox.y + h  = 題幹最後一行底部
+  ⚠️ 不要自己加 ±0.005 padding、後處理層會統一加。AI 跨題加 padding 不一致、會累積 overlap。
 
   尺寸常識:
     · bbox.w 通常 ~0.4 頁寬（單欄佈局）；雙欄佈局單題寬 ~0.42
@@ -2415,22 +2442,21 @@ const CLASSIFY_TYPE_RULES = {
       但學生在上面/裡面寫**多個代號**（如「A,B」「A、C」「2,4」「甲乙」）
     · 學生筆跡常**橫向延伸超出印刷標記**
 
-  bbox 公式（必須涵蓋印刷標記 + 學生筆跡，取較寬者）:
-    bbox.x      = min(印刷標記左端, 學生筆跡最左端) - 3-5%
-    bbox.x + w  = max(印刷標記右端, 學生筆跡最右端) + 3-5%
-    bbox.y      = 該行頂部 - 0.005
-    bbox.y + h  = 該行底部 + 0.005
+  bbox 公式（緊貼印刷標記 + 學生筆跡、不加 padding）:
+    bbox.x      = min(印刷標記左端, 學生筆跡最左端)
+    bbox.x + w  = max(印刷標記右端, 學生筆跡最右端)
+    bbox.y      = 該行頂部
+    bbox.y + h  = 該行底部
   ⚠️ 多答案在底線/括號時，學生筆跡可能比印刷標記寬 2-3 倍 — bbox 必須完整涵蓋
+  ⚠️ 不要自己加 ±0.005 / ±3-5% padding、後處理層會統一加
 
   🆕 「冒號後接空白」格式專用 bbox 公式（無印刷錨點，必須**逐題**看實際墨跡）:
-    bbox.x      = 冒號右緣 - 0.005（給視覺判定誤差 + 學生筆跡可能越過冒號的 slack；含部分冒號 OK）
-    bbox.x + w  = 學生筆跡最右端 + 0.01
-    bbox.y      = 學生實際手寫筆劃的**最高點** - 0.005（可能在印刷字 baseline 之上的撇捺）
-    bbox.y + h  = 學生實際手寫筆劃的**最低點** + 0.005（含 descenders、跨行延伸）
-    ⚠️ 此格式 h 通常 0.04-0.06（含上下緩衝），**不要被印刷字高度（~0.02）誤導**
+    bbox.x      = 冒號右緣
+    bbox.x + w  = 學生筆跡最右端
+    bbox.y      = 學生實際手寫筆劃的**最高點**（可能在印刷字 baseline 之上的撇捺）
+    bbox.y + h  = 學生實際手寫筆劃的**最低點**（含 descenders、跨行延伸）
+    ⚠️ 此格式 h 通常 0.04-0.06，**不要被印刷字高度（~0.02）誤導**
     ⚠️ 此格式空格沒寫的題目，bbox.x/w 仍依冒號位置給；y/h 取該行的合理估計（不複製鄰題的 y/h）
-    💡 為什麼 -0.005 不是 +0.005：實拍冒號位置視覺判定有 ±0.005 誤差、學生「回/指/隱」這類起筆橫線常微微越過冒號。
-       bbox 含一點冒號（無妨）比切到字頭（read 全錯）保險。
 
   🚨 single_choice 結構性陷阱（最常見的框錯模式、必看）:
     題卷常見排版：
@@ -2463,21 +2489,18 @@ const CLASSIFY_TYPE_RULES = {
   table_cell: `▸ table_cell
   答題區視覺形式: 整張表格（多列 × 多欄、清晰格線）
 
-  bbox 公式（依 spec.tableMeta 動態解讀、N=totalRows、M=totalCols）:
-    bbox.x      = 表格最左外緣格線 - 0.005
-    bbox.x + w  = 表格最右外緣格線 + 0.005
-    bbox.y      = row 1（最上列）外緣格線 - 0.010   ← 包含表頭
-    bbox.y + h  = row N（最下列）外緣格線 + 0.020   ← 留 padding 給拍照透視
+  bbox 公式（緊貼格線、不加 padding；依 spec.tableMeta 動態解讀、N=totalRows、M=totalCols）:
+    bbox.x      = 表格最左外緣格線
+    bbox.x + w  = 表格最右外緣格線
+    bbox.y      = row 1（最上列）外緣格線   ← 包含表頭
+    bbox.y + h  = row N（最下列）外緣格線
   bbox.h ≥ N × 0.025
 
   🚨🚨🚨 完整覆蓋鐵則:
     · bbox **必須**包含全部 N 列：上自 row 1「rowHeaders[0]」、下至 row N「rowHeaders[N-1]」
     · bbox **必須**包含全部 M 欄：左自 col 1、右至 col M
     · 學生答案通常在 row N「rowHeaders[N-1]」、**最容易被切到** — 特別確認其底邊完全在 bbox 內
-
-  🚨 拍照透視補償:
-    · 學生用手機拍紙、紙張可能略傾斜、表格在影像中不一定是完美水平矩形
-    · 寧可底部多預留 0.02-0.04 padding、也不要切掉答案列的底邊
+  ⚠️ 不要自己加 padding（含拍照透視預留）、後處理層會統一加
 
   SELF-CHECK（output 前必過）:
     ① bbox 內可數出 N 個完整橫向列?
@@ -2491,45 +2514,49 @@ const CLASSIFY_TYPE_RULES = {
 
   matching: `▸ matching
   答題區視覺形式: 連連看（左欄項目 + 右欄選項 + 學生連線）
-  bbox 公式:
-    bbox.x      = 左欄最左項目 - 0.01
-    bbox.x + w  = 右欄最右選項 + 0.01
-    bbox.y      = 第 1 個項目上邊 - 0.01
-    bbox.y + h  = 最後 1 個項目下邊 + 0.01
+  bbox 公式（緊貼項目邊界、不加 padding）:
+    bbox.x      = 左欄最左項目
+    bbox.x + w  = 右欄最右選項
+    bbox.y      = 第 1 個項目上邊
+    bbox.y + h  = 最後 1 個項目下邊
   同 bboxGroupId 共用一 bbox；echo bboxGroupId from spec
-  🚨 嚴禁: 只框單一連線；不可漏掉左欄或右欄`,
+  🚨 嚴禁: 只框單一連線；不可漏掉左欄或右欄
+  ⚠️ 不要自己加 ±0.01 padding、後處理層會統一加`,
 
   answer_with_context: `▸ circle_select_one / circle_select_many / single_check / multi_check / mark_in_text
   答題區視覺形式:
     · circle_select_*: 整列預印選項括號「(同意／不同意)」+ 學生圈選
     · single/multi_check: 整列方框 □ + 對應選項文字 + 學生勾選
     · mark_in_text: 整段印刷文章 + 學生圈詞/標記
-  bbox 公式:
-    bbox.x      = 第 1 個選項/方框/文章左邊 - 0.01
-    bbox.x + w  = 最後選項/方框/文章右邊 + 0.01
-    bbox.y      = 該列頂部 - 0.005
-    bbox.y + h  = 該列底部 + 學生筆跡延伸 + 0.005
+  bbox 公式（緊貼選項邊界、不加 padding）:
+    bbox.x      = 第 1 個選項/方框/文章左邊
+    bbox.x + w  = 最後選項/方框/文章右邊
+    bbox.y      = 該列頂部
+    bbox.y + h  = 該列底部（含學生筆跡延伸）
   · circle_select_*: 額外輸出 bracketBbox（緊框「(option1／option2…)」）
-  🚨 嚴禁: 只框被選中的選項；read 階段需看全列才能判斷學生選了哪個`,
+  🚨 嚴禁: 只框被選中的選項；read 階段需看全列才能判斷學生選了哪個
+  ⚠️ 不要自己加 padding、後處理層會統一加`,
 
   large_visual_area: `▸ calculation / word_problem / short_answer / ordering / map_symbol / grid_geometry / connect_dots / diagram_draw / diagram_color
   答題區視覺形式: 題幹 + 大空白工作區（學生寫算式 / 段落 / 序號 / 圖案）
-  bbox 公式:
-    bbox.x      = 題幹/工作區最左印刷邊 - 0.01
-    bbox.x + w  = max(題幹/工作區最右印刷邊, 學生筆跡最右) + 0.01
-    bbox.y      = 題幹上邊 - 0.005
-    bbox.y + h  = max(工作區下邊, 最後學生筆跡) + 0.01
+  bbox 公式（緊貼題幹+工作區+學生筆跡、不加 padding）:
+    bbox.x      = 題幹/工作區最左印刷邊
+    bbox.x + w  = max(題幹/工作區最右印刷邊, 學生筆跡最右)
+    bbox.y      = 題幹上邊
+    bbox.y + h  = max(工作區下邊, 最後學生筆跡)
   short_answer 多行: bbox.h 必須涵蓋整個寫字區塊
-  🚨 嚴禁: 只框第 1 行；漏掉題幹；漏掉學生補寫的部分`,
+  🚨 嚴禁: 只框第 1 行；漏掉題幹；漏掉學生補寫的部分
+  ⚠️ 不要自己加 padding、後處理層會統一加`,
 
   compound: `▸ compound_circle/check/writein_with_explain / compound_judge_with_correction/explain / multi_check_other / compound_chain_table
   答題區視覺形式: 兩部分組合 — 答案區（圈選/打勾/代號）+ 說明區（文字理由/改正）
-  bbox 公式:
-    bbox.x      = min(答案區左邊, 說明區左邊) - 0.01
-    bbox.x + w  = max(答案區右邊, 說明區右邊, 學生筆跡最右) + 0.01
-    bbox.y      = 答案區上邊 - 0.005
-    bbox.y + h  = 說明/改正區下邊 + 學生筆跡延伸 + 0.01
-  🚨 嚴禁: 只框其中一部分；必須兩部分都涵蓋`,
+  bbox 公式（緊貼兩段範圍 + 學生筆跡、不加 padding）:
+    bbox.x      = min(答案區左邊, 說明區左邊)
+    bbox.x + w  = max(答案區右邊, 說明區右邊, 學生筆跡最右)
+    bbox.y      = 答案區上邊
+    bbox.y + h  = 說明/改正區下邊（含學生筆跡延伸）
+  🚨 嚴禁: 只框其中一部分；必須兩部分都涵蓋
+  ⚠️ 不要自己加 padding、後處理層會統一加`,
 
   map_fill: `▸ map_fill
   答題區視覺形式: 整張圖（地圖填圖題答案散布全圖）
