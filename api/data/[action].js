@@ -4097,16 +4097,35 @@ async function handleSync(req, res) {
             const orientationsCount = Array.isArray(t.pageOrientations) ? t.pageOrientations.length : 0
             const imagePathsCount = Array.isArray(t.answerSheetImagePaths) ? t.answerSheetImagePaths.length : 0
             const candidatePages = Math.max(orientationsCount, imagePathsCount)
-            if (candidatePages <= 0) continue
-            const { error: updErr, count } = await supabaseDb
-              .from('assignments')
-              .update({ total_pages: candidatePages, updated_at: nowIso }, { count: 'exact' })
-              .eq('owner_id', user.id)
-              .eq('answer_key_template_id', t.id)
-            if (updErr) {
-              console.error(`[SYNC] sync total_pages for template ${t.id} failed:`, updErr.message)
-            } else if (count) {
-              console.log(`✅ [SYNC] template ${t.id} 縮頁同步 → ${count} 份 assignment 改 total_pages=${candidatePages}`)
+            if (candidatePages > 0) {
+              const { error: updErr, count } = await supabaseDb
+                .from('assignments')
+                .update({ total_pages: candidatePages, updated_at: nowIso }, { count: 'exact' })
+                .eq('owner_id', user.id)
+                .eq('answer_key_template_id', t.id)
+              if (updErr) {
+                console.error(`[SYNC] sync total_pages for template ${t.id} failed:`, updErr.message)
+              } else if (count) {
+                console.log(`✅ [SYNC] template ${t.id} 縮頁同步 → ${count} 份 assignment 改 total_pages=${candidatePages}`)
+              }
+            }
+
+            // 把 template.answer_key 反向同步進所有引用此 template 的 assignments。
+            // 同 sync request 內 assignments upsert (~L4047) 跑在 templates upsert 之前、
+            // 且 client Dexie 的 assignment.answerKey 不會跟著 AnswerBank 編輯自動更新、
+            // 所以 client push 一定會帶舊 answerKey 把 assignment 覆寫成 stale。這層是 SSoT。
+            const ak = t.answerKey ?? t.answer_key
+            if (ak !== undefined && ak !== null) {
+              const { error: akErr, count: akCount } = await supabaseDb
+                .from('assignments')
+                .update({ answer_key: ak, updated_at: nowIso }, { count: 'exact' })
+                .eq('owner_id', user.id)
+                .eq('answer_key_template_id', t.id)
+              if (akErr) {
+                console.error(`[SYNC] sync answer_key for template ${t.id} failed:`, akErr.message)
+              } else if (akCount) {
+                console.log(`✅ [SYNC] template ${t.id} answer_key 同步 → ${akCount} 份 assignment`)
+              }
             }
           }
         }
