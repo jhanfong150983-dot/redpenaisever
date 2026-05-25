@@ -481,10 +481,11 @@ const WORD_PROBLEM_INFLATE_RATIO = 0.10
 // 驗證：社會期中考 29 份 cohort、9 個被裁學生用此規則全部救回、19 個正常學生 cell 間 gap 0.20+ 不會 overlap
 const MULTI_FILL_PAD_LEFT = 0.03
 const MULTI_FILL_PAD_RIGHT = 0.01
-// fill_blank 失敗模式：右側 bbox 太緊、切到答案最後一位（如 "62." 漏掉 ".13"） → 左+0.005 右+0.03（2026-05-25）
-// 驗證：數練 p49-50 21 份、座 5/21 outlier 救回、其他 19 個正常 case 無破壞
+// fill_blank wide bbox（2026-05-26）：classify 已產整題幹 + 全部空格的 wide bbox（~0.4 頁寬）、
+// 不再需要為了補單位字而右邊多 pad 0.03。改成對稱 0.005 純安全邊距（防實拍透視造成切邊）。
+// 舊邏輯（左 0.005 / 右 0.03）保留為註解供回溯：是為了 tight bbox 補單位字救援；wide bbox 已內含單位、不再需要。
 const FILL_BLANK_PAD_LEFT = 0.005
-const FILL_BLANK_PAD_RIGHT = 0.03
+const FILL_BLANK_PAD_RIGHT = 0.005
 function inflateBboxForType(bbox, questionType) {
   if (!bbox) return bbox
   if (questionType === 'word_problem') {
@@ -2343,7 +2344,62 @@ function normalizeLocateResult(parsed, questionIds) {
 
 // Classify type rules v4.1: 每條規則包含「答題區視覺形式」+「bbox 公式」+「禁止」
 const CLASSIFY_TYPE_RULES = {
-  tight_answer: `▸ tight_answer (single_choice / multi_choice / true_false / fill_blank / fill_variants / multi_fill)
+  fill_blank: `▸ fill_blank（填空題、單一規則、不分視覺變體）
+
+  🚨 **本區塊規則只適用於 questionType === 'fill_blank'**。
+  其他題型（single_choice / multi_choice / true_false / fill_variants / multi_fill 等）一律以 tight_answer 規則為準。
+
+  🆕 **fill_blank 不論視覺長相、bbox 一律包整段題幹 + 全部空格標記**：
+  - 括號型「( )」
+  - 底線型「___」
+  - 方框型「□」
+  - 表格格子型
+  ⭐ 上述視覺變體**通通用同一條 wide bbox 公式**、不分 sub-case。
+
+  答題區視覺定位（學生會在這裡寫答案）:
+    · 印刷括號 / 底線 / 方框 / 格子內含學生手寫答案
+    · 同一題可能有 1 個空格（單空）或 N 個空格（合題、parts）
+    · 即使學生未填、bbox 仍依「該題印刷題幹範圍」決定
+
+  wide bbox 公式（all fill_blank 共用）:
+    bbox.x      = 該題題號（如「1.」「2.」「(1)」）印刷左緣 - 0.005
+    bbox.x + w  = 該題最末字（含單位、句末標點）印刷右緣 + 0.005
+    bbox.y      = 題幹第一行頂部 - 0.005
+    bbox.y + h  = 題幹最後一行底部 + 0.005
+
+  尺寸常識:
+    · bbox.w 通常 ~0.4 頁寬（單欄佈局）；雙欄佈局單題寬 ~0.42
+    · bbox.h 看題幹行數：1 行題 ≈ 0.025~0.04；2-3 行題 ≈ 0.06~0.10；4+ 行 ≈ 0.10~0.16
+    · 學生筆跡大小**完全不影響** bbox（bbox 由印刷題幹範圍決定）
+
+  範例 A（單空、單行）:
+    題目：「電扶梯的速率是 0.6 公尺／秒，阿玟行走的速率是 0.5 公尺／秒…5 秒後他移動了( 6.5 )公尺」
+    → bbox 包整段題目，從題號「1.」到「公尺」(含答案括弧 + 單位)
+    → bbox.w ≈ 0.4、bbox.h ≈ 0.04
+
+  範例 B（合題、多行）:
+    題目：「(1) 兩人同時同方向前進，( 2 )分鐘後相距 20 公尺。(2) 兩人同時相向前進，( 12 )分鐘後相遇。」
+    → bbox 包整段（兩個子句都包），y 從題號到最末「相遇。」
+    → bbox.w ≈ 0.4、bbox.h ≈ 0.08
+
+  範例 C（底線型同行多空）:
+    題目：「Mom is _____ in the _____ today.」
+    → bbox 包整段、含兩條底線 + "is" / "in the" / "today" 連續文字
+    → bbox.w ≈ 0.4、bbox.h ≈ 0.04
+
+  範例 D（方框型算式）:
+    題目：「2½ □ (4.73 □ 2.73)」
+    → bbox 包整個算式行、含兩個 □ 與括號
+    → bbox.w ≈ 0.4、bbox.h ≈ 0.04
+
+  🚨 嚴禁:
+    · 只框 tiny ( ) 或單一空格 → 那是舊規則
+    · 為避開「元 / 公分」單位字而縮小 bbox → 單位字現在要包進來
+    · 把同一題的多個空格拆成多個 bbox → 同一題只有一個 wide bbox 包整段
+    · 把本規則推廣到 single_choice / multi_choice / true_false / multi_fill / fill_variants
+      → 這些題型仍維持 tight_answer 規則的緊框公式、不受本區塊影響`,
+
+  tight_answer: `▸ tight_answer (single_choice / multi_choice / true_false / fill_variants / multi_fill)
   答題區視覺形式（學生會在這裡寫答案）:
     · 印刷括號「( )」/「（ ）」— 學生在括號內寫代號（A/B/C/甲乙/○✗/數字）
     · 印刷底線「___」/「_____」— 學生在底線上寫字
@@ -2484,8 +2540,12 @@ function buildClassifyTypeRulesSection(specs) {
   const typesUsed = new Set((specs || []).map((s) => s?.questionType).filter(Boolean))
   const blocks = []
 
-  // tight_answer 群組 (6 type 共用一條規則)
-  const tightTypes = ['single_choice', 'multi_choice', 'true_false', 'fill_blank', 'fill_variants', 'multi_fill']
+  // fill_blank 獨立規則：不論視覺變體（括號/底線/方框/格子）一律 wide bbox 包整題幹
+  if (typesUsed.has('fill_blank')) {
+    blocks.push(CLASSIFY_TYPE_RULES.fill_blank)
+  }
+  // tight_answer 群組 (5 type 共用 tight 規則，不含 fill_blank)
+  const tightTypes = ['single_choice', 'multi_choice', 'true_false', 'fill_variants', 'multi_fill']
   if (tightTypes.some((t) => typesUsed.has(t))) {
     blocks.push(CLASSIFY_TYPE_RULES.tight_answer)
   }
@@ -6490,10 +6550,9 @@ export async function runStagedGradingPhaseA({
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
         const bboxToUse = inflateBboxForType(q.answerBbox, q.questionType)
-        // fill_blank 子題（括號型）用小 padding，避免裁切到上下相鄰的括號
-        const isParenSubQ = q.questionType === 'fill_blank' && q.questionId.split('-').length >= 3
-        const cropPad = isParenSubQ ? +(0.01 / totalPages).toFixed(4)
-          : dynamicPad
+        // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再有「鄰格括號被切」風險
+        // 統一走 dynamicPad、不再對 fill_blank 子題特別給小 cropPad
+        const cropPad = dynamicPad
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
@@ -8003,9 +8062,8 @@ export async function runStagedGradingPhaseAArbiter({
       needsReviewQids.map(async (qid) => {
         const aq = alignedById.get(qid)
         if (!aq?.answerBbox) return { qid, cropData: null }
-        const isParenSubQ = aq.questionType === 'fill_blank' && qid.split('-').length >= 3
-        const dynamicPad = 0.005
-        const cropPad = isParenSubQ ? 0.003 : dynamicPad
+        // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再給小 cropPad 防鄰格
+        const cropPad = 0.005
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
