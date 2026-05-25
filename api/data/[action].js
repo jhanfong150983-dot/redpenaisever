@@ -5166,7 +5166,10 @@ async function handleStudentOverview(req, res) {
           aIds.length
             ? supabaseDb
                 .from('submissions')
-                .select('id, assignment_id, score, graded_at, created_at, updated_at, source, grading_result, image_url, status')
+                // 2026-05-25: grading_result 拔掉、改用下方 fallback lazy pull
+                // 大多數情況 openCorrections（correction_question_items）有資料、不需 grading_result
+                // 真有 fallback 需求才針對特定 submission id 補拉、avoid pulling JSONB for all subs
+                .select('id, assignment_id, score, graded_at, created_at, updated_at, source, image_url, status')
                 .eq('owner_id', cOwnerId)
                 .eq('student_id', studentId)
                 .in('assignment_id', aIds)
@@ -5240,6 +5243,33 @@ async function handleStudentOverview(req, res) {
           openCorrectionsByAssignment.set(row.assignment_id, existing)
         }
 
+        // 2026-05-25: 第二段 lazy pull grading_result —— 只針對需要 fallback 的 submission id
+        // 條件：assignment 處於 correction 狀態 + correction_question_items 沒料 + 有 latestGraded
+        // 大多數情況不會 trigger，省下對所有 submissions 的 JSONB 拉取
+        const fallbackSubIds = []
+        for (const assignment of assignmentsResult.data || []) {
+          const state = stateMap.get(assignment.id)
+          const status = state?.status ?? 'not_uploaded'
+          if (!['correction_required', 'correction_in_progress', 'correction_pending_review'].includes(status)) continue
+          if ((openCorrectionsByAssignment.get(assignment.id) ?? []).length > 0) continue
+          const subs = submissionsByAssignment.get(assignment.id) || []
+          const latestGraded = subs
+            .filter((row) => row.graded_at !== null && row.graded_at !== undefined)
+            .sort((a, b) => (toNumber(b.graded_at) ?? 0) - (toNumber(a.graded_at) ?? 0))[0]
+          if (latestGraded?.id) fallbackSubIds.push(latestGraded.id)
+        }
+        const fallbackGradingResultMap = new Map()
+        if (fallbackSubIds.length > 0) {
+          const { data: fbRows } = await supabaseDb
+            .from('submissions')
+            .select('id, grading_result')
+            .in('id', fallbackSubIds)
+            .eq('owner_id', cOwnerId)
+          for (const row of fbRows || []) {
+            if (row.grading_result) fallbackGradingResultMap.set(row.id, row.grading_result)
+          }
+        }
+
         return (assignmentsResult.data || []).map((assignment) => {
           const state = stateMap.get(assignment.id)
           const submissions = submissionsByAssignment.get(assignment.id) || []
@@ -5265,9 +5295,13 @@ async function handleStudentOverview(req, res) {
           const canUpload = preferences.student_portal_enabled && !effectiveUploadLocked
           const correctionAttemptCount = state?.correction_attempt_count ?? 0
           const openCorrections = openCorrectionsByAssignment.get(assignment.id) ?? []
+          // 2026-05-25: grading_result 不再在 submissionsResult、改從 fallbackGradingResultMap 取
+          const fallbackGradingResult = latestGradedSubmission?.id
+            ? fallbackGradingResultMap.get(latestGradedSubmission.id)
+            : null
           const fallbackCorrections =
-            openCorrections.length === 0 && isCorrectionStatus && latestGradedSubmission?.grading_result
-              ? parseMistakesFromGradingResult(latestGradedSubmission.grading_result).map((mistake) =>
+            openCorrections.length === 0 && isCorrectionStatus && fallbackGradingResult
+              ? parseMistakesFromGradingResult(fallbackGradingResult).map((mistake) =>
                   compactObject({
                     attemptNo: correctionAttemptCount,
                     questionId: mistake.questionId,
@@ -7859,7 +7893,11 @@ async function handleAssignmentStateSummary(req, res) {
       .in('assignment_id', assignmentIds),
     supabaseDb
       .from('submissions')
-      .select('assignment_id, student_id, grading_result, graded_at, updated_at, source, status')
+      // 2026-05-25: 只拉 grading_result 內的 mistakes + details 兩個 sub-array、
+      // 不拉整顆 JSONB（_internal / cropByQuestionId 等大欄位都跳過）。
+      // parseMistakesFromGradingResult 只用這兩段、剛好相容。
+      // home overview 每次開都打、200 assignments × 30 students = 6000 row、省的量大
+      .select('assignment_id, student_id, mistakes:grading_result->mistakes, details:grading_result->details, graded_at, updated_at, source, status')
       .eq('owner_id', user.id)
       .in('assignment_id', assignmentIds)
       .neq('source', 'student_correction')
@@ -7890,8 +7928,12 @@ async function handleAssignmentStateSummary(req, res) {
     if (!byAssignment[row.assignment_id]) byAssignment[row.assignment_id] = []
     const key = `${row.assignment_id}|${row.student_id}`
     const entry = latestByKey.get(key)
+    // 2026-05-25: sub-path 取回的 mistakes / details 已經是頂層欄位、組回去給 parser 用
     const mistakeCount = entry
-      ? parseMistakesFromGradingResult(entry.row.grading_result).length
+      ? parseMistakesFromGradingResult({
+          mistakes: entry.row.mistakes,
+          details: entry.row.details
+        }).length
       : null
     byAssignment[row.assignment_id].push({
       studentId: row.student_id,
