@@ -616,12 +616,20 @@ export default async function handler(req, res) {
   // ── 答案卷參考圖（Phase A classify 使用）────────────────────────────────────
   let answerKeyImages = []
   let assignmentTotalPages = null  // 🆕 用於 staged-grading.js 判定是否該按 ID 切頁
-  if (routeKey === 'grading.phase_a' && payload?.assignmentId) {
+  // 2026-05-25: Phase A 拆 3 個 route 後、原本只認 'grading.phase_a' 條件失效
+  //   → classify call (grading.phase_a_classify) 拿不到 assignmentTotalPages
+  //   → staged-grading.js fallback 按題號 prefix 切頁、單頁多 section 卷被切成薄條紋
+  //   → AI 看不到完整題目、CLASSIFY_LOW_COVERAGE。
+  // 修：classify 與 legacy phase_a 兩條都要拿。
+  // 重踩 feedback_dont_infer_total_pages_from_question_ids.md 的雷。
+  const needsAnswerKeyImagesAndTotalPages =
+    routeKey === 'grading.phase_a' || routeKey === 'grading.phase_a_classify'
+  if (needsAnswerKeyImagesAndTotalPages && payload?.assignmentId) {
     answerKeyImages = await fetchAnswerSheetImagesForClassify(
       supabaseAdmin, user.id, payload.assignmentId
     )
     if (answerKeyImages.length > 0) {
-      console.log(`📷 [AnswerSheet] 載入 ${answerKeyImages.length} 頁答案卷圖 assignmentId=${payload.assignmentId}`)
+      console.log(`📷 [AnswerSheet] 載入 ${answerKeyImages.length} 頁答案卷圖 assignmentId=${payload.assignmentId} routeKey=${routeKey}`)
     }
     // 🆕 拿 total_pages：staged-grading 用此判定「單頁多 section 卷」、跳過 ID 自動切頁
     try {
