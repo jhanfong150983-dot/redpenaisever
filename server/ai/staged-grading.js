@@ -5506,12 +5506,25 @@ export async function runStagedGradingPhaseA({
             answer: a.studentAnswerRaw || a.studentAnswer || ''
           }))
         }
+        // 2026-05-25: classify 失敗時保留 alignedQuestions 摘要、之後 admin / dev 直接從 DB 看
+        // 不存完整 bbox（省空間）、只存 questionId + visible + questionType + 來源
+        const cr = extra?.classifyResult
+        const alignedSummary = cr && Array.isArray(cr.alignedQuestions)
+          ? cr.alignedQuestions.map((q) => ({
+              questionId: q.questionId,
+              visible: !!q.visible,
+              questionType: q.questionType,
+              framingReason: q.framingReason,
+              hasAnswerBbox: !!q.answerBbox
+            }))
+          : null
         const failureLogData = {
           pipelineFailure: failure,
           failedAtStage: stage,
           classify: {
             ocrAssist: typeof ocrAssistMeta !== 'undefined' && ocrAssistMeta?.perPage?.length > 0 ? ocrAssistMeta : null,
-            qualityGate: { severity: 'fail', warnings: failure.technical?.warnings, metrics: failure.technical?.metrics }
+            qualityGate: { severity: 'fail', warnings: failure.technical?.warnings, metrics: failure.technical?.metrics },
+            alignedQuestions: alignedSummary
           },
           // 2026-05-17: read FAIL 時保留 AI1 / AI2 答案、之後可撈出來查 disagreement 來源
           read_answer_1: extra?.readAnswerResult ? extractAnswers(extra.readAnswerResult) : null,
@@ -5992,6 +6005,29 @@ export async function runStagedGradingPhaseA({
         throw new Error('PhaseA classify parse failed (per-page split)')
       }
 
+      // 2026-05-25: 每頁 AI 回的 raw questions 摘要、Vercel 搜 [CLASSIFY-PAGE-DIAG]
+      // 看 AI 在哪頁漏哪些題、貼 OCR-assist 前的原始結果
+      logStaged(pipelineRunId, 'basic', '[CLASSIFY-PAGE-DIAG] per-page AI raw', {
+        pages: pageEntries.map(([pageNum, ids], i) => {
+          const parsed = parsedResults[i]
+          const rawAligned = Array.isArray(parsed?.alignedQuestions) ? parsed.alignedQuestions : []
+          const rawIds = rawAligned.map((q) => q?.questionId).filter(Boolean)
+          const rawVisibleIds = rawAligned.filter((q) => q?.visible).map((q) => q.questionId)
+          const expectedIds = ids
+          const missingFromAi = expectedIds.filter((id) => !rawIds.includes(id))
+          const aiReturnedExtra = rawIds.filter((id) => !expectedIds.includes(id))
+          return {
+            page: pageNum,
+            expected: expectedIds.length,
+            aiReturned: rawIds.length,
+            aiVisible: rawVisibleIds.length,
+            missingFromAi,
+            aiReturnedExtra,
+            visibleIds: rawVisibleIds
+          }
+        })
+      })
+
       // Normalize, apply OCR override (per-page coords), then remap bboxes from per-page coords → full-image coords
       const allOverrides = []
       const normalizedResults = pageEntries.map(([, ids], i) => {
@@ -6258,7 +6294,38 @@ export async function runStagedGradingPhaseA({
     // Retry exhausted check: if retry didn't complete OR still FAIL → fail this submission.
     // (No further AI calls; frontend will surface pipelineFailure and skip Phase B.)
     if (!classifyRetryQG || classifyRetryQG.severity === QG_SEVERITY.FAIL) {
-      return buildFailureReturn('classify', [classifyRetryQG ?? classifyQG])
+      // 2026-05-25: classify 失敗診斷 log — Vercel 搜 [CLASSIFY-FAIL-DIAG] 找
+      // 列出漏掉的 questionIds、bbox 來源分布、OCR-assist 是否救援
+      const aligned = Array.isArray(classifyResult?.alignedQuestions) ? classifyResult.alignedQuestions : []
+      const visibleIds = aligned.filter((q) => q.visible).map((q) => q.questionId)
+      const missingIds = aligned.filter((q) => !q.visible).map((q) => q.questionId)
+      const visibleByType = {}
+      for (const q of aligned.filter((q) => q.visible)) {
+        const t = q.questionType || 'unknown'
+        visibleByType[t] = (visibleByType[t] || 0) + 1
+      }
+      const ocrAssistSummary = ocrAssistMeta.perPage.map((p) => ({
+        page: p.page,
+        ocrCandidates: Object.keys(p.candidates || {}).length,
+        rowAnchorOverrides: (p.rowAnchorOverrides || []).length,
+        ocrError: p.stats?.error,
+        ocrSkipped: p.stats?.skipped
+      }))
+      logStaged(pipelineRunId, 'basic', '[CLASSIFY-FAIL-DIAG] 失敗詳情', {
+        coverage: classifyRetryQG?.metrics?.coverage ?? classifyQG.metrics?.coverage,
+        visible: visibleIds.length,
+        missing: missingIds.length,
+        totalExpected: questionIds.length,
+        visibleIds,
+        missingIds,
+        visibleByType,
+        pageBreaksUsed: pageBreaks?.length || 0,
+        ocrAssistEnabled: isOcrAssistEnabled(),
+        ocrAssistSummary,
+        retryAttempted: !!classifyRetryQG,
+        retryWarnings: classifyRetryQG?.warnings || []
+      })
+      return buildFailureReturn('classify', [classifyRetryQG ?? classifyQG], { classifyResult })
     }
   }
   // ── End Classify Quality Gate ─────────────────────────────────────────────
