@@ -431,6 +431,15 @@ function toReadAnswerSchemaPreview(parsed) {
             student: ensureString(c.student, '')
           }))
       }
+      // fill_blank 合題：保留每空結構化讀值
+      if (Array.isArray(item?.partValues)) {
+        entry.partValues = item.partValues
+          .filter((p) => p && typeof p.subId === 'string' && p.subId.trim())
+          .map((p) => ({
+            subId: String(p.subId).trim(),
+            student: ensureString(p.student, '')
+          }))
+      }
       return entry
     })
   }
@@ -2225,6 +2234,19 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
           }))
       : undefined
 
+    // fill_blank 合題：保留每空對錯細節（accessor AI 對 partValues vs parts 比對後輸出）
+    const partResults = Array.isArray(row?.partResults)
+      ? row.partResults
+          .filter((p) => p && typeof p.subId === 'string' && p.subId.trim())
+          .map((p) => ({
+            subId: String(p.subId).trim(),
+            student: ensureString(p.student, ''),
+            expected: ensureString(p.expected, ''),
+            correct: p.correct === true,
+            reason: typeof p.reason === 'string' ? p.reason : undefined
+          }))
+      : undefined
+
     const normalizedBase = {
       questionId,
       score,
@@ -2242,7 +2264,8 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
           ? row.matchingDetails
           : undefined,
       rubricScores: Array.isArray(row?.rubricScores) ? row.rubricScores : undefined,
-      cellResults
+      cellResults,
+      partResults
     }
 
     const normalized = applyLenientFocusOverride(normalizedBase, question, answerKey, domainHint)
@@ -3476,6 +3499,18 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     }
   }
 
+  // fill_blank 合題：建 questionId → parts map（給 read prompt 列每空 subId）
+  const fillBlankPartsMap = new Map()
+  for (const q of visibleQuestions) {
+    if (q.questionType !== 'fill_blank') continue
+    const akQ = (Array.isArray(options?.answerKeyQuestions) ? options.answerKeyQuestions : [])
+      .find((aq) => aq?.id === q.questionId)
+    if (Array.isArray(akQ?.parts) && akQ.parts.length > 0) {
+      fillBlankPartsMap.set(q.questionId, { parts: akQ.parts })
+    }
+  }
+  const fillBlankPartsIds = Array.from(fillBlankPartsMap.keys())
+
   // Bucket A: answer_with_context
   const circleSelectOneIds = idsOf('circle_select_one')
   const circleSelectManyIds = idsOf('circle_select_many')
@@ -3736,6 +3771,26 @@ FILL-BLANK (questions in FILL-BLANK list):
   If the cropped image shows content from MULTIPLE blanks or lines (e.g., you see two different ( ) with different answers), identify which blank is closest to the CENTER of the crop image — that is your target blank.
   - Content near the EDGES (top, bottom, left, right) of the crop that belongs to a DIFFERENT blank — do NOT read it.
   - Once you identify the target blank, read ALL handwriting inside it COMPLETELY — including faint, small, or offset characters. Do NOT skip any visible strokes within the target blank.${englishSpellingRuleBlock}
+${fillBlankPartsIds.length > 0 ? `
+- 🆕 FILL-BLANK 合題（題目含 parts 陣列，多空一題）：
+  These questions have MULTIPLE blanks (parts) in ONE question stem. The crop bbox covers the ENTIRE question stem + all blanks.
+  - For each part (subId a, b, c, ...) listed in SPEC below, read what the student wrote in that blank.
+  - Output partValues array: [{ subId: "a", student: "..." }, { subId: "b", student: "..." }, ...]
+  - subId order matches left-to-right top-to-bottom in the question stem.
+  - Empty blank → student = "". Unreadable → student = "?".
+  - studentAnswerRaw = partValues 拼接，用「, 」分隔（依 subId 順序）。例如：partValues=[{a:"2"},{b:"12"}] → studentAnswerRaw = "2, 12"
+  - 所有 parts 都空白 → status="blank"，partValues 仍要回（每 part student=""）。
+  - 至少 1 part 有手寫 → status="read"。
+  - 禁止：把不同 part 的內容混讀；依括號位置嚴格對位 subId。
+
+SPEC for fill_blank questions with parts:
+${fillBlankPartsIds.map((qid) => {
+  const meta = fillBlankPartsMap.get(qid)
+  if (!meta) return `- questionId="${qid}": (no parts meta, skip partValues)`
+  const partsDesc = meta.parts.map((p) => `(${p.subId})`).join(' ')
+  return `- questionId="${qid}": ${meta.parts.length} 空, subIds: ${partsDesc}`
+}).join('\n')}
+` : ''}
 ` : ''
 
   const calculationRules = calculationIds.length > 0 ? `
@@ -4214,7 +4269,8 @@ Return:
       "status": "read|blank|unreadable"${needsReadingReasoning ? `,
       "readingReasoning": "理解 → 抄錄 → 輸出 三段推理（必填於：single_choice / multi_choice / circle_select_one|many / single_check / multi_check / multi_check_other / compound_*_with_explain / compound_judge_*）。其他 type 可省略此欄位。"` : ''}${(isEnglish && fillBlankIds.length > 0) ? `,
       "rawSpelling": "d-i-n-n-g r-o-o-m（**只在英語 fill_blank** 才輸出，其他 type 與其他領域 omit 此欄位）"` : ''}${tableCellIds.length > 0 ? `,
-      "cellValues": [{ "row": 3, "col": 2, "student": "27%" }, ...]  // **只在 table_cell 才輸出**，依 SPEC 列出每 cell 學生值；其他 type omit 此欄位` : ''}
+      "cellValues": [{ "row": 3, "col": 2, "student": "27%" }, ...]  // **只在 table_cell 才輸出**，依 SPEC 列出每 cell 學生值；其他 type omit 此欄位` : ''}${fillBlankPartsIds.length > 0 ? `,
+      "partValues": [{ "subId": "a", "student": "2" }, { "subId": "b", "student": "12" }]  // **只在 fill_blank 合題（有 parts）才輸出**，依 SPEC 列出每空學生值；其他 type / 單空 fill_blank omit 此欄位` : ''}
     }
   ]
 }
@@ -4471,13 +4527,17 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
             processOmitted: true
           }
         }
-        return {
+        const out = {
           questionId: a.questionId,
           status: a.status,
           studentAnswerRaw: multiSelectIds.has(a.questionId) && typeof a.studentAnswerRaw === 'string'
             ? a.studentAnswerRaw.replace(/[，、；;｜|]/g, ',')
             : a.studentAnswerRaw
         }
+        // table_cell / fill_blank 合題：保留結構化讀值給 accessor 對齊每 cell/part
+        if (Array.isArray(a.cellValues)) out.cellValues = a.cellValues
+        if (Array.isArray(a.partValues)) out.partValues = a.partValues
+        return out
       })
     : []
 
@@ -4530,6 +4590,17 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - errorType: 任 cell 答錯 → 'concept'；全空白 → 'blank'；單位錯為主 → 'unit'。
   - studentAnswer：寫人類可讀摘要（同 read 給的 studentAnswerRaw 即可）。
   - 範例（4 cells、maxScore=4、3 個對 1 個漏單位）：score=3、isCorrect=false、errorType='concept'、cellResults 列每 cell 對錯+理由。
+- fill_blank 合題（題目含 parts 陣列）：群組批改多空題。AnswerKey 提供 parts 陣列（每元素 {subId, answer, maxScore}）；Read 結果在 partValues 陣列（每元素 {subId, student}）。
+  - 對每個 answerKey.parts[i]，依 subId 找到對應的 partValues 元素，比對 student vs answer。
+  - 比對規則同 fill_blank 單空（精確比對 + UNIT RULE + DUAL-ANSWER RULE）；單位、空白、不可讀的處理一致。
+  - partResults 陣列輸出每空對錯細節：[{ subId, student, expected, correct, reason }]
+    - reason 簡短說明錯誤原因（如「單位錯」「數值錯」「未作答」），correct 時可省。
+  - 配分：每 part 各自有 maxScore；漏填或預設 → 平均分（maxScore / parts.length，向下取整、最後 1 個取餘）。
+  - score = sum(partResults.filter(p => p.correct).map(p => part.maxScore))
+  - isCorrect = (所有 parts 都對才算)
+  - errorType: 任 part 錯 → 'concept'；全空白 → 'blank'；單位錯為主 → 'unit'。
+  - studentAnswer：寫人類可讀摘要（同 read 給的 studentAnswerRaw 即可，如「2, 12」）。
+  - 範例（2 parts、maxScore=4、第 1 空對 第 2 空錯）：score=2、isCorrect=false、errorType='concept'、partResults 列每空對錯+理由。
 - multi_check / multi_choice: The answer field contains comma-separated correct tokens (e.g. "①,③" or "A,C"). SEPARATOR NORMALIZATION: before splitting, replace ALL of these separators in BOTH student answer and correct answer with a regular comma: Chinese comma（，）, Chinese pause mark（、）, semicolon（；）, fullwidth semicolon, vertical bar（｜ or |）, whitespace-only gaps between tokens. Then parse as comma-separated token sets (order-insensitive).
   - OPEN-ENDED OTHER RULE: If referenceAnswer contains "其他選項：#N" (e.g. "其他選項：#4" or "其他選項：#4；參考：XXX"), token #N is an open-ended free-write option. Before computing correct/wrong sets, REMOVE #N from student_tokens. Student selecting or not selecting 其他 does NOT affect score in any way.
   - correct = tokens in student_tokens ∩ answer_tokens
@@ -4753,12 +4824,14 @@ Output:
       "errorType": "concept",
       "needExplain": true,
       "scoreConfidence": 79,
-      "cellResults": [{ "row": 3, "col": 2, "label": "蘋果", "student": "27%", "expected": "27%", "correct": true }]
+      "cellResults": [{ "row": 3, "col": 2, "label": "蘋果", "student": "27%", "expected": "27%", "correct": true }],
+      "partResults": [{ "subId": "a", "student": "2", "expected": "2", "correct": true }, { "subId": "b", "student": "13", "expected": "12", "correct": false, "reason": "數值錯" }]
     }
   ],
   "totalScore": 0
 }
 ⚠️ cellResults 只在 questionCategory='table_cell' 時輸出（每 cell 一筆對錯細節）；其他 type omit 此欄位。
+⚠️ partResults 只在 questionCategory='fill_blank' 且有 parts 陣列時輸出（每空一筆對錯細節）；其他情境 omit 此欄位。
 `.trim()
 }
 
