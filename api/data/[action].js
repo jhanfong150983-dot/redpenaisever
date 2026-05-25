@@ -3232,6 +3232,21 @@ async function handleSync(req, res) {
 
   if (req.method === 'GET') {
     try {
+      // 2026-05-25: incremental sync — 只對 submissions 套用 since 過濾（最大宗、16MB TOAST）。
+      // 其他表（classrooms/students/assignments/...）小、保持全拉、orphan cleanup 才能正確跑。
+      //
+      // 流程：client 帶 ?since=<ISO timestamp> 時、submissions select 加 .gte('updated_at', since)、
+      // deleted_records 加 .gte('deleted_at', since)。response 多回 serverTime（query 開始前的
+      // 時間）、client 存 localStorage、下次 sync 帶回來。本地 Dexie 用 bulkPut（不 clear）、
+      // 缺的 row = 沒變 = 保留原值。第一次 sync（no since）= 全拉、後續每 30 秒只拉 submissions deltas。
+      //
+      // 改前：吳老師單次 sync 2.8MB grading_result+phase_a_state+final_answers JSONB。
+      // 改後：沒事件時近 0 bytes、有 5 個學生上傳 ~50KB。~99% submissions JSONB 流量削減。
+      const sinceParam = typeof req.query?.since === 'string' ? req.query.since : null
+      const since = sinceParam ? new Date(sinceParam) : null
+      const sinceIso = since && !Number.isNaN(since.getTime()) ? since.toISOString() : null
+      const serverTime = new Date().toISOString()
+
       // 2026-05-19: PostgREST 預設 cap 1000 筆、submissions 超量會被切（佳軒老師 1040 筆只回 1000、
       // 老師看到「有些學生顯示尚未繳交」其實學生已上傳）。fetchAllPaginated 用 .range() 分頁撈全。
       // submissions 跟 deleted_records 已知會成長到 cap、用分頁；其他表格資料量小、保持單次 query。
@@ -3249,23 +3264,27 @@ async function handleSync(req, res) {
         supabaseDb.from('classrooms').select('*').eq('owner_id', ownerId),
         supabaseDb.from('students').select('*').eq('owner_id', ownerId),
         supabaseDb.from('assignments').select('*').eq('owner_id', ownerId),
-        fetchAllPaginated(() =>
-          supabaseDb
+        fetchAllPaginated(() => {
+          let qb = supabaseDb
             .from('submissions')
             // 2026-05-17: 加 phase_a_state + final_answers 進 sync select、給 client 卡片狀態計算用
             .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result, phase_a_state, final_answers')
             .eq('owner_id', ownerId)
-        ),
+          if (sinceIso) qb = qb.gte('updated_at', sinceIso)
+          return qb
+        }),
         supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
         supabaseDb.from('gradebook_custom_columns').select('*').eq('owner_id', ownerId),
         supabaseDb.from('gradebook_custom_scores').select('*').eq('owner_id', ownerId),
         supabaseDb.from('answer_key_templates').select('*').eq('owner_id', ownerId),
-        fetchAllPaginated(() =>
-          supabaseDb
+        fetchAllPaginated(() => {
+          let qb = supabaseDb
             .from('deleted_records')
             .select('table_name, record_id, deleted_at')
             .eq('owner_id', ownerId)
-        )
+          if (sinceIso) qb = qb.gte('deleted_at', sinceIso)
+          return qb
+        })
       ])
 
       if (classroomsResult.error) {
@@ -3669,6 +3688,10 @@ async function handleSync(req, res) {
         ),
         answerKeyTemplates: answerKeyTemplates.filter((row) => !deletedSets.answer_key_templates.has(row.id)),
         deleted,
+        // 2026-05-25: incremental sync cursor — client 把 serverTime 存 localStorage、
+        // 下次 sync 帶 ?since=<serverTime> 取 deltas。serverTime 是 query 開始前抓的、
+        // 確保所有「query 中或之後」寫入的 row 下次都會被拉到。
+        serverTime,
         ...(assignmentTags ? { assignmentTags } : {})
       })
     } catch (err) {
