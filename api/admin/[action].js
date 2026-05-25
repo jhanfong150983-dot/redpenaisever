@@ -4007,6 +4007,53 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
     ...r2Map.keys()
   ])
 
+  // 2026-05-25: 把 bbox 算成「最終 read 看到的 crop 區域」= classify bbox + inflate + padding
+  //   user 反映 bbox 顯示在題幹但 read 還能讀到、就是 padding 救援的視覺證據
+  //   admin 想看「AI 實際 crop 多大」、所以替換成最終區域、不是 pre-padding 中間 bbox
+  //
+  // 對齊 staged-grading.js:6422 + 6419 (inflateBboxForType) 邏輯
+  const ASSIGN_TOTAL_PAGES = Math.max(1, Number(assignment?.total_pages) || 1)
+  const PAD_FILL_BLANK_LEFT = 0.005
+  const PAD_FILL_BLANK_RIGHT = 0.03
+  const PAD_MULTI_FILL_LEFT = 0.03
+  const PAD_MULTI_FILL_RIGHT = 0.01
+  const WORD_PROBLEM_INFLATE = 0.10
+  const inflateBboxForType = (b, type) => {
+    if (!b) return b
+    if (type === 'word_problem') {
+      return {
+        x: b.x,
+        y: b.y,
+        w: Math.min(1 - b.x, b.w * (1 + WORD_PROBLEM_INFLATE)),
+        h: Math.min(1 - b.y, b.h * (1 + WORD_PROBLEM_INFLATE))
+      }
+    }
+    if (type === 'multi_fill') {
+      const newX = Math.max(0, b.x - PAD_MULTI_FILL_LEFT)
+      const newRight = Math.min(1, b.x + b.w + PAD_MULTI_FILL_RIGHT)
+      return { x: newX, y: b.y, w: newRight - newX, h: b.h }
+    }
+    if (type === 'fill_blank') {
+      const newX = Math.max(0, b.x - PAD_FILL_BLANK_LEFT)
+      const newRight = Math.min(1, b.x + b.w + PAD_FILL_BLANK_RIGHT)
+      return { x: newX, y: b.y, w: newRight - newX, h: b.h }
+    }
+    return b
+  }
+  const computeFinalCropBbox = (mergedBbox, qid, type) => {
+    if (!mergedBbox) return null
+    const inflated = inflateBboxForType(mergedBbox, type)
+    // 注意 mergedBbox.y 已是 merged 座標、pad 也用 merged 座標 = 0.03 / totalPages
+    const segments = qid.split('-').length
+    const isParenSubQ = type === 'fill_blank' && segments >= 3
+    const pad = isParenSubQ ? 0.01 / ASSIGN_TOTAL_PAGES : 0.03 / ASSIGN_TOTAL_PAGES
+    const x0 = Math.max(0, inflated.x - pad)
+    const y0 = Math.max(0, inflated.y - pad)
+    const x1 = Math.min(1, inflated.x + inflated.w + pad)
+    const y1 = Math.min(1, inflated.y + inflated.h + pad)
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+  }
+
   const questions = [...qids].map((qid) => {
     const bb = bboxByQid.get(qid)
     const r1 = r1Map.get(qid)
@@ -4014,11 +4061,13 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
     const arb = arbMap.get(qid)
     const final = finalMap.get(qid)
     const acc = accessorMap.get(qid)
+    const type = typeByQid.get(qid) || null
     return {
       qid,
-      type: typeByQid.get(qid) || null,
+      type,
       page: bb?.page ?? 0,
-      bbox: bb?.bbox || null,
+      // 2026-05-25: 改回傳「最終 read crop 區域」、不是中間 bbox
+      bbox: computeFinalCropBbox(bb?.bbox, qid, type),
       bboxSource: bboxSourceByQid.get(qid) || null,  // 'raw' | 'ocr_override' | 'row_anchor'
       ai1: r1 ? { answer: r1.answer ?? '', status: r1.status || null } : null,
       ai2: r2 ? { answer: r2.answer ?? '', status: r2.status || null } : null,
