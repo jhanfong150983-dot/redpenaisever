@@ -2369,9 +2369,12 @@ async function handleImportTemplate(req, res) {
         id: newId,
         name: source.name,
         domain: source.domain,
+        docType: source.doc_type,
+        answerKey: source.answer_key,
         shareCode: newShareCode,
         questionCount: source.question_count,
-        totalScore: source.total_score
+        totalScore: source.total_score,
+        updatedAt: nowIso
       }
     })
   } catch (err) {
@@ -4059,8 +4062,19 @@ async function handleSync(req, res) {
       syncTimerEnd('assignments')
 
       // ── answer_key_templates ──────────────────────────────────
+      // Guard: 不接受空 questions 的 push。stale client 把 answer_key 擦成
+      // {questions:[], totalScore:0} 推上來會在 upsert 反向擦掉 server 已寫好的
+      // 答案內容（2026-05-26 import-template 路徑的 corruption bug）。
       const incomingTemplates = Array.isArray(body.answerKeyTemplates)
-        ? body.answerKeyTemplates.filter((t) => t?.id && t?.answerKey)
+        ? body.answerKeyTemplates.filter((t) => {
+            if (!t?.id || !t?.answerKey) return false
+            const qs = t.answerKey?.questions
+            if (Array.isArray(qs) && qs.length === 0) {
+              console.warn(`[SYNC] 拒絕 template ${t.id} push：answer_key.questions 為空（疑似 stale client 覆寫）`)
+              return false
+            }
+            return true
+          })
         : []
       if (incomingTemplates.length > 0) {
         const templateRows = incomingTemplates.map((t) => compactObject({
