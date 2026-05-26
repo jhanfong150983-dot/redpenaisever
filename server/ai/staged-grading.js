@@ -7862,6 +7862,54 @@ Return JSON:
     }).catch(() => {})
   }
 
+  // 2026-05-26: 補上 unsplit (legacy) path 的 phase_a_state 持久化
+  // 原本只有 runStagedGradingPhaseAArbiter (split path 第 3 endpoint) 寫、
+  // legacy unsplit path 沒寫 → 後續「重新批改」(fromCache) 找不到 phase_a_state
+  // 案例：1778869831881-ybuzhswr0 graded=true 但 phase_a_state=null、re-grade 報錯
+  const submissionIdForPersist = internalContext?.submissionId || payload?.submissionId
+  if (submissionIdForPersist) {
+    const extractMin = (result) => {
+      const answers = Array.isArray(result?.answers) ? result.answers : []
+      return answers.map((a) => ({
+        questionId: a.questionId,
+        status: a.status,
+        answer: a.studentAnswerRaw || a.studentAnswer || ''
+      }))
+    }
+    const readAnswer1MiniLegacy = extractMin(readAnswerParsed || readAnswerResult)
+    const readAnswer2MiniLegacy = extractMin(reReadAnswerParsed)
+    const reconstructedClassifyResult = {
+      coverage: classifyResult?.coverage,
+      alignedQuestions: (classifyResult?.alignedQuestions || []).map((q) => ({
+        questionId: q.questionId,
+        questionType: q.questionType,
+        visible: q.visible,
+        answerBbox: q.answerBbox ? { x: +q.answerBbox.x, y: +q.answerBbox.y, w: +q.answerBbox.w, h: +q.answerBbox.h } : null,
+        bboxCorrected: !!q.bboxCorrected,
+        framingReason: q.framingReason || undefined
+      }))
+    }
+    const phaseAStateToPersist = {
+      version: 1,
+      pipelineRunId,
+      stagedLogLevel,
+      model,
+      answerKey,
+      questionIds,
+      classifyResult: reconstructedClassifyResult,
+      readAnswer1: readAnswer1MiniLegacy || [],
+      readAnswer2: readAnswer2MiniLegacy || [],
+      arbiterDecisions: questionResults.map((qr) => ({
+        questionId: qr.questionId,
+        arbiterStatus: qr.arbiterResult?.arbiterStatus,
+        finalAnswer: qr.arbiterResult?.finalAnswer,
+        consistent: qr.arbiterResult?.consistent
+      })),
+      savedAt: new Date().toISOString()
+    }
+    await persistPhaseAState(submissionIdForPersist, phaseAStateToPersist)
+  }
+
   return {
     phaseAComplete: true,
     questionResults,
