@@ -1130,6 +1130,12 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   if (s1 === 'blank' && s2 === 'blank') return 'stable'
   if (s1 !== 'read' || s2 !== 'read') return 'unstable'
 
+  // map_fill 位置標籤主觀（AI 可能選「左上方/中央陸地」空間描述、也可能選「甲/乙/丙」
+  // 印刷代號）、文字比對必失敗、永遠 diff/unstable。設計上 Phase B Accessor 的
+  // MAP-FILL SCORING 用 acceptableAnswers 集合比對、不依賴位置 label 一致。
+  // 兩 AI 都有 read → stable、讓 Accessor 評分；一邊 blank 一邊 read → 上面已 return unstable。
+  if (questionType === 'map_fill') return 'stable'
+
   // calculation / word_problem：只比最終答案，忽略步驟排版差異
   if (questionType === 'calculation' || questionType === 'word_problem') {
     const fa1 = extractFinalAnswerFromCalc(read1?.studentAnswerRaw)
