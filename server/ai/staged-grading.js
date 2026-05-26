@@ -5937,14 +5937,18 @@ export async function runStagedGradingPhaseA({
     // 信任度高、不做 narrow / x-shift 判斷。詳見 bbox-row-anchor-match.js
     const rowAnchorBboxes = ocrAssistMeta.perPage[0]?.rowAnchorBboxes
     if (rowAnchorBboxes && Object.keys(rowAnchorBboxes).length > 0) {
-      const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides } = applyRowAnchorOverride(
+      const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides, rejected: rowRejected } = applyRowAnchorOverride(
         classifyResult.alignedQuestions, rowAnchorBboxes
       )
       if (rowOverrides.length > 0) {
         classifyResult = { ...classifyResult, alignedQuestions: rowOverriddenQs }
         logStaged(pipelineRunId, stagedLogLevel, 'classify row-anchor override (single-page)', { count: rowOverrides.length, samples: rowOverrides.slice(0, 5) })
       }
+      if (rowRejected && rowRejected.length > 0) {
+        logStaged(pipelineRunId, 'basic', 'classify row-anchor REJECTED (y_diff too large、可能 OCR 誤匹配同 N 不同 section)', { count: rowRejected.length, samples: rowRejected.slice(0, 5) })
+      }
       ocrAssistMeta.perPage[0].rowAnchorOverrides = rowOverrides
+      ocrAssistMeta.perPage[0].rowAnchorRejected = rowRejected || []
     }
 
     // 🆕 math 算式 □ AI override v2 (crop-based)：對 hint 含「算式」+「□」的 qids
@@ -6066,14 +6070,18 @@ export async function runStagedGradingPhaseA({
 
       // 🆕 Row anchor full-replace override（multi-page fallback path）
       if (fallbackMeta.rowAnchorBboxes && Object.keys(fallbackMeta.rowAnchorBboxes).length > 0) {
-        const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides } = applyRowAnchorOverride(
+        const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides, rejected: rowRejected } = applyRowAnchorOverride(
           classifyResult.alignedQuestions, fallbackMeta.rowAnchorBboxes
         )
         if (rowOverrides.length > 0) {
           classifyResult = { ...classifyResult, alignedQuestions: rowOverriddenQs }
           logStaged(pipelineRunId, stagedLogLevel, 'classify row-anchor override (multi-page fallback)', { count: rowOverrides.length, samples: rowOverrides.slice(0, 5) })
         }
+        if (rowRejected && rowRejected.length > 0) {
+          logStaged(pipelineRunId, 'basic', 'classify row-anchor REJECTED (multi-page fallback)', { count: rowRejected.length, samples: rowRejected.slice(0, 5) })
+        }
         fallbackMeta.rowAnchorOverrides = rowOverrides
+        fallbackMeta.rowAnchorRejected = rowRejected || []
       }
     } else {
       // Success: each page gets its own cropped image — no pageBreaks needed in prompt
@@ -6205,14 +6213,18 @@ export async function runStagedGradingPhaseA({
 
         // 🆕 Row anchor full-replace override（multi-page split path）
         if (pageMeta.rowAnchorBboxes && Object.keys(pageMeta.rowAnchorBboxes).length > 0) {
-          const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides } = applyRowAnchorOverride(
+          const { alignedQuestions: rowOverriddenQs, overrides: rowOverrides, rejected: rowRejected } = applyRowAnchorOverride(
             norm.alignedQuestions, pageMeta.rowAnchorBboxes
           )
           if (rowOverrides.length > 0) {
             norm = { ...norm, alignedQuestions: rowOverriddenQs }
             allOverrides.push(...rowOverrides.map(o => ({ ...o, page: pageEntries[i][0], type: 'row_anchor' })))
           }
+          if (rowRejected && rowRejected.length > 0) {
+            logStaged(pipelineRunId, 'basic', `classify row-anchor REJECTED (page ${pageEntries[i][0]})`, { count: rowRejected.length, samples: rowRejected.slice(0, 5) })
+          }
           pageMeta.rowAnchorOverrides = rowOverrides
+          pageMeta.rowAnchorRejected = rowRejected || []
         }
         const { pageStartY, pageEndY } = splitPages[i]
         for (const q of norm.alignedQuestions) {

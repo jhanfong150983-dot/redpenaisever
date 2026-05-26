@@ -863,12 +863,35 @@ export function buildRowAnchorCandidates(answerKeyQuestions, detections, imageSi
  * 把 row anchor candidates 套用到 classifyAligned、回傳 overrides
  * 跟現有 applyOcrBboxOverride 不同：row anchor 是 **full replacement**、
  * 不做 narrow / x-shift 判斷、信任 OCR 鎖的 bbox。
+ *
+ * 2026-05-26：加 y sanity check。
+ * 原因：卷上同 N 數字可能出現多處（如「3.」既在「一、選擇題」又在「三、應用題」），
+ *   OCR matcher 只看 paren / score、不看 y 位置合理性、可能 match 到別 section 的同 N。
+ *   實際 case：02 王偉哲 1-1-3 AI classify y=0.350（正確）、OCR override y=0.652（錯到三、應用第3題）。
+ * 修法：若 OCR 給的 y 跟 AI classify 原 y 差 > Y_DIFF_THRESHOLD、視為 OCR 誤匹配、保留 AI 原 bbox。
  */
+const ROW_ANCHOR_Y_DIFF_THRESHOLD = 0.20  // 圖片高度的 20%、跨欄 / 跨 section 不可能
 export function applyRowAnchorOverride(alignedQuestions, candidatesByQid) {
   const overrides = []
+  const rejected = []
   const out = alignedQuestions.map(q => {
     const cand = candidatesByQid[q.questionId]
     if (!cand || !q.visible) return q
+    // y sanity check：若 AI 有給 bbox、檢查 OCR 的 y 是否離 AI 太遠
+    const aiBbox = q.answerBbox
+    if (aiBbox && typeof aiBbox.y === 'number' && typeof cand.y === 'number') {
+      const yDiff = Math.abs(cand.y - aiBbox.y)
+      if (yDiff > ROW_ANCHOR_Y_DIFF_THRESHOLD) {
+        rejected.push({
+          qid: q.questionId,
+          aiY: +aiBbox.y.toFixed(3),
+          ocrY: +cand.y.toFixed(3),
+          yDiff: +yDiff.toFixed(3),
+          reason: 'y_diff_exceeds_threshold'
+        })
+        return q  // 保留 AI 原 bbox
+      }
+    }
     overrides.push({
       qid: q.questionId,
       before: q.answerBbox,
@@ -877,6 +900,6 @@ export function applyRowAnchorOverride(alignedQuestions, candidatesByQid) {
     })
     return { ...q, answerBbox: cand }
   })
-  return { alignedQuestions: out, overrides }
+  return { alignedQuestions: out, overrides, rejected }
 }
 // force redeploy 2026-05-15
