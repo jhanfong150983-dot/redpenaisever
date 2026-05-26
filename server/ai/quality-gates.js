@@ -303,18 +303,25 @@ export function validateClassifyQuality(classifyResult, expectedQuestionIds, ref
   }
 
   // ── Bbox missing rate (visible but no answerBbox) ──
+  // map_fill 從 bbox 結構性檢查整批排除：地圖填圖題答案散布全圖、bbox 設計上就是
+  // {x:0,y:0,w:1,h:1} 整張圖、所有「正常題型」的 bbox 形狀假設（size / overlap /
+  // cluster / edge / drift）對它都不成立。crop / locate 階段已當特例處理
+  // ([staged-grading.js:6584] crop 跳過、[staged-grading.js:7766] full image fallback）、
+  // QG 對齊。未來新增 bbox check 從 bboxRelevantQuestions 起算。
   const visibleQuestions = aligned.filter((q) => q.visible)
-  const missingBboxCount = visibleQuestions.filter((q) => !q.answerBbox).length
-  const missingBboxRate = visibleCount > 0 ? missingBboxCount / visibleCount : 0
+  const bboxRelevantQuestions = visibleQuestions.filter((q) => q.questionType !== 'map_fill')
+  const missingBboxCount = bboxRelevantQuestions.filter((q) => !q.answerBbox).length
+  const bboxRelevantCount = bboxRelevantQuestions.length
+  const missingBboxRate = bboxRelevantCount > 0 ? missingBboxCount / bboxRelevantCount : 0
   metrics.missingBboxCount = missingBboxCount
   metrics.missingBboxRate = +missingBboxRate.toFixed(3)
   if (missingBboxRate > 0.3) {
-    warnings.push(`FAIL:CLASSIFY_HIGH_MISSING_BBOX(${missingBboxCount}/${visibleCount})`)
+    warnings.push(`FAIL:CLASSIFY_HIGH_MISSING_BBOX(${missingBboxCount}/${bboxRelevantCount})`)
   }
 
   // ── Bbox size anomaly ──
   // min area 0.0001: 容許表格小格（4頁合併後 w≈0.045, h≈0.004 → area≈0.00018）
-  const bboxes = visibleQuestions.filter((q) => q.answerBbox).map((q) => ({ id: q.questionId, ...q.answerBbox }))
+  const bboxes = bboxRelevantQuestions.filter((q) => q.answerBbox).map((q) => ({ id: q.questionId, ...q.answerBbox }))
   let sizeAnomalyCount = 0
   for (const b of bboxes) {
     const area = b.w * b.h
