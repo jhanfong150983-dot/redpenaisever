@@ -4850,13 +4850,30 @@ ${isHighSchool
   - errorType: 'concept' if wrong/missing codes; 'blank' if studentAnswerRaw is blank/未作答.
   - scoringReason: use format「學生填入___，正確答案為___，（列出正確/缺少/多餘的代碼）」. e.g. "學生填入ㄅ、ㄇ，正確答案為ㄅ、ㄇ、ㄉ，漏填ㄉ".
 
-- MAP-FILL SCORING (地圖填圖題): If the AnswerKey question has acceptableAnswers (list of correct names) AND a long referenceAnswer describing positions:
-  - The student's answer contains position:name pairs (e.g. "位置A: 泰國, 位置B: 越南").
-  - Compare each student-labeled position+name against the referenceAnswer's position→name mapping.
-  - correctCount = number of positions where the student wrote the correct name.
-  - score = Math.round(correctCount / totalPositions * maxScore).
-  - isCorrect = (score === maxScore).
-  - scoringReason MUST use format「學生將位置X填為「___」，正確答案為___，（錯誤描述）」. e.g. "學生將位置C填為「越南」、位置D填為「泰國」，正確答案為C=泰國、D=越南，兩者填反". Do NOT just say "X/Y correct".
+- MAP-FILL SCORING (地圖填圖題、視覺評分模式):
+  studentAnswerRaw 會是 placeholder「(填圖題，由 Phase B 直接視覺評分)」，**不要**從 placeholder 抽答案。
+  此題型 Phase A 跳過 Read、改由你（Accessor）直接看 crop 圖視覺評分。
+
+  評分步驟：
+  1. 看 crop 圖（attached as「題目 <questionId> 學生作答圖」），辨識學生在地圖上寫的**所有**地名/標籤手寫文字。
+     - 不要從 acceptableAnswers 反推「學生應該寫什麼」，只看你**實際看到**的學生筆跡。
+     - 學生可能寫拼字錯誤、用中文/英文混用，照學生實際寫的內容辨識。
+  2. 把辨識到的學生筆跡集合 與 acceptableAnswers（標準地名陣列）比對：
+     - 完全匹配 → 該位置算對
+     - 學生有寫但不在 acceptableAnswers 內 → 該位置算錯
+     - 同義詞 / 拼字小錯（如「亞」vs「亜」）→ 視為正確
+  3. 對位用 referenceAnswer 的位置描述（如「左上方為摩洛哥、其東側為阿爾及利亞...」）確認學生**特定位置**填的名字是否符合該位置的標準答案。
+     - 如果 referenceAnswer 沒明確位置描述、用集合配對（學生筆跡集合 ∩ acceptableAnswers 的大小）
+  4. correctCount = 學生填對的位置數量。totalPositions = acceptableAnswers 長度。
+  5. score = Math.round(correctCount / totalPositions * maxScore)
+  6. isCorrect = (score === maxScore)
+  7. studentFinalAnswer 欄位填你從圖中辨識到的學生筆跡（用「, 」分隔）、不是 placeholder。
+     例：studentFinalAnswer = "中國, 韓國, 日本, 臺灣, 菲律賓"
+  8. scoringReason MUST 用格式「學生在地圖上寫了「___」，正確答案應為「___」，（具體錯誤描述）」
+     - 完全正確：「學生填寫的所有地名皆正確：摩洛哥、阿爾及利亞、馬利...」
+     - 部分對：「學生寫了「茅利塔尼亞、馬利」，正確；但「中國、韓國、日本」不在非洲國家清單中、應為「尼日、查德、塞內加爾」等」
+     - 全錯：「學生在地圖上寫了「中國、韓國、日本、臺灣、菲律賓」（東亞國家），但此題為非洲地圖、正確答案應為摩洛哥、茅利塔尼亞...等 24 國」
+     - 未作答：「學生地圖空白、未填寫任何地名」
 - MAP-DRAW SCORING (繪圖/標記題): The student's answer is a description of what was drawn and where (e.g. "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"). The referenceAnswer in the AnswerKey describes where the symbol SHOULD be placed.
   - Judge whether the drawn symbol is correct (right type of symbol).
   - Judge whether the position is correct by comparing the described location against the referenceAnswer's required coordinates/grid position.
@@ -4882,7 +4899,7 @@ ${isHighSchool
   - word_problem:      correct→「列式正確，答句「36公分」正確」 wrong→「學生答句寫「38公分」，正確答案為「36公分」，答案錯誤」 missing_unit→「答句數值36正確，但缺少單位「公分」，扣1分」 process_error→「答句「36公分」正確，列式過程有誤（第二步乘法錯誤），扣1分」
   - short_answer:      correct→「學生回答內容完整，概念正確」 wrong→「學生寫「因為天氣很熱」，正確答案應涵蓋「蒸發作用」概念，學生僅描述現象未說明原理」. When rubricsDimensions exist, describe each dimension's score.
   - matching:          correct→「學生配對「2公尺/秒」，答案正確」 wrong→「學生配對「3公尺/秒」，正確答案為「2公尺/秒」，配對錯誤」
-  - map_fill:          correct→「所有位置填寫正確」 wrong→「學生將位置C填為「越南」、位置D填為「泰國」，正確答案為C=泰國、D=越南，兩者填反」
+  - map_fill:          (視覺評分模式，看圖直接判) correct→「學生在地圖上寫了「摩洛哥、阿爾及利亞、馬利...」，全部正確」 wrong→「學生在地圖上寫了「中國、韓國、日本」（東亞國家），但此題為非洲地圖、正確答案應為非洲國家如「摩洛哥、茅利塔尼亞」等」 blank→「學生地圖空白、未填寫任何地名」
   - map_symbol/grid_geometry/connect_dots: correct→「學生繪製颱風符號於右下格，位置與符號皆正確」 wrong→「學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移」
   - circle_select_one: correct→「學生圈選「同意」，答案正確」 wrong→「學生圈選「不同意」，正確答案為「同意」，圈選錯誤」
   - circle_select_many: correct→「學生圈選「同意、中立」，答案正確」 wrong→「學生圈選「同意、不同意」，正確答案為「同意、中立」，多圈了不同意、漏圈中立」
@@ -7296,6 +7313,30 @@ export async function runStagedGradingPhaseA({
     const read1 = read1ById.get(questionId)
     const read2 = read2ById.get(questionId)
     const classifyRow = classifyAligned.find((q) => q.questionId === questionId)
+
+    // ── map_fill: Phase A 跳過 Read（位置標籤主觀、文字化 lossy）──
+    // 直接 auto-confirmed 進 Phase B、由 Accessor 拿 crop 圖視覺評分。
+    // status='auto' 給 UI 顯示「(填圖題，由 Phase B 直接視覺評分)」用。
+    // arbiter 階段會 skip map_fill（不送 AI3）、fallback 看到 consistencyStatus='stable'
+    // 自動回 arbitrated_agree。Phase B Accessor 用 questionCategory==='map_fill' 走
+    // 視覺評分 path、忽略 finalAnswer placeholder。
+    if (classifyRow?.questionType === 'map_fill') {
+      const placeholder = '(填圖題，由 Phase B 直接視覺評分)'
+      return {
+        questionId,
+        consistencyStatus: 'stable',
+        containmentPreferredRaw: null,
+        consistencyReason: undefined,
+        questionType: 'map_fill',
+        readAnswer1: { status: 'auto', studentAnswer: placeholder },
+        readAnswer2: { status: 'auto', studentAnswer: placeholder },
+        answerBbox: classifyRow?.answerBbox ?? null,
+        bboxCorrected: classifyRow?.bboxCorrected || false,
+        calculationAnswerMismatch: false,
+        framingReason: classifyRow?.framingReason || undefined
+      }
+    }
+
     // Force unstable for multi_fill questions flagged as uncertain (E/F underline ambiguity, etc.)
     const isUncertain = multiFillUncertainIds?.has(questionId)
     const efMergeReason = isUncertain ? 'E/F 底線重疊：字母底部與底線黏合，無法確認是 E 還是 F' : undefined
@@ -7583,6 +7624,8 @@ Return JSON:
       const s2 = qr.readAnswer2.status
       // 雙方都 blank → 自動一致，不需送 AI3
       if (s1 === 'blank' && s2 === 'blank') return false
+      // status='auto' → map_fill 跳過 Read、由 Phase B 直接視覺評分、不需 AI3
+      if (s1 === 'auto' || s2 === 'auto') return false
       return true
     })
     .map((qr) => ({
@@ -8490,6 +8533,12 @@ export async function runStagedGradingPhaseB({
   // Phase 2：final answer 跟 expected 不一致的題 → Accessor 收 prompt 但不收 crop
   //   理由：final 已錯、不需 crop 評列式品質、直接 0 分；也省 token。
   const calcTypes = new Set(['calculation', 'word_problem'])
+  // 視覺評分題型：Phase A 跳過 Read、Phase B Accessor 直接拿 crop 圖視覺評分。
+  // map_fill 設計上 crop = full image（bbox 強制 {0,0,1,1}），裁出來等同原圖。
+  // 跟 calcTypes 共用 calcCropMap 機制（一樣的 crop 流程、一樣的 buildAccessorParts）、
+  // Accessor prompt 端用 questionCategory 走不同評分規則。
+  const visualEvalTypes = new Set(['map_fill'])
+  const cropTypesForAccessor = new Set([...calcTypes, ...visualEvalTypes])
   const akQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const akQById = new Map(akQuestions.map((q) => [ensureString(q?.id).trim(), q]))
 
@@ -8560,7 +8609,7 @@ export async function runStagedGradingPhaseB({
   const calcCropMap = new Map() // questionId → { data, mimeType }
   if (inlineImages.length > 0 && classifyResult) {
     const calcQuestions = (Array.isArray(classifyResult) ? classifyResult : classifyResult?.questions || [])
-      .filter((q) => q.visible && q.answerBbox && calcTypes.has(q.questionType))
+      .filter((q) => q.visible && q.answerBbox && cropTypesForAccessor.has(q.questionType))
       .filter((q) => !manualBypassIds.has(q.questionId) && !finalMismatchIds.has(q.questionId))
     if (calcQuestions.length > 0) {
       const img = inlineImages[0]?.inlineData
