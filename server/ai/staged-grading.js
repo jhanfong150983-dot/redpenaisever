@@ -8613,7 +8613,14 @@ export async function runStagedGradingPhaseB({
   // 2026-05-20: skip crop for manualBypassIds (Accessor 不跑) + finalMismatchIds (final 已錯、不需評列式)
   const calcCropMap = new Map() // questionId → { data, mimeType }
   if (inlineImages.length > 0 && classifyResult) {
-    const calcQuestions = (Array.isArray(classifyResult) ? classifyResult : classifyResult?.questions || [])
+    // 2026-05-27: 修長期 bug — classifyResult 結構是 { alignedQuestions, coverage }、
+    // 不是 { questions }。之前讀 classifyResult?.questions 永遠拿到 undefined、
+    // calcCropMap 永遠空。對 calc/word_problem 沒事（用 text studentAnswer 評分）、
+    // 但對 map_fill 致命（沒圖 + placeholder text → Accessor 認定學生未作答）。
+    const classifyQuestionsArr = Array.isArray(classifyResult)
+      ? classifyResult
+      : (classifyResult?.alignedQuestions || classifyResult?.questions || [])
+    const calcQuestions = classifyQuestionsArr
       .filter((q) => q.visible && q.answerBbox && cropTypesForAccessor.has(q.questionType))
       .filter((q) => !manualBypassIds.has(q.questionId) && !finalMismatchIds.has(q.questionId))
     if (calcQuestions.length > 0) {
