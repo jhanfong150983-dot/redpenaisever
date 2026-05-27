@@ -5328,6 +5328,8 @@ function buildFinalGradingResult({
     const hasMismatch = answer?.calculationAnswerMismatch === true
     const row = {
       questionId,
+      // questionType 帶下來：前端對 map_fill 等視覺評分題型要鎖編輯欄
+      questionType: classify?.questionType || question?.questionCategory || undefined,
       studentAnswer: ensureString(answer?.studentAnswerRaw, '無法辨識'),
       isCorrect: hasMismatch ? false : score?.isCorrect === true,
       score: hasMismatch ? 0 : toFiniteNumber(score?.score) ?? 0,
