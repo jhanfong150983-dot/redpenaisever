@@ -8040,6 +8040,9 @@ export async function runStagedGradingPhaseAArbiter({
       const s1 = qr.readAnswer1?.status
       const s2 = qr.readAnswer2?.status
       if (s1 === 'blank' && s2 === 'blank') return false
+      // status='auto' → map_fill 跳過 Read、Phase B Accessor 直接視覺評分、不需 AI3
+      // 跟 runStagedGradingPhaseA 內部的 arbiter filter 對齊（兩個 endpoint 都要擋）
+      if (s1 === 'auto' || s2 === 'auto') return false
       return true
     })
     .map((qr) => ({
