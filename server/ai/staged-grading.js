@@ -9473,6 +9473,12 @@ export async function runStagedGradingPhaseB({
     consistencyById
   })
 
+  // 2026-05-28: Phase B 完成 = 老師已在 ConsistencyReviewPanel 處理過漏題 / 無法辨識
+  // buildFinalGradingResult 的 reviewReasons 來自 Phase A classify.coverage 跟 unreadable、
+  // 那些都是 Phase A 該處理的事、Phase B 完成後不該再吐「需複核」徽章誤導老師
+  finalResult.needsReview = false
+  finalResult.reviewReasons = []
+
   logStaged(pipelineRunId, stagedLogLevel, 'PhaseB final summary', {
     totalScore: finalResult.totalScore,
     detailCount: Array.isArray(finalResult.details) ? finalResult.details.length : 0,
