@@ -2331,9 +2331,13 @@ async function handleImportTemplate(req, res) {
   const supabaseDb = getSupabaseAdmin()
   try {
     // 查找分享碼對應的答案卷（不限 owner，任何人的都可以匯入）
+    // 2026-05-28: SELECT 補 page_orientations + answer_sheet_mode、避免新匯入者踩
+    // 「page_orientations 為 null → server smart pageBreaks fallback 退回 0.5 equal split
+    //   → 直/橫拍混合答案卷 1-2-2 invisible」這個雷
+    // 不複製 image storage paths（new owner 沒讀那些檔案的權限）、不複製 folder（importer 沒這資料夾）
     const { data: source, error: findErr } = await supabaseDb
       .from('answer_key_templates')
-      .select('id, name, domain, doc_type, folder, answer_key, question_count, total_score')
+      .select('id, name, domain, doc_type, folder, answer_key, question_count, total_score, page_orientations, answer_sheet_mode')
       .eq('share_code', shareCode)
       .maybeSingle()
 
@@ -2357,6 +2361,8 @@ async function handleImportTemplate(req, res) {
         question_count: source.question_count,
         total_score: source.total_score,
         share_code: newShareCode,
+        page_orientations: source.page_orientations,
+        answer_sheet_mode: source.answer_sheet_mode,
         created_at: nowIso,
         updated_at: nowIso
       })
@@ -2374,6 +2380,8 @@ async function handleImportTemplate(req, res) {
         shareCode: newShareCode,
         questionCount: source.question_count,
         totalScore: source.total_score,
+        pageOrientations: source.page_orientations,
+        answerSheetMode: source.answer_sheet_mode,
         updatedAt: nowIso
       }
     })
