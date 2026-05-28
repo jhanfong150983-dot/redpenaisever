@@ -70,6 +70,47 @@ export function parseStageAResult(rawText) {
     .filter((p) => p.name && p.desc)
 }
 
+// ── Stage B-AI2 (Review Reader): 給 names 當 verification hint、仿 buildReviewReadPrompt ──
+// AI2 角色：知道每位置的標準名字、做 verification、但仍只能回實看到的內容
+//
+// 對應 buildReviewReadPrompt（其他題型用）的設計：
+// - 提供標準答案作 hint
+// - 看到不同時「再仔細看一次」、確認不是漏讀
+// - 真的看不到 → blank、不可從 hint 反推
+export function buildStageBReviewPrompt(positions) {
+  const arr = Array.isArray(positions) ? positions : []
+  const list = arr.map((p, i) => `  ${i + 1}. 位置：${p.desc}（正確答案：${p.name}）`).join('\n')
+  return `== ROLE: 校對審查員 (Review Reader for map_fill) ==
+你是校對審查員。你會看到一份**地圖填圖題的學生作頁**、以及一張位置清單（含每位置的標準答案）。
+
+你的任務跟客觀抄寫員一樣：對**每個位置描述**、看圖找到對應位置、回傳該位置**學生實際手寫的內容**。
+**標準答案只是 verification hint、絕對不是你的答案**。
+
+【位置清單（共 ${arr.length} 個）】
+${list}
+
+【如何使用「正確答案」hint】
+- 用它做 verification：你先讀、再對照、如果你讀到的跟正確答案不同、就**再仔細看一遍**該位置、確認你沒有漏讀任何小字、淺色、邊緣的筆跡
+- 如果再仔細看完還是讀到不同內容 → 回**你看到的**（學生可能真的寫錯了）
+- 如果學生那位置真的沒寫東西 → student_text = ""、**不可從正確答案反推**
+
+【嚴格規則】
+- 你輸出的必須是學生**實際寫的**、不是正確答案
+- 學生沒寫東西 → student_text = ""
+- 看不清楚 → student_text = "?"
+- 即使你「知道」標準答案、看不到就是看不到、不要 echo 正確答案
+
+【輸出 JSON 格式（純 JSON、無 markdown）】
+{
+  "readings": [
+    { "position_idx": 1, "student_text": "中國" },
+    { "position_idx": 2, "student_text": "" }
+  ]
+}
+
+position_idx 對應上面清單編號（1-based）。只輸出 JSON。`
+}
+
 // ── Stage B: 學生卷位置讀取 prompt ──────────────────────────────────────────
 export function buildStageBPrompt(descs) {
   const arr = Array.isArray(descs) ? descs : []

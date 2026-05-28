@@ -26,6 +26,7 @@ import {
   buildStageAPrompt,
   parseStageAResult,
   buildStageBPrompt,
+  buildStageBReviewPrompt,
   parseStageBResult,
   gradeMapFillDeterministically
 } from './map-fill-grader.js'
@@ -1138,11 +1139,10 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   if (s1 === 'blank' && s2 === 'blank') return 'stable'
   if (s1 !== 'read' || s2 !== 'read') return 'unstable'
 
-  // map_fill 位置標籤主觀（AI 可能選「左上方/中央陸地」空間描述、也可能選「甲/乙/丙」
-  // 印刷代號）、文字比對必失敗、永遠 diff/unstable。設計上 Phase B Accessor 的
-  // MAP-FILL SCORING 用 acceptableAnswers 集合比對、不依賴位置 label 一致。
-  // 兩 AI 都有 read → stable、讓 Accessor 評分；一邊 blank 一邊 read → 上面已 return unstable。
-  if (questionType === 'map_fill') return 'stable'
+  // 2026-05-28 pivot: map_fill 改走 Phase A 3-AI per-position pattern、
+  // consistency 在 questionResultsRaw 構造時 per-position 比對、不走這支通用函式。
+  // 這函式對 map_fill 不會被呼叫（read1/read2 是 synthesized 結構、走 fast path）。
+
 
   // calculation / word_problem：只比最終答案，忽略步驟排版差異
   if (questionType === 'calculation' || questionType === 'word_problem') {
@@ -6843,12 +6843,85 @@ export async function runStagedGradingPhaseA({
       })
     )
   }
+
+  // ── 2026-05-28: map_fill per-position 並行 read（AI1 + AI2）─────────────
+  // 跟 fill_blank/single_choice 用同樣的 3-AI 模式、但對 map_fill 特化：
+  // AI1：看整圖 + position descs（不揭露 names）→ 老實讀每位置學生筆跡
+  // AI2：看整圖 + position descs + names（作 verification hint）→ 仍只能回實看到的內容
+  // AI3：跳過（per-position 純文字比對、deterministic、不需 LLM）
+  //
+  // 需要 AnswerKey 內 question.positions[] 存在（Stage A 已跑過）；
+  // 若 AnswerKey 未升級（無 positions），map_fill 退回舊「Phase B 視覺評分」path。
+  const mapFillReadJobs = []  // [{ questionId, positions, ai1Idx, ai2Idx }]
+  const mapFillAkQuestions = mapFillIds
+    .map((qid) => answerKeyQuestions.find((q) => q?.id === qid))
+    .filter((q) => q && Array.isArray(q.positions) && q.positions.length > 0)
+  for (const akQ of mapFillAkQuestions) {
+    const positions = akQ.positions
+    const descs = positions.map((p) => p.desc)
+    const ai1Idx = parallelCalls.length
+    parallelCalls.push(
+      executeStage({
+        apiKey,
+        model: readModel,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+        stageContents: [{ role: 'user', parts: [{ text: buildStageBPrompt(descs) }, ...submissionImageParts] }]
+      })
+    )
+    const ai2Idx = parallelCalls.length
+    parallelCalls.push(
+      executeStage({
+        apiKey,
+        model: readModel,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(),
+        routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+        stageContents: [{ role: 'user', parts: [{ text: buildStageBReviewPrompt(positions) }, ...submissionImageParts] }]
+      })
+    )
+    mapFillReadJobs.push({ questionId: akQ.id, positions, ai1Idx, ai2Idx })
+  }
+  if (mapFillReadJobs.length > 0) {
+    logStaged(pipelineRunId, 'basic',
+      `[A2] map_fill 並行 read ${mapFillReadJobs.length} 題（AI1+AI2 共 ${mapFillReadJobs.length * 2} 個 call）`)
+  }
+
   logStageStart(pipelineRunId, 'ReadAnswer+reReadAnswer')
   const parallelResults = await Promise.all(parallelCalls)
   const readAnswerResponse = parallelResults[0]
   const reReadAnswerResponse = parallelResults[1]
   const finalAnswerOnlyResponse = finalAnswerOnlyIdx >= 0 ? parallelResults[finalAnswerOnlyIdx] : null
   const calcFinalAnswerResponse = calcFinalAnswerIdx >= 0 ? parallelResults[calcFinalAnswerIdx] : null
+
+  // ── 解析 map_fill AI1/AI2 readings ─────────────────────────────────────
+  // mapFillReadingsByQid: Map<questionId, { ai1: [{position_idx, student_text}], ai2: [...] }>
+  const mapFillReadingsByQid = new Map()
+  for (const job of mapFillReadJobs) {
+    const ai1Resp = parallelResults[job.ai1Idx]
+    const ai2Resp = parallelResults[job.ai2Idx]
+    const expectedCount = job.positions.length
+    let ai1Readings = []
+    let ai2Readings = []
+    if (ai1Resp?.ok) {
+      const raw = extractCandidateText(ai1Resp.data) || ''
+      ai1Readings = parseStageBResult(raw, expectedCount) || []
+    } else {
+      logStaged(pipelineRunId, 'basic', `[A2] map_fill ${job.questionId} AI1 失敗 status=${ai1Resp?.status}`)
+    }
+    if (ai2Resp?.ok) {
+      const raw = extractCandidateText(ai2Resp.data) || ''
+      ai2Readings = parseStageBResult(raw, expectedCount) || []
+    } else {
+      logStaged(pipelineRunId, 'basic', `[A2] map_fill ${job.questionId} AI2 失敗 status=${ai2Resp?.status}`)
+    }
+    mapFillReadingsByQid.set(job.questionId, { ai1: ai1Readings, ai2: ai2Readings, positions: job.positions })
+    if (ai1Resp) stageResponses.push(ai1Resp)
+    if (ai2Resp) stageResponses.push(ai2Resp)
+  }
   logStageEnd(pipelineRunId, 'ReadAnswer', readAnswerResponse)
   logStageEnd(pipelineRunId, 'reReadAnswer', reReadAnswerResponse)
   stageResponses.push(readAnswerResponse, reReadAnswerResponse)
@@ -7406,26 +7479,71 @@ export async function runStagedGradingPhaseA({
     const read2 = read2ById.get(questionId)
     const classifyRow = classifyAligned.find((q) => q.questionId === questionId)
 
-    // ── map_fill: Phase A 跳過 Read（位置標籤主觀、文字化 lossy）──
-    // 直接 auto-confirmed 進 Phase B、由 Accessor 拿 crop 圖視覺評分。
-    // status='auto' 給 UI 顯示「(填圖題，由 Phase B 直接視覺評分)」用。
-    // arbiter 階段會 skip map_fill（不送 AI3）、fallback 看到 consistencyStatus='stable'
-    // 自動回 arbitrated_agree。Phase B Accessor 用 questionCategory==='map_fill' 走
-    // 視覺評分 path、忽略 finalAnswer placeholder。
+    // ── map_fill: Phase A 3-AI per-position 流程（2026-05-28 pivot）──
+    // AnswerKey 已升級（有 positions[]） → 用平行 AI1/AI2 readings + per-position consistency
+    // AnswerKey 未升級（無 positions[]） → 回退到 Phase B 視覺評分 path（auto-stable）
     if (classifyRow?.questionType === 'map_fill') {
-      const placeholder = '(填圖題，由 Phase B 直接視覺評分)'
+      const mfData = mapFillReadingsByQid.get(questionId)
+      if (!mfData || mfData.positions.length === 0) {
+        // 舊資料 fallback：Phase B map-fill-grader 會走 Stage A lazy backfill + Stage B
+        const placeholder = '(填圖題 AnswerKey 未升級、由 Phase B 視覺評分)'
+        return {
+          questionId,
+          consistencyStatus: 'stable',
+          containmentPreferredRaw: null,
+          consistencyReason: undefined,
+          questionType: 'map_fill',
+          readAnswer1: { status: 'auto', studentAnswer: placeholder },
+          readAnswer2: { status: 'auto', studentAnswer: placeholder },
+          answerBbox: classifyRow?.answerBbox ?? null,
+          bboxCorrected: classifyRow?.bboxCorrected || false,
+          calculationAnswerMismatch: false,
+          framingReason: classifyRow?.framingReason || undefined
+        }
+      }
+
+      // 有 positions[] → 跑 per-position consistency
+      const { ai1: mfRead1, ai2: mfRead2, positions } = mfData
+      const r1Map = new Map(mfRead1.map((r) => [r.position_idx, String(r.student_text ?? '')]))
+      const r2Map = new Map(mfRead2.map((r) => [r.position_idx, String(r.student_text ?? '')]))
+      const perPosition = positions.map((p, i) => {
+        const idx = i + 1
+        const ai1_text = r1Map.get(idx) ?? ''
+        const ai2_text = r2Map.get(idx) ?? ''
+        return {
+          idx,
+          name: p.name,
+          desc: p.desc,
+          ai1_text,
+          ai2_text,
+          consistent: ai1_text === ai2_text
+        }
+      })
+      const allConsistent = perPosition.every((p) => p.consistent)
+      const consistencyStatus = allConsistent ? 'stable' : 'diff'
+
+      // synthesize readAnswer1/2 給既有相容邏輯（join 非空 readings 作 string）
+      const joinReadings = (m) => positions
+        .map((_, i) => (m.get(i + 1) || '').trim())
+        .filter(Boolean)
+        .join(', ')
+      const r1Str = joinReadings(r1Map)
+      const r2Str = joinReadings(r2Map)
+
       return {
         questionId,
-        consistencyStatus: 'stable',
+        consistencyStatus,
         containmentPreferredRaw: null,
-        consistencyReason: undefined,
+        consistencyReason: allConsistent ? undefined : `${perPosition.filter((p) => !p.consistent).length} 個位置 AI1/AI2 不一致`,
         questionType: 'map_fill',
-        readAnswer1: { status: 'auto', studentAnswer: placeholder },
-        readAnswer2: { status: 'auto', studentAnswer: placeholder },
+        readAnswer1: { status: 'read', studentAnswer: r1Str || '' },
+        readAnswer2: { status: 'read', studentAnswer: r2Str || '' },
         answerBbox: classifyRow?.answerBbox ?? null,
         bboxCorrected: classifyRow?.bboxCorrected || false,
         calculationAnswerMismatch: false,
-        framingReason: classifyRow?.framingReason || undefined
+        framingReason: classifyRow?.framingReason || undefined,
+        // 🆕 per-position 細節給前端 ConsistencyQuestionCard 顯示
+        mapFillReadings: { ai1: mfRead1, ai2: mfRead2, perPosition }
       }
     }
 
@@ -7716,8 +7834,10 @@ Return JSON:
       const s2 = qr.readAnswer2.status
       // 雙方都 blank → 自動一致，不需送 AI3
       if (s1 === 'blank' && s2 === 'blank') return false
-      // status='auto' → map_fill 跳過 Read、由 Phase B 直接視覺評分、不需 AI3
+      // status='auto' → map_fill 舊資料 fallback、Phase B 視覺評分、不需 AI3
       if (s1 === 'auto' || s2 === 'auto') return false
+      // map_fill 走 per-position consistency、不用 AI3 整題比對
+      if (qr.questionType === 'map_fill') return false
       return true
     })
     .map((qr) => ({
@@ -8736,16 +8856,19 @@ export async function runStagedGradingPhaseB({
     })
   }
 
-  // ── Phase 1: map_fill Direction Y 評分 ─────────────────────────────────────
-  // map_fill 完全 bypass Accessor、走 map-fill-grader (Stage B + 程式化比對)。
-  // 設計依據：實驗 2026-05-28 證實 Accessor 看 acceptableAnswers 會幻覺、
-  // 改成「Stage A 抽 positions、Stage B 不揭露 name、deterministic match」零幻覺。
+  // ── Phase 1: map_fill 評分 ─────────────────────────────────────────────
+  // 2026-05-28 pivot: 優先用 Phase A confirmed readings + deterministic match（不跑 AI）
+  // 如果 finalAnswer 沒帶 per-position readings（舊資料）→ fallback 跑 Stage A+B（map-fill-grader）
   const mapFillBypassIds = new Set()
   const mapFillQuestions = akQuestions.filter((q) => q?.questionCategory === 'map_fill' && q?.id)
+  // 用 finalAnswers 取得每個 questionId 的 per-position confirmed readings（client 帶上來）
+  const finalAnswerByQid = new Map(
+    (Array.isArray(finalAnswers) ? finalAnswers : []).map((a) => [ensureString(a?.questionId, '').trim(), a])
+  )
   if (mapFillQuestions.length > 0 && inlineImages.length > 0) {
     const studentImg = inlineImages[0]?.inlineData
     if (studentImg?.data && studentImg?.mimeType) {
-      logStaged(pipelineRunId, 'basic', `[B-MapFill] ${mapFillQuestions.length} 題走 Direction Y`)
+      logStaged(pipelineRunId, 'basic', `[B-MapFill] ${mapFillQuestions.length} 題評分中`)
       for (const q of mapFillQuestions) {
         const qId = String(q.id).trim()
         if (manualBypassIds.has(qId)) continue
@@ -8756,6 +8879,37 @@ export async function runStagedGradingPhaseB({
           // 取 positions: 優先用 question.positions、fallback Stage A 即時偵測
           let positions = Array.isArray(q.positions) ? q.positions.filter((p) => p?.name && p?.desc) : null
 
+          // ── Fast path: 用 finalAnswer.mapFillFinalReadings (Phase A confirmed) ──
+          const fa = finalAnswerByQid.get(qId)
+          const confirmedReadings = Array.isArray(fa?.mapFillFinalReadings) ? fa.mapFillFinalReadings : null
+
+          if (confirmedReadings && positions && positions.length > 0 && confirmedReadings.length === positions.length) {
+            // 直接 deterministic match、不跑 AI
+            const result = gradeMapFillDeterministically(positions, confirmedReadings, acceptableAnswers)
+            logStaged(pipelineRunId, 'basic',
+              `[B-MapFill] ${qId} 用 Phase A confirmed readings 評分 score=${result.score}/${result.maxScore} ` +
+              `correct=${result.summary.correct} wrong=${result.summary.wrong} ` +
+              `blank=${result.summary.blank} unclear=${result.summary.unclear}`)
+            deterministicScores.push({
+              questionId: qId,
+              isCorrect: result.isCorrect,
+              score: result.score,
+              maxScore: result.maxScore,
+              errorType: result.isCorrect ? 'none'
+                : result.summary.blank === result.maxScore ? 'blank'
+                : 'concept',
+              scoringReason: result.scoringReason,
+              scoreConfidence: 100,
+              studentFinalAnswer: result.studentFinalAnswer,
+              needExplain: false,
+              _mapFillBypass: true,
+              mapFillResults: result.perPosResults
+            })
+            mapFillBypassIds.add(qId)
+            continue
+          }
+
+          // ── Slow path fallback: positions[] 缺 / Phase A 沒帶 confirmed readings → 跑 Stage A+B ──
           if (!positions || positions.length === 0) {
             // Lazy backfill: 跑 Stage A
             if (!q.cropImagePath) {
@@ -8803,7 +8957,7 @@ export async function runStagedGradingPhaseB({
           }
 
           if (!mapFillFailed && positions && positions.length > 0) {
-            // Stage B: 讀學生卷
+            // Stage B fallback: 跑 AI 讀學生卷（舊路徑、Phase A 沒 confirmed 時）
             const descs = positions.map((p) => p.desc)
             const stageBResp = await executeStage({
               apiKey,
@@ -8832,7 +8986,7 @@ export async function runStagedGradingPhaseB({
               } else {
                 const result = gradeMapFillDeterministically(positions, readings, acceptableAnswers)
                 logStaged(pipelineRunId, 'basic',
-                  `[B-MapFill] ${qId} 完成 score=${result.score}/${result.maxScore} ` +
+                  `[B-MapFill] ${qId} 完成 (Stage B fallback) score=${result.score}/${result.maxScore} ` +
                   `correct=${result.summary.correct} wrong=${result.summary.wrong} ` +
                   `blank=${result.summary.blank} unclear=${result.summary.unclear} ` +
                   `${stageBResp.modelLatencyMs}ms`)
@@ -8844,11 +8998,10 @@ export async function runStagedGradingPhaseB({
                   errorType: result.isCorrect ? 'none'
                     : result.summary.blank === result.maxScore ? 'blank'
                     : 'concept',
-                  // 用 mergeStagedResults 讀的 field 名（reason/confidence 是 silent bug）
                   scoringReason: result.scoringReason,
                   scoreConfidence: 100,
                   studentFinalAnswer: result.studentFinalAnswer,
-                  needExplain: false,  // scoringReason 已含完整說明
+                  needExplain: false,
                   _mapFillBypass: true,
                   mapFillResults: result.perPosResults
                 })
