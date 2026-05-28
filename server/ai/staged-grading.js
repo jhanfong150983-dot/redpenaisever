@@ -6853,9 +6853,10 @@ export async function runStagedGradingPhaseA({
   // 需要 AnswerKey 內 question.positions[] 存在（Stage A 已跑過）；
   // 若 AnswerKey 未升級（無 positions），map_fill 退回舊「Phase B 視覺評分」path。
   const mapFillReadJobs = []  // [{ questionId, positions, ai1Idx, ai2Idx }]
-  const mapFillAkQuestions = mapFillIds
-    .map((qid) => answerKeyQuestions.find((q) => q?.id === qid))
-    .filter((q) => q && Array.isArray(q.positions) && q.positions.length > 0)
+  // 從 answerKeyQuestions 直接過濾 map_fill + 已有 positions[]
+  // （mapFillIds 是 buildReadAnswerPrompt 內 scope 變數、這裡不能用）
+  const mapFillAkQuestions = (Array.isArray(answerKeyQuestions) ? answerKeyQuestions : [])
+    .filter((q) => q?.questionCategory === 'map_fill' && Array.isArray(q.positions) && q.positions.length > 0)
   for (const akQ of mapFillAkQuestions) {
     const positions = akQ.positions
     const descs = positions.map((p) => p.desc)
