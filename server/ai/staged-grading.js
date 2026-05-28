@@ -4818,6 +4818,25 @@ ${isHighSchool
     - 數值錯誤 / 單位錯誤 / 缺單位 (referenceAnswer 有單位但學生沒寫) / 空白 / 無法辨識 → score = 0. STOP.
   **完全不檢查算式過程、不看 crop 圖、不分析列式。算式診斷由後續 explain 階段負責，accessor 不碰。**
   禁止給 (maxScore - 1) 這類中間分數。
+
+  🚨 MULTI-PART FINAL ANSWERS (referenceAnswer 含多個數值+單位、用「，」「,」「、」分隔):
+    例：referenceAnswer = "50.24 公分，1406.72 平方公分" (兩個 part) 或 "12歲，36歲" (兩個 part)。
+    步驟：
+      1. 依「，」「,」「、」拆解 referenceAnswer 為 N 個 expected parts。
+      2. 同樣切 studentAnswerRaw 為 student parts。
+      3. 對齊比對 (順序固定)：
+         - 全部 part 對 (數值正確 + 單位正確/equivalent) → score = maxScore, isCorrect=true。
+         - 任一 part 數值錯 / 單位錯 / 缺漏 → score = 0, isCorrect=false。
+      4. scoringReason 必須具體標出每個 part 對錯。
+         範例 (1 對 1 錯)：「第一個答案「50.24cm」正確；第二個答案「1105.28」錯誤，正確應為「1406.72 平方公分」」
+         範例 (全錯)：「學生只寫一個答案「4048 cm²」、應有兩個答案「50.24 公分」+「1406.72 平方公分」、缺漏不完整」
+    🚨 絕對禁止對 multi-part 題目 fallback 為空 scoringReason — 必須寫出對比。
+
+  🚨 word_problem 強制 scoringReason 規範：
+    - score=0 (錯) 必須寫出「學生答案 vs 標準答案」對比 + 錯誤原因。
+    - score=maxScore (對) 必須寫「答句「X」正確」之類確認句。
+    - 嚴禁回傳空字串 / null / 純標點符號的 scoringReason。
+    - 若 referenceAnswer 真的看不懂、給 isCorrect=false + scoringReason="referenceAnswer 格式無法解析（請老師人工確認）"。
 - calculation: Standard-answer question type with BINARY scoring (all-or-nothing — score 必為 0 或 maxScore，禁止中間值).
   HARD RULE: NEVER require "答：", "A:", or "Ans:" prefix. NO unit checking — students do NOT need to write units.
   ⚠️ studentAnswerRaw 只含學生寫的「最終答案」(已從 OCR 過程文字中萃取)。**算式過程一律不評**。
@@ -4952,6 +4971,7 @@ ${isHighSchool
   - multi_fill:        correct→「學生填入ㄅ、ㄇ、ㄉ，全部正確」 wrong→「學生填入ㄅ、ㄇ，正確答案為ㄅ、ㄇ、ㄉ，漏填ㄉ」
   - calculation:       correct→「最終答案36正確」 wrong→「學生最終答案為38，正確答案為36，答案錯誤」
   - word_problem:      correct→「答句「36公分」正確」 wrong(數值錯)→「學生答句寫「38公分」，正確答案為「36公分」，答案錯誤」 wrong(單位錯)→「學生答句寫「36公尺」，正確答案為「36公分」，單位錯誤、答案不正確」 wrong(缺單位)→「學生答句寫「36」（缺單位），正確答案為「36公分」，答案不完整、答案不正確」
+                       multi-part correct→「第一個答案「50.24cm」正確；第二個答案「1406.72cm²」正確」 multi-part partial wrong→「第一個答案「50.24cm」正確；第二個答案「1105.28」錯誤，正確應為「1406.72 平方公分」」 multi-part missing→「學生只寫一個答案「4048 cm²」、應有兩個答案「50.24 公分」+「1406.72 平方公分」、缺漏不完整」
   - short_answer:      correct→「學生回答內容完整，概念正確」 wrong→「學生寫「因為天氣很熱」，正確答案應涵蓋「蒸發作用」概念，學生僅描述現象未說明原理」. When rubricsDimensions exist, describe each dimension's score.
   - matching:          correct→「學生配對「2公尺/秒」，答案正確」 wrong→「學生配對「3公尺/秒」，正確答案為「2公尺/秒」，配對錯誤」
   - map_fill:          走獨立 map-fill-grader、不應該到 Accessor、看到就 needs_review
@@ -5384,6 +5404,16 @@ function buildFinalGradingResult({
     // map_fill 走 map-fill-grader、studentAnswer 用 grader 寫的 studentFinalAnswer
     // （不是 readAnswerResult.answers 因為 map_fill 沒進 Read）
     const isMapFillBypass = score?._mapFillBypass === true
+    // 2026-05-29 Fix A: AI 沒給 scoringReason 時、fallback 不要寫「需人工複核」
+    // 改成顯示「學生答案 vs 標準答案」、讓老師一眼判斷
+    const studentAnsForReason = isMapFillBypass
+      ? ensureString(score?.studentFinalAnswer, '')
+      : ensureString(answer?.studentAnswerRaw, '無法辨識')
+    const refAnsForReason = ensureString(question?.referenceAnswer || question?.answer, '').trim()
+    const fallbackWrongReason = refAnsForReason
+      ? `學生答案「${studentAnsForReason}」、標準答案「${refAnsForReason}」（AI 未提供具體理由、請手動確認）`
+      : `學生答案「${studentAnsForReason}」（AI 未提供具體理由、請手動確認）`
+
     const row = {
       questionId,
       // questionType 帶下來：前端對 map_fill 等視覺評分題型要鎖編輯欄
@@ -5396,7 +5426,7 @@ function buildFinalGradingResult({
       maxScore: toFiniteNumber(score?.maxScore) ?? Math.max(0, toFiniteNumber(question?.maxScore) ?? 0),
       reason:
         ensureString(score?.scoringReason, '').trim() ||
-        (score?.isCorrect ? '答案正確' : '需人工複核'),
+        (score?.isCorrect ? '答案正確' : fallbackWrongReason),
       confidence: clampInt(score?.scoreConfidence, 0, 100, 0),
       errorType:
         ensureString(score?.errorType, '').trim() ||
