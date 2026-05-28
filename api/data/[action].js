@@ -5495,8 +5495,15 @@ async function handleStudentSubmission(req, res) {
   // Disputed questions: [{questionId, note}] — student believes AI was wrong
   const disputedQuestions = Array.isArray(body.disputedQuestions) ? body.disputedQuestions : []
 
-  if (!assignmentId || !normalizedImagePayload) {
+  if (!assignmentId) {
     res.status(400).json({ error: 'Missing required fields' })
+    return
+  }
+  // 2026-05-27: 訂正模式不需要 main image — AI recheck 只看 corrections/<sub>/<qid>.webp、
+  // 老師端 GradingPage 也跳過 student_correction submission 顯示。imageBase64 只在 upload
+  // 模式必填。
+  if (mode === 'upload' && !normalizedImagePayload) {
+    res.status(400).json({ error: 'Missing image' })
     return
   }
 
@@ -5670,51 +5677,68 @@ async function handleStudentSubmission(req, res) {
     submissionId = generateSubmissionId()
     studentContextRef = studentContext
     assignmentIdRef = assignmentId
-    const { filePath, thumbFilePath } = await uploadSubmissionAssets(
-      supabaseDb,
-      submissionId,
-      imageBase64,
-      contentType,
-      thumbBase64,
-      thumbContentType
-    )
-
-    // 未批改前可覆蓋舊作業
-    const { data: latestSubmissionRows, error: latestSubmissionError } = await supabaseDb
-      .from('submissions')
-      .select('id, graded_at')
-      .eq('owner_id', ownerId)
-      .eq('assignment_id', assignmentId)
-      .eq('student_id', studentContext.id)
-      .order('created_at', { ascending: false })
-      .limit(1)
-
-    if (latestSubmissionError) {
-      throw new Error(latestSubmissionError.message)
+    // 2026-05-27: 訂正模式不上傳整份作答頁、image_url 留空字串（schema NOT NULL）。
+    // AI recheck 只讀 corrections/<sub>/<qid>.webp、UI 也跳過、上傳純粹是 wasted storage。
+    let filePath = ''
+    let thumbFilePath = null
+    if (mode === 'upload') {
+      const uploaded = await uploadSubmissionAssets(
+        supabaseDb,
+        submissionId,
+        imageBase64,
+        contentType,
+        thumbBase64,
+        thumbContentType
+      )
+      filePath = uploaded.filePath
+      thumbFilePath = uploaded.thumbFilePath
     }
 
-    const latestSubmission = latestSubmissionRows?.[0]
-    if (latestSubmission?.id && latestSubmission.id !== submissionId) {
-      const latestIsGraded = (latestSubmission.graded_at !== null && latestSubmission.graded_at !== undefined) ||
-        String(latestSubmission.status || '').toLowerCase() === 'graded'
-      if (!latestIsGraded) {
-        await supabaseDb
-          .from('deleted_records')
-          .upsert(
-            {
-              owner_id: ownerId,
-              table_name: 'submissions',
-              record_id: latestSubmission.id,
-              deleted_at: new Date().toISOString()
-            },
-            { onConflict: 'owner_id,table_name,record_id' }
-          )
-        await supabaseDb
-          .from('submissions')
-          .delete()
-          .eq('id', latestSubmission.id)
-          .eq('owner_id', ownerId)
-        await deleteSubmissionAssets(supabaseDb, latestSubmission.id)
+    // 未批改前可覆蓋舊作業（僅 upload 模式 — 訂正流程不該動原批改 submission）
+    // 2026-05-27: 修兩個 bug：
+    //   (a) 整段沒 gate mode、訂正模式跑來也會把舊的 graded submission 砍掉、學生卡片
+    //       變「尚未繳交 + 待訂正」矛盾狀態。六年4班 U5 5/26 12 位學生中招、其中
+    //       李宥均 / 白筱霜 因新 insert 失敗、舊批改紀錄連帶整張作答頁照片全消失。
+    //   (b) SELECT 漏 status 欄位、`status === 'graded'` fallback 永遠失效 ——
+    //       資料庫裡有 35 筆 graded_at IS NULL 的歷史 graded submission 會被誤判
+    //       為「未批改」直接砍掉。
+    if (mode === 'upload') {
+      const { data: latestSubmissionRows, error: latestSubmissionError } = await supabaseDb
+        .from('submissions')
+        .select('id, status, graded_at')
+        .eq('owner_id', ownerId)
+        .eq('assignment_id', assignmentId)
+        .eq('student_id', studentContext.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+
+      if (latestSubmissionError) {
+        throw new Error(latestSubmissionError.message)
+      }
+
+      const latestSubmission = latestSubmissionRows?.[0]
+      if (latestSubmission?.id && latestSubmission.id !== submissionId) {
+        const latestIsGraded = (latestSubmission.graded_at !== null && latestSubmission.graded_at !== undefined) ||
+          String(latestSubmission.status || '').toLowerCase() === 'graded'
+        if (!latestIsGraded) {
+          await supabaseDb
+            .from('deleted_records')
+            .upsert(
+              {
+                owner_id: ownerId,
+                table_name: 'submissions',
+                record_id: latestSubmission.id,
+                deleted_at: new Date().toISOString()
+              },
+              { onConflict: 'owner_id,table_name,record_id' }
+            )
+          await supabaseDb
+            .from('submissions')
+            .delete()
+            .eq('id', latestSubmission.id)
+            .eq('owner_id', ownerId)
+          await deleteSubmissionAssets(supabaseDb, latestSubmission.id)
+        }
       }
     }
 
