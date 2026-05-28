@@ -1398,8 +1398,11 @@ async function fetchLatestGradedSubmissionsByStudent(
   return latestByStudent
 }
 
-async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRows) {
+async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRows, options = {}) {
   if (!Array.isArray(submissionRows) || submissionRows.length === 0) return
+  // 2026-05-28: forceRebuildCorrection — 手動改分數時跳過「已在訂正流程則 skip」的守門、
+  // 強制以新 gradingResult.mistakes 重建 correction_question_items
+  const forceRebuildCorrection = options?.forceRebuildCorrection === true
 
   const preferences = await getTeacherPreferences(supabaseDb, ownerId)
   const assignmentIds = [
@@ -1460,7 +1463,9 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
       'correction_pending_review', 'correction_passed', 'correction_failed'
     ]
     if (source !== 'student_correction' && CORRECTION_ACTIVE_STATUSES.includes(existingStatus)) {
-      continue
+      // 2026-05-28: 手動改分數時、forceRebuildCorrection=true、跳過此 skip 守門、
+      // 讓 correction_question_items 依新 gradingResult.mistakes 重 build
+      if (!forceRebuildCorrection) continue
     }
     // Guard: once teacher/manual flow reaches correction_passed, treat it as terminal.
     // Ignore stale correction submissions synced later (graded or non-graded).
@@ -2274,6 +2279,75 @@ async function handleDisputeResolve(req, res) {
       })
     )
 
+    // 2026-05-28: 申訴 accept 時、把學生這題從錯誤變正確、加分回 submission.score、
+    // 從 gradingResult.mistakes 移除
+    // 之前只動 correction_question_items.status='resolved'、submission 分數紋風不動、
+    // 老師承認學生對結果分數沒還回去（user 回報 bug）
+    const acceptedQids = resolutions
+      .filter((r) => r?.action === 'accept' && typeof r?.questionId === 'string' && r.questionId.trim())
+      .map((r) => r.questionId.trim())
+    if (acceptedQids.length > 0) {
+      try {
+        // 找原始批改的 submission（round 0、最近一份）
+        const { data: subRows } = await supabaseDb
+          .from('submissions')
+          .select('id, score, grading_result, graded_at')
+          .eq('owner_id', user.id)
+          .eq('assignment_id', assignmentId)
+          .eq('student_id', studentId)
+          .eq('round', 0)
+          .order('graded_at', { ascending: false })
+          .limit(1)
+        const subRow = subRows?.[0]
+        if (subRow?.grading_result && Array.isArray(subRow.grading_result?.details)) {
+          const gr = subRow.grading_result
+          const acceptedSet = new Set(acceptedQids)
+          // mutate details：accepted 題目改成 isCorrect=true、score=maxScore
+          const newDetails = gr.details.map((d) => {
+            if (!d?.questionId || !acceptedSet.has(d.questionId)) return d
+            const maxScore = Number.isFinite(Number(d.maxScore)) ? Number(d.maxScore) : 0
+            return {
+              ...d,
+              score: maxScore,
+              isCorrect: maxScore > 0,
+              reason: '申訴通過（老師承認原始作答正確）',
+              comment: '申訴通過（老師承認原始作答正確）'
+            }
+          })
+          // mistakes：移除 accepted 題目
+          const newMistakes = Array.isArray(gr.mistakes)
+            ? gr.mistakes.filter((m) => !m?.questionId || !acceptedSet.has(m.questionId))
+            : []
+          // 重算 totalScore
+          const newTotalScore = newDetails.reduce(
+            (sum, d) => sum + (Number.isFinite(Number(d?.score)) ? Number(d.score) : 0),
+            0
+          )
+          const newGr = {
+            ...gr,
+            details: newDetails,
+            mistakes: newMistakes,
+            totalScore: newTotalScore
+          }
+          const { error: updErr } = await supabaseDb
+            .from('submissions')
+            .update({
+              score: newTotalScore,
+              ai_score: newTotalScore,
+              grading_result: newGr,
+              updated_at: now
+            })
+            .eq('id', subRow.id)
+            .eq('owner_id', user.id)
+          if (updErr) {
+            console.warn('[dispute-resolve] submission grading_result update failed:', updErr.message)
+          }
+        }
+      } catch (err) {
+        console.warn('[dispute-resolve] failed to sync accepted scores back to submission:', err?.message)
+      }
+    }
+
     // After resolving all, check remaining open/disputed counts to update state
     const { data: remaining } = await supabaseDb
       .from('correction_question_items')
@@ -2474,7 +2548,15 @@ async function handleSaveGrading(req, res) {
           .eq('owner_id', user.id)
           .in('id', updatedIds)
         if (updatedSubs && updatedSubs.length > 0) {
-          await applySubmissionStateTransitions(supabaseDb, user.id, updatedSubs)
+          // 2026-05-28: 手動改分數時、強制 rebuild correction state（不 skip 已在訂正流程的學生）
+          // 否則「老師加分回該題」/「老師扣分」這種變動沒同步到學生端訂正清單
+          const fromManualScoreEdit = body?.fromManualScoreEdit === true
+          await applySubmissionStateTransitions(
+            supabaseDb,
+            user.id,
+            updatedSubs,
+            { forceRebuildCorrection: fromManualScoreEdit }
+          )
         }
       } catch (err) {
         console.warn('[save-grading] applySubmissionStateTransitions failed (non-fatal):', err?.message)
