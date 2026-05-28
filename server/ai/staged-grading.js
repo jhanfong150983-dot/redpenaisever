@@ -5869,15 +5869,60 @@ export async function runStagedGradingPhaseA({
   const assignmentTotalPages = internalContext?.assignmentTotalPages
   const isSinglePagePhysical = answerSheetMode === 'answer_only' || assignmentTotalPages === 1
   if (pageBreaks.length === 0 && !isSinglePagePhysical) {
-    const pageNums = new Set()
-    for (const id of questionIds) {
-      const m = id.match(/^(\d+)-/)
-      if (m) pageNums.add(parseInt(m[1], 10))
+    // 2026-05-28: 智慧 fallback — 用 answer_key_templates.page_orientations 算真實切點
+    // 修法動機：吳老師數練 p51-53 case、page 1 直拍 + page 2 橫拍 → 真實 pageBreaks=[0.665]、
+    // 但 sync 把 pageBreaks 從 Dexie 洗掉、client 傳 empty、舊 fallback 用 equal split [0.5]
+    // → page 1 sub-image 切到 y=0.5 但實際 page 1 占到 y=0.665 → 1-2-2 被切到 page 2 sub-image → invisible
+    let smartPageBreaks = []
+    const assignmentIdForLookup = internalContext?.assignmentId || payload?.assignmentId
+    if (assignmentIdForLookup) {
+      try {
+        const supabase = getSupabaseAdmin()
+        const { data: assignmentRow } = await supabase
+          .from('assignments')
+          .select('answer_key_template_id')
+          .eq('id', assignmentIdForLookup)
+          .single()
+        if (assignmentRow?.answer_key_template_id) {
+          const { data: tpl } = await supabase
+            .from('answer_key_templates')
+            .select('page_orientations')
+            .eq('id', assignmentRow.answer_key_template_id)
+            .single()
+          const orientations = tpl?.page_orientations
+          if (Array.isArray(orientations) && orientations.length > 1) {
+            // A4 標準：portrait aspect (寬:高) ≈ 1:1.41、landscape ≈ 1.41:1
+            // 各頁 scale 到 merged 圖 width 後高度比例：portrait≈1.41、landscape≈0.71
+            const ratios = orientations.map(o => o === 'portrait' ? 1.41 : 0.71)
+            const total = ratios.reduce((a, b) => a + b, 0)
+            let cumul = 0
+            for (let i = 0; i < ratios.length - 1; i++) {
+              cumul += ratios[i]
+              smartPageBreaks.push(+(cumul / total).toFixed(4))
+            }
+            logStaged(pipelineRunId, 'basic',
+              `[pageBreaks] smart fallback from page_orientations=${JSON.stringify(orientations)} → ${JSON.stringify(smartPageBreaks)}`)
+          }
+        }
+      } catch (err) {
+        console.warn(`[PhaseA][${pipelineRunId}] pageBreaks smart fallback failed:`, err?.message)
+      }
     }
-    const maxPage = pageNums.size > 0 ? Math.max(...pageNums) : 1
-    if (maxPage >= 2) {
-      pageBreaks = Array.from({ length: maxPage - 1 }, (_, i) => +((i + 1) / maxPage).toFixed(4))
-      logStaged(pipelineRunId, stagedLogLevel, 'pageBreaks auto-estimated (equal split)', { maxPage, pageBreaks })
+
+    if (smartPageBreaks.length > 0) {
+      pageBreaks = smartPageBreaks
+    } else {
+      // 舊行為（equal split）— 智慧 fallback 拿不到 orientations 時的最後保險
+      const pageNums = new Set()
+      for (const id of questionIds) {
+        const m = id.match(/^(\d+)-/)
+        if (m) pageNums.add(parseInt(m[1], 10))
+      }
+      const maxPage = pageNums.size > 0 ? Math.max(...pageNums) : 1
+      if (maxPage >= 2) {
+        pageBreaks = Array.from({ length: maxPage - 1 }, (_, i) => +((i + 1) / maxPage).toFixed(4))
+        logStaged(pipelineRunId, stagedLogLevel, 'pageBreaks auto-estimated (equal split fallback)', { maxPage, pageBreaks })
+      }
     }
   }
   if (isSinglePagePhysical) {
