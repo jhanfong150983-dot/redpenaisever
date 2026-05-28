@@ -95,6 +95,88 @@ export async function clearPhaseAState(submissionId) {
 }
 
 /**
+ * 2026-05-28: Phase A 重跑時清訂正狀態
+ *
+ * Why: 老師對已派發訂正的學生重跑 Phase A、舊 grading_result.mistakes 不再有效、
+ *   訂正清單也跟著失效。需把 assignment_student_state 退回 'graded'、
+ *   把 correction_question_items 標 'skipped'、讓新 Phase B 跑完能重 build。
+ *
+ * Status policy:
+ *   - 'correction_passed' (訂正完成 = 終點) → return { blocked: true } 讓 caller 擋下重跑
+ *   - 'correction_required' / 'correction_in_progress' / 'correction_pending_review' /
+ *     'correction_failed' → 清資料
+ *   - 其他狀態（'graded' / 'uploaded' 等）→ no-op、回 { cleared: false }
+ *
+ * @returns {Promise<{ blocked?: boolean; cleared: boolean; reason?: string }>}
+ */
+export async function clearCorrectionForRerun(submissionId) {
+  if (!submissionId) return { cleared: false }
+  try {
+    const supabase = getSupabaseAdmin()
+    const { data: sub, error: subErr } = await supabase
+      .from('submissions')
+      .select('id, owner_id, assignment_id, student_id')
+      .eq('id', submissionId)
+      .maybeSingle()
+    if (subErr || !sub) {
+      console.warn(`[clearCorrectionForRerun] submission lookup failed=${submissionId}:`, subErr?.message)
+      return { cleared: false }
+    }
+    const { owner_id: ownerId, assignment_id: assignmentId, student_id: studentId } = sub
+    if (!ownerId || !assignmentId || !studentId) return { cleared: false }
+
+    const { data: state } = await supabase
+      .from('assignment_student_state')
+      .select('status')
+      .eq('owner_id', ownerId)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .maybeSingle()
+    const status = String(state?.status || '').toLowerCase()
+    if (status === 'correction_passed') {
+      return { blocked: true, cleared: false, reason: '學生已完成訂正、不可重跑批改' }
+    }
+    const nonTerminalCorrection = [
+      'correction_required', 'correction_in_progress',
+      'correction_pending_review', 'correction_failed'
+    ]
+    if (!nonTerminalCorrection.includes(status)) {
+      return { cleared: false }
+    }
+
+    const nowIso = new Date().toISOString()
+    const { error: stateErr } = await supabase
+      .from('assignment_student_state')
+      .update({
+        status: 'graded',
+        last_status_reason: '老師重新批改、訂正狀態已清除',
+        updated_at: nowIso
+      })
+      .eq('owner_id', ownerId)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+    if (stateErr) {
+      console.warn(`[clearCorrectionForRerun] state update failed=${submissionId}:`, stateErr.message)
+    }
+    const { error: itemsErr } = await supabase
+      .from('correction_question_items')
+      .update({ status: 'skipped', updated_at: nowIso })
+      .eq('owner_id', ownerId)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentId)
+      .in('status', ['open', 'disputed'])
+    if (itemsErr) {
+      console.warn(`[clearCorrectionForRerun] items close failed=${submissionId}:`, itemsErr.message)
+    }
+    console.log(`[clearCorrectionForRerun] cleared submission=${submissionId} prevStatus=${status}`)
+    return { cleared: true }
+  } catch (err) {
+    console.warn(`[clearCorrectionForRerun] error:`, err?.message)
+    return { cleared: false }
+  }
+}
+
+/**
  * 2026-05-17: 從 DB 讀 phase_a_state（給 Phase B fromCache 用）
  * 2026-05-18: 同步抓 assignments.answer_key（live），給 fromCache path 蓋掉快取版、避免老師改答案後重批不生效
  *   注意：submissions.assignment_id 沒 FK 到 assignments.id、PostgREST embed 不可用、拆兩個 query

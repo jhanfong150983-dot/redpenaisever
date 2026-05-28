@@ -2630,6 +2630,95 @@ async function handleClearGrading(req, res) {
   }
 }
 
+// 2026-05-28: Q1 — Phase A/B 重跑前先呼叫此 endpoint。
+// 行為：
+//   - 任一學生 status='correction_passed' → 回 { blockedStudents: [...] }、HTTP 409、不動資料
+//   - 其他 correction_* 狀態 → 重置 assignment_student_state=graded、close correction_question_items
+//   - 不在 correction 狀態 → no-op
+// 用途：避免老師重跑批改時、舊 correction_question_items 跟新 mistakes 不一致
+async function handleClearCorrectionForRerun(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const assignmentId = typeof body?.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const studentIds = Array.isArray(body?.studentIds)
+    ? [...new Set(body.studentIds.map((v) => typeof v === 'string' ? v.trim() : '').filter(Boolean))]
+    : []
+  if (!assignmentId || studentIds.length === 0) {
+    res.status(400).json({ error: 'Missing assignmentId or studentIds' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const { data: states, error: statesError } = await supabaseDb
+      .from('assignment_student_state')
+      .select('student_id, status')
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .in('student_id', studentIds)
+    if (statesError) throw new Error(statesError.message)
+
+    const statusByStudent = new Map()
+    for (const row of states || []) statusByStudent.set(row.student_id, String(row.status || '').toLowerCase())
+
+    const passedStudentIds = studentIds.filter((sid) => statusByStudent.get(sid) === 'correction_passed')
+    if (passedStudentIds.length > 0) {
+      const { data: studentRows } = await supabaseDb
+        .from('students')
+        .select('id, name, seat_number')
+        .eq('owner_id', user.id)
+        .in('id', passedStudentIds)
+      const blockedStudents = (studentRows || []).map((s) => ({
+        studentId: s.id,
+        name: s.name,
+        seatNumber: s.seat_number
+      }))
+      res.status(409).json({
+        error: 'CORRECTION_PASSED_BLOCKED',
+        message: '部分學生已完成訂正、無法重跑批改',
+        blockedStudents
+      })
+      return
+    }
+
+    const NON_TERMINAL = ['correction_required', 'correction_in_progress', 'correction_pending_review', 'correction_failed']
+    const studentsToClear = studentIds.filter((sid) => NON_TERMINAL.includes(statusByStudent.get(sid)))
+    if (studentsToClear.length === 0) {
+      res.status(200).json({ success: true, clearedCount: 0 })
+      return
+    }
+
+    const nowIso = new Date().toISOString()
+    const { error: stateErr } = await supabaseDb
+      .from('assignment_student_state')
+      .update({
+        status: 'graded',
+        last_status_reason: '老師重新批改、訂正狀態已清除',
+        updated_at: nowIso
+      })
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .in('student_id', studentsToClear)
+      .in('status', NON_TERMINAL)
+    if (stateErr) throw new Error(stateErr.message)
+
+    const { error: itemsErr } = await supabaseDb
+      .from('correction_question_items')
+      .update({ status: 'skipped', updated_at: nowIso })
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .in('student_id', studentsToClear)
+      .in('status', ['open', 'disputed'])
+    if (itemsErr) throw new Error(itemsErr.message)
+
+    console.log(`[clear-correction-for-rerun] cleared assignment=${assignmentId} students=${studentsToClear.length}`)
+    res.status(200).json({ success: true, clearedCount: studentsToClear.length })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : '清除訂正狀態失敗' })
+  }
+}
+
 async function handleManualGrade(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -7259,6 +7348,10 @@ const log = document.getElementById('log');
   }
   if (action === 'clear-grading') {
     await handleClearGrading(req, res)
+    return
+  }
+  if (action === 'clear-correction-for-rerun') {
+    await handleClearCorrectionForRerun(req, res)
     return
   }
   if (action === 'import-template') {
