@@ -22,6 +22,14 @@ import { buildOcrHintsSection } from './bbox-anchor-match.js'
 // 新原則：bbox 來源只有兩條——OCR (row/sub_cell full replace) 或 AI (raw classify)、不再混用。
 import { applyRowAnchorOverride } from './bbox-row-anchor-match.js'
 import { applyMathEqBlankOverride } from './bbox-math-eq-blank.js'
+import {
+  buildStageAPrompt,
+  parseStageAResult,
+  buildStageBPrompt,
+  parseStageBResult,
+  gradeMapFillDeterministically
+} from './map-fill-grader.js'
+import { getSupabaseAdmin } from '../_supabase.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -4860,7 +4868,7 @@ ${isHighSchool
   - isCorrect = true if the student's text matches the answer (or an equivalent form).
   - score = maxScore if isCorrect, else 0 (binary scoring per pair).
   - errorType: 'concept' if wrong connection; 'blank' if "未連線" or "未作答".
-- map_fill: See MAP-FILL SCORING below.
+- map_fill: 不應該出現在 Accessor 的 question 清單裡（map_fill 走 map-fill-grader、Phase B bypass Accessor）。如果還是看到、給 needs_review。
 - multi_fill: See MULTI-FILL SCORING below.
 - map_symbol / grid_geometry / connect_dots: See MAP-DRAW SCORING below.
 - circle_select_one: Student wrote the selected option **text** (not letter), e.g. "同意". Compare to answer field (correct option text) — exact text match after whitespace trim and full-width/half-width normalize. score = maxScore if match, else 0. errorType: 'concept' if wrong; 'blank' if empty/未圈.
@@ -4905,30 +4913,8 @@ ${isHighSchool
   - errorType: 'concept' if wrong/missing codes; 'blank' if studentAnswerRaw is blank/未作答.
   - scoringReason: use format「學生填入___，正確答案為___，（列出正確/缺少/多餘的代碼）」. e.g. "學生填入ㄅ、ㄇ，正確答案為ㄅ、ㄇ、ㄉ，漏填ㄉ".
 
-- MAP-FILL SCORING (地圖填圖題、視覺評分模式):
-  studentAnswerRaw 會是 placeholder「(填圖題，由 Phase B 直接視覺評分)」，**不要**從 placeholder 抽答案。
-  此題型 Phase A 跳過 Read、改由你（Accessor）直接看 crop 圖視覺評分。
-
-  評分步驟：
-  1. 看 crop 圖（attached as「題目 <questionId> 學生作答圖」），辨識學生在地圖上寫的**所有**地名/標籤手寫文字。
-     - 不要從 acceptableAnswers 反推「學生應該寫什麼」，只看你**實際看到**的學生筆跡。
-     - 學生可能寫拼字錯誤、用中文/英文混用，照學生實際寫的內容辨識。
-  2. 把辨識到的學生筆跡集合 與 acceptableAnswers（標準地名陣列）比對：
-     - 完全匹配 → 該位置算對
-     - 學生有寫但不在 acceptableAnswers 內 → 該位置算錯
-     - 同義詞 / 拼字小錯（如「亞」vs「亜」）→ 視為正確
-  3. 對位用 referenceAnswer 的位置描述（如「左上方為摩洛哥、其東側為阿爾及利亞...」）確認學生**特定位置**填的名字是否符合該位置的標準答案。
-     - 如果 referenceAnswer 沒明確位置描述、用集合配對（學生筆跡集合 ∩ acceptableAnswers 的大小）
-  4. correctCount = 學生填對的位置數量。totalPositions = acceptableAnswers 長度。
-  5. score = Math.round(correctCount / totalPositions * maxScore)
-  6. isCorrect = (score === maxScore)
-  7. studentFinalAnswer 欄位填你從圖中辨識到的學生筆跡（用「, 」分隔）、不是 placeholder。
-     例：studentFinalAnswer = "中國, 韓國, 日本, 臺灣, 菲律賓"
-  8. scoringReason MUST 用格式「學生在地圖上寫了「___」，正確答案應為「___」，（具體錯誤描述）」
-     - 完全正確：「學生填寫的所有地名皆正確：摩洛哥、阿爾及利亞、馬利...」
-     - 部分對：「學生寫了「茅利塔尼亞、馬利」，正確；但「中國、韓國、日本」不在非洲國家清單中、應為「尼日、查德、塞內加爾」等」
-     - 全錯：「學生在地圖上寫了「中國、韓國、日本、臺灣、菲律賓」（東亞國家），但此題為非洲地圖、正確答案應為摩洛哥、茅利塔尼亞...等 24 國」
-     - 未作答：「學生地圖空白、未填寫任何地名」
+- MAP-FILL SCORING: map_fill 在 2026-05-28 起改走獨立 map-fill-grader、Phase B 完全 bypass Accessor、
+  Accessor 不應該看到任何 map_fill question。若還是看到、直接給 needs_review、不要嘗試評分。
 - MAP-DRAW SCORING (繪圖/標記題): The student's answer is a description of what was drawn and where (e.g. "颱風符號，位置：23.5°N緯線以南、121°E經線以東的格子（右下格）"). The referenceAnswer in the AnswerKey describes where the symbol SHOULD be placed.
   - Judge whether the drawn symbol is correct (right type of symbol).
   - Judge whether the position is correct by comparing the described location against the referenceAnswer's required coordinates/grid position.
@@ -4954,7 +4940,7 @@ ${isHighSchool
   - word_problem:      correct→「答句「36公分」正確」 wrong(數值錯)→「學生答句寫「38公分」，正確答案為「36公分」，答案錯誤」 wrong(單位錯)→「學生答句寫「36公尺」，正確答案為「36公分」，單位錯誤、答案不正確」 wrong(缺單位)→「學生答句寫「36」（缺單位），正確答案為「36公分」，答案不完整、答案不正確」
   - short_answer:      correct→「學生回答內容完整，概念正確」 wrong→「學生寫「因為天氣很熱」，正確答案應涵蓋「蒸發作用」概念，學生僅描述現象未說明原理」. When rubricsDimensions exist, describe each dimension's score.
   - matching:          correct→「學生配對「2公尺/秒」，答案正確」 wrong→「學生配對「3公尺/秒」，正確答案為「2公尺/秒」，配對錯誤」
-  - map_fill:          (視覺評分模式，看圖直接判) correct→「學生在地圖上寫了「摩洛哥、阿爾及利亞、馬利...」，全部正確」 wrong→「學生在地圖上寫了「中國、韓國、日本」（東亞國家），但此題為非洲地圖、正確答案應為非洲國家如「摩洛哥、茅利塔尼亞」等」 blank→「學生地圖空白、未填寫任何地名」
+  - map_fill:          走獨立 map-fill-grader、不應該到 Accessor、看到就 needs_review
   - map_symbol/grid_geometry/connect_dots: correct→「學生繪製颱風符號於右下格，位置與符號皆正確」 wrong→「學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移」
   - circle_select_one: correct→「學生圈選「同意」，答案正確」 wrong→「學生圈選「不同意」，正確答案為「同意」，圈選錯誤」
   - circle_select_many: correct→「學生圈選「同意、中立」，答案正確」 wrong→「學生圈選「同意、不同意」，正確答案為「同意、中立」，多圈了不同意、漏圈中立」
@@ -5381,11 +5367,16 @@ function buildFinalGradingResult({
     const consistency = consistencyById?.get(questionId)
 
     const hasMismatch = answer?.calculationAnswerMismatch === true
+    // map_fill 走 map-fill-grader、studentAnswer 用 grader 寫的 studentFinalAnswer
+    // （不是 readAnswerResult.answers 因為 map_fill 沒進 Read）
+    const isMapFillBypass = score?._mapFillBypass === true
     const row = {
       questionId,
       // questionType 帶下來：前端對 map_fill 等視覺評分題型要鎖編輯欄
       questionType: classify?.questionType || question?.questionCategory || undefined,
-      studentAnswer: ensureString(answer?.studentAnswerRaw, '無法辨識'),
+      studentAnswer: isMapFillBypass
+        ? ensureString(score?.studentFinalAnswer, '')
+        : ensureString(answer?.studentAnswerRaw, '無法辨識'),
       isCorrect: hasMismatch ? false : score?.isCorrect === true,
       score: hasMismatch ? 0 : toFiniteNumber(score?.score) ?? 0,
       maxScore: toFiniteNumber(score?.maxScore) ?? Math.max(0, toFiniteNumber(question?.maxScore) ?? 0),
@@ -5398,7 +5389,9 @@ function buildFinalGradingResult({
         ensureString(explain?.mistakeType, '').trim() ||
         undefined,
       needExplain: score?.needExplain === true || score?.isCorrect !== true,
-      studentFinalAnswer: ensureString(score?.studentFinalAnswer, '').trim() || undefined
+      studentFinalAnswer: ensureString(score?.studentFinalAnswer, '').trim() || undefined,
+      // map_fill 的 per-position 細節（給前端 detail modal 顯示用）
+      mapFillResults: Array.isArray(score?.mapFillResults) ? score.mapFillResults : undefined
     }
 
     // ── 程式化覆核：數字/符號答案的 fill_blank 不信任 accessor ──
@@ -8651,12 +8644,9 @@ export async function runStagedGradingPhaseB({
   // Phase 2：final answer 跟 expected 不一致的題 → Accessor 收 prompt 但不收 crop
   //   理由：final 已錯、不需 crop 評列式品質、直接 0 分；也省 token。
   const calcTypes = new Set(['calculation', 'word_problem'])
-  // 視覺評分題型：Phase A 跳過 Read、Phase B Accessor 直接拿 crop 圖視覺評分。
-  // map_fill 設計上 crop = full image（bbox 強制 {0,0,1,1}），裁出來等同原圖。
-  // 跟 calcTypes 共用 calcCropMap 機制（一樣的 crop 流程、一樣的 buildAccessorParts）、
-  // Accessor prompt 端用 questionCategory 走不同評分規則。
-  const visualEvalTypes = new Set(['map_fill'])
-  const cropTypesForAccessor = new Set([...calcTypes, ...visualEvalTypes])
+  // 2026-05-28: map_fill 已 pivot 到 Direction Y、走 map-fill-grader、不再經 Accessor。
+  // cropTypesForAccessor 只剩 calc/word_problem、不再含 map_fill。
+  const cropTypesForAccessor = new Set([...calcTypes])
   const akQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const akQById = new Map(akQuestions.map((q) => [ensureString(q?.id).trim(), q]))
 
@@ -8699,6 +8689,153 @@ export async function runStagedGradingPhaseB({
       count: manualBypassIds.size,
       questionIds: [...manualBypassIds]
     })
+  }
+
+  // ── Phase 1: map_fill Direction Y 評分 ─────────────────────────────────────
+  // map_fill 完全 bypass Accessor、走 map-fill-grader (Stage B + 程式化比對)。
+  // 設計依據：實驗 2026-05-28 證實 Accessor 看 acceptableAnswers 會幻覺、
+  // 改成「Stage A 抽 positions、Stage B 不揭露 name、deterministic match」零幻覺。
+  const mapFillBypassIds = new Set()
+  const mapFillQuestions = akQuestions.filter((q) => q?.questionCategory === 'map_fill' && q?.id)
+  if (mapFillQuestions.length > 0 && inlineImages.length > 0) {
+    const studentImg = inlineImages[0]?.inlineData
+    if (studentImg?.data && studentImg?.mimeType) {
+      logStaged(pipelineRunId, 'basic', `[B-MapFill] ${mapFillQuestions.length} 題走 Direction Y`)
+      for (const q of mapFillQuestions) {
+        const qId = String(q.id).trim()
+        if (manualBypassIds.has(qId)) continue
+        const acceptableAnswers = Array.isArray(q.acceptableAnswers) ? q.acceptableAnswers : []
+        let mapFillFailed = null
+
+        try {
+          // 取 positions: 優先用 question.positions、fallback Stage A 即時偵測
+          let positions = Array.isArray(q.positions) ? q.positions.filter((p) => p?.name && p?.desc) : null
+
+          if (!positions || positions.length === 0) {
+            // Lazy backfill: 跑 Stage A
+            if (!q.cropImagePath) {
+              mapFillFailed = '無 positions[] 且無 cropImagePath、無法跑 Stage A'
+            } else {
+              // 下載 AnswerKey crop
+              const supabase = getSupabaseAdmin()
+              const { data: blob, error: dlErr } = await supabase.storage
+                .from('homework-images')
+                .download(q.cropImagePath)
+              if (dlErr || !blob) {
+                mapFillFailed = `AnswerKey crop 下載失敗：${dlErr?.message || 'no blob'}`
+              } else {
+                const cropBytes = Buffer.from(await blob.arrayBuffer())
+                const cropMime = q.cropImagePath.endsWith('.webp') ? 'image/webp' : 'image/jpeg'
+                const stageAResp = await executeStage({
+                  apiKey,
+                  model: phaseBModel,
+                  payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                  timeoutMs: getRemainingBudget(),
+                  routeHint,
+                  routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+                  stageContents: [{
+                    role: 'user',
+                    parts: [
+                      { text: buildStageAPrompt(acceptableAnswers) },
+                      { inlineData: { mimeType: cropMime, data: cropBytes.toString('base64') } }
+                    ]
+                  }]
+                })
+                if (!stageAResp.ok) {
+                  mapFillFailed = `Stage A HTTP ${stageAResp.status}`
+                } else {
+                  const stageARaw = extractCandidateText(stageAResp.data) || ''
+                  positions = parseStageAResult(stageARaw)
+                  if (!positions || positions.length === 0) {
+                    mapFillFailed = 'Stage A parse 失敗或回空、無 positions'
+                  } else {
+                    logStaged(pipelineRunId, 'basic', `[B-MapFill] ${qId} Stage A lazy backfill ${positions.length} positions, ${stageAResp.modelLatencyMs}ms`)
+                  }
+                }
+                stageResponses.push(stageAResp)
+              }
+            }
+          }
+
+          if (!mapFillFailed && positions && positions.length > 0) {
+            // Stage B: 讀學生卷
+            const descs = positions.map((p) => p.desc)
+            const stageBResp = await executeStage({
+              apiKey,
+              model: phaseBModel,
+              payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+              timeoutMs: getRemainingBudget(),
+              routeHint,
+              routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+              stageContents: [{
+                role: 'user',
+                parts: [
+                  { text: buildStageBPrompt(descs) },
+                  { inlineData: { mimeType: studentImg.mimeType, data: studentImg.data } }
+                ]
+              }]
+            })
+            stageResponses.push(stageBResp)
+
+            if (!stageBResp.ok) {
+              mapFillFailed = `Stage B HTTP ${stageBResp.status}`
+            } else {
+              const stageBRaw = extractCandidateText(stageBResp.data) || ''
+              const readings = parseStageBResult(stageBRaw, positions.length)
+              if (!readings) {
+                mapFillFailed = 'Stage B parse 失敗'
+              } else {
+                const result = gradeMapFillDeterministically(positions, readings, acceptableAnswers)
+                logStaged(pipelineRunId, 'basic',
+                  `[B-MapFill] ${qId} 完成 score=${result.score}/${result.maxScore} ` +
+                  `correct=${result.summary.correct} wrong=${result.summary.wrong} ` +
+                  `blank=${result.summary.blank} unclear=${result.summary.unclear} ` +
+                  `${stageBResp.modelLatencyMs}ms`)
+                deterministicScores.push({
+                  questionId: qId,
+                  isCorrect: result.isCorrect,
+                  score: result.score,
+                  maxScore: result.maxScore,
+                  errorType: result.isCorrect ? 'none'
+                    : result.summary.blank === result.maxScore ? 'blank'
+                    : 'concept',
+                  // 用 mergeStagedResults 讀的 field 名（reason/confidence 是 silent bug）
+                  scoringReason: result.scoringReason,
+                  scoreConfidence: 100,
+                  studentFinalAnswer: result.studentFinalAnswer,
+                  needExplain: false,  // scoringReason 已含完整說明
+                  _mapFillBypass: true,
+                  mapFillResults: result.perPosResults
+                })
+                mapFillBypassIds.add(qId)
+              }
+            }
+          }
+        } catch (e) {
+          mapFillFailed = `map_fill grading 例外：${e?.message || e}`
+        }
+
+        if (mapFillFailed) {
+          logStaged(pipelineRunId, 'basic', `[B-MapFill] ${qId} 失敗、回退 needs_review`, { error: mapFillFailed })
+          deterministicScores.push({
+            questionId: qId,
+            isCorrect: false,
+            score: 0,
+            maxScore: Math.max(0, toFiniteNumber(q?.maxScore) ?? 0),
+            errorType: 'unreadable',
+            scoringReason: `map_fill 評分失敗（${mapFillFailed}）、需老師人工複核`,
+            scoreConfidence: 0,
+            studentFinalAnswer: '',
+            needExplain: false,
+            _mapFillBypass: true,
+            _mapFillFailed: true
+          })
+          mapFillBypassIds.add(qId)
+        }
+      }
+    } else {
+      logStaged(pipelineRunId, 'basic', `[B-MapFill] 無學生卷圖片、跳過 ${mapFillQuestions.length} 題`)
+    }
   }
 
   // Phase 2：找出 final ≠ expected 的 word_problem/calculation 題 (不含 manualBypass)
@@ -8782,20 +8919,22 @@ export async function runStagedGradingPhaseB({
 
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
+  // 2026-05-28: 也排除 mapFillBypassIds（map_fill 走 Direction Y、Accessor 不看）
+  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id)
   const allAnswerIds = finalReadAnswerResult.answers
     .map((a) => ensureString(a?.questionId).trim())
-    .filter((id) => id && !manualBypassIds.has(id))
+    .filter((id) => id && !isBypassed(id))
   const page1AnswerIds = allAnswerIds.filter((id) => id.startsWith('1-'))
   const page2AnswerIds = allAnswerIds.filter((id) => id.startsWith('2-'))
   const otherAnswerIds = allAnswerIds.filter((id) => !id.startsWith('1-') && !id.startsWith('2-'))
   const canSplitAccessor = page1AnswerIds.length > 0 && page2AnswerIds.length > 0
-  // 2026-05-20: 給 Accessor 的 readAnswerResult 也要剔除 manualBypassIds
-  const accessorReadAnswerResult = manualBypassIds.size > 0
-    ? { answers: finalReadAnswerResult.answers.filter((a) => !manualBypassIds.has(a.questionId)) }
+  // 給 Accessor 的 readAnswerResult / answerKey 都要剔除所有 bypass 的題（manual + map_fill）
+  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0
+  const accessorReadAnswerResult = hasBypass
+    ? { answers: finalReadAnswerResult.answers.filter((a) => !isBypassed(a.questionId)) }
     : finalReadAnswerResult
-  // 2026-05-20: 給 Accessor 的 answerKey 也要剔除 manualBypassIds（不要塞那些題的 spec 給 LLM）
-  const accessorAnswerKey = manualBypassIds.size > 0
-    ? { ...answerKey, questions: akQuestions.filter((q) => !manualBypassIds.has(ensureString(q?.id).trim())) }
+  const accessorAnswerKey = hasBypass
+    ? { ...answerKey, questions: akQuestions.filter((q) => !isBypassed(ensureString(q?.id).trim())) }
     : answerKey
 
   let accessorResult
