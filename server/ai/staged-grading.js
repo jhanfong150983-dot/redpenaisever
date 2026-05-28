@@ -1835,6 +1835,85 @@ function normalizeClassifyResult(parsed, questionIds) {
   return { alignedQuestions, coverage, unmappedQuestionIds, pixelBboxRejected }
 }
 
+// 2026-05-28: 偵測 invisible question 是否屬「卷底題」(answer_key bbox y+h > 0.85)
+// → 標記 likelyPhotoTruncation，UI 可顯示「學生拍照可能裁到、請學生重拍」
+// 用於 Issue 2：某題在多數 submissions 都 invisible、答案卷顯示該題位於頁底
+function isAnswerKeyBboxNearBottom(akBbox) {
+  if (!akBbox) return false
+  const yEnd = (Number(akBbox.y) || 0) + (Number(akBbox.h) || 0)
+  return yEnd > 0.85
+}
+
+// 2026-05-28: fill_blank with parts(合題) 的 bbox 過小時、擴展 h 確保涵蓋所有 parts
+// AI classify 給 fill_blank 的 bbox 有時太 tight、會 cut off 後續 parts
+// 規則：每個 part 預期至少佔 0.025 normalized height (~ 1 行)
+// 中心點不動、只擴展高度
+function ensureFillBlankBboxFitsParts(bbox, partsCount) {
+  if (!bbox || !partsCount || partsCount < 2) return bbox
+  const minHForParts = 0.025 * partsCount
+  const currentH = Number(bbox.h) || 0
+  if (currentH >= minHForParts) return bbox
+  const cy = (Number(bbox.y) || 0) + currentH / 2
+  const newY = Math.max(0, cy - minHForParts / 2)
+  const newH = Math.min(1 - newY, minHForParts)
+  return { ...bbox, y: newY, h: newH }
+}
+
+// 2026-05-28: classify 後處理裝飾——加入 truncation warning + 補 parts bbox
+// 1. 卷底 invisible → likelyPhotoTruncation=true
+// 2. fill_blank with parts 且 bbox 過小 → 擴展 h 到 parts.length * 0.025
+function decorateClassifyWithDiagnostics(classifyResult, akById) {
+  if (!classifyResult?.alignedQuestions || !akById) return classifyResult
+  let truncationCount = 0
+  let bboxExpandedCount = 0
+  for (const row of classifyResult.alignedQuestions) {
+    const akQ = akById.get(row.questionId)
+    if (!akQ) continue
+    const akBbox = akQ?.answerBbox
+    // Issue 2: 卷底題 + invisible → 標記 truncation
+    if (!row.visible && isAnswerKeyBboxNearBottom(akBbox)) {
+      row.likelyPhotoTruncation = true
+      row.truncationReason = 'bottom_of_page'
+      truncationCount += 1
+    }
+    // Issue 3: fill_blank parts 合題 bbox 不夠高 → 擴展
+    if (row.visible && row.questionType === 'fill_blank' && row.answerBbox) {
+      const partsCount = Array.isArray(akQ?.parts) ? akQ.parts.length : 0
+      if (partsCount >= 2) {
+        const original = row.answerBbox
+        const expanded = ensureFillBlankBboxFitsParts(original, partsCount)
+        if (expanded !== original && Math.abs((expanded.h || 0) - (original.h || 0)) > 1e-6) {
+          row.answerBbox = expanded
+          row.bboxExpandedForParts = {
+            partsCount,
+            originalH: Number(original.h.toFixed(4)),
+            expandedH: Number(expanded.h.toFixed(4))
+          }
+          bboxExpandedCount += 1
+        }
+      }
+    }
+  }
+  if (truncationCount > 0 || bboxExpandedCount > 0) {
+    classifyResult.diagnostics = {
+      ...(classifyResult.diagnostics || {}),
+      bottomTruncationCount: truncationCount,
+      fillBlankBboxExpandedCount: bboxExpandedCount
+    }
+  }
+  return classifyResult
+}
+
+// 2026-05-28: 偵測 AI2 整份吐 "未作答"/"blank" 的雙峰失敗模式（觀察到 ~8% 機率）
+// 條件：AI2 every entry status=blank（caller 應同時檢查 AI1 不是全 blank、避免學生真空卷誤判）
+function isReadAnswerEntirelyBlank(parsed) {
+  if (!parsed || !Array.isArray(parsed.answers) || parsed.answers.length === 0) return false
+  return parsed.answers.every((a) => {
+    const status = String(a?.status || '').toLowerCase()
+    return status === 'blank' || status === 'unreadable'
+  })
+}
+
 function buildBboxUnion(bboxes) {
   const list = Array.isArray(bboxes)
     ? bboxes.map((bbox) => normalizeBboxRef(bbox)).filter(Boolean)
@@ -5927,6 +6006,7 @@ export async function runStagedGradingPhaseA({
     const classifyParsed = parseCandidateJson(classifyResponse.data)
     if (!classifyParsed || typeof classifyParsed !== 'object') throw new Error('PhaseA classify parse failed')
     classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(classifyParsed, ids), classifyQuestionSpecs)
+    decorateClassifyWithDiagnostics(classifyResult, akByIdForLog)
     // 🆕 無條件保存 classify 原始 bbox（不論 OCR-assist 有沒有跑）
     // 之前只在 OCR-assist 有 match 時才保存、導致 admin dashboard 沒 OCR 就看不到 bbox
     const classifyBboxesBefore = classifyResult.alignedQuestions
@@ -6054,7 +6134,7 @@ export async function runStagedGradingPhaseA({
       }
       const parsedResults = classifyResponses.map((r) => parseCandidateJson(r.data))
       if (parsedResults.some((p) => !p || typeof p !== 'object')) throw new Error('PhaseA classify parse failed (per-page fallback)')
-      const normalizedResults = pageEntries.map(([, ids], i) => normalizeClassifyResult(parsedResults[i], ids))
+      const normalizedResults = pageEntries.map(([, ids], i) => decorateClassifyWithDiagnostics(normalizeClassifyResult(parsedResults[i], ids), akByIdForLog))
       const byId = new Map(normalizedResults.flatMap((n) => n.alignedQuestions).map((q) => [q.questionId, q]))
       const mergedAligned = questionIds.map((id) => byId.get(id) ?? { questionId: id, visible: false, questionType: 'fill_blank' })
       classifyResult = applyClassifyQuestionSpecs({
@@ -6205,7 +6285,7 @@ export async function runStagedGradingPhaseA({
       // Normalize, apply OCR override (per-page coords), then remap bboxes from per-page coords → full-image coords
       const allOverrides = []
       const normalizedResults = pageEntries.map(([, ids], i) => {
-        let norm = normalizeClassifyResult(parsedResults[i], ids)
+        let norm = decorateClassifyWithDiagnostics(normalizeClassifyResult(parsedResults[i], ids), akByIdForLog)
         // 🆕 無條件保存 classify 原始 bbox（per-page coords、未 remap）
         const classifyBboxesBefore = norm.alignedQuestions
           .filter(q => q.answerBbox)
@@ -6410,6 +6490,7 @@ export async function runStagedGradingPhaseA({
         const retryParsed = parseCandidateJson(retryResp.data)
         if (retryParsed && typeof retryParsed === 'object') {
           classifyResult = applyClassifyQuestionSpecs(normalizeClassifyResult(retryParsed, ids), classifyQuestionSpecs)
+          decorateClassifyWithDiagnostics(classifyResult, akByIdForLog)
           classifyRetryQG = validateClassifyQuality(classifyResult, questionIds, classifyRefBboxByQid, { answerSheetMode })
           logStaged(pipelineRunId, 'basic', 'classify retry quality-gate', {
             severity: classifyRetryQG.severity, warnings: classifyRetryQG.warnings
@@ -6778,6 +6859,43 @@ export async function runStagedGradingPhaseA({
       const ai2RawText = String(extractCandidateText(reReadAnswerResponse?.data) || '').slice(0, 800)
       console.warn(`[PhaseA][${pipelineRunId}] AI2 也 parse 失敗、AI2 raw text preview：`, ai2RawText)
       throw new Error('PhaseA read_answer parse failed (AI1 + AI2 都讀不到合法 JSON)')
+    }
+  }
+
+  // 2026-05-28: Issue 1 — AI2 整份 blank 自動 retry 一次
+  // 觀察到 ~8% submissions AI2 整份吐「未作答 / blank」但 AI1 正常
+  // 條件：AI2 every entry blank、AI1 有實質內容 → AI2 出包、retry 1 次
+  if (
+    reReadAnswerParsed &&
+    isReadAnswerEntirelyBlank(reReadAnswerParsed) &&
+    readAnswerParsed &&
+    !isReadAnswerEntirelyBlank(readAnswerParsed)
+  ) {
+    console.warn(`[PhaseA][${pipelineRunId}] AI2 整份 blank 偵測 (AI1 正常)、自動 retry 一次`)
+    logStaged(pipelineRunId, 'basic', '[A2-retry] AI2 整份 blank、retry')
+    const retryResponse = await executeStage({
+      apiKey,
+      model: readModel,
+      payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+      timeoutMs: getRemainingBudget(),
+      routeHint,
+      routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+      stageContents: [{ role: 'user', parts: ai2Parts }]
+    })
+    stageResponses.push(retryResponse)
+    if (retryResponse.ok) {
+      const retryParsed = parseCandidateJson(retryResponse.data)
+      if (retryParsed && typeof retryParsed === 'object' && !isReadAnswerEntirelyBlank(retryParsed)) {
+        console.log(`[PhaseA][${pipelineRunId}] AI2 retry 成功、用 retry 結果（取代原 blank 結果）`)
+        logStaged(pipelineRunId, 'basic', '[A2-retry] AI2 retry 成功、取代原結果')
+        reReadAnswerParsed = retryParsed
+      } else {
+        console.warn(`[PhaseA][${pipelineRunId}] AI2 retry 也 blank/parse 失敗、保留原結果`)
+        logStaged(pipelineRunId, 'basic', '[A2-retry] AI2 retry 仍失敗、保留原 blank 結果')
+      }
+    } else {
+      console.warn(`[PhaseA][${pipelineRunId}] AI2 retry HTTP 失敗 status=${retryResponse?.status}、保留原結果`)
+      logStaged(pipelineRunId, 'basic', `[A2-retry] AI2 retry HTTP 失敗 status=${retryResponse?.status}`)
     }
   }
 
