@@ -4669,8 +4669,22 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
     englishRulesSection = `\nENGLISH DOMAIN RULES:\n${rules.join('\n')}\nThese deductions are cumulative and stack with each other. The final score cannot go below 0.`
   }
 
+  // 2026-05-29: 把 question.answer 反向填到 referenceAnswer (若空)。
+  // 為什麼：Accessor prompt 對 word_problem / calculation / fill_blank 規則寫
+  //   「比對 studentAnswerRaw 與 referenceAnswer」(line 4802 等)、但 AnswerBank /
+  //   AnswerKey schema 老師填的是 question.answer 欄位、referenceAnswer 大多 null。
+  //   AI 看到 referenceAnswer=null 就 give up、isCorrect=false + 不給 scoringReason
+  //   → fallback 「需人工複核」誤導老師（19 題 word_problem 全中招）
+  // 修法：prompt-only fallback、不動 DB schema、不動 AnswerBank 寫入流程
+  const rawQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const compactAnswerKey = {
-    questions: Array.isArray(answerKey?.questions) ? answerKey.questions : [],
+    questions: rawQuestions.map((q) => {
+      if (!q || typeof q !== 'object') return q
+      const hasRef = typeof q.referenceAnswer === 'string' && q.referenceAnswer.trim().length > 0
+      const hasAns = typeof q.answer === 'string' && q.answer.trim().length > 0
+      if (!hasRef && hasAns) return { ...q, referenceAnswer: q.answer }
+      return q
+    }),
     totalScore: toFiniteNumber(answerKey?.totalScore) ?? null
   }
   // Build a set of questionIds that are multi-choice/multi-check types for separator normalization
