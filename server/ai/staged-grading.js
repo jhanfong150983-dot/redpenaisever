@@ -1904,16 +1904,6 @@ function decorateClassifyWithDiagnostics(classifyResult, akById) {
   return classifyResult
 }
 
-// 2026-05-28: 偵測 AI2 整份吐 "未作答"/"blank" 的雙峰失敗模式（觀察到 ~8% 機率）
-// 條件：AI2 every entry status=blank（caller 應同時檢查 AI1 不是全 blank、避免學生真空卷誤判）
-function isReadAnswerEntirelyBlank(parsed) {
-  if (!parsed || !Array.isArray(parsed.answers) || parsed.answers.length === 0) return false
-  return parsed.answers.every((a) => {
-    const status = String(a?.status || '').toLowerCase()
-    return status === 'blank' || status === 'unreadable'
-  })
-}
-
 function buildBboxUnion(bboxes) {
   const list = Array.isArray(bboxes)
     ? bboxes.map((bbox) => normalizeBboxRef(bbox)).filter(Boolean)
@@ -6859,43 +6849,6 @@ export async function runStagedGradingPhaseA({
       const ai2RawText = String(extractCandidateText(reReadAnswerResponse?.data) || '').slice(0, 800)
       console.warn(`[PhaseA][${pipelineRunId}] AI2 也 parse 失敗、AI2 raw text preview：`, ai2RawText)
       throw new Error('PhaseA read_answer parse failed (AI1 + AI2 都讀不到合法 JSON)')
-    }
-  }
-
-  // 2026-05-28: Issue 1 — AI2 整份 blank 自動 retry 一次
-  // 觀察到 ~8% submissions AI2 整份吐「未作答 / blank」但 AI1 正常
-  // 條件：AI2 every entry blank、AI1 有實質內容 → AI2 出包、retry 1 次
-  if (
-    reReadAnswerParsed &&
-    isReadAnswerEntirelyBlank(reReadAnswerParsed) &&
-    readAnswerParsed &&
-    !isReadAnswerEntirelyBlank(readAnswerParsed)
-  ) {
-    console.warn(`[PhaseA][${pipelineRunId}] AI2 整份 blank 偵測 (AI1 正常)、自動 retry 一次`)
-    logStaged(pipelineRunId, 'basic', '[A2-retry] AI2 整份 blank、retry')
-    const retryResponse = await executeStage({
-      apiKey,
-      model: readModel,
-      payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-      timeoutMs: getRemainingBudget(),
-      routeHint,
-      routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-      stageContents: [{ role: 'user', parts: ai2Parts }]
-    })
-    stageResponses.push(retryResponse)
-    if (retryResponse.ok) {
-      const retryParsed = parseCandidateJson(retryResponse.data)
-      if (retryParsed && typeof retryParsed === 'object' && !isReadAnswerEntirelyBlank(retryParsed)) {
-        console.log(`[PhaseA][${pipelineRunId}] AI2 retry 成功、用 retry 結果（取代原 blank 結果）`)
-        logStaged(pipelineRunId, 'basic', '[A2-retry] AI2 retry 成功、取代原結果')
-        reReadAnswerParsed = retryParsed
-      } else {
-        console.warn(`[PhaseA][${pipelineRunId}] AI2 retry 也 blank/parse 失敗、保留原結果`)
-        logStaged(pipelineRunId, 'basic', '[A2-retry] AI2 retry 仍失敗、保留原 blank 結果')
-      }
-    } else {
-      console.warn(`[PhaseA][${pipelineRunId}] AI2 retry HTTP 失敗 status=${retryResponse?.status}、保留原結果`)
-      logStaged(pipelineRunId, 'basic', `[A2-retry] AI2 retry HTTP 失敗 status=${retryResponse?.status}`)
     }
   }
 

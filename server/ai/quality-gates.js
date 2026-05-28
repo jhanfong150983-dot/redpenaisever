@@ -77,6 +77,14 @@ const PIPELINE_FAILURE_MESSAGES = {
       userMessage: '批改失敗：兩位 AI 讀出來的答案大幅不一致。',
       userAction: '請重新批改。'
     },
+    READ_AI2_EMPTY_STAGE: {
+      userMessage: '批改失敗：AI 校對階段（第二位 AI）整個沒回應，可能是模型短暫故障或網路問題。',
+      userAction: '已自動重試一次仍失敗，請手動重新批改這份作業。'
+    },
+    READ_AI2_ALL_BLANK: {
+      userMessage: '批改失敗：AI 校對階段（第二位 AI）整份判定為「未作答」，但第一位 AI 有讀到答案，這通常是 AI 偶發出包。',
+      userAction: '已自動重試一次仍失敗，請手動重新批改這份作業。'
+    },
     CROSS_CLASSIFY_READ_HIGH_UNREADABLE: {
       userMessage: '批改失敗：找到答題框但讀不到內容（可能框錯位置）。',
       userAction: '請重新批改。'
@@ -550,6 +558,20 @@ export function validateReadAnswerQuality(readResult1, readResult2, expectedQues
   // → 默默把整份卷 needs_review_count 拉到 100%、老師收到 25/25 review
   if (expectedCount > 0 && answers2.length === 0) {
     warnings.push('FAIL:READ_AI2_EMPTY_STAGE')
+  }
+
+  // ── AI2 every entry blank（AI2 出包、吐了 N 個 entry 但全 status=blank/unreadable）── 2026-05-28
+  // 觀察到 ~8% submissions 在吳老師數練 p51-53 踩這種、是 AI2 stage 偶發失敗的另一形式
+  // 條件：AI2 有 ≥ 1 entry 但全 blank/unreadable、且 AI1 有實質 read（避免學生真空卷誤判）
+  if (expectedCount > 0 && answers2.length > 0) {
+    const ai2AllBlank = answers2.every((a) => {
+      const status = String(a?.status || '').toLowerCase()
+      return status === 'blank' || status === 'unreadable'
+    })
+    const ai1HasRead = answers1.some((a) => String(a?.status || '').toLowerCase() === 'read')
+    if (ai2AllBlank && ai1HasRead) {
+      warnings.push('FAIL:READ_AI2_ALL_BLANK')
+    }
   }
   metrics.coverageRate = +coverageRate.toFixed(3)
   if (expectedCount > 0 && coverageRate < 0.8) {
