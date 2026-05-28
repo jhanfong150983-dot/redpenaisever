@@ -4719,37 +4719,23 @@ ${isHighSchool
     - ⚠️ 其他 text is NEVER penalized regardless of reasonableness — it only affects scoringReason.
   - isCorrect = (score === maxScore).
   - errorType: same as multi_check (based on non-其他 tokens only).
-- word_problem: Standard-answer question type with FIXED DEDUCTION scoring (not multi-dimension rubric).
-  ⚠️ studentAnswerRaw 只含學生寫的「最終答句」(已從 OCR 過程文字中萃取)，processOmitted=true 表示 process 文字**故意未提供**。
-  ⚠️ 你**必須完全從學生作答圖判斷算式過程**，禁止假裝你看到任何 process 文字、禁止從 studentAnswerRaw 推論 process。
-  🚨 FIXED DEDUCTION SCORING (word_problem — must follow strictly):
-  Start with score = maxScore, then apply deductions in order:
-  STEP 1 — 答句數值: If the numeric value (from studentAnswerRaw) is WRONG → score = 0. STOP. **不需檢查 process**。
-  STEP 2 — 答句單位: If referenceAnswer has a unit but student OMITTED it → deduct 1. If student wrote a WRONG unit (not in UNIT EQUIVALENCE TABLE) → score = 0. STOP.
-  STEP 3 — 列式計算 (僅看學生作答圖):
-    - 必要條件：STEP 1 通過（答句正確），才進此 step。
-    - 從圖片直接讀過程，禁止依賴任何文字 transcription。
-    - 只有當圖片**清楚顯示**過程有嚴重數學錯誤（如錯公式/錯運算且根本無法導出正確答案）→ deduct 1。
-    - 圖片不清楚 / 無法判斷 → DO NOT deduct（答句既然對，過程理應對，OCR 不準不是學生的錯）。
-    - 完全沒寫過程（圖片只有答句、沒任何算式）→ deduct 1。
-    - 簡寫 / 跳步驟 → NO deduction。
-  Final score = max(0, score after deductions). Each deficiency deducts exactly 1 point, never more.
-- calculation: Standard-answer question type with FIXED DEDUCTION scoring (not multi-dimension rubric).
+- word_problem: Standard-answer question type with BINARY scoring (all-or-nothing — score 必為 0 或 maxScore，禁止中間值).
+  ⚠️ studentAnswerRaw 只含學生寫的「最終答句」(已從 OCR 過程文字中萃取)。**算式過程一律不評**。
+  🚨 BINARY SCORING (word_problem — must follow strictly):
+  比對 studentAnswerRaw 的最終答句 (含數值與單位) 與 referenceAnswer：
+    - 數值正確 + (referenceAnswer 沒單位需求 OR 單位正確/在 UNIT EQUIVALENCE TABLE) → score = maxScore. STOP.
+    - 數值錯誤 / 單位錯誤 / 缺單位 (referenceAnswer 有單位但學生沒寫) / 空白 / 無法辨識 → score = 0. STOP.
+  **完全不檢查算式過程、不看 crop 圖、不分析列式。算式診斷由後續 explain 階段負責，accessor 不碰。**
+  禁止給 (maxScore - 1) 這類中間分數。
+- calculation: Standard-answer question type with BINARY scoring (all-or-nothing — score 必為 0 或 maxScore，禁止中間值).
   HARD RULE: NEVER require "答：", "A:", or "Ans:" prefix. NO unit checking — students do NOT need to write units.
-  ⚠️ studentAnswerRaw 只含學生寫的「最終答案」(已從 OCR 過程文字中萃取)，processOmitted=true 表示 process 文字**故意未提供**。
-  ⚠️ 你**必須完全從學生作答圖判斷算式過程**，禁止假裝你看到任何 process 文字、禁止從 studentAnswerRaw 推論 process。
-  🚨 FIXED DEDUCTION SCORING (calculation — must follow strictly):
-  Start with score = maxScore, then apply deductions in order:
-  STEP 1 — 最終答案: If the final numeric value (from studentAnswerRaw) is WRONG → score = 0. STOP. **不需檢查 process**。
-  STEP 2 — 算式過程 (僅看學生作答圖):
-    - 必要條件：STEP 1 通過（最終答案正確），才進此 step。
-    - 從圖片直接讀過程，禁止依賴任何文字 transcription。
-    - 只有當圖片**清楚顯示**過程有嚴重數學錯誤（如錯公式/錯運算且根本無法導出最終答案）→ deduct 1。
-    - 圖片不清楚 / 無法判斷 → DO NOT deduct（最終答案既然對，過程理應對，OCR 不準不是學生的錯）。
-    - 完全沒寫過程（圖片只有最終答案、沒任何算式）→ deduct 1。
-    - 簡寫 / 跳步驟 → NO deduction。
-  Final score = max(0, score after deductions). Each deficiency deducts exactly 1 point, never more.
-  LENIENT FOCUS: when strictness = lenient, if 最終答案 is correct, allow full score regardless of process.
+  ⚠️ studentAnswerRaw 只含學生寫的「最終答案」(已從 OCR 過程文字中萃取)。**算式過程一律不評**。
+  🚨 BINARY SCORING (calculation — must follow strictly):
+  比對 studentAnswerRaw 的最終數值 與 referenceAnswer 的最終數值：
+    - 數值匹配（含等值分數/小數、commutative 因式順序） → score = maxScore. STOP.
+    - 數值錯誤 / 空白 / 無法辨識 → score = 0. STOP.
+  **完全不檢查算式過程、不看 crop 圖、不分析列式。算式診斷由後續 explain 階段負責，accessor 不碰。**
+  禁止給 (maxScore - 1) 這類中間分數。
 - short_answer: Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback. No unit checking required.
   - ⚠️ OPEN-CHOICE DIMENSION RULE: When a dimension's criteria says "完成選擇即可，無對錯" (or similar), award full marks for that dimension as long as the student made any choice — regardless of WHICH option they chose. This applies to "承上題" follow-up questions where students choose one aspect from the previous question and explain it. Do NOT deduct points for choosing 休閒娛樂 vs 文化傳承 vs 教育 etc. — all valid options from the preceding question are equally acceptable.
     - IMPLICIT CHOICE COUNTS: The student does NOT need to name the layer explicitly. If their explanation clearly describes one layer (e.g. "娛樂身心" → 休閒娛樂 layer), treat that as a valid choice. Do NOT compare their explanation to other unchosen layers.
@@ -4895,8 +4881,8 @@ ${isHighSchool
   - multi_check/multi_choice: correct→「學生選①③④，答案正確」 wrong→「學生選①②③，正確答案為①③④，多選了②、漏選了④」
   - multi_check_other: same as multi_check + append 其他 evaluation. e.g. 「學生選①②，正確答案為①③，多選了②、漏選了③；其他選項文字合理」
   - multi_fill:        correct→「學生填入ㄅ、ㄇ、ㄉ，全部正確」 wrong→「學生填入ㄅ、ㄇ，正確答案為ㄅ、ㄇ、ㄉ，漏填ㄉ」
-  - calculation:       correct→「算式過程正確，最終答案36正確」 wrong→「學生最終答案為38，正確答案為36，答案錯誤」 process_error→「最終答案36正確，算式過程有誤（第二步乘法錯誤），扣1分」
-  - word_problem:      correct→「列式正確，答句「36公分」正確」 wrong→「學生答句寫「38公分」，正確答案為「36公分」，答案錯誤」 missing_unit→「答句數值36正確，但缺少單位「公分」，扣1分」 process_error→「答句「36公分」正確，列式過程有誤（第二步乘法錯誤），扣1分」
+  - calculation:       correct→「最終答案36正確」 wrong→「學生最終答案為38，正確答案為36，答案錯誤」
+  - word_problem:      correct→「答句「36公分」正確」 wrong(數值錯)→「學生答句寫「38公分」，正確答案為「36公分」，答案錯誤」 wrong(單位錯)→「學生答句寫「36公尺」，正確答案為「36公分」，單位錯誤、答案不正確」 wrong(缺單位)→「學生答句寫「36」（缺單位），正確答案為「36公分」，答案不完整、答案不正確」
   - short_answer:      correct→「學生回答內容完整，概念正確」 wrong→「學生寫「因為天氣很熱」，正確答案應涵蓋「蒸發作用」概念，學生僅描述現象未說明原理」. When rubricsDimensions exist, describe each dimension's score.
   - matching:          correct→「學生配對「2公尺/秒」，答案正確」 wrong→「學生配對「3公尺/秒」，正確答案為「2公尺/秒」，配對錯誤」
   - map_fill:          (視覺評分模式，看圖直接判) correct→「學生在地圖上寫了「摩洛哥、阿爾及利亞、馬利...」，全部正確」 wrong→「學生在地圖上寫了「中國、韓國、日本」（東亞國家），但此題為非洲地圖、正確答案應為非洲國家如「摩洛哥、茅利塔尼亞」等」 blank→「學生地圖空白、未填寫任何地名」
@@ -5429,12 +5415,11 @@ function buildFinalGradingResult({
       }
     }
 
-    // ── 程式化覆核：word_problem / calculation 最終答案決定制 ──
-    // 規則：
-    //   最終答案對 + 有步驟 → 滿分（不看 accessor 怎麼評計算過程）
+    // ── 程式化覆核：word_problem / calculation BINARY 二元計分 ──
+    // 規則（全有全無、accessor 給的 partial 一律 override）：
+    //   最終答案對 + 有步驟 → 滿分
     //   最終答案對 + 空白步驟 → 0分（疑似抄答案）
-    //   最終答案錯 + 有步驟 → 保留 accessor 分數（讓 accessor 判部分分）
-    //   最終答案錯 + 空白步驟 → 0分
+    //   最終答案錯 → 0分（不論是否有步驟、不論 accessor 怎麼判）
     if (qCategory === 'word_problem' || qCategory === 'calculation') {
       const refText = ensureString(question?.referenceAnswer || question?.answer, '')
       const refFinal = extractFinalAnswerFromCalc(refText)
@@ -5452,15 +5437,17 @@ function buildFinalGradingResult({
         // 分數必須最簡（整數除外，如 2/2=1 可接受）— 僅當 fractionRule=require_simplified；分數⇔小數等值仍接受
         const finalMatch = (refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)) && (!requireSimplifiedFraction || !isUnsimplifiedFraction(stuFinal))
 
-        if (finalMatch && hasSteps && row.score < qMaxScore) {
-          // 最終答案對 + 有步驟 → 滿分
+        if (finalMatch && hasSteps) {
+          // 最終答案對 + 有步驟 → 滿分（強制 override 任何 accessor partial）
           const prevScore = row.score
-          row.isCorrect = true
-          row.score = qMaxScore
-          row.needExplain = false
-          row.reason = `答案正確（程式比對覆核）`
-          row.confidence = 100
-          console.log(`[programmatic-override] ${questionId} final-answer-match + has-steps → full marks (${prevScore}→${qMaxScore})`)
+          if (row.score !== qMaxScore || row.isCorrect !== true) {
+            row.isCorrect = true
+            row.score = qMaxScore
+            row.needExplain = false
+            row.reason = `答案正確（程式比對覆核）`
+            row.confidence = 100
+            console.log(`[programmatic-override] ${questionId} final-answer-match + has-steps → full marks (${prevScore}→${qMaxScore})`)
+          }
         } else if (finalMatch && !hasSteps) {
           // 最終答案對 + 空白步驟 → 0分（疑似抄答案）
           row.isCorrect = false
@@ -5469,24 +5456,18 @@ function buildFinalGradingResult({
           row.reason = `最終答案正確但未列出計算過程（程式比對覆核）`
           row.confidence = 100
           console.log(`[programmatic-override] ${questionId} final-answer-match + blank-steps → 0`)
-        } else if (!finalMatch && row.isCorrect === true) {
-          // 最終答案錯但 accessor 說對 → 強制錯誤
+        } else if (!finalMatch) {
+          // 最終答案錯 → 0分（binary：不論是否有步驟、不論 accessor 給多少 partial）
+          const prevScore = row.score
           row.isCorrect = false
           row.score = 0
           row.needExplain = true
-          row.reason = `最終答案不符（程式比對覆核：學生 "${stuFinal}" ≠ 標準 "${refFinal}"）`
+          row.reason = hasSteps
+            ? `最終答案不符（程式比對覆核：學生 "${stuFinal}" ≠ 標準 "${refFinal}"）`
+            : `答案錯誤且未列出計算過程`
           row.confidence = 100
-          console.log(`[programmatic-override] ${questionId} final-answer-mismatch + accessor-correct → force wrong`)
-        } else if (!finalMatch && !hasSteps) {
-          // 最終答案錯 + 空白步驟 → 0分
-          row.isCorrect = false
-          row.score = 0
-          row.needExplain = true
-          row.reason = `答案錯誤且未列出計算過程`
-          row.confidence = 100
-          console.log(`[programmatic-override] ${questionId} final-answer-mismatch + blank-steps → 0`)
+          console.log(`[programmatic-override] ${questionId} final-answer-mismatch → 0 (hasSteps=${hasSteps}, prevScore=${prevScore})`)
         }
-        // 最終答案錯 + 有步驟 → 不動，保留 accessor 的部分分數
       }
     }
 
@@ -7867,6 +7848,39 @@ Return JSON:
     logStaged(pipelineRunId, stagedLogLevel, 'english spacing flagged for review', spacingReviewFlagged)
   }
 
+  // ── Excessive blanks safety net: 未作答 > 3 整批翻 needs_review、可能 classify 飄掉 ──
+  const EXCESSIVE_BLANKS_THRESHOLD = 3
+  const blankCount = questionResults.filter((qr) =>
+    qr.arbiterResult?.arbiterStatus === 'arbitrated_agree' &&
+    !ensureString(qr.arbiterResult?.finalAnswer, '').trim()
+  ).length
+  if (blankCount > EXCESSIVE_BLANKS_THRESHOLD) {
+    const excessiveBlankFlipped = []
+    for (const qr of questionResults) {
+      const ar = qr.arbiterResult
+      if (ar?.arbiterStatus === 'arbitrated_agree' && !ensureString(ar?.finalAnswer, '').trim()) {
+        qr.arbiterResult = {
+          ...ar,
+          arbiterStatus: 'needs_review',
+          excessiveBlanksFlag: true,
+          excessiveBlanksReason: `本份共 ${blankCount} 題未作答、可能 AI 題目定位漂掉、請確認`
+        }
+        const cropData = allQuestionCropMap.get(qr.questionId)
+        if (cropData) {
+          qr.answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+        } else if (fullImageDataUrl) {
+          qr.answerCropImageUrl = fullImageDataUrl
+        }
+        excessiveBlankFlipped.push(qr.questionId)
+      }
+    }
+    if (excessiveBlankFlipped.length > 0) {
+      logStaged(pipelineRunId, stagedLogLevel,
+        `excessive blanks (${blankCount}>${EXCESSIVE_BLANKS_THRESHOLD}) → ${excessiveBlankFlipped.length} 題翻 needs_review`,
+        excessiveBlankFlipped)
+    }
+  }
+
   const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
   const diffCount = 0  // no longer used (legacy compat: kept at 0)
   const unstableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus === 'needs_review').length
@@ -8191,6 +8205,34 @@ export async function runStagedGradingPhaseAArbiter({
     }
     return { ...qr, arbiterResult }
   })
+
+  // ── Excessive blanks safety net: 未作答 > 3 整批翻 needs_review、可能 classify 飄掉 ──
+  // 放在 crop 之前、讓翻過去的 blank 自然進 needsReviewQids 拿到 crop
+  const EXCESSIVE_BLANKS_THRESHOLD = 3
+  const blankCountPreCrop = questionResultsPreCrop.filter((qr) =>
+    qr.arbiterResult?.arbiterStatus === 'arbitrated_agree' &&
+    !ensureString(qr.arbiterResult?.finalAnswer, '').trim()
+  ).length
+  if (blankCountPreCrop > EXCESSIVE_BLANKS_THRESHOLD) {
+    const excessiveBlankFlipped = []
+    for (const qr of questionResultsPreCrop) {
+      const ar = qr.arbiterResult
+      if (ar?.arbiterStatus === 'arbitrated_agree' && !ensureString(ar?.finalAnswer, '').trim()) {
+        qr.arbiterResult = {
+          ...ar,
+          arbiterStatus: 'needs_review',
+          excessiveBlanksFlag: true,
+          excessiveBlanksReason: `本份共 ${blankCountPreCrop} 題未作答、可能 AI 題目定位漂掉、請確認`
+        }
+        excessiveBlankFlipped.push(qr.questionId)
+      }
+    }
+    if (excessiveBlankFlipped.length > 0) {
+      logStaged(pipelineRunId, stagedLogLevel,
+        `[A3] excessive blanks (${blankCountPreCrop}>${EXCESSIVE_BLANKS_THRESHOLD}) → ${excessiveBlankFlipped.length} 題翻 needs_review`,
+        excessiveBlankFlipped)
+    }
+  }
 
   // Re-crop ONLY needs_review questions (省 wall time + 頻寬)
   const needsReviewQids = questionResultsPreCrop
