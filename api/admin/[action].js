@@ -3943,14 +3943,25 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
   //   優先序：rowAnchorOverrides.after > overrides.after > classifyBboxes.bbox
   //   (row anchor 是 full replace、跑在 OCR width_floor/x_shift 之後)
   // ⚠️ submissions/<id>.webp 是垂直堆疊的 merged 多頁圖、但每頁 bbox 是 normalized 到該「單頁」(y ∈ [0,1])。
-  //   page 1+ 的 bbox 要 offset 才能畫在 merged 圖上：mergedY = (pageIdx + bbox.y) / pageCount
-  //   假設所有 page 等高（teacher_scan 走 PDF rasterize 一律相同 dpi 故等高）
+  //   2026-05-24 修正：原本假設所有 page 等高、但學生用手機拍照各頁尺寸不同
+  //   (數練p51-53 page1=2217px, page2=1116px)、bbox 整體偏移 ~8%。
+  //   改用實際 imageSize[1] 算每頁 height ratio、缺資料時退回等高假設。
   const bboxByQid = new Map()
   const bboxSourceByQid = new Map()  // qid → 'raw' | 'ocr_override' | 'row_anchor'
   const perPage = log?.classify?.ocrAssist?.perPage || []
   const pageCount = perPage.length || 1
+  const pageHeights = perPage.map((p) => p?.imageSize?.[1] || 0)
+  const totalH = pageHeights.reduce((s, h) => s + h, 0)
+  const useRealHeights = totalH > 0 && pageHeights.every((h) => h > 0)
+  const ratios = useRealHeights
+    ? pageHeights.map((h) => h / totalH)
+    : Array.from({ length: pageCount }, () => 1 / pageCount)
+  const yOffsets = ratios.reduce((acc, _, i) => {
+    acc.push(i === 0 ? 0 : acc[i - 1] + ratios[i - 1])
+    return acc
+  }, [])
   const toMerged = (b, pageIdx) => pageCount > 1
-    ? { x: b.x, y: (pageIdx + b.y) / pageCount, w: b.w, h: b.h / pageCount }
+    ? { x: b.x, y: yOffsets[pageIdx] + b.y * ratios[pageIdx], w: b.w, h: b.h * ratios[pageIdx] }
     : b
   perPage.forEach((p, pageIdx) => {
     // 1) raw classifyBboxes
