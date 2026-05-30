@@ -5427,6 +5427,8 @@ function buildFinalGradingResult({
     // map_fill 走 map-fill-grader、studentAnswer 用 grader 寫的 studentFinalAnswer
     // （不是 readAnswerResult.answers 因為 map_fill 沒進 Read）
     const isMapFillBypass = score?._mapFillBypass === true
+    // VJ 視覺判斷題：不走文字 Read、studentAnswer = blank 判讀摘要（圖上作答/未作答）、並帶逐柱 vjItemResults
+    const isVjBypass = score?._vjBypass === true
     // 2026-05-29 Fix A: AI 沒給 scoringReason 時、fallback 不要寫「需人工複核」
     // 改成顯示「學生答案 vs 標準答案」、讓老師一眼判斷
     const studentAnsForReason = isMapFillBypass
@@ -5441,7 +5443,7 @@ function buildFinalGradingResult({
       questionId,
       // questionType 帶下來：前端對 map_fill 等視覺評分題型要鎖編輯欄
       questionType: classify?.questionType || question?.questionCategory || undefined,
-      studentAnswer: isMapFillBypass
+      studentAnswer: (isMapFillBypass || isVjBypass)
         ? ensureString(score?.studentFinalAnswer, '')
         : ensureString(answer?.studentAnswerRaw, '無法辨識'),
       isCorrect: hasMismatch ? false : score?.isCorrect === true,
@@ -5458,7 +5460,9 @@ function buildFinalGradingResult({
       needExplain: score?.needExplain === true || score?.isCorrect !== true,
       studentFinalAnswer: ensureString(score?.studentFinalAnswer, '').trim() || undefined,
       // map_fill 的 per-position 細節（給前端 detail modal 顯示用）
-      mapFillResults: Array.isArray(score?.mapFillResults) ? score.mapFillResults : undefined
+      mapFillResults: Array.isArray(score?.mapFillResults) ? score.mapFillResults : undefined,
+      // VJ 的逐柱結果（給前端 detail 顯示逐柱 + 老師逐柱改有畫/沒畫）
+      vjItemResults: Array.isArray(score?.vjItemResults) ? score.vjItemResults : undefined
     }
 
     // ── 程式化覆核：數字/符號答案的 fill_blank 不信任 accessor ──
@@ -9299,11 +9303,13 @@ export async function runStagedGradingPhaseB({
 
         const agg = aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore)
         logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} score=${agg.score}/${agg.maxScore} 非空白${notBlank.length}項`)
+        // 學生答案＝blank 判讀的摘要文案（非文字、非對錯）：全空白→未作答、有任一柱作答→圖上作答
+        const vjAllBlank = agg.vjItemResults.length > 0 && agg.vjItemResults.every((r) => r.verdict === 'blank')
         deterministicScores.push({
           questionId: qId, isCorrect: agg.isCorrect, score: agg.score, maxScore: agg.maxScore,
           errorType: agg.isCorrect ? 'none' : (notBlank.length === 0 ? 'blank' : 'concept'),
           scoringReason: agg.scoringReason, scoreConfidence: 100,
-          studentFinalAnswer: agg.vjItemResults.map((r) => `${r.label}:${r.verdict}`).join('、'),
+          studentFinalAnswer: vjAllBlank ? '未作答' : '圖上作答',
           needExplain: false, _vjBypass: true, vjItemResults: agg.vjItemResults
         })
         vjBypassIds.add(qId)
