@@ -8461,6 +8461,10 @@ export async function runStagedGradingPhaseAArbiter({
       // status='auto' → map_fill 跳過 Read、Phase B Accessor 直接視覺評分、不需 AI3
       // 跟 runStagedGradingPhaseA 內部的 arbiter filter 對齊（兩個 endpoint 都要擋）
       if (s1 === 'auto' || s2 === 'auto') return false
+      // 2026-05-30 修：split 路徑漏了這兩個排除（full 路徑 8013-8015 有）→ VJ/map_fill 被
+      // 送進 AI3 文字仲裁、AI3 的文字一致性判定蓋過 blank/per-position 路由（空白該送審卻自動過）。
+      if (qr.questionType === 'map_fill') return false
+      if (VISUAL_JUDGMENT_TYPES.has(qr.questionType)) return false
       return true
     })
     .map((qr) => ({
