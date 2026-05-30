@@ -3845,7 +3845,8 @@ async function qualitySubmissionList(db, assignmentId) {
 async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
   const { data: sub, error: sErr } = await db
     .from('submissions')
-    .select('id, assignment_id, student_id, image_url, graded_at, final_answers, grading_result, source, status')
+    // ⚠️ 只撈 phase_a_state->arbiterDecisions sub-path、不拉整顆 phase_a_state（含 readAnswer1/2/classify 大 JSONB）
+    .select('id, assignment_id, student_id, image_url, graded_at, final_answers, grading_result, source, status, arbiter_decisions:phase_a_state->arbiterDecisions')
     .eq('id', submissionId)
     .maybeSingle()
   if (sErr) throw new Error(sErr.message)
@@ -4020,6 +4021,20 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
   const detailMap = new Map(detailArr.map((d) => [d.questionId, d]))
   const VJ_TYPES = new Set(['diagram_color', 'map_symbol', 'grid_geometry'])
 
+  // phase_a_state.arbiterDecisions：AI3 一致性判官的權威結果。
+  // ⚠️ 部分重批（05-30 起）arbiter 結果沒回填到 grading_stage_logs.arbiter（log 空）→ 當 log 空時用這個 fallback、否則整片「無 arbiter」。
+  const arbDecArr = Array.isArray(sub.arbiter_decisions) ? sub.arbiter_decisions : []
+  const arbDecMap = new Map(arbDecArr.map((a) => [a.questionId, a]))
+  const consistentOf = (logArb, qid) => {
+    if (logArb && typeof logArb.consistent === 'boolean') return logArb.consistent  // log 有就用 log
+    const d = arbDecMap.get(qid)
+    if (!d) return null
+    if (typeof d.consistent === 'boolean') return d.consistent
+    if (d.arbiterStatus === 'arbitrated_agree') return true
+    if (d.arbiterStatus === 'needs_review' || d.arbiterStatus === 'arbitrated_disagree') return false
+    return null
+  }
+
   // union 所有 qid，題序按 1-2-3 自然排序（含 detail keys：VJ 不進 read log、需從 details 補進來）
   const qids = new Set([
     ...bboxByQid.keys(),
@@ -4050,7 +4065,7 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
       bboxSource: bboxSourceByQid.get(qid) || null,  // 'raw' | 'ocr_override' | 'row_anchor'
       ai1: isVJ ? null : (r1 ? { answer: r1.answer ?? '', status: r1.status || null } : null),
       ai2: isVJ ? null : (r2 ? { answer: r2.answer ?? '', status: r2.status || null } : null),
-      arbiterConsistent: isVJ ? null : (arb?.consistent ?? null),
+      arbiterConsistent: isVJ ? null : consistentOf(arb, qid),
       finalAnswer: isVJ ? (det?.studentAnswer ?? null) : (final?.finalStudentAnswer ?? null),
       finalAnswerSource: isVJ ? 'visual_judgment' : (final?.finalAnswerSource ?? final?.source ?? null),
       isMistake: mistakeSet.has(qid),
