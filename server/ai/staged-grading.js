@@ -1154,6 +1154,20 @@ function normalizeMathAnswer(s) {
 
 // A5: 純邏輯一致性比對（不耗 token）
 // read1/read2: { status: 'read'|'blank'|'unreadable', studentAnswerRaw: string }
+// 抽出字串中的數值（含小數）轉 number 排序；用於判斷兩讀值的數字是否不同。
+// 「27倍」→[27]、「7倍」→[7]、「約518.1cm³」→[518.1]、「5.0」→[5]（值相等視為相同）。
+function extractNumericValues(s) {
+  return (String(s ?? '').match(/\d+(?:\.\d+)?/g) || []).map(Number).sort((x, y) => x - y)
+}
+// 兩答案的數值內容是否不同（27倍≠7倍、96280≠6280；518.1=約518.1、5=5.0 視為相同）。
+function numericValuesDiffer(a1, a2) {
+  const n1 = extractNumericValues(a1)
+  const n2 = extractNumericValues(a2)
+  if (n1.length !== n2.length) return true
+  for (let i = 0; i < n1.length; i++) if (n1[i] !== n2[i]) return true
+  return false
+}
+
 function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s1 = ensureString(read1?.status, '').toLowerCase()
   const s2 = ensureString(read2?.status, '').toLowerCase()
@@ -1204,6 +1218,12 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
   const a2 = normalizeAnswerForComparison(ensureString(read2?.studentAnswerRaw, ''))
   if (a1 === a2) return 'stable'
+  // 2026-05-31: 兩讀值「數字（值）不同」一律 diff（送人工審查）。
+  // 修真實 bug：「7倍」是「27倍」的子字串、「96280」與「6280」字元高度相似 → 被下方「包含關係 /
+  // Jaccard 相似度」啟發式誤判為 stable、再由 getContainmentPreferredRaw 直接採用其中一個（截斷/多位）
+  // 錯誤讀值、不送審（AI3 缺席時 fallback 用到這個 status → 學生被冤枉 0 分）。
+  // 數字相同的措辭/單位/前綴差異（約518.1=518.1、5=5.0）才繼續走後面的相似度判定。
+  if (numericValuesDiffer(a1, a2)) return 'diff'
   // 計算題：不使用字元集相似度（不同算式可能共享相同數字/符號，Jaccard 會誤判）
   // 只做精確比對和後段的包含關係檢查
   if (questionType !== 'calculation') {
