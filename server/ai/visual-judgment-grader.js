@@ -33,24 +33,30 @@ function parseJson(rawText) {
 // category：questionCategory；refText：referenceAnswer / answer（題意 hint）
 export function buildVjRubricPrompt(category, refText) {
   const ref = String(refText ?? '').trim()
-  const refLine = ref ? `\n【題目要求（hint）】${ref}` : ''
+  // ⚠️ 文字提示常把形狀標錯（如把平行四邊形柱寫成長方柱、1/4圓柱寫成半圓柱）→ 標為「可能不準、別照抄」
+  const refLine = ref ? `\n【文字提示（可能把形狀標錯，只當定位參考、不要照抄）】${ref}` : ''
 
   if (category === 'diagram_color') {
     return `這是一張**數學畫記/塗色題的答案卷**（老師畫的正解）。學生要在每個圖形上畫記或塗色作答。${refLine}
 
-任務：找出**所有需要學生作答的獨立子元素**（每個圖形/區域一個），並寫出評判條件。
+任務：找出**所有需要學生作答的獨立子元素**（每個圖形/區域一個），**逐一仔細辨識它實際是什麼立體**，並寫出評判條件。
+
+【辨識立體形狀的規則（最重要，直接影響之後批改）】
+- **以你看到的圖為準**，逐一數每個立體的面、看底面是什麼形狀再命名；**不要照抄上面的文字提示**。
+- 常見：三角柱、長方體、長方柱、正方體、圓柱、半圓柱、**四分之一圓柱**、**梯形柱**、**平行四邊形柱**、五角柱…
+- ⚠️ 斜的四邊形柱**不是**長方柱（長方柱有直角）；只露 1/4 圓弧的**不是**半圓柱。
+- ⚠️ **區分長方柱 vs 平行四邊形柱**：長方柱（含長方體）側面是長方形、側邊本身就是高、**不會另外畫高**；若圖上某面**中間畫了一條輔助高（通常虛線）**，代表斜邊不是高、必須另標高 → 那是**平行四邊形柱或梯形柱**（看底面是平行四邊形還是梯形）。
 
 【輸出 JSON（純 JSON、無 markdown）】
 {
-  "itemLabels": ["左上半圓柱體", "右上長方體", "左下三角柱體", "右下五角柱體"],
+  "itemLabels": ["左上四分之一圓柱", "右上平行四邊形柱", "左下三角柱", "右下梯形柱"],
   "condition": "每個柱體用藍筆描出至少一條合法柱高",
-  "gradingDefinition": "柱高=連接前後兩底面的側稜（長度方向的邊）；**任何一條連接兩底面的側稜都算正確**（不只一條標準答案）；畫在底面內的邊／半徑／對角線＝錯。"
+  "gradingDefinition": "柱高=連接兩底面的側稜（長度方向的邊）；**任何一條連接兩底面的側稜都算正確**（不只一條標準答案）；描在底面的邊／內部的高（輔助高）／半徑／對角線＝錯。"
 }
 
 【規則】
-- itemLabels：用「方位 + 圖形名」依「左上→右上→左下→右下」順序列出，每個獨立圖形一項。
-- condition：一句話總結學生每項該做什麼。
-- gradingDefinition：**寫清楚「什麼樣的作答算對」**，特別是「有多個等價合法位置」時要明講（避免之後被當成只有一個標準答案而誤殺）。
+- itemLabels：用「方位 + **你辨識出的正確立體名**」依「左上→右上→左下→右下」順序列出，每個獨立圖形一項。
+- gradingDefinition：寫清楚「什麼算對」，「有多個等價合法側稜」時明講（避免誤殺）。
 - 只看印刷正解、不臆造看不到的圖形。
 只輸出 JSON。`
   }
@@ -152,6 +158,12 @@ ${list}
 你**絕對不可判它沒畫(blank)**，請務必仔細找出學生那條筆跡並判斷對錯（correct/wrong）。
 （未列在上面的項目可能沒畫，若真找不到才回 blank。）
 
+【最關鍵：只算學生的藍筆，忽略題目印刷的線】
+學生用「藍色筆」描柱高作答。圖上**原本就印好**的線——特別是題目用來標示「底面的高」的**虛線/輔助線**、以及柱體的印刷外框——都**不是學生畫的**。
+- 判斷時**只看學生新加上去的藍色筆跡**描在哪條邊，拿它對照標準判對錯。
+- **絕對不要**把印刷的虛線、輔助高、外框當成學生作答而判錯。
+- 學生若描了多條或有少許雜筆，以**最明顯、最完整描在某一條邊**的那條為準。
+
 逐項：先簡述你看到學生畫在哪，再給 verdict。
 【輸出 JSON（純 JSON、無 markdown）】
 { "perItem": [ { "idx": 1, "seen": "...", "verdict": "correct|wrong|blank" } ] }
@@ -181,7 +193,7 @@ export function parseVjGradeResult(rawText, expectedCount) {
 export function aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore) {
   const labels = Array.isArray(itemLabels) ? itemLabels : []
   const blankMap = new Map((blankConfirmed || []).map((b) => [b.idx, !!b.isBlank]))
-  const gradeMap = new Map((grades || []).map((g) => [g.idx, g.verdict]))
+  const gradeMap = new Map((grades || []).map((g) => [g.idx, g])) // 保留整個 {verdict, seen}
   const n = labels.length
   let pass = 0
   const vjItemResults = []
@@ -192,9 +204,11 @@ export function aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore) {
     if (blankMap.get(idx)) { verdict = 'blank'; reason = '未作答' }
     else {
       const g = gradeMap.get(idx)
-      if (g === 'correct') { verdict = 'correct'; reason = '正確' }
-      else if (g === 'blank') { verdict = 'blank'; reason = '未作答' }
-      else { verdict = 'wrong'; reason = '位置/畫法不符' }
+      const v = g?.verdict
+      const seen = String(g?.seen ?? '').trim() // AI 逐柱「看到學生畫在哪」
+      if (v === 'correct') { verdict = 'correct'; reason = '正確' }
+      else if (v === 'blank') { verdict = 'blank'; reason = '未作答' }
+      else { verdict = 'wrong'; reason = seen || '位置/畫法不符' } // ⭐ wrong 用 AI 的 seen 當精確理由
     }
     if (verdict === 'correct') pass++
     vjItemResults.push({ idx, label, verdict, reason })

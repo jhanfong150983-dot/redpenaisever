@@ -58,6 +58,17 @@ export const READ_ANSWER_GENERATION_CONFIG = {
   }
 }
 
+// 2026-05-30: VJ 視覺判斷題 grade 用 temp 0 — 實驗證實 borderline 柱(側稜 vs 底面高/半徑)在 temp 0.3
+// 有 ~1/5 變異、會把對的判錯；temp 0 決定性、落在主流(正確)答案。只給 VJ grade、不動其他 stage。
+export const VJ_GRADE_GENERATION_CONFIG = {
+  generationConfig: {
+    temperature: 0,
+    thinkingConfig: {
+      thinking_level: 'MINIMAL'
+    }
+  }
+}
+
 
 function createPipelineRunId(requestId = '') {
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -9296,7 +9307,7 @@ export async function runStagedGradingPhaseB({
           const crop = bbox ? await cropInlineImageByBbox(studentImg.data, studentImg.mimeType, inflateBboxForType(bbox, classifyRow.questionType || q.questionCategory), true, 0.01) : null
           if (crop) {
             const resp = await executeStage({
-              apiKey, model: phaseBModel, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+              apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
               timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
               stageContents: [{ role: 'user', parts: [{ text: buildVjGradePrompt(itemLabels, vjRubric.gradingDefinition, notBlank) }, { inlineData: crop }] }]
             })
@@ -9633,6 +9644,9 @@ export async function runStagedGradingPhaseB({
   const accessorScores = Array.isArray(accessorResult.scores) ? accessorResult.scores : []
   const explainQuestionIds = accessorScores
     .filter((s) => s?.isCorrect !== true || s?.needExplain === true)
+    // 2026-05-30: VJ 視覺判斷題不進 explain（explain 是文字解釋、對 VJ 無用、白花一次 call；
+    // VJ 的逐柱理由已由 grade 的 seen 提供）
+    .filter((s) => !vjBypassIds.has(ensureString(s?.questionId).trim()))
     .map((s) => ensureString(s?.questionId).trim())
     .filter(Boolean)
 
