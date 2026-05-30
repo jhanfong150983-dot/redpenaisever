@@ -2608,6 +2608,17 @@ async function handleClearGrading(req, res) {
   const supabaseDb = getSupabaseAdmin()
   try {
     const nowIso = new Date().toISOString()
+    // 先撈出「真的有 grading_result」的學生（清除前）→ 等下只精準重設這些人的 state。
+    // 手動批改的 stub submission 無 grading_result、不在此清單、其 state 完全不碰（人為決定保留）。
+    const { data: gradedSubs, error: gradedSubsErr } = await supabaseDb
+      .from('submissions')
+      .select('student_id')
+      .eq('assignment_id', assignmentId)
+      .eq('owner_id', user.id)
+      .not('grading_result', 'is', null)
+    if (gradedSubsErr) throw new Error(gradedSubsErr.message)
+    const affectedStudentIds = [...new Set((gradedSubs || []).map((r) => r.student_id).filter(Boolean))]
+
     const { error } = await supabaseDb
       .from('submissions')
       .update({
@@ -2628,15 +2639,19 @@ async function handleClearGrading(req, res) {
     // 2026-05-30: 更換答案卷 = 評分「標準」變了 → 連訂正/申訴狀態也必須失效。
     // 跟「重跑 Phase A」不同：那個會擋下已完成(correction_passed)的卷；
     // 但「改答案卷」連 endpoint 也要 force 清（舊標準下的訂正/申訴都不算數）。
-    // 詳見 docs/批改重跑與清除政策.md §4、§6。
-    const ALL_CORRECTION = ['correction_required', 'correction_in_progress', 'correction_pending_review', 'correction_passed', 'correction_failed']
-    const { error: stateErr } = await supabaseDb
-      .from('assignment_student_state')
-      .update({ status: 'graded', last_status_reason: '老師更換答案卷、批改與訂正狀態已清除', updated_at: nowIso })
-      .eq('owner_id', user.id)
-      .eq('assignment_id', assignmentId)
-      .in('status', ALL_CORRECTION)
-    if (stateErr) throw new Error(stateErr.message)
+    // 重設目標 = 'uploaded'（有卷、等重批、仍鎖住不讓學生亂傳），等同剛上傳尚未批改；
+    // 不能用 'graded'（會讓總覽把清空的學生誤當已批改）。
+    // 只動「剛被清掉 grading 的學生」(affectedStudentIds)，含 graded / 所有 correction_*（含 endpoint）；
+    // 手動批改 stub 不在清單、不受影響。詳見 docs/批改重跑與清除政策.md §4、§6。
+    if (affectedStudentIds.length > 0) {
+      const { error: stateErr } = await supabaseDb
+        .from('assignment_student_state')
+        .update({ status: 'uploaded', last_status_reason: '老師更換答案卷、批改與訂正狀態已清除', updated_at: nowIso })
+        .eq('owner_id', user.id)
+        .eq('assignment_id', assignmentId)
+        .in('student_id', affectedStudentIds)
+      if (stateErr) throw new Error(stateErr.message)
+    }
     const { error: itemsErr } = await supabaseDb
       .from('correction_question_items')
       .update({ status: 'skipped', updated_at: nowIso })
