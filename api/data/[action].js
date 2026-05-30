@@ -2607,6 +2607,7 @@ async function handleClearGrading(req, res) {
   if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
   const supabaseDb = getSupabaseAdmin()
   try {
+    const nowIso = new Date().toISOString()
     const { error } = await supabaseDb
       .from('submissions')
       .update({
@@ -2617,13 +2618,34 @@ async function handleClearGrading(req, res) {
         feedback: null,
         grading_result: null,
         graded_at: null,
-        updated_at: new Date().toISOString()
+        updated_at: nowIso
       })
       .eq('assignment_id', assignmentId)
       .eq('owner_id', user.id)
       .not('grading_result', 'is', null)
     if (error) throw new Error(error.message)
-    console.log(`✅ [clear-grading] 已清除 assignment=${assignmentId} 的批改結果`)
+
+    // 2026-05-30: 更換答案卷 = 評分「標準」變了 → 連訂正/申訴狀態也必須失效。
+    // 跟「重跑 Phase A」不同：那個會擋下已完成(correction_passed)的卷；
+    // 但「改答案卷」連 endpoint 也要 force 清（舊標準下的訂正/申訴都不算數）。
+    // 詳見 docs/批改重跑與清除政策.md §4、§6。
+    const ALL_CORRECTION = ['correction_required', 'correction_in_progress', 'correction_pending_review', 'correction_passed', 'correction_failed']
+    const { error: stateErr } = await supabaseDb
+      .from('assignment_student_state')
+      .update({ status: 'graded', last_status_reason: '老師更換答案卷、批改與訂正狀態已清除', updated_at: nowIso })
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .in('status', ALL_CORRECTION)
+    if (stateErr) throw new Error(stateErr.message)
+    const { error: itemsErr } = await supabaseDb
+      .from('correction_question_items')
+      .update({ status: 'skipped', updated_at: nowIso })
+      .eq('owner_id', user.id)
+      .eq('assignment_id', assignmentId)
+      .in('status', ['open', 'disputed', 'resolved'])
+    if (itemsErr) throw new Error(itemsErr.message)
+
+    console.log(`✅ [clear-grading] 已清除 assignment=${assignmentId} 的批改結果 + 訂正/申訴狀態(含 endpoint)`)
     res.status(200).json({ success: true })
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : '清除失敗' })
