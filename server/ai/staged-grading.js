@@ -6789,6 +6789,9 @@ export async function runStagedGradingPhaseA({
   const allQuestionCropMap = new Map()  // questionId → { data, mimeType }
   const ai1CropCandidates = classifyAligned.filter(
     (q) => q.visible && q.answerBbox && q.questionType !== 'map_fill'
+      // VJ 視覺判斷題走專屬 blank reader（line 6990）、不進主 flash read：
+      // 否則塗色題每次 Phase A 都被 AI1/AI2 轉錄成散文 readAnswer1/2（白花 token + 誤導輸出）
+      && !VISUAL_JUDGMENT_TYPES.has(q.questionType)
       && !focusedCheckboxCropMap.has(q.questionId)  // exclude already-cropped checkbox questions
   )
   if (ai1CropCandidates.length > 0 && inlineImages.length > 0) {

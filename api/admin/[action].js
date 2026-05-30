@@ -4011,11 +4011,17 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
   const accessorArr = Array.isArray(phaseBLog?.accessor) ? phaseBLog.accessor : []
   const accessorMap = new Map(accessorArr.map((a) => [a.questionId, a]))
 
-  // union 所有 qid，題序按 1-2-3 自然排序
+  // grading_result.details per qid（VJ 視覺判斷題用：逐柱 vjItemResults + 分數/理由；VJ 不走主 read/accessor）
+  const detailArr = Array.isArray(sub.grading_result?.details) ? sub.grading_result.details : []
+  const detailMap = new Map(detailArr.map((d) => [d.questionId, d]))
+  const VJ_TYPES = new Set(['diagram_color', 'map_symbol', 'grid_geometry'])
+
+  // union 所有 qid，題序按 1-2-3 自然排序（含 detail keys：VJ 不進 read log、需從 details 補進來）
   const qids = new Set([
     ...bboxByQid.keys(),
     ...r1Map.keys(),
-    ...r2Map.keys()
+    ...r2Map.keys(),
+    ...detailMap.keys()
   ])
 
   const questions = [...qids].map((qid) => {
@@ -4025,23 +4031,32 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
     const arb = arbMap.get(qid)
     const final = finalMap.get(qid)
     const acc = accessorMap.get(qid)
+    const det = detailMap.get(qid)
+    const qType = typeByQid.get(qid) || det?.questionType || null
+    const isVJ = VJ_TYPES.has(qType)
+    // VJ 視覺判斷題：沒有 read 散文，改帶逐柱結果（有畫/沒畫 + 對錯）；分數/理由 fallback 從 details 取（VJ bypass accessor）
+    const vjItems = isVJ && Array.isArray(det?.vjItemResults)
+      ? det.vjItemResults.map((v) => ({ idx: v.idx ?? null, label: v.label ?? '', verdict: v.verdict ?? null, reason: v.reason ?? '' }))
+      : null
     return {
       qid,
-      type: typeByQid.get(qid) || null,
+      type: qType,
       page: bb?.page ?? 0,
       bbox: bb?.bbox || null,
       bboxSource: bboxSourceByQid.get(qid) || null,  // 'raw' | 'ocr_override' | 'row_anchor'
-      ai1: r1 ? { answer: r1.answer ?? '', status: r1.status || null } : null,
-      ai2: r2 ? { answer: r2.answer ?? '', status: r2.status || null } : null,
-      arbiterConsistent: arb?.consistent ?? null,
-      finalAnswer: final?.finalStudentAnswer ?? null,
-      finalAnswerSource: final?.finalAnswerSource ?? final?.source ?? null,
+      ai1: isVJ ? null : (r1 ? { answer: r1.answer ?? '', status: r1.status || null } : null),
+      ai2: isVJ ? null : (r2 ? { answer: r2.answer ?? '', status: r2.status || null } : null),
+      arbiterConsistent: isVJ ? null : (arb?.consistent ?? null),
+      finalAnswer: isVJ ? (det?.studentAnswer ?? null) : (final?.finalStudentAnswer ?? null),
+      finalAnswerSource: isVJ ? 'visual_judgment' : (final?.finalAnswerSource ?? final?.source ?? null),
       isMistake: mistakeSet.has(qid),
-      // Phase B 批改：分數 + 對錯 + 批改理由（只在錯題時前端顯示 reason）
-      score: acc?.score ?? null,
-      maxScore: acc?.maxScore ?? null,
-      isCorrect: typeof acc?.isCorrect === 'boolean' ? acc.isCorrect : null,
-      scoringReason: acc?.reason || null
+      // VJ 逐柱結果（前端據此渲染有畫/沒畫 + 對錯，取代 AI1/AI2 read 行）
+      vjItems,
+      // Phase B 批改：分數 + 對錯 + 批改理由（VJ bypass accessor → fallback 從 details 取）
+      score: acc?.score ?? (isVJ ? det?.score ?? null : null),
+      maxScore: acc?.maxScore ?? (isVJ ? det?.maxScore ?? null : null),
+      isCorrect: typeof acc?.isCorrect === 'boolean' ? acc.isCorrect : (isVJ && typeof det?.isCorrect === 'boolean' ? det.isCorrect : null),
+      scoringReason: acc?.reason || (isVJ ? det?.reason ?? null : null)
     }
   }).sort((a, b) => sortQidNumeric(a.qid, b.qid))
 
