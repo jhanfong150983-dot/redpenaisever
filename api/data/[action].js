@@ -2741,6 +2741,158 @@ async function handleClearCorrectionForRerun(req, res) {
   }
 }
 
+// 2026-05-30: Phase B 重批的「逐題狀態調和」（取代舊的「整批清+重建」）。
+// 依 docs/批改重跑與清除政策.md §5 逐題比對新舊對錯、只動翻轉題、保留未變動題的訂正/申訴成果。
+// body: { assignmentId, studentId, submissionId, gradingResult }（gradingResult = 剛算好的新 Phase B 結果）
+// 回傳調整後的 gradingResult（client 用它覆蓋本地）。
+async function handleReconcilePhaseBRegrade(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const assignmentId = typeof body?.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const studentId = typeof body?.studentId === 'string' ? body.studentId.trim() : ''
+  const submissionId = typeof body?.submissionId === 'string' ? body.submissionId.trim() : ''
+  const newGrade = body?.gradingResult
+  if (!assignmentId || !studentId || !submissionId || !newGrade || !Array.isArray(newGrade.details)) {
+    res.status(400).json({ error: 'Missing assignmentId/studentId/submissionId/gradingResult' }); return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const now = new Date().toISOString()
+    // 1) 目前每題的訂正/申訴狀態（優先序 disputed > open > resolved）
+    const { data: items } = await supabaseDb
+      .from('correction_question_items')
+      .select('question_id, status, dispute_note, dispute_rejected_at')
+      .eq('owner_id', user.id).eq('assignment_id', assignmentId).eq('student_id', studentId)
+      .in('status', ['open', 'disputed', 'resolved'])
+    const rank = { disputed: 3, open: 2, resolved: 1 }
+    const itemByQ = new Map()
+    for (const it of items || []) {
+      const q = String(it.question_id || '').trim(); if (!q) continue
+      const prev = itemByQ.get(q)
+      if (!prev || (rank[it.status] || 0) > (rank[prev.status] || 0)) itemByQ.set(q, it)
+    }
+    const oldStateOf = (q) => {
+      const it = itemByQ.get(q)
+      if (!it) return 'none'
+      if (it.status === 'disputed') return 'disputed'
+      if (it.status === 'open') return 'open'
+      if (it.status === 'resolved') return (it.dispute_note && !it.dispute_rejected_at) ? 'appeal_won' : 'corrected'
+      return 'none'
+    }
+    // 2) 新一輪的錯題集合
+    // ⚠️ mistakes 欄位名是 `id`（非 questionId）、且 explain 沒跑時 mistakes 可能為空 →
+    //    一律用 canonical normalizer（讀 id||questionId、無 mistakes 時從 details isCorrect=false 推導）。
+    const newMistakeList = parseMistakesFromGradingResult(newGrade)
+    const newMistakeByQ = new Map(newMistakeList.map((m) => [String(m.questionId || '').trim(), m]))
+    const newMistakeQs = new Set([...newMistakeByQ.keys()].filter(Boolean))
+    const allQs = new Set([...itemByQ.keys(), ...newMistakeQs])
+
+    // 3) 逐題決策（見 §5 矩陣）
+    const newOpen = []          // none + 現在錯：對→錯、新錯題
+    const resolveOpen = []      // open + 現在對：錯→對、結案
+    const autoVindicate = []    // disputed + 現在對：申訴自動平反 → 該題給對
+    const appealOverride = []   // appeal_won + 現在錯：老師已接受、不被覆蓋 → 該題給對
+    for (const q of allQs) {
+      const st = oldStateOf(q)
+      const wrong = newMistakeQs.has(q)
+      if (st === 'none' && wrong) newOpen.push(q)
+      else if (st === 'open' && !wrong) resolveOpen.push(q)
+      else if (st === 'disputed' && !wrong) autoVindicate.push(q)
+      else if (st === 'appeal_won' && wrong) appealOverride.push(q)
+      // 其餘（open+錯、disputed+錯、corrected、appeal_won+對）一律不動，保留現狀
+    }
+
+    // 4) 調整 grade：autoVindicate + appealOverride 的題目改成「正確、滿分」、移出 mistakes、重算分
+    const makeCorrect = new Set([...autoVindicate, ...appealOverride])
+    let adjusted = newGrade
+    if (makeCorrect.size > 0) {
+      const newDetails = (newGrade.details || []).map((d) => {
+        const q = String(d?.questionId || '').trim()
+        if (!makeCorrect.has(q)) return d
+        const ms = Number.isFinite(Number(d?.maxScore)) ? Number(d.maxScore) : 0
+        const reason = appealOverride.includes(q)
+          ? '申訴通過（老師已接受、重新批改不覆蓋）'
+          : '申訴通過（重新批改判定正確而自動通過）'
+        return { ...d, score: ms, isCorrect: ms > 0, reason, comment: reason }
+      })
+      const newMistakes = (Array.isArray(newGrade.mistakes) ? newGrade.mistakes : [])
+        .filter((m) => !makeCorrect.has(String((m?.id || m?.questionId) || '').trim()))
+      adjusted = { ...newGrade, details: newDetails, mistakes: newMistakes }
+    }
+    const finalScore = (adjusted.details || []).reduce((s, d) => s + (Number.isFinite(Number(d?.score)) ? Number(d.score) : 0), 0)
+    adjusted = { ...adjusted, totalScore: finalScore }
+
+    // 5) 存回原卷
+    const { error: subErr } = await supabaseDb.from('submissions').update({
+      score: finalScore, ai_score: finalScore, grading_result: adjusted,
+      score_source: 'ai', status: 'graded', updated_at: now
+    }).eq('id', submissionId).eq('owner_id', user.id)
+    if (subErr) throw new Error(subErr.message)
+
+    // 6) 套用 item 動作：結案(resolveOpen) + 自動平反(autoVindicate) → resolved
+    const toResolve = [...resolveOpen, ...autoVindicate]
+    if (toResolve.length > 0) {
+      await supabaseDb.from('correction_question_items')
+        .update({ status: 'resolved', updated_at: now })
+        .eq('owner_id', user.id).eq('assignment_id', assignmentId).eq('student_id', studentId)
+        .in('question_id', toResolve).in('status', ['open', 'disputed'])
+    }
+    // 新錯題（原本對、重批變錯）：開新 attempt_no=0 open 列。
+    // 帶上 bbox/hint/student_answer（從 normalizer 來、訂正 UI 與 lazy crop 需要）；
+    // delete-then-insert 避免跟殘列的 (…,attempt_no,question_id) 唯一鍵衝突。
+    if (newOpen.length > 0) {
+      await supabaseDb.from('correction_question_items')
+        .delete().eq('owner_id', user.id).eq('assignment_id', assignmentId).eq('student_id', studentId)
+        .in('question_id', newOpen)
+      const rows = newOpen.map((q) => {
+        const m = newMistakeByQ.get(q) || {}
+        return compactObject({
+          owner_id: user.id, assignment_id: assignmentId, student_id: studentId, attempt_no: 0,
+          question_id: q,
+          question_text: m.questionText || undefined,
+          mistake_reason: m.reason || undefined,
+          hint_text: m.hintText || undefined,
+          accessor_result: compactObject({
+            source_submission_id: submissionId,
+            question_bbox: normalizeBbox(m.questionBbox),
+            answer_bbox: normalizeBbox(m.answerBbox),
+            student_answer_raw: m.studentAnswerRaw || undefined
+          }),
+          status: 'open'
+        })
+      })
+      await supabaseDb.from('correction_question_items').insert(rows)
+    }
+
+    // 7) 重算 assignment_student_state.status（沿用 dispute-resolve 的判定）
+    const { data: remain } = await supabaseDb.from('correction_question_items')
+      .select('status').eq('owner_id', user.id).eq('assignment_id', assignmentId).eq('student_id', studentId)
+      .in('status', ['open', 'disputed'])
+    const openN = (remain || []).filter((r) => r.status === 'open').length
+    const dispN = (remain || []).filter((r) => r.status === 'disputed').length
+    const wasInCorrection = itemByQ.size > 0
+    let st2
+    if (openN > 0) st2 = 'correction_required'
+    else if (dispN > 0) st2 = 'correction_pending_review'
+    else if (wasInCorrection) st2 = 'correction_passed'  // 本來在訂正、現在全解決 → 完成
+    else st2 = 'graded'
+    await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, compactObject({
+      status: st2,
+      last_status_reason: st2 === 'correction_passed' ? null : '老師重新批改、已逐題調和訂正/申訴狀態'
+    }))
+
+    console.log(`[reconcile-phase-b] ${assignmentId}/${studentId} newOpen=${newOpen.length} resolved=${resolveOpen.length} vindicate=${autoVindicate.length} appealKeep=${appealOverride.length} → ${st2} score=${finalScore}`)
+    res.status(200).json({
+      success: true, gradingResult: adjusted, score: finalScore, newStatus: st2,
+      reconcile: { newWrong: newOpen, resolved: resolveOpen, autoVindicated: autoVindicate, appealKept: appealOverride }
+    })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Phase B 調和失敗' })
+  }
+}
+
 async function handleManualGrade(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -7374,6 +7526,10 @@ const log = document.getElementById('log');
   }
   if (action === 'clear-correction-for-rerun') {
     await handleClearCorrectionForRerun(req, res)
+    return
+  }
+  if (action === 'reconcile-phase-b-regrade') {
+    await handleReconcilePhaseBRegrade(req, res)
     return
   }
   if (action === 'import-template') {
