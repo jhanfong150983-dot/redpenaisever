@@ -9900,7 +9900,12 @@ GRADING RULES per questionCategory ("questionCategory" is authoritative. Only fa
     * HARD RULE: NEVER require "答：" / "A：" / "Ans:" format for calculation.
     * If the student writes extra intermediate steps, do not fail only because of extra steps; focus on correctness.
     * LENIENT FOCUS RULE: when item.strictness = "lenient", prioritize 最終答案. If final numeric answer is correct, allow pass even if process is brief.
-- short_answer / map_symbol / grid_geometry / connect_dots: This is a correction submission.
+- diagram_color / map_symbol / grid_geometry（視覺判斷題：學生在預印圖形上畫線／塗色／畫記／標符號，如「描柱高」「畫對稱軸」「標位置」）: This is a correction submission. **Judge VISUALLY from the correction photo.**
+    * 看訂正照片，判斷學生**重畫**的內容現在是否正確滿足 referenceAnswer 描述的概念。
+    * 🚨 接受「等價的合法答案」（最重要）：這類題常有**多個同樣正確的位置/畫法**（例：柱高＝任一條連接兩底面的側稜；對稱軸＝任一條合法對稱軸）。**不可要求和 referenceAnswer 舉的那一個例子完全重合**——只要學生畫在**任一個幾何上/概念上正確的位置**就 pass。
+    * 畫在「底面內的邊／半徑／對角線」或其他非答案位置 → not passed。完全沒重畫或仍錯 → not passed。
+    * 不要做文字比對；以「圖上畫的對不對」為準。
+- short_answer / connect_dots: This is a correction submission.
     * Judge based on referenceAnswer and whether the student demonstrates genuine understanding of the concept.
     * The answer does not need to be perfect, but must show the student understood their mistake and addressed it meaningfully.
     * LENIENT FOCUS RULE: when item.strictness = "lenient":
