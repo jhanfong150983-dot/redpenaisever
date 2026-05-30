@@ -4777,12 +4777,16 @@ ${JSON.stringify(trimmedAnswers)}
 UNIT EQUIVALENCE TABLE — these pairs are ALWAYS treated as identical regardless of strictness:
   【長度】 km = 公里   m = 公尺   cm = 公分   mm = 公釐
   【面積】 km² = 平方公里   m² = 平方公尺 = ㎡   cm² = 平方公分   mm² = 平方公釐
+  【體積】 km³ = 立方公里   m³ = 立方公尺   cm³ = 立方公分 = cc = c.c.   mm³ = 立方公釐
   【重量】 kg = 公斤   g = 公克   mg = 毫克
   【容積】 L = 公升   mL = ml = 毫升
   【時間】 h = hr = 小時   min = 分 = 分鐘   s = sec = 秒
   【速度】 km/h = 公里/小時 = 時速X公里   m/s = 公尺/秒   m/min = 公尺/分鐘   km/min = 公里/分鐘
   Note: "時速X公里" (e.g. 時速60公里) = "X km/h" = "X 公里/小時" — treat as identical.
+  Note: Same-name pairs above (e.g. cm³ ↔ 立方公分, m² ↔ 平方公尺) ARE identical.
   Note: Different units (e.g. 公尺 vs 公分, kg vs g) are still WRONG even if both appear in this table.
+  🚨 DIMENSION RULE: 長度(m/公尺/cm) ≠ 面積(m²/平方公尺/cm²) ≠ 體積(m³/立方公尺/cm³) are DIFFERENT dimensions.
+     Same number with a wrong dimension is a UNIT ERROR (errorType='unit', score 0), e.g. "408.2 m³" vs answer "408.2 平方公尺" → WRONG (體積 vs 面積).
 
 Rules:
 - score must be 0..maxScore.
@@ -4850,6 +4854,12 @@ ${isHighSchool
   比對 studentAnswerRaw 的最終答句 (含數值與單位) 與 referenceAnswer：
     - 數值正確 + (referenceAnswer 沒單位需求 OR 單位正確/在 UNIT EQUIVALENCE TABLE) → score = maxScore. STOP.
     - 數值錯誤 / 單位錯誤 / 缺單位 (referenceAnswer 有單位但學生沒寫) / 空白 / 無法辨識 → score = 0. STOP.
+  🚨 數值比對規則（NUMBER MATCH — 嚴格遵守）：
+    - **精確比對、無容忍值**：學生數值需與 referenceAnswer 數值**完全相等**才算對。不可套用任何誤差/容忍範圍。
+    - referenceAnswer 帶「約」「大約」「≈」是因為用 π≈3.14 取近似、**不代表有容忍範圍**；學生用同樣 3.14 算應得完全一樣的數。
+      例：ref「約518.1 立方公分」→ 學生「518.1」對；學生「515.25」**錯**（數值不同、非容忍範圍）。
+    - **格式等價（視為相同數）**：5 = 5.0 = 5.00（結尾零）；1/2 = 0.5；3 又 1/2 = 3.5；1,000 = 1000（去千分位逗號）；²/³ 上標 = ^2/^3。
+    - **單位維度（見 UNIT EQUIVALENCE TABLE 的 DIMENSION RULE）**：長度 ≠ 面積 ≠ 體積。維度不符即使數值相同也是單位錯、score 0（如 m³ vs 平方公尺）。
   **完全不檢查算式過程、不看 crop 圖、不分析列式。算式診斷由後續 explain 階段負責，accessor 不碰。**
   禁止給 (maxScore - 1) 這類中間分數。
 
@@ -9902,12 +9912,16 @@ ${JSON.stringify(itemsWithAnswers, null, 2)}
 UNIT EQUIVALENCE TABLE — these pairs are ALWAYS treated as identical:
   【長度】 km = 公里   m = 公尺   cm = 公分   mm = 公釐
   【面積】 km² = 平方公里   m² = 平方公尺 = ㎡   cm² = 平方公分   mm² = 平方公釐
+  【體積】 km³ = 立方公里   m³ = 立方公尺   cm³ = 立方公分 = cc = c.c.   mm³ = 立方公釐
   【重量】 kg = 公斤   g = 公克   mg = 毫克
   【容積】 L = 公升   mL = ml = 毫升
   【時間】 h = hr = 小時   min = 分 = 分鐘   s = sec = 秒
   【速度】 km/h = 公里/小時 = 時速X公里   m/s = 公尺/秒   m/min = 公尺/分鐘   km/min = 公里/分鐘
   Note: "時速X公里" (e.g. 時速60公里) = "X km/h" = "X 公里/小時" — treat as identical.
+  Note: Same-name pairs above (e.g. cm³ ↔ 立方公分) ARE identical.
   Note: Different units (e.g. 公尺 vs 公分, kg vs g) are still WRONG even if both appear in this table.
+  🚨 DIMENSION RULE: 長度 ≠ 面積 ≠ 體積 (m ≠ m² ≠ m³). Same number with wrong dimension = unit error.
+  🚨 NUMBER MATCH: 精確比對、無容忍值。ref 帶「約/大約」是 π≈3.14 取近似、非容忍範圍 → 學生數值需完全相等。格式等價：5=5.0、1/2=0.5、1,000=1000。
 
 GRADING RULES per questionCategory ("questionCategory" is authoritative. Only fall back to "type" when questionCategory is empty):
 - single_choice / true_false / fill_blank: student answer must match correctAnswer. Minor spacing/punctuation differences are OK.
