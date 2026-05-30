@@ -45,6 +45,12 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.GRADING_PHASE_A_READ]: MODEL_FLASH,   // 同 read
   [AI_ROUTE_KEYS.GRADING_RECHECK]: MODEL_PRO,          // 學生訂正重批（含 OCR、保留 PRO）
   [AI_ROUTE_KEYS.ANSWER_KEY_LOCATE]: MODEL_PRO,        // 答案卷 bbox 定位（同 classify 性質）
+  // ── VJ 視覺判斷題（diagram_color / map_symbol / grid_geometry）：全 PRO ──
+  // 2026-05-30 實測：flash 連 blank 偵測都不安全（真空白幻覺出筆跡）；PRO blank 100% 穩定。
+  // grade 判對錯更需強模型。三階段都 PRO。成本框在 VJ 題（每題每生 blank×1 + grade×1 = 2 個 PRO call）。
+  [AI_ROUTE_KEYS.GRADING_VJ_RUBRIC]: MODEL_PRO,        // A0 答案卷 → vjRubric
+  [AI_ROUTE_KEYS.GRADING_VJ_BLANK]: MODEL_PRO,         // Phase A 單一 blank reader
+  [AI_ROUTE_KEYS.GRADING_VJ_GRADE]: MODEL_PRO,         // Phase B rubric 判對錯
   // 2026-05-23: 紙張四角偵測切到 FLASH
   // 原因：(1) 老師端 AssignmentImport 已 skip、只剩學生拍照觸發
   //       (2) 找白色矩形邊緣是相對簡單視覺任務、FLASH 夠用

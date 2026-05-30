@@ -17,6 +17,10 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_EXPLAIN: 'grading.explain',
   GRADING_RECHECK: 'grading.recheck',
   GRADING_CONSISTENCY_JUDGE: 'grading.consistency_judge',
+  // VJ（視覺判斷題：diagram_color / map_symbol / grid_geometry）專用三階段、全走 PRO
+  GRADING_VJ_RUBRIC: 'grading.vj_rubric',   // A0：答案卷 → vjRubric（itemLabels/condition/gradingDefinition）
+  GRADING_VJ_BLANK: 'grading.vj_blank',     // Phase A：單一 PRO blank reader（每項有沒有畫）
+  GRADING_VJ_GRADE: 'grading.vj_grade',     // Phase B：rubric + 權威 blank 參數判對錯
   ANSWER_KEY_EXTRACT: 'answer_key.extract',
   ANSWER_KEY_LOCATE: 'answer_key.locate',
   ANSWER_KEY_REANALYZE: 'answer_key.reanalyze',

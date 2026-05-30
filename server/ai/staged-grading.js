@@ -30,6 +30,17 @@ import {
   parseStageBResult,
   gradeMapFillDeterministically
 } from './map-fill-grader.js'
+import {
+  VISUAL_JUDGMENT_TYPES,
+  buildVjRubricPrompt,
+  parseVjRubricResult,
+  buildVjBlankPrompt,
+  parseVjBlankResult,
+  classifyVjBlank,
+  buildVjGradePrompt,
+  parseVjGradeResult,
+  aggregateVjScore
+} from './visual-judgment-grader.js'
 import { getSupabaseAdmin } from '../_supabase.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
@@ -2114,7 +2125,7 @@ Return:
 `.trim()
 }
 
-function normalizeReadAnswerResult(parsed, questionIds, mismatchIds = new Set()) {
+export function normalizeReadAnswerResult(parsed, questionIds, mismatchIds = new Set()) {
   const answersRaw = Array.isArray(parsed?.answers) ? parsed.answers : []
   const byQuestionId = mapByQuestionId(answersRaw, (item) => item?.questionId)
   const answers = []
@@ -2123,6 +2134,18 @@ function normalizeReadAnswerResult(parsed, questionIds, mismatchIds = new Set())
     const row = byQuestionId.get(questionId)
     let studentAnswerRaw = ensureString(row?.studentAnswerRaw, '').trim()
     let status = ensureString(row?.status, '').trim().toLowerCase()
+
+    // 2026-05-29: 合題（fill_blank parts）後備——AI 偶發正確回了 partValues
+    // 但忘了照 prompt 把它們拼進 studentAnswerRaw（~10% 的 read run 整組合題一起漏）。
+    // 結果存成空 → 一致性誤判「AI1 空 vs AI2 有」→ 假性 needs_review。
+    // partValues 既然在，就 deterministic 拼回（不靠模型）。只在至少一空有內容時回填，
+    // 全空維持原本 blank 判定。table_cell 的 cellValues 同理可比照（暫不動，未實證需要）。
+    if (!studentAnswerRaw && Array.isArray(row?.partValues)) {
+      const joined = row.partValues
+        .map((p) => ensureString(p?.student, '').trim())
+        .join(', ')
+      if (joined.replace(/[,\s]/g, '')) studentAnswerRaw = joined.trim()
+    }
 
     if (!['read', 'blank', 'unreadable'].includes(status)) {
       if (!studentAnswerRaw || studentAnswerRaw === '未作答') status = 'blank'
@@ -6935,6 +6958,47 @@ export async function runStagedGradingPhaseA({
       `[A2] map_fill 並行 read ${mapFillReadJobs.length} 題（AI1+AI2 共 ${mapFillReadJobs.length * 2} 個 call）`)
   }
 
+  // ── 2026-05-30: VJ 視覺判斷題（diagram_color / map_symbol / grid_geometry）─────
+  // 單一 PRO blank reader（每項有沒有畫）；對錯延到 Phase B 帶權威 blank 參數做。
+  // 需 AnswerKey 內 question.vjRubric（A0 已跑）；未升級 → Phase B lazy backfill。
+  // PRO blank 實測 100% 穩定，故只跑 1 個 reader（route GRADING_VJ_BLANK=PRO）。
+  const vjReadJobs = []  // [{ questionId, itemLabels, vjRubric, blankIdx, crop }]
+  const vjAkQuestions = (Array.isArray(answerKeyQuestions) ? answerKeyQuestions : [])
+    .filter((q) => VISUAL_JUDGMENT_TYPES.has(q?.questionCategory)
+      && q?.vjRubric && Array.isArray(q.vjRubric.itemLabels) && q.vjRubric.itemLabels.length > 0)
+  if (vjAkQuestions.length > 0 && inlineImages.length > 0) {
+    const inlineImage = inlineImages[0]
+    for (const akQ of vjAkQuestions) {
+      const classifyRow = classifyAligned.find((r) => r.questionId === akQ.id)
+      if (!classifyRow?.answerBbox) continue
+      const crop = await cropInlineImageByBbox(
+        inlineImage.inlineData.data,
+        inlineImage.inlineData.mimeType,
+        inflateBboxForType(classifyRow.answerBbox, classifyRow.questionType),
+        true,
+        dynamicPad
+      )
+      if (!crop) continue
+      const itemLabels = akQ.vjRubric.itemLabels
+      const blankIdx = parallelCalls.length
+      parallelCalls.push(
+        executeStage({
+          apiKey,
+          model: readModel,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(),
+          routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_VJ_BLANK,
+          stageContents: [{ role: 'user', parts: [{ text: buildVjBlankPrompt(itemLabels) }, { inlineData: crop }] }]
+        })
+      )
+      vjReadJobs.push({ questionId: akQ.id, itemLabels, vjRubric: akQ.vjRubric, blankIdx, crop })
+    }
+  }
+  if (vjReadJobs.length > 0) {
+    logStaged(pipelineRunId, 'basic', `[A2] VJ blank read ${vjReadJobs.length} 題（單一 PRO reader）`)
+  }
+
   logStageStart(pipelineRunId, 'ReadAnswer+reReadAnswer')
   const parallelResults = await Promise.all(parallelCalls)
   const readAnswerResponse = parallelResults[0]
@@ -6967,6 +7031,24 @@ export async function runStagedGradingPhaseA({
     if (ai1Resp) stageResponses.push(ai1Resp)
     if (ai2Resp) stageResponses.push(ai2Resp)
   }
+
+  // ── 解析 VJ blank readings ─────────────────────────────────────────────
+  // vjReadingsByQid: Map<questionId, { blankRead:[{idx,hasMark}], itemLabels, vjRubric, crop }>
+  const vjReadingsByQid = new Map()
+  for (const job of vjReadJobs) {
+    const resp = parallelResults[job.blankIdx]
+    let blankRead = []
+    if (resp?.ok) {
+      blankRead = parseVjBlankResult(extractCandidateText(resp.data) || '', job.itemLabels.length) || []
+    } else {
+      logStaged(pipelineRunId, 'basic', `[A2] VJ ${job.questionId} blank read 失敗 status=${resp?.status}`)
+    }
+    vjReadingsByQid.set(job.questionId, {
+      blankRead, itemLabels: job.itemLabels, vjRubric: job.vjRubric, crop: job.crop
+    })
+    if (resp) stageResponses.push(resp)
+  }
+
   logStageEnd(pipelineRunId, 'ReadAnswer', readAnswerResponse)
   logStageEnd(pipelineRunId, 'reReadAnswer', reReadAnswerResponse)
   stageResponses.push(readAnswerResponse, reReadAnswerResponse)
@@ -7524,6 +7606,48 @@ export async function runStagedGradingPhaseA({
     const read2 = read2ById.get(questionId)
     const classifyRow = classifyAligned.find((q) => q.questionId === questionId)
 
+    // ── VJ 視覺判斷題：blank 偵測 + 逐項分類（2026-05-30）──
+    // 有畫→auto_not_blank（自動送 Phase B grade）；空白→review_blank（送老師確認）。對錯延到 Phase B。
+    if (VISUAL_JUDGMENT_TYPES.has(classifyRow?.questionType)) {
+      const vjData = vjReadingsByQid.get(questionId)
+      if (!vjData || !Array.isArray(vjData.itemLabels) || vjData.itemLabels.length === 0) {
+        // 未升級（無 vjRubric）→ Phase B lazy backfill；先標 stable placeholder
+        return {
+          questionId,
+          consistencyStatus: 'stable',
+          containmentPreferredRaw: null,
+          consistencyReason: undefined,
+          questionType: classifyRow?.questionType,
+          readAnswer1: { status: 'auto', studentAnswer: '(視覺判斷題 AnswerKey 未升級、由 Phase B 評分)' },
+          readAnswer2: { status: 'auto', studentAnswer: '(視覺判斷題 AnswerKey 未升級、由 Phase B 評分)' },
+          answerBbox: classifyRow?.answerBbox ?? null,
+          bboxCorrected: classifyRow?.bboxCorrected || false,
+          calculationAnswerMismatch: false,
+          framingReason: classifyRow?.framingReason || undefined
+        }
+      }
+      const { perItem, anyReview } = classifyVjBlank(vjData.itemLabels, vjData.blankRead)
+      const consistencyStatus = anyReview ? 'diff' : 'stable'
+      const summary = perItem.map((p) => `${p.label}:${p.hasMark === 'yes' ? '有畫' : '空白'}`).join('、')
+      return {
+        questionId,
+        consistencyStatus,
+        containmentPreferredRaw: null,
+        consistencyReason: anyReview
+          ? `${perItem.filter((p) => p.status !== 'auto_not_blank').length} 項需確認是否作答`
+          : undefined,
+        questionType: classifyRow?.questionType,
+        readAnswer1: { status: 'read', studentAnswer: summary },
+        readAnswer2: { status: 'read', studentAnswer: summary },
+        answerBbox: classifyRow?.answerBbox ?? null,
+        bboxCorrected: classifyRow?.bboxCorrected || false,
+        calculationAnswerMismatch: false,
+        framingReason: classifyRow?.framingReason || undefined,
+        // 🆕 per-item 給前端 VJ 審查 card（有/沒有畫）
+        visualJudgment: { itemLabels: vjData.itemLabels, perItem }
+      }
+    }
+
     // ── map_fill: Phase A 3-AI per-position 流程（2026-05-28 pivot）──
     // AnswerKey 已升級（有 positions[]） → 用平行 AI1/AI2 readings + per-position consistency
     // AnswerKey 未升級（無 positions[]） → 回退到 Phase B 視覺評分 path（auto-stable）
@@ -7883,6 +8007,8 @@ Return JSON:
       if (s1 === 'auto' || s2 === 'auto') return false
       // map_fill 走 per-position consistency、不用 AI3 整題比對
       if (qr.questionType === 'map_fill') return false
+      // VJ 視覺判斷題走 blank 分類 + Phase B grade、不用 AI3
+      if (VISUAL_JUDGMENT_TYPES.has(qr.questionType)) return false
       return true
     })
     .map((qr) => ({
@@ -9081,6 +9207,118 @@ export async function runStagedGradingPhaseB({
     }
   }
 
+  // ── Phase 1b: VJ 視覺判斷題評分（PRO grade + 權威 blank 參數）─────────────
+  // 2026-05-30: 用 finalAnswer.vjBlankConfirmed 決定哪些項非空白 → 只對非空白項跑 PRO grade。
+  // 整題全空白 → deterministic 0、不發 grade call。vjRubric/blank 缺 → lazy backfill。
+  const vjBypassIds = new Set()
+  const vjQuestions = akQuestions.filter((q) => VISUAL_JUDGMENT_TYPES.has(q?.questionCategory) && q?.id)
+  if (vjQuestions.length > 0) {
+    const vjClassifyArr = Array.isArray(classifyResult)
+      ? classifyResult
+      : (classifyResult?.alignedQuestions || classifyResult?.questions || [])
+    const studentImg = inlineImages[0]?.inlineData
+    for (const q of vjQuestions) {
+      const qId = String(q.id).trim()
+      if (manualBypassIds.has(qId)) continue
+      const maxScore = Number(q.maxScore) || 0
+      try {
+        // 1) 取 vjRubric（缺 → lazy A0 從 cropImagePath）
+        let vjRubric = q.vjRubric && Array.isArray(q.vjRubric.itemLabels) && q.vjRubric.itemLabels.length > 0
+          ? q.vjRubric : null
+        if (!vjRubric && q.cropImagePath) {
+          try {
+            const supabase = getSupabaseAdmin()
+            const { data: blob } = await supabase.storage.from('homework-images').download(q.cropImagePath)
+            if (blob) {
+              const cropMime = q.cropImagePath.endsWith('.jpg') ? 'image/jpeg' : 'image/webp'
+              const refB64 = Buffer.from(await blob.arrayBuffer()).toString('base64')
+              const resp = await executeStage({
+                apiKey, model: phaseBModel, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_RUBRIC,
+                stageContents: [{ role: 'user', parts: [{ text: buildVjRubricPrompt(q.questionCategory, q.referenceAnswer || q.answer) }, { inlineData: { mimeType: cropMime, data: refB64 } }] }]
+              })
+              if (resp?.ok) vjRubric = parseVjRubricResult(extractCandidateText(resp.data) || '')
+              if (resp) stageResponses.push(resp)
+            }
+          } catch (e) { logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} lazy A0 失敗：${e?.message}`) }
+        }
+        if (!vjRubric) {
+          // 無法取得 rubric → 整題送審
+          deterministicScores.push({
+            questionId: qId, isCorrect: false, score: 0, maxScore, errorType: 'unreadable',
+            scoringReason: '視覺判斷題：無法取得評判條件（answer key 未升級且無參考圖），請老師複核',
+            scoreConfidence: 0, studentFinalAnswer: '', needExplain: false, _vjBypass: true, _vjFailed: true
+          })
+          vjBypassIds.add(qId)
+          continue
+        }
+        const itemLabels = vjRubric.itemLabels
+        const n = itemLabels.length
+
+        // 2) 取 blank 確認（client finalAnswer.vjBlankConfirmed）
+        const fa = finalAnswerByQid.get(qId)
+        let blankConfirmed = Array.isArray(fa?.vjBlankConfirmed) ? fa.vjBlankConfirmed : null
+        // 缺 → lazy 跑一次 PRO blank reader（auto-stable 流程客戶端通常會帶；此為保險）
+        if (!blankConfirmed && studentImg?.data) {
+          const classifyRow = vjClassifyArr.find((r) => (r.questionId || r.id) === qId)
+          if (classifyRow?.answerBbox) {
+            const crop = await cropInlineImageByBbox(studentImg.data, studentImg.mimeType, inflateBboxForType(classifyRow.answerBbox, classifyRow.questionType || q.questionCategory), true, 0.01)
+            if (crop) {
+              const resp = await executeStage({
+                apiKey, model: phaseBModel, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_BLANK,
+                stageContents: [{ role: 'user', parts: [{ text: buildVjBlankPrompt(itemLabels) }, { inlineData: crop }] }]
+              })
+              if (resp?.ok) {
+                const br = parseVjBlankResult(extractCandidateText(resp.data) || '', n) || []
+                blankConfirmed = br.map((x) => ({ idx: x.idx, isBlank: x.hasMark !== 'yes' }))
+              }
+              if (resp) stageResponses.push(resp)
+            }
+          }
+        }
+        if (!blankConfirmed) blankConfirmed = itemLabels.map((_, i) => ({ idx: i + 1, isBlank: false }))
+        const notBlank = blankConfirmed.filter((b) => !b.isBlank).map((b) => b.idx)
+
+        // 3) 對非空白項跑 PRO grade（整題全空白 → 不發 call、直接 0）
+        let grades = []
+        if (notBlank.length > 0 && studentImg?.data) {
+          const classifyRow = vjClassifyArr.find((r) => (r.questionId || r.id) === qId)
+          const bbox = classifyRow?.answerBbox
+          const crop = bbox ? await cropInlineImageByBbox(studentImg.data, studentImg.mimeType, inflateBboxForType(bbox, classifyRow.questionType || q.questionCategory), true, 0.01) : null
+          if (crop) {
+            const resp = await executeStage({
+              apiKey, model: phaseBModel, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+              timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
+              stageContents: [{ role: 'user', parts: [{ text: buildVjGradePrompt(itemLabels, vjRubric.gradingDefinition, notBlank) }, { inlineData: crop }] }]
+            })
+            if (resp?.ok) grades = parseVjGradeResult(extractCandidateText(resp.data) || '', n) || []
+            if (resp) stageResponses.push(resp)
+          }
+        }
+
+        const agg = aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore)
+        logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} score=${agg.score}/${agg.maxScore} 非空白${notBlank.length}項`)
+        deterministicScores.push({
+          questionId: qId, isCorrect: agg.isCorrect, score: agg.score, maxScore: agg.maxScore,
+          errorType: agg.isCorrect ? 'none' : (notBlank.length === 0 ? 'blank' : 'concept'),
+          scoringReason: agg.scoringReason, scoreConfidence: 100,
+          studentFinalAnswer: agg.vjItemResults.map((r) => `${r.label}:${r.verdict}`).join('、'),
+          needExplain: false, _vjBypass: true, vjItemResults: agg.vjItemResults
+        })
+        vjBypassIds.add(qId)
+      } catch (e) {
+        logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 評分失敗：${e?.message} → 送審`)
+        deterministicScores.push({
+          questionId: qId, isCorrect: false, score: 0, maxScore, errorType: 'unreadable',
+          scoringReason: `視覺判斷題評分失敗：${e?.message || ''}，請老師複核`,
+          scoreConfidence: 0, studentFinalAnswer: '', needExplain: false, _vjBypass: true, _vjFailed: true
+        })
+        vjBypassIds.add(qId)
+      }
+    }
+  }
+
   // Phase 2：找出 final ≠ expected 的 word_problem/calculation 題 (不含 manualBypass)
   const finalMismatchIds = new Set()
   for (const ans of finalReadAnswerResult.answers) {
@@ -9163,7 +9401,7 @@ export async function runStagedGradingPhaseB({
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
   // 2026-05-28: 也排除 mapFillBypassIds（map_fill 走 Direction Y、Accessor 不看）
-  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id)
+  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id)
   const allAnswerIds = finalReadAnswerResult.answers
     .map((a) => ensureString(a?.questionId).trim())
     .filter((id) => id && !isBypassed(id))
@@ -9171,8 +9409,8 @@ export async function runStagedGradingPhaseB({
   const page2AnswerIds = allAnswerIds.filter((id) => id.startsWith('2-'))
   const otherAnswerIds = allAnswerIds.filter((id) => !id.startsWith('1-') && !id.startsWith('2-'))
   const canSplitAccessor = page1AnswerIds.length > 0 && page2AnswerIds.length > 0
-  // 給 Accessor 的 readAnswerResult / answerKey 都要剔除所有 bypass 的題（manual + map_fill）
-  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0
+  // 給 Accessor 的 readAnswerResult / answerKey 都要剔除所有 bypass 的題（manual + map_fill + VJ）
+  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0 || vjBypassIds.size > 0
   const accessorReadAnswerResult = hasBypass
     ? { answers: finalReadAnswerResult.answers.filter((a) => !isBypassed(a.questionId)) }
     : finalReadAnswerResult
