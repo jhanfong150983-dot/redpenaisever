@@ -3899,16 +3899,20 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
         .eq('pipeline_run_id', targetRunId)
         .eq('phase', 'phase_a')
         .maybeSingle(),
+      // ⚠️ 同一 phase_a run 可被多次重跑 Phase B（吃 cached phase_a）→ 同 pipeline_run_id 會有多筆 phase_b。
+      // 不能用 maybeSingle（多筆會噴 "multiple rows" error）→ 改抓「最新一筆」phase_b 當現況批改結果。
       db.from('grading_stage_logs')
-        .select('pipeline_run_id, accessor, total_score')
+        .select('pipeline_run_id, accessor, total_score, created_at')
         .eq('submission_id', submissionId)
         .eq('pipeline_run_id', targetRunId)
         .eq('phase', 'phase_b')
-        .maybeSingle()
+        .order('created_at', { ascending: false })
+        .limit(1)
     ])
     if (phaseARes.error) throw new Error(phaseARes.error.message)
+    if (phaseBRes.error) console.error('[admin/quality] phase_b log query error:', phaseBRes.error.message)
     log = phaseARes.data || null
-    phaseBLog = phaseBRes.data || null
+    phaseBLog = Array.isArray(phaseBRes.data) ? (phaseBRes.data[0] || null) : (phaseBRes.data || null)
   }
 
   // runs timeline：用 metadata-only 結果
