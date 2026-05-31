@@ -2184,6 +2184,35 @@ async function handleCorrectionDisputes(req, res) {
 
     if (error) throw new Error(error.message)
 
+    // 2026-06-01: 補「答案卷答案」(每題標準答案) 供老師審申訴時與「系統採用的答案」左右對比。
+    const answerByQid = new Map()
+    try {
+      const { data: assignmentRow } = await supabaseDb
+        .from('assignments')
+        .select('answer_key')
+        .eq('id', assignmentId)
+        .eq('owner_id', user.id)
+        .maybeSingle()
+      const questions = Array.isArray(assignmentRow?.answer_key?.questions) ? assignmentRow.answer_key.questions : []
+      for (const q of questions) {
+        const qid = String(q?.id ?? '').trim()
+        if (!qid) continue
+        const primary = (typeof q?.answer === 'string' && q.answer.trim())
+          ? q.answer.trim()
+          : (typeof q?.referenceAnswer === 'string' ? q.referenceAnswer.trim() : '')
+        const accept = Array.isArray(q?.acceptableAnswers)
+          ? q.acceptableAnswers.filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim())
+          : []
+        let text = primary
+        if (accept.length > 0) {
+          const extra = accept.filter((a) => a !== primary)
+          if (primary && extra.length) text = `${primary}（可接受：${extra.join('、')}）`
+          else if (!primary) text = accept.join('、')
+        }
+        if (text) answerByQid.set(qid, text)
+      }
+    } catch { /* 答案卷讀取失敗不擋申訴載入 */ }
+
     const corrections = (data || []).map((row) => {
       const accessor = row.accessor_result && typeof row.accessor_result === 'object' ? row.accessor_result : null
       return {
@@ -2194,6 +2223,7 @@ async function handleCorrectionDisputes(req, res) {
         cropImageUrl: typeof accessor?.crop_image_url === 'string' ? accessor.crop_image_url : undefined,
         sourceSubmissionId: typeof accessor?.source_submission_id === 'string' ? accessor.source_submission_id : undefined,
         studentAnswer: typeof accessor?.student_answer_raw === 'string' ? accessor.student_answer_raw : undefined,
+        correctAnswer: answerByQid.get(String(row.question_id || '').trim()) || undefined,
         status: row.status
       }
     })
