@@ -8986,6 +8986,28 @@ export async function runStagedGradingPhaseB({
         console.log(`[PhaseB fromCache] 用 arbiterDecisions 推估 final_answers count=${finalAnswers.length}`)
       }
     }
+    // 2026-06-01 安全網：finalAnswers（payload 或 DB 快取）可能只含老師手改的少數題——其餘乾淨題被
+    //   「重跑 Phase A 只留 manual」清掉、client rebuild 又遇 local phaseAState stale 沒補回 →
+    //   漏題在 Phase B 被當「無法辨識」0 分（實測 數習P66-69 5/12 號全 0）。
+    //   這裡一律用 arbiterDecisions 補「finalAnswers 沒有、但有 AI 讀取結果」的題（只補、不覆蓋老師已確認的）。
+    if (!Array.isArray(finalAnswers)) finalAnswers = []
+    if (Array.isArray(cachedState.arbiterDecisions) && cachedState.arbiterDecisions.length > 0) {
+      const faQids = new Set(finalAnswers.map((fa) => fa?.questionId).filter(Boolean))
+      let filledFromArbiter = 0
+      for (const d of cachedState.arbiterDecisions) {
+        if (!d?.questionId || faQids.has(d.questionId)) continue
+        if (typeof d.finalAnswer !== 'string') continue  // needs_review 無 finalAnswer 的不補（保持缺）
+        finalAnswers.push({
+          questionId: d.questionId,
+          finalStudentAnswer: d.finalAnswer,
+          finalAnswerSource: 'ai_read1'
+        })
+        filledFromArbiter++
+      }
+      if (filledFromArbiter > 0) {
+        console.log(`[PhaseB fromCache] 安全網：finalAnswers 缺 ${filledFromArbiter} 題、用 arbiterDecisions 補回（避免漏題被當無法辨識）`)
+      }
+    }
   }
 
   // Accept _internal (server-internal path) or _phaseContext (client round-trip path)
