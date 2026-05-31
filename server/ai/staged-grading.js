@@ -8695,15 +8695,25 @@ export async function runStagedGradingPhaseAArbiter({
     }
   }
 
-  // Re-crop ONLY needs_review questions (省 wall time + 頻寬)
-  const needsReviewQids = questionResultsPreCrop
-    .filter((qr) => qr.arbiterResult?.arbiterStatus === 'needs_review')
+  // Re-crop needs_review 題 + 空白題（省 wall time + 頻寬，只切會被審查的）
+  // 2026-05-31: 空白題（兩次皆 blank → arbitrated_agree + 空 finalAnswer）前端會拉進「待複核」、
+  //   讓老師確認「真空白 vs AI 漏讀」→ 也要 crop，否則審查時沒圖可看。排除 map_fill/VJ（走各自路徑）。
+  const cropQids = questionResultsPreCrop
+    .filter((qr) => {
+      const st = qr.arbiterResult?.arbiterStatus
+      if (st === 'needs_review') return true
+      const isBlankAgree = st === 'arbitrated_agree'
+        && !ensureString(qr.arbiterResult?.finalAnswer, '').trim()
+        && qr.questionType !== 'map_fill'
+        && !VISUAL_JUDGMENT_TYPES.has(qr.questionType)
+      return isBlankAgree
+    })
     .map((qr) => qr.questionId)
 
   const cropByQuestionId = new Map()
-  if (needsReviewQids.length > 0 && inlineImage) {
+  if (cropQids.length > 0 && inlineImage) {
     const cropResults = await Promise.all(
-      needsReviewQids.map(async (qid) => {
+      cropQids.map(async (qid) => {
         const aq = alignedById.get(qid)
         if (!aq?.answerBbox) return { qid, cropData: null }
         // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再給小 cropPad 防鄰格
@@ -8721,19 +8731,19 @@ export async function runStagedGradingPhaseAArbiter({
     for (const { qid, cropData } of cropResults) {
       if (cropData) cropByQuestionId.set(qid, cropData)
     }
-    logStaged(pipelineRunId, 'basic', `[A3] needs_review 重切 crop ${needsReviewQids.length} 題、成功 ${cropByQuestionId.size}`)
+    logStaged(pipelineRunId, 'basic', `[A3] 重切 crop（needs_review + 空白）${cropQids.length} 題、成功 ${cropByQuestionId.size}`)
   }
 
   const questionResults = questionResultsPreCrop.map((qr) => {
     const isNeedsReview = qr.arbiterResult?.arbiterStatus === 'needs_review'
     const cropData = cropByQuestionId.get(qr.questionId)
     let answerCropImageUrl
-    if (isNeedsReview) {
-      if (cropData) {
-        answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
-      } else if (fullImageDataUrl) {
-        answerCropImageUrl = fullImageDataUrl
-      }
+    // 有切到 crop（needs_review 或 空白題）→ 一律附上；needs_review 切失敗才退全圖
+    // （空白題切失敗不退全圖、避免每張空白卷都塞整張大圖膨脹 payload）
+    if (cropData) {
+      answerCropImageUrl = `data:${cropData.mimeType};base64,${cropData.data}`
+    } else if (isNeedsReview && fullImageDataUrl) {
+      answerCropImageUrl = fullImageDataUrl
     }
     return { ...qr, answerCropImageUrl, hasCropImage: !!cropData }
   })
