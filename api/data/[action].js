@@ -2888,11 +2888,19 @@ async function handleReconcilePhaseBRegrade(req, res) {
     const openN = (remain || []).filter((r) => r.status === 'open').length
     const dispN = (remain || []).filter((r) => r.status === 'disputed').length
     const wasInCorrection = itemByQ.size > 0
+    // 2026-06-01: 只有「學生真的交過訂正(correction_attempt_count>0)」才算「已完成訂正」。
+    //   老師重批把錯題清掉、但學生沒做任何訂正(attempts=0) → 回 graded、不誤標已完成訂正。
+    //   (尤其原本的「錯」常是 AI 批錯、重批後消失，學生根本沒訂正過。)
+    const { data: stRow } = await supabaseDb.from('assignment_student_state')
+      .select('correction_attempt_count')
+      .eq('owner_id', user.id).eq('assignment_id', assignmentId).eq('student_id', studentId)
+      .maybeSingle()
+    const attemptCount = clampInteger(stRow?.correction_attempt_count, 0, 99, 0)
     let st2
     if (openN > 0) st2 = 'correction_required'
     else if (dispN > 0) st2 = 'correction_pending_review'
-    else if (wasInCorrection) st2 = 'correction_passed'  // 本來在訂正、現在全解決 → 完成
-    else st2 = 'graded'
+    else if (wasInCorrection && attemptCount > 0) st2 = 'correction_passed'  // 學生真的訂正完成
+    else st2 = 'graded'  // 從沒訂正、或老師重批清掉錯題(學生沒做) → 一般已批改
     await upsertAssignmentStudentState(supabaseDb, user.id, assignmentId, studentId, compactObject({
       status: st2,
       last_status_reason: st2 === 'correction_passed' ? null : '老師重新批改、已逐題調和訂正/申訴狀態'
