@@ -2390,6 +2390,34 @@ async function handleDisputeResolve(req, res) {
 }
 
 // ── 用短碼匯入答案卷 ────────────────────────────────────────────────────
+// 2026-06-01: 匯入分享答案卷時、把原圖從原作者 storage 複製一份到匯入者名下。
+//   path 格式 = `<prefix>/<entityId>/<filename>`（如 template-answer-sheets/<id>/page-0.webp）、
+//   只把第 2 段 entityId 換成 newId、prefix/filename 保留 → download-by-templateId 走 path 慣例剛好對得上。
+//   單張失敗只 skip 該張（non-fatal）、不擋整個匯入。
+async function copyTemplateStorageImages(supabaseDb, sourcePaths, newId) {
+  if (!Array.isArray(sourcePaths) || sourcePaths.length === 0) return []
+  const bucket = supabaseDb.storage.from('homework-images')
+  const out = []
+  for (const src of sourcePaths) {
+    if (typeof src !== 'string' || !src) continue
+    const parts = src.split('/')
+    if (parts.length < 3) continue
+    try {
+      const { data, error } = await bucket.download(src)
+      if (error || !data) { console.warn(`[import-template] 複製原圖 skip ${src}: ${error?.message || 'no data'}`); continue }
+      const buffer = Buffer.from(await data.arrayBuffer())
+      parts[1] = newId
+      const dest = parts.join('/')
+      const { error: upErr } = await bucket.upload(dest, buffer, { contentType: 'image/webp', upsert: true })
+      if (upErr) { console.warn(`[import-template] 複製原圖上傳失敗 ${dest}: ${upErr.message}`); continue }
+      out.push(dest)
+    } catch (e) {
+      console.warn(`[import-template] 複製原圖例外 ${src}:`, e instanceof Error ? e.message : e)
+    }
+  }
+  return out
+}
+
 async function handleImportTemplate(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -2408,10 +2436,12 @@ async function handleImportTemplate(req, res) {
     // 2026-05-28: SELECT 補 page_orientations + answer_sheet_mode、避免新匯入者踩
     // 「page_orientations 為 null → server smart pageBreaks fallback 退回 0.5 equal split
     //   → 直/橫拍混合答案卷 1-2-2 invisible」這個雷
-    // 不複製 image storage paths（new owner 沒讀那些檔案的權限）、不複製 folder（importer 沒這資料夾）
+    // 2026-06-01: 連答案卷原圖也複製一份到匯入者名下（answer_sheet_image_paths / question_booklet_image_paths）
+    //   ——否則匯入者沒有原圖、download 端點又擋 owner，無法預覽、也切不出每題 crop（前端是用原圖+bbox 即時切的）。
+    //   不複製 folder（importer 沒這資料夾）。
     const { data: source, error: findErr } = await supabaseDb
       .from('answer_key_templates')
-      .select('id, name, domain, doc_type, folder, answer_key, question_count, total_score, page_orientations, answer_sheet_mode')
+      .select('id, name, domain, doc_type, folder, answer_key, question_count, total_score, page_orientations, answer_sheet_mode, answer_sheet_image_paths, question_booklet_image_paths')
       .eq('share_code', shareCode)
       .maybeSingle()
 
@@ -2422,6 +2452,10 @@ async function handleImportTemplate(req, res) {
     const newShareCode = 'AK-' + Math.random().toString(36).substring(2, 8).toUpperCase()
     const newId = `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`
     const nowIso = new Date().toISOString()
+
+    // 2026-06-01: 把原圖（答案卷頁面 + 題本）複製一份到匯入者名下（path 把 entityId 段換成 newId）。
+    const newAnswerSheetPaths = await copyTemplateStorageImages(supabaseDb, source.answer_sheet_image_paths, newId)
+    const newBookletPaths = await copyTemplateStorageImages(supabaseDb, source.question_booklet_image_paths, newId)
 
     const { error: insertErr } = await supabaseDb
       .from('answer_key_templates')
@@ -2437,6 +2471,8 @@ async function handleImportTemplate(req, res) {
         share_code: newShareCode,
         page_orientations: source.page_orientations,
         answer_sheet_mode: source.answer_sheet_mode,
+        answer_sheet_image_paths: newAnswerSheetPaths.length ? newAnswerSheetPaths : null,
+        question_booklet_image_paths: newBookletPaths.length ? newBookletPaths : null,
         created_at: nowIso,
         updated_at: nowIso
       })
@@ -2456,6 +2492,8 @@ async function handleImportTemplate(req, res) {
         totalScore: source.total_score,
         pageOrientations: source.page_orientations,
         answerSheetMode: source.answer_sheet_mode,
+        answerSheetImagePaths: newAnswerSheetPaths.length ? newAnswerSheetPaths : undefined,
+        questionBookletImagePaths: newBookletPaths.length ? newBookletPaths : undefined,
         updatedAt: nowIso
       }
     })
