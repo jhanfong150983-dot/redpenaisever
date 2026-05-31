@@ -5709,6 +5709,8 @@ async function handleStudentOverview(req, res) {
               sourceSubmissionId: resolvedSourceSubmissionId || undefined,
               sourceImageUrl: accessorSourceImageUrl,
               cropImageUrl: accessorCropImageUrl,
+              // 2026-06-01: AI 從學生筆跡讀到的答案——學生端訂正頁顯示「你的作答 → AI 讀成 X」、發現字跡問題
+              studentAnswer: typeof accessor?.student_answer_raw === 'string' ? accessor.student_answer_raw : undefined,
               questionBbox: normalizeBbox(accessor?.question_bbox),
               answerBbox: normalizeBbox(accessor?.answer_bbox),
               status: row.status,
@@ -6754,6 +6756,8 @@ async function handleStudentCorrections(req, res) {
             sourceSubmissionId: resolvedSourceSubmissionId || undefined,
             sourceImageUrl: accessorSourceImageUrl,
             cropImageUrl: accessorCropImageUrl,
+            // 2026-06-01: AI 讀到的學生答案（學生端訂正頁「你的作答 → AI 讀成 X」對比用）
+            studentAnswer: typeof accessor?.student_answer_raw === 'string' ? accessor.student_answer_raw : undefined,
             questionBbox: normalizeBbox(accessor?.question_bbox),
             answerBbox: normalizeBbox(accessor?.answer_bbox),
             status: item.status,
