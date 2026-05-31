@@ -4656,6 +4656,19 @@ function applyForensicDecision(forensic, ai1Answer, ai2Answer) {
   return { arbiterStatus: 'needs_review' }
 }
 
+// 2026-05-31: AI3 回的 questionId 可能帶格式變體（如「1-1（類型：single_check）」「題目1-1」）→
+// 用 `===` 對不上、整批 AI3 結果被丟掉、退回程式 fallback（實證 13 收到/0 匹配）。
+// 先精確比對；失敗則找「題號是 AI3 回值子字串」的最長題號（避免 1-3 誤匹配到 1-3-2）。回傳對到的 item（含 canonical questionId）。
+function matchArbiterItemByQid(rawQid, items) {
+  const qId = ensureString(rawQid).trim()
+  if (!qId || !Array.isArray(items)) return null
+  const exact = items.find((i) => i.questionId === qId)
+  if (exact) return exact
+  const cands = items.filter((i) => i.questionId && qId.includes(i.questionId))
+  if (cands.length === 0) return null
+  return cands.sort((a, b) => String(b.questionId).length - String(a.questionId).length)[0]
+}
+
 function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
   const strictness = answerKey?.strictness || 'standard'
   // gradeBand: 'high' (10-12) → 多選用大考中心固定扣分；其他 (含 NULL/k9) → 現行 substitution-discount 公式
@@ -8092,12 +8105,10 @@ Return JSON:
         const arbiterParsed = parseCandidateJson(arbiterResponse.data)
         const results = Array.isArray(arbiterParsed?.consistencyResults) ? arbiterParsed.consistencyResults : []
         for (const r of results) {
-          const qId = ensureString(r?.questionId).trim()
-          if (!qId) continue
-          const item = arbiterItems.find((i) => i.questionId === qId)
+          const item = matchArbiterItemByQid(r?.questionId, arbiterItems)
           if (!item) continue
           const decision = applyForensicDecision(r, item.ai1Answer, item.ai2Answer)
-          arbiterByQuestionId.set(qId, {
+          arbiterByQuestionId.set(item.questionId, {
             arbiterStatus: decision.arbiterStatus,
             finalAnswer: decision.finalAnswer,
             consistent: r.consistent,
@@ -8155,12 +8166,10 @@ Return JSON:
           // Replace prior decisions with retry results (retry is the authoritative re-run)
           arbiterByQuestionId.clear()
           for (const r of retryResults) {
-            const qId = ensureString(r?.questionId).trim()
-            if (!qId) continue
-            const item = arbiterItemsForAI3.find((i) => i.questionId === qId)
+            const item = matchArbiterItemByQid(r?.questionId, arbiterItemsForAI3)
             if (!item) continue
             const decision = applyForensicDecision(r, item.ai1Answer, item.ai2Answer)
-            arbiterByQuestionId.set(qId, {
+            arbiterByQuestionId.set(item.questionId, {
               arbiterStatus: decision.arbiterStatus,
               finalAnswer: decision.finalAnswer,
               consistent: r.consistent,
@@ -8542,13 +8551,12 @@ export async function runStagedGradingPhaseAArbiter({
       if (arbiterResponse.ok) {
         const arbiterParsed = parseCandidateJson(arbiterResponse.data)
         const results = Array.isArray(arbiterParsed?.consistencyResults) ? arbiterParsed.consistencyResults : []
+        const unmatchedQids = []
         for (const r of results) {
-          const qId = ensureString(r?.questionId).trim()
-          if (!qId) continue
-          const item = arbiterItems.find((i) => i.questionId === qId)
-          if (!item) continue
+          const item = matchArbiterItemByQid(r?.questionId, arbiterItems)
+          if (!item) { unmatchedQids.push(ensureString(r?.questionId).trim() || '(empty)'); continue }
           const decision = applyForensicDecision(r, item.ai1Answer, item.ai2Answer)
-          arbiterByQuestionId.set(qId, {
+          arbiterByQuestionId.set(item.questionId, {  // 用 canonical 題號當 key、下游 get(questionId) 才對得上
             arbiterStatus: decision.arbiterStatus,
             finalAnswer: decision.finalAnswer,
             consistent: r.consistent,
@@ -8557,7 +8565,10 @@ export async function runStagedGradingPhaseAArbiter({
         }
         const consistentCount = Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'arbitrated_agree').length
         const inconsistentCount = Array.from(arbiterByQuestionId.values()).filter((v) => v.arbiterStatus === 'needs_review').length
-        logStaged(pipelineRunId, 'basic', `[A3] AI3 判定完成 一致=${consistentCount} 不一致=${inconsistentCount} 收到=${results.length}/${arbiterItems.length}`)
+        logStaged(pipelineRunId, 'basic', `[A3] AI3 判定完成 一致=${consistentCount} 不一致=${inconsistentCount} 收到=${results.length}/${arbiterItems.length} 匹配=${arbiterByQuestionId.size}`)
+        if (unmatchedQids.length > 0) {
+          logStaged(pipelineRunId, 'basic', `[A3] ⚠️ ${unmatchedQids.length} 筆 AI3 結果對不上題號（會退 fallback）`, { aiReturned: unmatchedQids.slice(0, 8), expected: arbiterItems.map((i) => i.questionId).slice(0, 8) })
+        }
       } else {
         logStaged(pipelineRunId, 'basic', `[A3] AI3 失敗 status=${arbiterResponse.status} → fallback 純字串比對`)
       }
@@ -8594,12 +8605,10 @@ export async function runStagedGradingPhaseAArbiter({
           const retryResults = Array.isArray(retryParsed?.consistencyResults) ? retryParsed.consistencyResults : []
           arbiterByQuestionId.clear()
           for (const r of retryResults) {
-            const qId = ensureString(r?.questionId).trim()
-            if (!qId) continue
-            const item = arbiterItems.find((i) => i.questionId === qId)
+            const item = matchArbiterItemByQid(r?.questionId, arbiterItems)
             if (!item) continue
             const decision = applyForensicDecision(r, item.ai1Answer, item.ai2Answer)
-            arbiterByQuestionId.set(qId, {
+            arbiterByQuestionId.set(item.questionId, {
               arbiterStatus: decision.arbiterStatus,
               finalAnswer: decision.finalAnswer,
               consistent: r.consistent,
