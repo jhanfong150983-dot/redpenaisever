@@ -4066,6 +4066,10 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
       ai1: isVJ ? null : (r1 ? { answer: r1.answer ?? '', status: r1.status || null } : null),
       ai2: isVJ ? null : (r2 ? { answer: r2.answer ?? '', status: r2.status || null } : null),
       arbiterConsistent: isVJ ? null : consistentOf(arb, qid),
+      // 一致性判定來源：'ai3'=AI3 語意判官真的判過（在 log.arbiter 裡）、
+      // 'fallback'=AI3 沒產出、程式字串比對 fallback 判的（只在 arbiterDecisions 裡）、null=不適用/無資料。
+      // 讓品質頁能標「AI一致 vs 程式一致」、一眼看出 AI3 是否真的在運作。
+      consistencySource: isVJ ? null : (arb ? 'ai3' : (arbDecMap.has(qid) ? 'fallback' : null)),
       finalAnswer: isVJ ? (det?.studentAnswer ?? null) : (final?.finalStudentAnswer ?? null),
       finalAnswerSource: isVJ ? 'visual_judgment' : (final?.finalAnswerSource ?? final?.source ?? null),
       isMistake: mistakeSet.has(qid),
