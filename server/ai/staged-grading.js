@@ -1321,8 +1321,12 @@ function canonicalizeUnits(s) {
 
 // Deterministic match：老師人工編輯 final 跟 expected 比對、normalize + 單位等價
 function manualEditDeterministicMatch(studentText, expectedText) {
-  const a = canonicalizeUnits(normalizeAnswerForComparison(studentText || ''))
-  const b = canonicalizeUnits(normalizeAnswerForComparison(expectedText || ''))
+  // 2026-06-02: 去掉「緊貼數字的約/大約/約為/≈」等近似詞，避免答案卷寫「約 257.04 立方公分」
+  // 而學生（或老師手動改後）寫「257.04cm³」被誤判錯。限定「後面緊跟數字」才去除 →
+  // 不誤傷「馬關條約」「凡爾賽條約」這種把『約』當字的社會科答案（約後面不是數字）。
+  const stripApprox = (t) => t.replace(/(?:大約為|約為|大約|約|≈)(?=[0-9])/g, '')
+  const a = stripApprox(canonicalizeUnits(normalizeAnswerForComparison(studentText || '')))
+  const b = stripApprox(canonicalizeUnits(normalizeAnswerForComparison(expectedText || '')))
   if (!a || !b) return false
   if (a === b) return true
   // 移除所有空白後再比一次（學生可能寫 "144 立方公分" expected "144立方公分"）
