@@ -1361,6 +1361,18 @@ async function getDispatchActiveAssignments(supabaseDb, ownerId, assignmentIds) 
   return new Set((data || []).map((row) => row.assignment_id).filter(Boolean))
 }
 
+// 2026-06-01: 「空殼訂正卷」防護 — 一筆 source=student_correction 但從沒真正批改過的卷
+// （grading_result 為 null / 沒有 mistakes・details）不可被當成權威成績卷。
+// 來源:student-submission 在「沒有 open 待訂正題目」時的捷徑分支會生出 status='graded'
+// 但 grading_result 空的卷（見 6319 附近）。此 helper 統一判斷「有沒有真正的批改內容」，
+// 給排序（fetchLatestGradedSubmissionsByStudent）和狀態轉換（applySubmissionStateTransitions）共用，
+// 確保空殼永不勝出、也不會誤判 correction_passed。
+function submissionHasRealGrade(row) {
+  const gr = row?.grading_result
+  if (!gr || typeof gr !== 'object') return false
+  return Array.isArray(gr.mistakes) || Array.isArray(gr.details)
+}
+
 async function fetchLatestGradedSubmissionsByStudent(
   supabaseDb,
   ownerId,
@@ -1381,16 +1393,26 @@ async function fetchLatestGradedSubmissionsByStudent(
   for (const row of data || []) {
     const studentId = row.student_id
     if (!studentId) continue
+    // 2026-06-01: 兩段式排序 — 先比「有沒有真正批改內容」，再比時間。
+    // 空殼訂正卷（status=graded 但 grading_result 空、graded_at=null）以前會靠
+    // updated_at 退而求其次的時間打贏真正批改過的卷、害下游誤判 0 錯不用訂正。
+    // 現在「有真正批改」永遠優先於「空殼」，只有當該生完全沒有真正批改卷時才退用空殼。
     const rankedAt =
       toNumber(row.graded_at) ??
       toMillis(row.updated_at) ??
       0
+    const tier = submissionHasRealGrade(row) ? 1 : 0
     const existing = latestByStudent.get(studentId)
+    const existingTier = existing ? (submissionHasRealGrade(existing) ? 1 : 0) : -1
     const existingRank =
       existing
         ? toNumber(existing.graded_at) ?? toMillis(existing.updated_at) ?? 0
         : -1
-    if (!existing || rankedAt >= existingRank) {
+    if (
+      !existing ||
+      tier > existingTier ||
+      (tier === existingTier && rankedAt >= existingRank)
+    ) {
       latestByStudent.set(studentId, row)
     }
   }
@@ -1454,6 +1476,18 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     const isGraded = row.graded_at !== undefined && row.graded_at !== null
       ? true
       : submissionStatus === 'graded'
+
+    // 2026-06-01: 空殼/作廢訂正卷防護 — 兩種都不可驅動任何狀態轉換：
+    //  (1) status='superseded'：student-submission 在「無 open 題目」時標記的作廢訂正卷
+    //  (2) 看起來 graded 卻沒有真正批改內容（grading_result 空）的歷史空殼
+    // 以前 (2) 會走 0 錯路徑被標 correction_passed（假性訂正完成）；(1) 會被當未批改拉回
+    // correction_in_progress。一律跳過。
+    if (
+      source === 'student_correction' &&
+      (submissionStatus === 'superseded' || (isGraded && !submissionHasRealGrade(row)))
+    ) {
+      continue
+    }
 
     // Layer 2: If teacher re-grades a student who is already in correction workflow,
     // skip the state transition to avoid overwriting correction progress.
@@ -6317,16 +6351,67 @@ async function handleStudentSubmission(req, res) {
           .eq('status', 'open')
 
         if (!openItems?.length) {
-          // 全部都是申訴題，沒有 open items → 跳過 AI，直接設為待老師審閱
+          // 2026-06-01: 沒有 open 待訂正題目。可能 (a) 全部申訴 (b) 老師已重批/清掉題目（師生競態）。
+          // 不論哪種，這張訂正卷都「沒有可批的內容」→ 絕不可標成 graded（會變空殼污染下游：
+          // 被當權威成績卷、誤判 correction_passed）。一律標成 superseded（非 graded、無 grading_result/graded_at）。
+          const nowIso = new Date().toISOString()
           await supabaseDb
             .from('submissions')
-            .update({ status: 'graded', score: 0, updated_at: new Date().toISOString() })
+            .update({ status: 'superseded', updated_at: nowIso })
             .eq('id', submissionId)
-          await upsertAssignmentStudentState(
-            supabaseDb, ownerId, assignmentId, studentContext.id,
-            { status: 'correction_pending_review', last_status_reason: '所有題目已申訴，等待老師審閱' }
-          )
-          correctionResult = { gradingPending: false, allDisputed: true }
+            .eq('owner_id', ownerId)
+
+          // 區分原因：有 disputed 題目 = 全部申訴；完全沒題目 = 老師已重批/清掉（競態）
+          const { data: disputedItems } = await supabaseDb
+            .from('correction_question_items')
+            .select('question_id')
+            .eq('owner_id', ownerId)
+            .eq('assignment_id', assignmentId)
+            .eq('student_id', studentContext.id)
+            .eq('status', 'disputed')
+
+          if (disputedItems?.length) {
+            // (a) 全部申訴 → 等老師審閱
+            await upsertAssignmentStudentState(
+              supabaseDb, ownerId, assignmentId, studentContext.id,
+              { status: 'correction_pending_review', last_status_reason: '所有題目已申訴，等待老師審閱' }
+            )
+            correctionResult = { gradingPending: false, allDisputed: true }
+          } else {
+            // (b) 沒有待訂正題目（師生競態：老師重批/清掉題目）→ 對齊老師最新批改真相，
+            // 不憑空殼下定論。看最新「真正批改過」的原始卷還有沒有錯。
+            const latestByStudent = await fetchLatestGradedSubmissionsByStudent(
+              supabaseDb, ownerId, assignmentId
+            )
+            const latestSub = latestByStudent.get(studentContext.id) || null
+            const latestMistakes = latestSub
+              ? parseMistakesFromGradingResult(latestSub.grading_result)
+              : []
+            if (latestMistakes.length === 0) {
+              // 已全對（含老師重批成全對）→ 無需訂正，原始卷成績為準。不產生任何 graded 卷。
+              await upsertAssignmentStudentState(
+                supabaseDb, ownerId, assignmentId, studentContext.id,
+                {
+                  status: 'graded',
+                  current_submission_id: latestSub?.id ?? undefined,
+                  last_graded_submission_id: latestSub?.id ?? undefined,
+                  last_status_reason: '老師重新批改後已全對，無需訂正'
+                }
+              )
+              correctionResult = { gradingPending: false, correctionResolved: 'already_correct' }
+            } else {
+              // 老師重批後出現新的錯題 → 訂正題目已更新，請學生依最新題目重做。
+              await upsertAssignmentStudentState(
+                supabaseDb, ownerId, assignmentId, studentContext.id,
+                { status: 'correction_required', last_status_reason: '老師重新批改，訂正題目已更新' }
+              )
+              correctionResult = {
+                gradingPending: false,
+                correctionResolved: 'items_changed',
+                wrongCount: latestMistakes.length
+              }
+            }
+          }
         } else {
           // 確認訂正照片已上傳
           const recheckFolder = await supabaseDb.storage.from(HOMEWORK_IMAGES_BUCKET)
