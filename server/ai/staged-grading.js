@@ -5639,6 +5639,16 @@ function buildFinalGradingResult({
     : []
   const locateById = mapByQuestionId(locateRows, (item) => item?.questionId)
 
+  // 國字注音 section 偵測（同 classify gzZhuyinPair）：section（去尾段共同前綴）含任一純注音正解
+  // → 該 section 是國字注音題組（考國字 + 考注音 混排、同「印刷提示形式 + 手寫作答形式」版面）。
+  const gzZhuyinSections = new Set()
+  for (const q of keyQuestions) {
+    const qid = ensureString(q?.id).trim()
+    const parts = qid.split('-')
+    if (parts.length < 2) continue
+    if (isZhuyinAnswer(q?.answer)) gzZhuyinSections.add(parts.slice(0, -1).join('-'))
+  }
+
   const details = []
   let totalScore = 0
 
@@ -5839,6 +5849,35 @@ function buildFinalGradingResult({
             : `答案錯誤且未列出計算過程`
           row.confidence = 100
           console.log(`[programmatic-override] ${questionId} final-answer-mismatch → 0 (hasSteps=${hasSteps}, prevScore=${prevScore})`)
+        }
+      }
+    }
+
+    // ── 程式化覆核：國字注音「考國字題不因印刷注音聲調誤扣」（2026-06-03）──
+    // 背景：國字注音改「讀兩形式」後 read 回「國字 注音」(注音多半是印刷提示)。考國字題正解只有國字、
+    //   注音不該計分；但 accessor 是 LLM、偶發脫稿去挑印刷注音的聲調判錯（畢業考全班 read 相同、
+    //   27/28 判對、僅 1 人被挑注音判 0 = 抽樣樂透，prompt 壓不到 0）。
+    // 為何用 accessor 的理由而非 read：read1/read2 無法分辨「國字真寫對」(座號25 羹) 與「國字寫錯但被讀寬」
+    //   (座號19 窘，read1=read2=窘 但實際寫錯字)，只有看圖的 accessor 能分（25 認得國字、19 回「沒這個字」）。
+    // 規則（純加分、只 wrong→correct）：gz section 的考國字題(正解非注音) + accessor 判錯 +
+    //   read 的國字部分==正解(國字有讀對) + 理由是「注音/聲調」問題 + 理由無「國字錯/沒這個字」類字樣 → 翻回對。
+    {
+      const qParts = questionId.split('-')
+      const isGzSection = qParts.length >= 2 && gzZhuyinSections.has(qParts.slice(0, -1).join('-'))
+      if (isGzSection && row.isCorrect === false && refAnswer && !isZhuyinAnswer(refAnswer)) {
+        const reasonText = ensureString(row.reason, '')
+        const readHanzi = (ensureString(row.studentAnswer, '').match(/[一-鿿]/g) || []).join('')
+        const guoziReadCorrect = readHanzi.includes(refAnswer)             // 國字有讀到正解字
+        const blamesZhuyin = /注音|聲調/.test(reasonText)                   // 扣分理由提到注音/聲調
+        const guoziProblem = /沒(有)?這個字|不是.{0,4}字|寫錯字|國字.{0,6}(錯|不符|不正確|有誤)|(錯|不符).{0,4}國字|國字與注音|未作答|無法辨識/.test(reasonText)
+        if (guoziReadCorrect && blamesZhuyin && !guoziProblem) {
+          const prev = row.score
+          row.isCorrect = true
+          row.score = toFiniteNumber(question?.maxScore) ?? row.maxScore
+          row.needExplain = false
+          row.reason = `答案正確（考國字題：國字正確即給分、印刷注音不計分；程式覆核）`
+          row.confidence = 100
+          console.log(`[gz-override] ${questionId} 國字「${refAnswer}」讀對、僅注音被誤扣 → 翻正 (${prev}→${row.score}) accessor理由="${reasonText.slice(0, 40)}"`)
         }
       }
     }
