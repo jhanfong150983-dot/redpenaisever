@@ -9273,6 +9273,41 @@ export async function runStagedGradingPhaseB({
     })
   }
 
+  // Phase 0b (2026-06-02 stage2)：客觀選擇題用 code 直接判、不送 Accessor LLM（省 token）。
+  // 安全：single_choice 最終分數本來就由「程式化覆核」(buildFinalGradingResult) 確定性決定、
+  //   accessor 的判分一律被覆寫；故跳過 accessor 對最終成績中性、只省掉白做的 AI token。
+  //   只 bypass gradeObjectiveDeterministic 可判的（選項代號型，canonical 跨記號 99.5% 對 AI 且更準）；
+  //   選項是文字/多字者回 gradable=false → 不 bypass、仍交 Accessor。
+  const objectiveBypassIds = new Set()
+  for (const ans of finalReadAnswerResult.answers) {
+    const qid = ensureString(ans?.questionId).trim()
+    if (!qid || manualBypassIds.has(qid)) continue
+    const q = akQById.get(qid)
+    if (!q || q.questionCategory !== 'single_choice') continue
+    const res = gradeObjectiveDeterministic(q, ans.studentAnswerRaw, ans.status)
+    if (!res.gradable) continue
+    objectiveBypassIds.add(qid)
+    deterministicScores.push({
+      questionId: qid,
+      isCorrect: res.isCorrect,
+      score: res.score,
+      maxScore: res.maxScore,
+      errorType: res.errorType,
+      reason: res.scoringReason,
+      scoringReason: res.scoringReason,
+      confidence: 100,
+      scoreConfidence: 100,
+      studentFinalAnswer: ensureString(ans.studentAnswerRaw, ''),
+      needExplain: !res.isCorrect && res.errorType !== 'blank',
+      _objectiveBypass: true
+    })
+  }
+  if (objectiveBypassIds.size > 0) {
+    logStaged(pipelineRunId, 'basic', `[B-Phase0b] single_choice code-bypass（不送 Accessor）`, {
+      count: objectiveBypassIds.size
+    })
+  }
+
   // ── Phase 1: map_fill 評分 ─────────────────────────────────────────────
   // 2026-05-28 pivot: 優先用 Phase A confirmed readings + deterministic match（不跑 AI）
   // 如果 finalAnswer 沒帶 per-position readings（舊資料）→ fallback 跑 Stage A+B（map-fill-grader）
@@ -9649,7 +9684,7 @@ export async function runStagedGradingPhaseB({
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
   // 2026-05-28: 也排除 mapFillBypassIds（map_fill 走 Direction Y、Accessor 不看）
-  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id)
+  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id)
   const allAnswerIds = finalReadAnswerResult.answers
     .map((a) => ensureString(a?.questionId).trim())
     .filter((id) => id && !isBypassed(id))
@@ -9658,7 +9693,7 @@ export async function runStagedGradingPhaseB({
   const otherAnswerIds = allAnswerIds.filter((id) => !id.startsWith('1-') && !id.startsWith('2-'))
   const canSplitAccessor = page1AnswerIds.length > 0 && page2AnswerIds.length > 0
   // 給 Accessor 的 readAnswerResult / answerKey 都要剔除所有 bypass 的題（manual + map_fill + VJ）
-  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0 || vjBypassIds.size > 0
+  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0 || vjBypassIds.size > 0 || objectiveBypassIds.size > 0
   const accessorReadAnswerResult = hasBypass
     ? { answers: finalReadAnswerResult.answers.filter((a) => !isBypassed(a.questionId)) }
     : finalReadAnswerResult
