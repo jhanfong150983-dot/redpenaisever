@@ -3620,6 +3620,12 @@ Reading discipline (國語 specific):
 - 注音符號 (Bopomofo) may appear in young students' answers. Read each symbol exactly.
 - Punctuation marks (。、，：；！？) are part of the answer when explicitly written.
 - For 國語 fill_blank, the answer is usually 1–4 Chinese characters; longer continuous text suggests short_answer.
+
+國字注音 DUAL-FORM 讀法（2026-06-02，只在「作答盒內同時有國字與注音」時適用）：
+- 國字注音題的作答盒裡常**同時有一個國字和一個注音**：其中一個是印刷題幹、另一個是學生手寫（考國字→手寫國字大、印刷注音小；考注音→印刷國字大、手寫注音小、易看漏）。你**不需要分辨哪個是手寫**。
+- 請把你看到的**國字與注音兩者都寫進 studentAnswerRaw**，**固定格式「國字 注音」（國字在前、注音在後、中間一個半形空格）**，例「紮 ㄓㄚˊ」。兩讀者用同一格式才能一致。
+- ⚠️ 注音務必**逐一注音符號讀實際筆跡**；【嚴禁】從盒內印刷國字去推算它的讀音——破音字會害你挑錯（例：印刷是「紮」不可自動寫成 ㄗㄚ，要看手寫注音筆跡是什麼就寫什麼）。
+- 若盒內只有一種形式（只有國字或只有注音）→ 照常只寫該形式、不要硬湊。
 `.trim()
 
 // Layer 2: 數學領域共通段
@@ -4677,7 +4683,7 @@ function matchArbiterItemByQid(rawQid, items) {
   return cands.sort((a, b) => String(b.questionId).length - String(a.questionId).length)[0]
 }
 
-function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
+export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
   const strictness = answerKey?.strictness || 'standard'
   // gradeBand: 'high' (10-12) → 多選用大考中心固定扣分；其他 (含 NULL/k9) → 現行 substitution-discount 公式
   const isHighSchool = gradeBand === 'high'
@@ -4841,6 +4847,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - single_choice / true_false / single_check: Compare student's selected option letter/symbol only. Ignore surrounding text. Case-insensitive. Binary right/wrong.
 - fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "15 km" = "15 公里" ✓). Units NOT in the same equivalence pair are WRONG (errorType='unit'): 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm. Do NOT accept other unit substitutions regardless of strictness setting.
   DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
+  STUDENT DUAL-FORM RULE (國字注音，與上條互補): 國字注音題的 studentAnswerRaw 可能同時含「國字」與「注音」兩種形式（系統把作答盒內看到的兩者都讀出來、格式「國字 注音」，其中一個是印刷題幹、一個是學生手寫，你不需分辨）。correctAnswer 為單一形式時，只要 studentAnswerRaw 裡的**國字 OR 注音 任一與 correctAnswer 完全相符**（注音須含聲調）即 isCorrect=true、滿分；另一個不吻合的形式是印刷題幹，**忽略、不可當作答錯扣分**。若兩形式都不等於 correctAnswer（含注音聲調不符、破音字錯讀如紮讀成ㄗㄚ、只讀到印刷國字而正解是注音）→ isCorrect=false。
 - fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
 - table_cell: 群組批改表格題。AnswerKey 提供 cells 陣列（每元素 {row, col, label, answer}）；Read 結果在 cellValues 陣列（每元素 {row, col, student}）。
   - 對每個 answerKey.cells[i]，依 (row, col) 找到對應的 cellValues 元素，比對 student vs answer。
