@@ -5488,6 +5488,7 @@ function filterPayloadForGemini(payload) {
 async function executeStage({
   apiKey,
   model: _legacyModel,  // 2026-05-21: 不再用，由 STAGE_MODEL[routeKey] 統一決定。保留參數簽名相容
+  modelOverride,  // 2026-06-02: 有給就用這個 model（例：國語卷 read 改 PRO），否則照 routeKey 決定
   payload,
   timeoutMs,
   routeHint,
@@ -5497,7 +5498,7 @@ async function executeStage({
   // 2026-05-21: model 分流——每個 routeKey 查 STAGE_MODEL 取 PRO/FLASH
   // 視覺類 (classify / read / locate / perspective) → MODEL_PRO
   // 純文字類 (arbiter / accessor / explain / report) → MODEL_FLASH
-  const model = resolveStageModel(routeKey)
+  const model = modelOverride || resolveStageModel(routeKey)
   const pipeline = getPipeline(routeKey)
 
   const prepareStartedAt = Date.now()
@@ -5904,7 +5905,12 @@ export async function runStagedGradingPhaseA({
   // 舊 STAGED_READ_MODEL_OVERRIDE env var 已拔除（改用 model-config.js）
   // readModel 變數保留供 applyMathEqBlankOverride 等非 executeStage 路徑用
   const readModel = STAGE_MODEL[AI_ROUTE_KEYS.GRADING_READ_ANSWER]
-  logStaged(pipelineRunId, 'basic', `[A2] read stage model=${readModel}（由 model-config.js 決定）`)
+  // 2026-06-02: 國語卷 read 改走 PRO。FLASH 對手寫複雜國字(國字注音)會幻覺(籌→寺/費、棘→束、窘→牠)、
+  // 害 read1≠read2 大量假性 NR(實證 exp-repro-read)；PRO 讀字大幅改善。其他科目維持 FLASH。
+  // 單選題已 bypass Accessor、Phase B token 不受影響。MODEL_PRO=3.5-flash(非舊 3.1-pro、無整份判 blank 問題)。
+  const readDomainIsMandarin = (ensureString(internalContext?.domainHint, '')).includes('國語')
+  const readModelOverride = readDomainIsMandarin ? MODEL_PRO : undefined
+  logStaged(pipelineRunId, 'basic', `[A2] read stage model=${readModelOverride || readModel}${readModelOverride ? '（國語卷→PRO）' : '（model-config）'}`)
 
   // 2026-05-17: 「重新截取」清空模式——僅在 classify call 觸發、清掉 submissions 表上的 phase_a_state /
   // final_answers / grading_result / score 等舊資料（stage_logs 保留 audit）
@@ -7067,6 +7073,7 @@ export async function runStagedGradingPhaseA({
     executeStage({
       apiKey,
       model: readModel,
+      modelOverride: readModelOverride,
       payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
       timeoutMs: getRemainingBudget(),
       routeHint,
@@ -7077,6 +7084,7 @@ export async function runStagedGradingPhaseA({
     executeStage({
       apiKey,
       model: readModel,
+      modelOverride: readModelOverride,
       payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
       timeoutMs: getRemainingBudget(),
       routeHint,
@@ -7756,6 +7764,7 @@ export async function runStagedGradingPhaseA({
       executeStage({
         apiKey,
         model: readModel,
+        modelOverride: readModelOverride,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
@@ -7765,6 +7774,7 @@ export async function runStagedGradingPhaseA({
       executeStage({
         apiKey,
         model: readModel,
+        modelOverride: readModelOverride,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
         timeoutMs: getRemainingBudget(),
         routeHint,
