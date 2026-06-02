@@ -1561,7 +1561,10 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
     )
     const dispatchActive = dispatchActiveAssignments.has(assignmentId)
     const autoDispatch = preferences.correction_dispatch_mode === 'auto' && source !== 'student_correction'
-    let status = hasMistakes ? ((dispatchActive || autoDispatch) ? 'correction_required' : 'graded') : 'graded'
+    // 2026-06-02: 學生自助批改完成 → 自動派發訂正（視同 dispatchActive），讓學生立即可訂正。
+    // 只對「原始上傳卷」(非 student_correction) 生效；finalize 才傳 studentSelfGrade。
+    const studentSelfGrade = options?.studentSelfGrade === true && source !== 'student_correction'
+    let status = hasMistakes ? ((dispatchActive || autoDispatch || studentSelfGrade) ? 'correction_required' : 'graded') : 'graded'
     let lastStatusReason = undefined
 
     if (source === 'student_correction') {
@@ -2611,9 +2614,27 @@ async function handleSaveGrading(req, res) {
   if (submissions.length === 0) { res.status(400).json({ error: 'Missing submissions' }); return }
   const supabaseDb = getSupabaseAdmin()
   try {
+    // 2026-06-02: 老師端尊重學生「先批先贏」鎖——若該卷正由學生自助批改中（鎖新鮮），
+    // 老師一般批改略過（不覆蓋）。學生批完鎖已釋放→老師可正常重批（事後、非競態）。
+    const subIds = submissions.filter((s) => s?.id).map((s) => s.id)
+    const lockBySubId = new Map()
+    if (subIds.length) {
+      const { data: lockRows } = await supabaseDb
+        .from('submissions')
+        .select('id, grading_lock')
+        .eq('owner_id', user.id)
+        .in('id', subIds)
+      for (const r of lockRows || []) lockBySubId.set(r.id, r.grading_lock)
+    }
     let updated = 0
+    const skippedLocked = []
     for (const sub of submissions) {
       if (!sub?.id) continue
+      const lock = lockBySubId.get(sub.id)
+      if (isLockFresh(lock) && lock?.by === 'student') {
+        skippedLocked.push(sub.id)
+        continue
+      }
       // Phase A 失敗時、client 會帶 status='grading_failed' + gradingResult.pipelineFailure
       // 該情況不寫入 score / ai_score / graded_at（沒有實際批分）
       const isFailure = sub?.status === 'grading_failed'
@@ -2630,6 +2651,9 @@ async function handleSaveGrading(req, res) {
             score_source: sub.scoreSource ?? 'ai',
             grading_result: sub.gradingResult ?? undefined,
             graded_at: sub.gradedAt ?? Date.now(),
+            // 老師批改：標記 graded_by='teacher'（蓋掉舊「學生自批」徽章）、清掉殘留鎖
+            graded_by: 'teacher',
+            grading_lock: null,
             updated_at: new Date().toISOString()
           }
       const { error } = await supabaseDb
@@ -2638,6 +2662,9 @@ async function handleSaveGrading(req, res) {
         .eq('id', sub.id)
         .eq('owner_id', user.id)
       if (!error) updated++
+    }
+    if (skippedLocked.length) {
+      console.log(`[save-grading] 略過 ${skippedLocked.length} 卷（學生自助批改中）:`, skippedLocked)
     }
     // 觸發學生端狀態轉換（graded_once、訂正流程等）
     if (updated > 0) {
@@ -3749,7 +3776,7 @@ async function handleSync(req, res) {
           let qb = supabaseDb
             .from('submissions')
             // 2026-05-17: 加 phase_a_state + final_answers 進 sync select、給 client 卡片狀態計算用
-            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result, phase_a_state, final_answers, page_breaks')
+            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, graded_by, updated_at, grading_result, phase_a_state, final_answers, page_breaks')
             .eq('owner_id', ownerId)
           if (sinceIso) qb = qb.gte('updated_at', sinceIso)
           return qb
@@ -3950,6 +3977,8 @@ async function handleSync(req, res) {
             answerKeyTemplateId: row.answer_key_template_id ?? undefined,
             conceptTags: row.concept_tags ?? undefined,
             studentUploadEnabled: row.student_upload_enabled ?? undefined,
+            allowStudentAiGrading: row.allow_student_ai_grading ?? undefined,
+            studentAiGradingLimit: row.student_ai_grading_limit ?? undefined,
             answerSheetImagePaths: row.answer_sheet_image_paths ?? undefined,
             questionBookletImagePaths: row.question_booklet_image_paths ?? undefined,
             answerSheetMode: row.answer_sheet_mode ?? undefined,
@@ -4518,6 +4547,8 @@ async function handleSync(req, res) {
             answer_key_template_id: a.answerKeyTemplateId ?? a.answer_key_template_id ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
             student_upload_enabled: a.studentUploadEnabled ?? a.student_upload_enabled ?? undefined,
+            allow_student_ai_grading: a.allowStudentAiGrading ?? a.allow_student_ai_grading ?? undefined,
+            student_ai_grading_limit: a.studentAiGradingLimit ?? a.student_ai_grading_limit ?? undefined,
             answer_sheet_image_paths: a.answerSheetImagePaths ?? a.answer_sheet_image_paths ?? undefined,
             question_booklet_image_paths: a.questionBookletImagePaths ?? a.question_booklet_image_paths ?? undefined,
             answer_sheet_mode: normalizeAnswerSheetMode(a.answerSheetMode ?? a.answer_sheet_mode) ?? undefined,
@@ -5646,7 +5677,7 @@ async function handleStudentOverview(req, res) {
           getTeacherPreferences(supabaseDb, cOwnerId),
           supabaseDb
             .from('assignments')
-            .select('id, title, total_pages, student_show_score, student_upload_enabled, answer_key_template_id, updated_at')
+            .select('id, title, total_pages, student_show_score, student_upload_enabled, allow_student_ai_grading, student_ai_grading_limit, answer_key_template_id, updated_at')
             .eq('owner_id', cOwnerId)
             .eq('classroom_id', classroomId)
             .order('created_at', { ascending: false })
@@ -5673,7 +5704,7 @@ async function handleStudentOverview(req, res) {
             ? supabaseDb
                 .from('assignment_student_state')
                 .select(
-                  'assignment_id, status, upload_locked, graded_once, correction_attempt_count, correction_attempt_limit, last_status_reason, current_submission_id, last_graded_submission_id, updated_at'
+                  'assignment_id, status, upload_locked, graded_once, correction_attempt_count, correction_attempt_limit, student_ai_grading_count, last_status_reason, current_submission_id, last_graded_submission_id, updated_at'
                 )
                 .eq('owner_id', cOwnerId)
                 .eq('student_id', studentId)
@@ -5685,7 +5716,7 @@ async function handleStudentOverview(req, res) {
                 // 2026-05-25: grading_result 拔掉、改用下方 fallback lazy pull
                 // 大多數情況 openCorrections（correction_question_items）有資料、不需 grading_result
                 // 真有 fallback 需求才針對特定 submission id 補拉、avoid pulling JSONB for all subs
-                .select('id, assignment_id, score, graded_at, created_at, updated_at, source, image_url, status')
+                .select('id, assignment_id, score, graded_at, created_at, updated_at, source, image_url, status, graded_by')
                 .eq('owner_id', cOwnerId)
                 .eq('student_id', studentId)
                 .in('assignment_id', aIds)
@@ -5886,6 +5917,13 @@ async function handleStudentOverview(req, res) {
             title: assignment.title,
             totalPages: effectiveTotalPages,
             studentUploadEnabled: assignment.student_upload_enabled ?? true,
+            // 學生自助 AI 批改（預設關閉）+ 次數上限/已用次數，控制學生端「批改」入口
+            allowStudentAiGrading: assignment.allow_student_ai_grading ?? false,
+            studentAiGradingLimit: assignment.student_ai_grading_limit ?? 1,
+            studentAiGradingCount: state?.student_ai_grading_count ?? 0,
+            // 最新上傳卷的批改歸屬/狀態：學生端判斷是否「已被老師先批改鎖定」
+            latestSubmissionGradedBy: latestSubmission?.graded_by ?? undefined,
+            latestSubmissionStatus: latestSubmission?.status ?? undefined,
             pageOrientations: tplOrientations || undefined,
             status,
             gradingPending: gradingPending || undefined,
@@ -7628,6 +7666,273 @@ async function handleCampus1Debug(req, res) {
   }
 }
 
+// ─── 學生自助 AI 批改（Phase A→人工複核→Phase B）─────────────────────────────
+// 2026-06-02: 三支 endpoint。設計見 plan「學生端自助 AI 批改」。
+//  - student-ai-grading-begin：先批先贏鎖 + 次數硬擋 + 佔 attempt + 並發節流
+//  - student-save-final-answers：複核確認後落地 final_answers（供 Phase B fromCache 讀回）
+//  - student-finalize-grading：落地成績 + 觸發狀態機自動派發訂正 + graded_by='student'
+const STUDENT_AI_GRADING_LOCK_TTL_MS = 10 * 60 * 1000 // 10 分鐘逾時釋放，避免學生中途離開卡死該卷
+const STUDENT_AI_GRADING_MAX_CONCURRENT = (() => {
+  const v = Number(process.env.STUDENT_AI_GRADING_MAX_CONCURRENT)
+  return Number.isFinite(v) && v > 0 ? v : 5
+})()
+
+function isLockFresh(lock) {
+  if (!lock || typeof lock !== 'object') return false
+  const at = typeof lock.at === 'string' ? Date.parse(lock.at) : (typeof lock.at === 'number' ? lock.at : NaN)
+  if (!Number.isFinite(at)) return false
+  return (Date.now() - at) < STUDENT_AI_GRADING_LOCK_TTL_MS
+}
+
+// 解析「學生 ↔ 某作業」的關係：回傳 { ok, status, error, code, studentContext, assignment, ownerId }
+async function resolveStudentForAssignment(supabaseDb, user, assignmentId) {
+  if (!assignmentId) return { ok: false, status: 400, error: 'Missing assignmentId' }
+  const studentContexts = await resolveStudentContextsByAuthUser(supabaseDb, user.id, user.email)
+  if (!studentContexts.length) return { ok: false, status: 403, error: 'Student account is not linked' }
+  const ownerIds = [...new Set(studentContexts.map((c) => c.ownerId))]
+  const { data: assignment, error } = await supabaseDb
+    .from('assignments')
+    .select('id, owner_id, classroom_id, answer_key, allow_student_ai_grading, student_ai_grading_limit, answer_sheet_mode, domain, total_pages')
+    .eq('id', assignmentId)
+    .in('owner_id', ownerIds)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  if (!assignment) return { ok: false, status: 404, error: 'Assignment not found' }
+  const studentContext = studentContexts.find(
+    (c) => c.ownerId === assignment.owner_id && c.classroomId === assignment.classroom_id
+  )
+  if (!studentContext) return { ok: false, status: 403, error: 'Forbidden assignment access' }
+  return { ok: true, studentContext, assignment, ownerId: assignment.owner_id }
+}
+
+async function handleStudentAiGradingBegin(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const assignmentId = typeof body?.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const submissionId = typeof body?.submissionId === 'string' ? body.submissionId.trim() : ''
+  if (!assignmentId || !submissionId) { res.status(400).json({ error: 'Missing assignmentId or submissionId' }); return }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const ctx = await resolveStudentForAssignment(supabaseDb, user, assignmentId)
+    if (!ctx.ok) { res.status(ctx.status).json({ error: ctx.error, code: ctx.code }); return }
+    const { studentContext, assignment, ownerId } = ctx
+
+    if (assignment.allow_student_ai_grading !== true) {
+      res.status(403).json({ error: '老師未開放自助批改', code: 'NOT_ALLOWED' }); return
+    }
+    const preferences = await getTeacherPreferences(supabaseDb, ownerId)
+    if (!preferences.student_portal_enabled) {
+      res.status(403).json({ error: '學生端已被老師關閉', code: 'PORTAL_DISABLED' }); return
+    }
+
+    // 次數硬擋
+    const limit = clampInteger(assignment.student_ai_grading_limit, 1, 10, 1)
+    const { data: state } = await supabaseDb
+      .from('assignment_student_state')
+      .select('student_ai_grading_count')
+      .eq('owner_id', ownerId)
+      .eq('assignment_id', assignmentId)
+      .eq('student_id', studentContext.id)
+      .maybeSingle()
+    const usedCount = clampInteger(state?.student_ai_grading_count ?? 0, 0, 99, 0)
+    if (usedCount >= limit) {
+      res.status(429).json({ error: '已用完自助批改次數', code: 'LIMIT_REACHED', usedCount, limit }); return
+    }
+
+    // 取得該卷現況（含批改所需 context：image_url / page_breaks）
+    const { data: sub, error: subErr } = await supabaseDb
+      .from('submissions')
+      .select('id, status, grading_lock, graded_by, student_id, owner_id, image_url, page_breaks')
+      .eq('id', submissionId)
+      .eq('owner_id', ownerId)
+      .maybeSingle()
+    if (subErr) throw new Error(subErr.message)
+    if (!sub || sub.student_id !== studentContext.id) {
+      res.status(404).json({ error: 'Submission not found' }); return
+    }
+    // 先批先贏：已批改（老師或自己）→ 擋
+    if (String(sub.status) === 'graded') {
+      res.status(409).json({ error: '此卷已批改，無法再自助批改', code: 'ALREADY_GRADED', gradedBy: sub.graded_by ?? 'teacher' }); return
+    }
+    // 他方正在批改中（鎖新鮮且非本人）→ 擋
+    const lock = sub.grading_lock
+    if (isLockFresh(lock) && lock?.actor && lock.actor !== user.id) {
+      res.status(409).json({ error: '此卷正在批改中，請稍候', code: 'ALREADY_IN_PROGRESS' }); return
+    }
+
+    // 並發節流：統計此老師目前新鮮的批改鎖數
+    const { data: lockedRows } = await supabaseDb
+      .from('submissions')
+      .select('id, grading_lock')
+      .eq('owner_id', ownerId)
+      .not('grading_lock', 'is', null)
+    const freshOthers = (lockedRows || []).filter(
+      (r) => r.id !== submissionId && isLockFresh(r.grading_lock)
+    ).length
+    if (freshOthers >= STUDENT_AI_GRADING_MAX_CONCURRENT) {
+      res.status(429).json({ error: '批改人數過多，請稍候再試', code: 'TOO_MANY_CONCURRENT' }); return
+    }
+
+    // 原子搶鎖：條件式 update（status 仍非 graded）。只有一方會成功改到行。
+    const newLock = { by: 'student', at: new Date().toISOString(), actor: user.id }
+    const { data: claimed, error: claimErr } = await supabaseDb
+      .from('submissions')
+      .update({ grading_lock: newLock, updated_at: new Date().toISOString() })
+      .eq('id', submissionId)
+      .eq('owner_id', ownerId)
+      .eq('student_id', studentContext.id)
+      .neq('status', 'graded')
+      .select('id')
+    if (claimErr) throw new Error(claimErr.message)
+    if (!claimed || claimed.length === 0) {
+      res.status(409).json({ error: '此卷已批改，無法再自助批改', code: 'ALREADY_GRADED' }); return
+    }
+
+    // 佔 attempt（+1）。MVP：失敗不自動回補（保守、防濫用），逾時鎖釋放見 finalize/begin reclaim。
+    const nextCount = usedCount + 1
+    await upsertAssignmentStudentState(supabaseDb, ownerId, assignmentId, studentContext.id, {
+      student_ai_grading_count: nextCount
+    })
+
+    res.status(200).json({
+      ok: true,
+      attemptNo: nextCount,
+      limit,
+      // 批改所需 context（學生 client 不持有 answerKey，由 proxy server 端注入）
+      imageUrl: sub.image_url || `submissions/${submissionId}.webp`,
+      pageBreaks: Array.isArray(sub.page_breaks) ? sub.page_breaks : [],
+      answerSheetMode: assignment.answer_sheet_mode || 'with_questions',
+      domain: assignment.domain || undefined
+    })
+  } catch (err) {
+    console.error('[student-ai-grading-begin] failed:', err?.message || err)
+    res.status(500).json({ error: err instanceof Error ? err.message : '無法開始批改' })
+  }
+}
+
+async function handleStudentSaveFinalAnswers(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const assignmentId = typeof body?.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const submissionId = typeof body?.submissionId === 'string' ? body.submissionId.trim() : ''
+  const finalAnswers = Array.isArray(body?.finalAnswers) ? body.finalAnswers : null
+  if (!assignmentId || !submissionId || !finalAnswers) {
+    res.status(400).json({ error: 'Missing assignmentId / submissionId / finalAnswers' }); return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const ctx = await resolveStudentForAssignment(supabaseDb, user, assignmentId)
+    if (!ctx.ok) { res.status(ctx.status).json({ error: ctx.error }); return }
+    const { studentContext, ownerId } = ctx
+    const { error } = await supabaseDb
+      .from('submissions')
+      .update({ final_answers: finalAnswers, updated_at: new Date().toISOString() })
+      .eq('id', submissionId)
+      .eq('owner_id', ownerId)
+      .eq('student_id', studentContext.id)
+    if (error) throw new Error(error.message)
+    res.status(200).json({ ok: true })
+  } catch (err) {
+    console.error('[student-save-final-answers] failed:', err?.message || err)
+    res.status(500).json({ error: err instanceof Error ? err.message : '儲存失敗' })
+  }
+}
+
+async function handleStudentFinalizeGrading(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const assignmentId = typeof body?.assignmentId === 'string' ? body.assignmentId.trim() : ''
+  const submissionId = typeof body?.submissionId === 'string' ? body.submissionId.trim() : ''
+  const gradingResult = body?.gradingResult && typeof body.gradingResult === 'object' ? body.gradingResult : null
+  if (!assignmentId || !submissionId || !gradingResult) {
+    res.status(400).json({ error: 'Missing assignmentId / submissionId / gradingResult' }); return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const ctx = await resolveStudentForAssignment(supabaseDb, user, assignmentId)
+    if (!ctx.ok) { res.status(ctx.status).json({ error: ctx.error }); return }
+    const { studentContext, assignment, ownerId } = ctx
+    if (assignment.allow_student_ai_grading !== true) {
+      res.status(403).json({ error: '老師未開放自助批改', code: 'NOT_ALLOWED' }); return
+    }
+
+    const { data: sub, error: subErr } = await supabaseDb
+      .from('submissions')
+      .select('id, status, grading_lock, graded_by, student_id, source, image_url')
+      .eq('id', submissionId)
+      .eq('owner_id', ownerId)
+      .maybeSingle()
+    if (subErr) throw new Error(subErr.message)
+    if (!sub || sub.student_id !== studentContext.id) {
+      res.status(404).json({ error: 'Submission not found' }); return
+    }
+    // 老師已接手（先批先贏）→ 不覆蓋
+    const lock = sub.grading_lock
+    if (String(sub.status) === 'graded' && (sub.graded_by ?? 'teacher') === 'teacher') {
+      res.status(409).json({ error: '老師已批改此卷', code: 'TEACHER_GRADED' }); return
+    }
+    if (isLockFresh(lock) && lock?.by === 'teacher') {
+      res.status(409).json({ error: '老師正在批改此卷', code: 'TEACHER_GRADING' }); return
+    }
+
+    const score = toNumber(body?.score) ?? toNumber(gradingResult?.totalScore)
+    const gradedAt = Date.now()
+    const { error: updErr } = await supabaseDb
+      .from('submissions')
+      .update(compactObject({
+        status: 'graded',
+        score: score ?? undefined,
+        ai_score: score ?? undefined,
+        score_source: 'ai',
+        grading_result: gradingResult,
+        graded_at: gradedAt,
+        graded_by: 'student',
+        grading_lock: null,
+        updated_at: new Date().toISOString()
+      }))
+      .eq('id', submissionId)
+      .eq('owner_id', ownerId)
+      .eq('student_id', studentContext.id)
+    if (updErr) throw new Error(updErr.message)
+
+    // 觸發狀態機：自動派發訂正（studentSelfGrade）。寫 correction_question_items + 設 correction_required。
+    const row = {
+      id: submissionId,
+      assignment_id: assignmentId,
+      student_id: studentContext.id,
+      status: 'graded',
+      graded_at: gradedAt,
+      grading_result: gradingResult,
+      source: sub.source || 'student_upload',
+      image_url: sub.image_url
+    }
+    try {
+      await applySubmissionStateTransitions(supabaseDb, ownerId, [row], { studentSelfGrade: true })
+    } catch (err) {
+      console.warn('[student-finalize-grading] applySubmissionStateTransitions failed (non-fatal):', err?.message)
+    }
+
+    const mistakes = parseMistakesFromGradingResult(gradingResult)
+    const hasMistakes = mistakes.length > 0
+    res.status(200).json({
+      ok: true,
+      hasMistakes,
+      wrongCount: mistakes.length,
+      status: hasMistakes ? 'correction_required' : 'graded',
+      score: score ?? null
+    })
+  } catch (err) {
+    console.error('[student-finalize-grading] failed:', err?.message || err)
+    res.status(500).json({ error: err instanceof Error ? err.message : '批改收尾失敗' })
+  }
+}
+
 export default async function handler(req, res) {
   if (handleCors(req, res)) {
     return
@@ -7660,6 +7965,18 @@ export default async function handler(req, res) {
   }
   if (action === 'student-corrections') {
     await handleStudentCorrections(req, res)
+    return
+  }
+  if (action === 'student-ai-grading-begin') {
+    await handleStudentAiGradingBegin(req, res)
+    return
+  }
+  if (action === 'student-save-final-answers') {
+    await handleStudentSaveFinalAnswers(req, res)
+    return
+  }
+  if (action === 'student-finalize-grading') {
+    await handleStudentFinalizeGrading(req, res)
     return
   }
   if (action === 'process-grading') {

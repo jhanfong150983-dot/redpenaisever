@@ -526,11 +526,11 @@ export default async function handler(req, res) {
     return
   }
 
-  // 🆕 如果有 AnswerKey，注入到 prompt 中
+  // 🆕 AnswerKey 注入延後到「billing 解析之後」再做。
+  // 原因（2026-06-02 學生自助批改）：injectAnswerKeyToContents 會就地改寫 contents，
+  // 且學生 actor 一律不可信任 client 傳的 answerKey（會被用來灌假正解作弊）。
+  // 必須先知道 isStudentActor / billingUserId，才能決定「用 client key（老師）還是 server live key（學生）」。
   let processedContents = contents
-  if (resolvedAnswerKey) {
-    processedContents = injectAnswerKeyToContents(contents, resolvedAnswerKey)
-  }
 
   let supabaseAdmin = null
   let currentBalance = 0
@@ -613,6 +613,36 @@ export default async function handler(req, res) {
     return
   }
 
+  // ── §0 答案外洩防護 + AnswerKey 注入（延後到 billing 解析後）─────────────────
+  // 學生 actor：一律忽略 client 傳的 answerKey（可能灌假正解作弊），改由 server 依
+  // assignmentId + billingUserId(老師 owner_id) 撈 live answerKey 注入。撈不到就不注入
+  // （寧可批改缺答案卷失敗、也不外洩/不採信 client）。老師/admin：維持用 client resolvedAnswerKey。
+  const isGradingRoute = typeof routeKey === 'string' && routeKey.startsWith('grading.')
+  if (isStudentActor && isGradingRoute && payload?.assignmentId) {
+    resolvedAnswerKey = null
+    answerKeyHash = null
+    try {
+      const { data: a } = await supabaseAdmin
+        .from('assignments')
+        .select('owner_id, answer_key')
+        .eq('id', payload.assignmentId)
+        .maybeSingle()
+      if (a && a.owner_id === billingUserId && a.answer_key) {
+        resolvedAnswerKey = normalizeAnswerKeyPayload(a.answer_key, logPrefix)
+        if (resolvedAnswerKey) {
+          console.log(`📥 [AnswerKey] 學生路徑 server 注入 live answerKey assignmentId=${payload.assignmentId}`)
+        }
+      } else {
+        console.warn(`${logPrefix} student-answerkey-inject-skip reason=${!a ? 'no_assignment' : a.owner_id !== billingUserId ? 'owner_mismatch' : 'no_answer_key'}`)
+      }
+    } catch (e) {
+      console.warn(`${logPrefix} student-answerkey-inject-failed`, e?.message || e)
+    }
+  }
+  if (resolvedAnswerKey) {
+    processedContents = injectAnswerKeyToContents(contents, resolvedAnswerKey)
+  }
+
   // ── 答案卷參考圖（Phase A classify 使用）────────────────────────────────────
   let answerKeyImages = []
   let assignmentTotalPages = null  // 🆕 用於 staged-grading.js 判定是否該按 ID 切頁
@@ -626,7 +656,9 @@ export default async function handler(req, res) {
     routeKey === 'grading.phase_a' || routeKey === 'grading.phase_a_classify'
   if (needsAnswerKeyImagesAndTotalPages && payload?.assignmentId) {
     answerKeyImages = await fetchAnswerSheetImagesForClassify(
-      supabaseAdmin, user.id, payload.assignmentId
+      // 2026-06-02: 用 billingUserId（學生→老師 owner_id）比對 owner_id，否則學生發起的
+      // answer_only 批改抓不到答案卷圖（owner_id !== 學生 user.id → 回 []）。老師自批 billingUserId===user.id 不變。
+      supabaseAdmin, billingUserId, payload.assignmentId
     )
     if (answerKeyImages.length > 0) {
       console.log(`📷 [AnswerSheet] 載入 ${answerKeyImages.length} 頁答案卷圖 assignmentId=${payload.assignmentId} routeKey=${routeKey}`)
@@ -649,7 +681,8 @@ export default async function handler(req, res) {
   let questionBookletImages = []
   if (routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId) {
     questionBookletImages = await fetchQuestionBookletImages(
-      supabaseAdmin, user.id, payload.assignmentId
+      // 2026-06-02: 同上，用 billingUserId 比對 owner_id（學生自助批改 answer_only 需題本圖）。
+      supabaseAdmin, billingUserId, payload.assignmentId
     )
     if (questionBookletImages.length > 0) {
       console.log(`📖 [QuestionBooklet] 載入 ${questionBookletImages.length} 頁題本圖 assignmentId=${payload.assignmentId}`)
