@@ -3749,7 +3749,7 @@ async function handleSync(req, res) {
           let qb = supabaseDb
             .from('submissions')
             // 2026-05-17: 加 phase_a_state + final_answers 進 sync select、給 client 卡片狀態計算用
-            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result, phase_a_state, final_answers')
+            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, updated_at, grading_result, phase_a_state, final_answers, page_breaks')
             .eq('owner_id', ownerId)
           if (sinceIso) qb = qb.gte('updated_at', sinceIso)
           return qb
@@ -4001,6 +4001,8 @@ async function handleSync(req, res) {
           actorUserId: row.actor_user_id ?? undefined,
           imageUrl: row.image_url ?? undefined,
           thumbUrl: row.thumb_url ?? row.thumbnail_url ?? undefined,
+          // 多頁合併頁界：批改/「看原圖」用真界切頁，避免 0.5 等分把一大一小的頁切歪
+          pageBreaks: Array.isArray(row.page_breaks) ? row.page_breaks : undefined,
           createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
           score: row.score ?? undefined,
           aiScore: row.ai_score ?? undefined,
@@ -4827,6 +4829,9 @@ async function handleSync(req, res) {
             })(),
             image_url: imageUrl,
             thumb_url: thumbUrl,
+            // 多頁合併頁界：持久化老師端 mergePageBlobs 算的真界，修好「sync 把 pageBreaks 洗掉」
+            // 的老問題（之前只能靠 staged-grading 的 orientation smart-fallback 補救）。
+            page_breaks: Array.isArray(s.pageBreaks) ? s.pageBreaks : undefined,
             // source whitelist：避免 client 寫入意外值。
             // teacher_student_upload 為 legacy（UnifiedImportPage 舊行為），保留向下相容；
             // 新上傳一律走 teacher_scan / teacher_camera 區分 PDF / 相機。
@@ -5970,6 +5975,20 @@ async function handleStudentSubmission(req, res) {
   const thumbBase64 = body.thumbBase64
   const thumbContentType = body.thumbContentType
   const pageCount = clampInteger(body.pageCount, 1, 20, 1)
+  // 多頁合併的真實頁界（client mergePageBlobs 算的累積高度比例、不含最後一頁）。
+  // 驗證：陣列、每項 0<x<1、嚴格遞增、長度需 = pageCount-1，任一不符就整個丟棄退回 null
+  // （讓批改 fallback 接手，總比存錯切點好）。
+  const sanitizedPageBreaks = (() => {
+    const raw = body.pageBreaks
+    if (!Array.isArray(raw) || raw.length === 0) return null
+    if (pageCount > 1 && raw.length !== pageCount - 1) return null
+    let prev = 0
+    for (const v of raw) {
+      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v >= 1 || v <= prev) return null
+      prev = v
+    }
+    return raw
+  })()
   // Per-question correction images: [{questionId, imageBase64, contentType}]
   const correctionImages = Array.isArray(body.correctionImages) ? body.correctionImages : []
   // Disputed questions: [{questionId, note}] — student believes AI was wrong
@@ -6277,6 +6296,8 @@ async function handleStudentSubmission(req, res) {
           status: mode === 'correction' ? 'pending_grading' : 'synced',
           source,
           round,
+          // 只有 upload 模式有合併主圖 → 才存 pageBreaks；correction 模式無主圖
+          page_breaks: mode === 'upload' && sanitizedPageBreaks ? sanitizedPageBreaks : undefined,
           parent_submission_id: currentState?.current_submission_id ?? undefined,
           actor_user_id: user.id,
           owner_id: ownerId
