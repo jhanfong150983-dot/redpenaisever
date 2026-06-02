@@ -6989,11 +6989,15 @@ export async function runStagedGradingPhaseA({
     const inlineImage = inlineImages[0]
     const cropResults = await Promise.all(
       ai1CropCandidates.map(async (q) => {
-        const bboxToUse = inflateBboxForType(q.answerBbox, q.questionType)
+        // 2026-06-02：answer_only 選擇題（single_choice/multi_choice）直接用 classify bbox、零 padding。
+        //   原因：這類卷選擇格的「上下排距 ≈ bbox 高」，只要有 inflate/pad 就會把上下排答案一起裁進來
+        //   → read1/read2 各抓不同排 → 大量假性 NR（8號實證 18 題選擇題 NR、crop 疊 2~3 排）。
+        //   bbox 已涵蓋該格、答案字在格中央，零 margin 最乾淨。只鎖 answer_only 選擇題、不碰其他模式/題型。
+        const aoChoice = answerSheetMode === 'answer_only' && (q.questionType === 'single_choice' || q.questionType === 'multi_choice')
         // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再有「鄰格括號被切」風險
-        // 統一走 dynamicPad、不再對 fill_blank 子題特別給小 cropPad
-        // 2026-06-02：選擇題類（CHOICE_TIGHT_TYPES）改用 choiceAwareCropPad（隨格高縮放）避免疊字、其餘維持 dynamicPad
-        const cropPad = choiceAwareCropPad(q)
+        // 2026-06-02：其餘選擇題類（含 true_false）維持 choiceAwareCropPad（隨格高縮放）、其他維持 dynamicPad
+        const bboxToUse = aoChoice ? q.answerBbox : inflateBboxForType(q.answerBbox, q.questionType)
+        const cropPad = aoChoice ? 0 : choiceAwareCropPad(q)
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
