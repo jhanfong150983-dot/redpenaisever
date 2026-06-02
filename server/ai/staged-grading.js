@@ -4683,6 +4683,58 @@ function matchArbiterItemByQid(rawQid, items) {
   return cands.sort((a, b) => String(b.questionId).length - String(a.questionId).length)[0]
 }
 
+// 2026-06-02: 只送該卷實際有的題型規則（省 token + 各型可獨立微調、不牽動其他型）。
+// 設計：模板文字完全不動，組好後在此「移除缺席題型的 category bullet」。零轉錄風險。
+// all-types → keep 全集 → 不移除任何 bullet → 與原本位元相同（golden 驗證）。
+// 互引依賴：circle_select_many / mark_in_text / multi_check_other 的規則引用 multi_check；
+//          table_cell 引用 fill_blank → 這些型出現時強制保留被引用型的 bullet，避免斷引。
+const ACCESSOR_KNOWN_CATS = new Set([
+  'single_choice', 'multi_choice', 'circle_select_one', 'circle_select_many', 'single_check', 'multi_check',
+  'multi_check_other', 'true_false', 'fill_blank', 'multi_fill', 'table_cell', 'matching', 'ordering',
+  'mark_in_text', 'calculation', 'word_problem', 'fill_variants', 'map_fill', 'short_answer', 'map_symbol',
+  'grid_geometry', 'connect_dots', 'diagram_draw', 'diagram_color', 'compound_circle_with_explain',
+  'compound_check_with_explain', 'compound_writein_with_explain', 'compound_judge_with_correction',
+  'compound_judge_with_explain', 'compound_chain_table'
+])
+const ACCESSOR_RULE_DEPS = {
+  circle_select_many: ['multi_check'], mark_in_text: ['multi_check'],
+  multi_check_other: ['multi_check'], table_cell: ['fill_blank']
+}
+function gateAccessorCategoryRules(prompt, typesUsed) {
+  try {
+    const keep = new Set(typesUsed)
+    for (const t of typesUsed) (ACCESSOR_RULE_DEPS[t] || []).forEach((d) => keep.add(d))
+    const START = 'QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):'
+    const END = '- scoringReason MUST follow a UNIFIED STRUCTURE.'
+    const lines = prompt.split('\n')
+    const startIdx = lines.findIndex((l) => l.includes(START))
+    const endIdx = lines.findIndex((l, i) => i > startIdx && l.startsWith(END))
+    if (startIdx < 0 || endIdx < 0) return prompt  // 安全：找不到界標就不動
+    const bulletKeep = (line) => {
+      const m = line.match(/^- ([^:：]+)[:：]/)
+      const headTxt = (m ? m[1] : line.slice(2)).trim()
+      if (/^MULTI-FILL SCORING/.test(headTxt)) return keep.has('multi_fill')
+      if (/^MAP-FILL SCORING/.test(headTxt)) return keep.has('map_fill')
+      if (/^MAP-DRAW SCORING/.test(headTxt)) return ['map_symbol', 'grid_geometry', 'connect_dots'].some((t) => keep.has(t))
+      const toks = headTxt.split('/').map((s) => s.trim())
+      if (toks.length > 0 && toks.every((t) => ACCESSOR_KNOWN_CATS.has(t))) return toks.some((t) => keep.has(t))
+      return true  // 非題型 bullet（全域 / 合題中文標頭 / fallback）一律保留
+    }
+    const body = lines.slice(startIdx + 1, endIdx)
+    const out = []
+    let i = 0
+    while (i < body.length) {
+      if (/^- /.test(body[i])) {
+        let j = i + 1
+        while (j < body.length && !/^- /.test(body[j])) j++
+        if (bulletKeep(body[i])) out.push(...body.slice(i, j))
+        i = j
+      } else { out.push(body[i]); i++ }
+    }
+    return [...lines.slice(0, startIdx + 1), ...out, ...lines.slice(endIdx)].join('\n')
+  } catch { return prompt }
+}
+
 export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
   const strictness = answerKey?.strictness || 'standard'
   // gradeBand: 'high' (10-12) → 多選用大考中心固定扣分；其他 (含 NULL/k9) → 現行 substitution-discount 公式
@@ -4806,7 +4858,8 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
       })
     : []
 
-  return `
+  const accessorTypesUsed = new Set((compactAnswerKey.questions || []).map((q) => q.questionCategory).filter(Boolean))
+  const _accPrompt = `
 You are stage Assessor. Score each question by comparing student answers to the answer key.
 
 ${strictnessRule}
@@ -5110,6 +5163,7 @@ Output:
 ⚠️ cellResults 只在 questionCategory='table_cell' 時輸出（每 cell 一筆對錯細節）；其他 type omit 此欄位。
 ⚠️ partResults 只在 questionCategory='fill_blank' 且有 parts 陣列時輸出（每空一筆對錯細節）；其他情境 omit 此欄位。
 `.trim()
+  return gateAccessorCategoryRules(_accPrompt, accessorTypesUsed)
 }
 
 function buildConsistencyJudgePrompt(diffItems) {
