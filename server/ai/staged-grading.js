@@ -845,6 +845,10 @@ function normalizeAnswerForComparison(raw) {
   s = s.replace(/[,、\n\r]/gu, '')
   // 去除所有空白（避免有無空白造成誤判）
   s = s.replace(/\s+/gu, '')
+  // 選項代號後的句點視為等價（學生筆跡常寫「A.」「B.」）：A.→A、A.B.C→ABC
+  // 只去除「字母旁」的點（前面是字母、後面是字母或字串結尾）；
+  // 數字旁的小數點不動（保護 3.14 / 0.5 / 257.04、No.5 這類答案）
+  s = s.replace(/(?<=[A-Za-z])\.(?=[A-Za-z]|$)/gu, '')
   // 選項字母大小寫統一（A/a、B/b、C/c 等視為相同）
   s = s.toLowerCase()
   return s
@@ -6790,6 +6794,20 @@ export async function runStagedGradingPhaseA({
   const dynamicPadWide = +(0.08 / totalPages).toFixed(4)
   logStaged(pipelineRunId, stagedLogLevel, 'dynamic crop padding', { totalPages, pad: dynamicPad, padWide: dynamicPadWide })
 
+  // 2026-06-02: 密集選擇格（single_choice / multi_choice / true_false）用固定 0.03 pad 會把上下左右
+  // 鄰格的字一起裁進來，盲讀的 AI1 無法判斷哪個才是本題答案而挑錯（畢業考閱讀題組實證：read1 連錯多題、
+  // 而知道正解的 AI2 靠正解救回 → read1≠read2 大量假性待複核）。改成「pad 隨格高縮放、上限仍 0.03」：
+  //   小選擇格 h≈0.035 → pad≈0.016（消滅疊字）；大題 h 大 → 維持 0.03（行為不變）。
+  // 跨格式 A/B 實證見 scripts/exp-ai1-centering-v2.mjs（縮 pad 修好密集表、且不破壞橫排寬鬆格式）。
+  // 注意：刻意「不」搭配置中 prompt——實驗顯示縮 pad 後再加置中反而會把沒完美置中的真答案誤判成空白。
+  // 2026-06-02: 刻意只鎖在 answer_only（已實證範圍），不碰 with_questions 等其他模式的選擇題——
+  // 這樣未來要按題型微調 pad 都只影響 answer_only，不會動到目前沒問題的部分。
+  const CHOICE_TIGHT_TYPES = new Set(['single_choice', 'multi_choice', 'true_false'])
+  const choiceAwareCropPad = (q) =>
+    (answerSheetMode === 'answer_only' && CHOICE_TIGHT_TYPES.has(q?.questionType))
+      ? +Math.min(dynamicPad, (q?.answerBbox?.h || dynamicPad) * 0.45).toFixed(4)
+      : dynamicPad
+
   // Focused checkbox crops: single_check / multi_check / multi_choice
   // We pre-crop first, then exclude successful IDs from full-image ReadAnswer.
   const focusedCheckboxCandidates = classifyAligned.filter(
@@ -6838,7 +6856,8 @@ export async function runStagedGradingPhaseA({
         const bboxToUse = inflateBboxForType(q.answerBbox, q.questionType)
         // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再有「鄰格括號被切」風險
         // 統一走 dynamicPad、不再對 fill_blank 子題特別給小 cropPad
-        const cropPad = dynamicPad
+        // 2026-06-02：選擇題類（CHOICE_TIGHT_TYPES）改用 choiceAwareCropPad（隨格高縮放）避免疊字、其餘維持 dynamicPad
+        const cropPad = choiceAwareCropPad(q)
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
