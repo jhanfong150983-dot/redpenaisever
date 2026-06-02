@@ -1339,6 +1339,58 @@ function manualEditDeterministicMatch(studentText, expectedText) {
   return aNoSpace === bNoSpace
 }
 
+// 2026-06-02 (stage2)：客觀題型確定性判分——重用既有正規化零件、與 accessor 規則對齊、跳過 AI。
+// 回傳 { gradable, isCorrect, score, maxScore, errorType, scoringReason }；gradable=false → 交回 AI/複核。
+// 僅覆蓋「純比對、AI 本來也只是做同樣比對」的型；multi-select(部分給分公式) / fill_blank(英文拼寫/dual-form) 等暫不收。
+// 選項代號→統一序號（跨記號：A=甲=①=1、B=乙=②=2…）。非單一選項代號(文字/多字/數值)回 null。
+function canonicalOptionIndex(raw) {
+  let s = ensureString(raw, '').trim()
+  const paren = s.match(/^[(（]\s*(.)\s*[)）]$/u)
+  if (paren) s = paren[1]
+  if ([...s].length !== 1) return null
+  if (/[A-Za-z]/.test(s)) return s.toUpperCase().charCodeAt(0) - 64  // A=1..Z=26
+  const ci = '甲乙丙丁戊己庚辛壬癸'.indexOf(s); if (ci >= 0) return ci + 1
+  const code = s.charCodeAt(0); if (code >= 0x2460 && code <= 0x2473) return code - 0x2460 + 1  // ①-⑳
+  if (/^[0-9]$/.test(s)) return Number(s)
+  return null
+}
+
+export function gradeObjectiveDeterministic(q, studentAnswerRaw, status) {
+  const cat = q?.questionCategory
+  const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+  const raw = ensureString(studentAnswerRaw, '').trim()
+  const key = ensureString(q?.answer, '').trim()
+  if (status === 'blank') return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'blank', scoringReason: '學生未作答' }
+  if (status === 'unreadable') return { gradable: false }
+  if (!raw || !key) return { gradable: false }
+
+  if (cat === 'true_false') {
+    const sv = normalizeTrueFalseAnswer(raw)
+    const kv = normalizeTrueFalseAnswer(key)
+    if (!sv || !kv) return { gradable: false }
+    const ok = sv === kv
+    return { gradable: true, isCorrect: ok, score: ok ? maxScore : 0, maxScore, errorType: ok ? 'none' : 'concept', scoringReason: ok ? `學生判斷${sv}，答案正確` : `學生判斷${sv}，正確答案為${kv}，判斷錯誤` }
+  }
+  if (cat === 'single_choice') {
+    // 用選項序號正規化跨記號比對（A–Z / 甲乙丙丁 / ①②③ / 單一數字 / (A) → 統一序號）。
+    // 正解或學生答案無法化成單一選項代號（寫成選項文字/數值/多字）→ 交回 AI，避免誤判。
+    const ks = canonicalOptionIndex(key)
+    if (ks == null) return { gradable: false }
+    const ss = canonicalOptionIndex(raw)
+    if (ss == null) return { gradable: false }
+    const ok = ss === ks
+    return { gradable: true, isCorrect: ok, score: ok ? maxScore : 0, maxScore, errorType: ok ? 'none' : 'concept', scoringReason: ok ? `學生選${raw}，答案正確` : `學生選${raw}，正確答案為${key}，選項判斷錯誤` }
+  }
+  if (cat === 'fill_variants') {
+    const accept = Array.isArray(q?.acceptableAnswers) ? q.acceptableAnswers : []
+    const candidates = [key, ...accept].map((x) => ensureString(x, '').trim()).filter(Boolean)
+    if (candidates.length === 0) return { gradable: false }
+    const ok = candidates.some((c) => manualEditDeterministicMatch(raw, c))
+    return { gradable: true, isCorrect: ok, score: ok ? maxScore : 0, maxScore, errorType: ok ? 'none' : 'concept', scoringReason: ok ? `學生寫「${raw}」，屬可接受答案` : `學生寫「${raw}」，正確答案為「${key}」，不在可接受答案範圍內` }
+  }
+  return { gradable: false }
+}
+
 function mapByQuestionId(items, itemToQuestionId) {
   const map = new Map()
   for (const item of items) {
@@ -5664,6 +5716,15 @@ function buildFinalGradingResult({
             programMatch = extractedNorm === normRef || isNumericEqual(extractedNorm, normRef)
             if (requireSimplifiedFraction && programMatch && isUnsimplifiedFraction(extractedNorm)) programMatch = false
           }
+        }
+        // 2026-06-02: single_choice 選項代號跨記號等價（甲乙丙丁=①②③=ABC=數字）。
+        // 修既有 norm() 漏掉「甲乙→數字 / 字母↔數字」→ 學生「乙」對正解「2」被誤判錯的真實 bug。
+        // 純加分：只在 norm 比不出、但兩邊都是單一選項代號且序號相同時補判對；不會把錯的翻成對。
+        // 選項是文字/多字者 canonicalOptionIndex 回 null → 不動、維持原 norm 結果。
+        if (!programMatch && qCategory === 'single_choice') {
+          const kIdx = canonicalOptionIndex(refAnswer)
+          const sIdx = canonicalOptionIndex(studentAns)
+          if (kIdx != null && sIdx != null && kIdx === sIdx) programMatch = true
         }
         if (programMatch !== row.isCorrect) {
           const prevCorrect = row.isCorrect
