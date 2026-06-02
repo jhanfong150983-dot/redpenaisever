@@ -1578,7 +1578,16 @@ function resolveBboxPolicyByQuestionType(questionType) {
   return 'tight_answer'
 }
 
-function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
+// 純注音答案偵測（國字注音題「考注音」型正解）：至少 1 個注音符號(ㄅ–ㄩ)且整串只由
+// 注音符號 + 聲調(ˊˇˋ˙) + 「一」(ㄧ 的異體寫法) + 空白組成。漢字答案/混合文字 → false。
+function isZhuyinAnswer(raw) {
+  const s = ensureString(raw, '').trim()
+  if (!s) return false
+  if (!/[ㄅ-ㄩ]/.test(s)) return false
+  return /^[ㄅ-ㄩˇˉˊˋ˙一\s]+$/.test(s)
+}
+
+export function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions, answerSheetMode = 'with_questions') {
   const questions = Array.isArray(answerKeyQuestions) ? answerKeyQuestions : []
   const byQuestionId = mapByQuestionId(questions, (item) => item?.id)
 
@@ -1628,7 +1637,7 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
   // siblingIds 不在 server 端計算 — 不靠 answer key bbox 推導學生卷同行關係。
   // classify AI 自己從學生卷視覺判斷哪些格在同行。
 
-  return questionIds.map((questionId) => {
+  const specs = questionIds.map((questionId) => {
     const question = byQuestionId.get(questionId)
     const expectedType = question ? resolveExpectedQuestionType(question) : 'fill_blank'
     const bboxPolicy = resolveBboxPolicyByQuestionType(expectedType)
@@ -1687,6 +1696,27 @@ function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions) {
     // legacy fill_blank+tablePosition 已停用：表格題改走 table_cell type（整表 1 bbox + cellValues read）
     return spec
   })
+
+  // 國字注音配對格偵測（只在 answer_only）：國字注音題版面是「印刷提示形式 + 手寫作答形式」兩格小單元。
+  // 偵測——同 section（去掉最後一段 ID 的共同前綴）內只要有任一純注音正解 → 整 section 即國字注音題組
+  // （考國字題正解是漢字、考注音題正解是注音，混在同 section、共用同一種兩格版面）。標記後 classify 改框整個 2 格單元。
+  if (answerSheetMode === 'answer_only') {
+    const zhuyinSections = new Set()
+    for (const qId of questionIds) {
+      const parts = qId.split('-')
+      if (parts.length < 2) continue
+      if (isZhuyinAnswer(byQuestionId.get(qId)?.answer)) zhuyinSections.add(parts.slice(0, -1).join('-'))
+    }
+    if (zhuyinSections.size > 0) {
+      for (const spec of specs) {
+        const parts = spec.questionId.split('-')
+        if (parts.length < 2 || spec.questionType !== 'fill_blank') continue
+        if (zhuyinSections.has(parts.slice(0, -1).join('-'))) spec.gzZhuyinPair = true
+      }
+    }
+  }
+
+  return specs
 }
 
 function normalizeUnorderedMode(value) {
@@ -2798,7 +2828,7 @@ function buildClassifyTypeRulesSection(specs) {
   return blocks.join('\n\n')
 }
 
-function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answerKeyPageCount = 0, classifyCorrections = [], answerSheetMode = 'with_questions') {
+export function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answerKeyPageCount = 0, classifyCorrections = [], answerSheetMode = 'with_questions') {
   const specs = Array.isArray(questionSpecs) ? questionSpecs : []
 
   // Page boundary section: injected when the submission image is composed of multiple merged photos
@@ -2820,6 +2850,22 @@ function buildClassifyPrompt(questionIds, questionSpecs, pageBreaks = [], answer
 
   // ── ANSWER-ONLY 精簡 prompt：跳過 25-type 規則，只用 box 格式 ──
   if (isAnswerOnly) {
+    const hasGzPair = Array.isArray(questionSpecs) && questionSpecs.some((s) => s?.gzZhuyinPair)
+    const gzZhuyinSection = hasGzPair ? `
+═══════════════ 國字注音配對格（特例，覆蓋上面的「單一 □」規則） ═══════════════
+
+specs 中標記 "gzZhuyinPair": true 的題目是【國字注音題】。它的版面是【兩個緊鄰的小格合為一題】：
+  · 一格是**印刷的提示形式**（字較大）——考注音題印的是國字、考國字題印的是注音。
+  · 另一格是**學生手寫作答格**（字較小、常偏窄）。
+  · 兩格通常上下或左右緊貼、合起來才是完整一題。
+
+🚨 bbox 必須**同時框住這兩格**（涵蓋印刷提示格 + 手寫作答格的整個外框），當成「一個 box」：
+  · ❌ 嚴禁只框其中一格——只框那個窄窄的手寫格會漏掉印刷提示字、且窄格沒有視覺錨點、最容易定位漂移。
+  · ✅ 先用**印刷的大字**當錨點定位（它最顯眼），再把緊貼它的手寫作答格一起包進來。
+  · ❌ 只框「同一題」自己的那一對兩格；不要往左右延伸框到**相鄰其他題**的格子。
+  · expectedAnswer 已提供（注音或國字），可輔助你確認哪一對屬於本題。
+` : ''
+
     const correctionsSection = Array.isArray(classifyCorrections) && classifyCorrections.length > 0
       ? `\n⚠️ BBOX POSITIONING REMINDER:\n前一輪 Read 結果偵測到下列題目可能有 bbox 定位問題，請特別注意：\n${classifyCorrections.map((c) => {
           if (c.type === 'neighbor_match') {
@@ -2861,7 +2907,7 @@ Do NOT infer question type. Question type is fixed by specs.${pageBoundarySectio
   □ 邊界 x=0.40~0.48, y=0.20~0.28、學生沒寫
   → bbox.x = 0.36, bbox.y = 0.18, bbox.w = 0.16, bbox.h = 0.12
   （跟範例 1 完全一樣 — 因為都是同一個 □）
-
+${gzZhuyinSection}
 ═══════════════ 共通規則 ═══════════════
 
 - visible=true 即使該格學生沒寫（空格）— 仍依格子位置定 bbox
@@ -6204,7 +6250,7 @@ export async function runStagedGradingPhaseA({
   if (classifyCorrections.length > 0) {
     logStaged(pipelineRunId, stagedLogLevel, 'classify corrections received', classifyCorrections)
   }
-  const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions)
+  const classifyQuestionSpecs = buildClassifyQuestionSpecs(questionIds, answerKeyQuestions, answerSheetMode)
 
   // 2026-05-17: 拆 classify 出獨立 HTTP call — 若 client 帶 _phaseAClassifyContext、
   // 直接 reuse 前一階段的 classifyResult、跳過整段 OCR + classify + bbox 後處理 + QG。
