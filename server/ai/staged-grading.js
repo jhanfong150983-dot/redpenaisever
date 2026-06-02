@@ -4731,7 +4731,14 @@ function gateAccessorCategoryRules(prompt, typesUsed) {
         i = j
       } else { out.push(body[i]); i++ }
     }
-    return [...lines.slice(0, startIdx + 1), ...out, ...lines.slice(endIdx)].join('\n')
+    const gated = [...lines.slice(0, startIdx + 1), ...out, ...lines.slice(endIdx)]
+    // 2026-06-02: scoringReason 收斂 —— 移除「SCORING REASON TEMPLATES PER CATEGORY」整塊（25 條各型範本）。
+    // 已實證(scripts/exp-accessor-reason)：強化版「通用結構」一條即涵蓋三要素(學生作答/標準答案/錯誤原因)
+    // 與型別細節(漏選/單位/聲調…)、7/7 與含範本版相同。理由格式只剩一處可調、不再各型分散。
+    const ts = gated.findIndex((l) => l.includes('SCORING REASON TEMPLATES PER CATEGORY'))
+    const te = gated.findIndex((l, i) => i > ts && l.includes('ENGLISH DOMAIN EXTRA'))
+    const finalLines = (ts >= 0 && te >= 0) ? [...gated.slice(0, ts), ...gated.slice(te)] : gated
+    return finalLines.join('\n')
   } catch { return prompt }
 }
 
@@ -5099,6 +5106,7 @@ ${isHighSchool
   - A position is correct if the student placed it in the correct grid cell or within reasonable proximity of the required coordinate intersection.
   - scoringReason MUST use format「學生繪製___於___，正確位置為___，（位置/符號是否正確）」. e.g. "學生繪製颱風符號於左下格，正確位置為右下格，符號正確但位置偏移".
 - scoringReason MUST follow a UNIFIED STRUCTURE. Write in Traditional Chinese. NEVER just state a score count like "9/11 correct".
+  錯題務必含三要素（缺一不可，禁止只給分數或空字串）：①學生實際作答 ②標準答案 ③具體錯誤原因。錯誤原因依題型寫具體：多選指明漏選/多選了哪些；計算/應用指明數值錯或單位錯；填空指明寫成什麼；是非指明判斷錯；配對/圈選/勾選指明選錯哪項；圖表/繪圖指明位置或數值偏差；國字注音指明國字或注音錯（含聲調）。
   STRUCTURE:
   - Correct: 「學生寫/選「___」，答案正確」
   - Wrong:   「學生寫/選「___」，正確答案為「___」，（具體錯誤原因）」
