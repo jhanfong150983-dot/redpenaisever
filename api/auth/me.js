@@ -530,6 +530,27 @@ export default async function handler(req, res) {
       console.warn('[AUTH-ME] campus1 binding query failed:', campus1BindingError)
     }
 
+    // 學校行政(教務主任)身分：獨立於 role，可與 teacher/admin 並存（供前端「切換到學校端」）
+    let schoolAdmin = null
+    try {
+      const supabaseDb = getSupabaseAdmin()
+      const { data: saData } = await supabaseDb
+        .from('school_admins')
+        .select('school_id, schools(name)')
+        .eq('profile_id', user.id)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+      if (saData?.school_id) {
+        schoolAdmin = {
+          schoolId: saData.school_id,
+          schoolName: saData.schools?.name || ''
+        }
+      }
+    } catch (err) {
+      console.warn('[AUTH-ME] school_admin query failed:', err?.message || err)
+    }
+
     // 永遠不快取 /auth/me 回應，避免瞬斷的失敗結果被快取住
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
     res.setHeader('Pragma', 'no-cache')
@@ -550,6 +571,7 @@ export default async function handler(req, res) {
         student: studentContext ?? undefined,
         students: studentContexts.length ? studentContexts : undefined,
         campus1Binding: campus1Binding ?? undefined,
+        schoolAdmin: schoolAdmin ?? undefined,
         studentLookupStatus: studentContexts.length > 0
           ? 'ok'
           : studentLookupError

@@ -5607,15 +5607,19 @@ async function handleSchoolAdminOverview(req, res) {
     return
   }
   const supabaseDb = getSupabaseAdmin()
-  const { data: profile } = await supabaseDb
-    .from('profiles')
-    .select('role')
-    .eq('id', user.id)
-    .maybeSingle()
-  if (profile?.role !== 'admin') {
+  // 權限：系統 admin（看所有學校）或 school_admin（只看自己的學校）
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseDb.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseDb.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const isAdminUser = profile?.role === 'admin'
+  const adminSchoolIds = Array.isArray(saRows) ? saRows.map((r) => r.school_id) : []
+  if (!isAdminUser && adminSchoolIds.length === 0) {
     res.status(403).json({ error: 'Forbidden' })
     return
   }
+  // 非系統 admin 時，限定只能存取自己管的學校
+  const canAccessSchool = (sid) => isAdminUser || adminSchoolIds.includes(sid)
   try {
     const schoolId = typeof req.query.schoolId === 'string' ? req.query.schoolId : ''
     const classLabel = typeof req.query.classLabel === 'string' ? req.query.classLabel : ''
@@ -5625,16 +5629,25 @@ async function handleSchoolAdminOverview(req, res) {
       const [personResult, recordsResult] = await Promise.all([
         supabaseDb
           .from('school_person')
-          .select('id, name, student_number, provider_student_id, email')
+          .select('id, name, student_number, provider_student_id, email, school_id')
           .eq('id', personId)
           .maybeSingle(),
         supabaseDb.rpc('school_admin_person_records', { p_person_id: personId })
       ])
       if (recordsResult.error) throw recordsResult.error
-      res.status(200).json({ person: personResult.data || null, records: recordsResult.data || [] })
+      if (personResult.data && !canAccessSchool(personResult.data.school_id)) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
+      const { school_id: _omit, ...personPublic } = personResult.data || {}
+      res.status(200).json({ person: personResult.data ? personPublic : null, records: recordsResult.data || [] })
       return
     }
     if (schoolId && classLabel) {
+      if (!canAccessSchool(schoolId)) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
       const { data, error } = await supabaseDb.rpc('school_admin_class_students', {
         p_school_id: schoolId,
         p_class_label: classLabel
@@ -5644,14 +5657,22 @@ async function handleSchoolAdminOverview(req, res) {
       return
     }
     if (schoolId) {
+      if (!canAccessSchool(schoolId)) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
       const { data, error } = await supabaseDb.rpc('school_admin_classes', { p_school_id: schoolId })
       if (error) throw error
       res.status(200).json({ classes: data || [] })
       return
     }
+    // 學校清單：admin 看全部；school_admin 只看自己管的
     const { data, error } = await supabaseDb.rpc('school_admin_schools')
     if (error) throw error
-    res.status(200).json({ schools: data || [] })
+    const schools = isAdminUser
+      ? data || []
+      : (data || []).filter((s) => adminSchoolIds.includes(s.school_id))
+    res.status(200).json({ schools })
   } catch (error) {
     console.error('[school-admin-overview] error:', error)
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' })
