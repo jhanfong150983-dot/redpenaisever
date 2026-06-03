@@ -1347,6 +1347,9 @@ function canonicalOptionIndex(raw) {
   let s = ensureString(raw, '').trim()
   const paren = s.match(/^[(（]\s*(.)\s*[)）]$/u)
   if (paren) s = paren[1]
+  // 剝除選項代號常見的標點/分隔殘跡：「B.」→B、「A、」→A、「C，」→C、半殘括號「B)」→B、全形句點「Ａ．」
+  // （學生常在選項代號後留下印刷的「.」「、」痕跡；不剝掉會讓長度!=1、整題退回 accessor 又誤判錯）
+  s = s.replace(/[.。．、,，:：;；)）(（\s]/gu, '')
   if ([...s].length !== 1) return null
   if (/[A-Za-z]/.test(s)) return s.toUpperCase().charCodeAt(0) - 64  // A=1..Z=26
   const ci = '甲乙丙丁戊己庚辛壬癸'.indexOf(s); if (ci >= 0) return ci + 1
