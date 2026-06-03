@@ -5592,6 +5592,72 @@ async function handleStudentsBatchUpsert(req, res) {
   }
 }
 
+// 學校管理層（教務主任）檢視頁：歸戶後的學生總覽 + 跨科檔案。
+// 目前以 admin role 控管（onboard 由 super-admin 檢視）；未來可放寬給 school_admin。
+// 走 service role 繞 RLS 讀 school_person 系列表（client 無法直連）。
+// 查詢分支：無參數=學校清單 / schoolId=班級清單 / schoolId+classLabel=班級學生 / personId=該生跨科檔案
+async function handleSchoolAdminOverview(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  const { data: profile } = await supabaseDb
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .maybeSingle()
+  if (profile?.role !== 'admin') {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  try {
+    const schoolId = typeof req.query.schoolId === 'string' ? req.query.schoolId : ''
+    const classLabel = typeof req.query.classLabel === 'string' ? req.query.classLabel : ''
+    const personId = typeof req.query.personId === 'string' ? req.query.personId : ''
+
+    if (personId) {
+      const [personResult, recordsResult] = await Promise.all([
+        supabaseDb
+          .from('school_person')
+          .select('id, name, student_number, provider_student_id, email')
+          .eq('id', personId)
+          .maybeSingle(),
+        supabaseDb.rpc('school_admin_person_records', { p_person_id: personId })
+      ])
+      if (recordsResult.error) throw recordsResult.error
+      res.status(200).json({ person: personResult.data || null, records: recordsResult.data || [] })
+      return
+    }
+    if (schoolId && classLabel) {
+      const { data, error } = await supabaseDb.rpc('school_admin_class_students', {
+        p_school_id: schoolId,
+        p_class_label: classLabel
+      })
+      if (error) throw error
+      res.status(200).json({ students: data || [] })
+      return
+    }
+    if (schoolId) {
+      const { data, error } = await supabaseDb.rpc('school_admin_classes', { p_school_id: schoolId })
+      if (error) throw error
+      res.status(200).json({ classes: data || [] })
+      return
+    }
+    const { data, error } = await supabaseDb.rpc('school_admin_schools')
+    if (error) throw error
+    res.status(200).json({ schools: data || [] })
+  } catch (error) {
+    console.error('[school-admin-overview] error:', error)
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' })
+  }
+}
+
 async function handleStudentOverview(req, res) {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -7957,6 +8023,10 @@ export default async function handler(req, res) {
   }
   if (action === 'student-overview') {
     await handleStudentOverview(req, res)
+    return
+  }
+  if (action === 'school-admin-overview') {
+    await handleSchoolAdminOverview(req, res)
     return
   }
   if (action === 'student-submission') {
