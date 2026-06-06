@@ -12,6 +12,7 @@ import { getEnvValue } from '../../server/_env.js'
 import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
+import { localizeBookletQuestions } from '../../server/ai/booklet-locate.js'
 import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import { trackingContext } from '../../server/ink-usage-tracker.js'
@@ -21,6 +22,60 @@ import {
   fetchCampus1Courses,
   fetchCampus1CourseStudents
 } from '../../server/_1campus.js'
+
+// 題本題目定位：lazy 算 + 快取在 answer_key_templates.booklet_question_locations（template 層、跨端共用）。
+// 回傳 { [internalId]: { page, seen } }（純 page、無 bbox）。模型走計費 pipeline（routeKey=grading.classify→3.5/MODEL_PRO，
+// detection 必須 3.5、2.5 子題群會翻車）。一次性、之後老師/學校端/家長端報告都重用此快取。
+// 設計/驗證見 server/ai/booklet-locate.js 與 scripts/exp-booklet-pageonly.mjs。
+async function getOrComputeBookletLocations({ supabaseDb, templateId, answerKeyQuestions, bookletImages, apiKey, runTracked, logPrefix }) {
+  // 1. 快取
+  if (templateId) {
+    try {
+      const { data: tpl } = await supabaseDb
+        .from('answer_key_templates')
+        .select('booklet_question_locations')
+        .eq('id', templateId)
+        .maybeSingle()
+      const cached = tpl?.booklet_question_locations
+      if (cached?.locations && Object.keys(cached.locations).length > 0) {
+        return { locations: cached.locations, source: 'cache' }
+      }
+    } catch (e) {
+      console.warn(`${logPrefix} booklet locations cache read failed (non-fatal):`, e?.message)
+    }
+  }
+  // 2. 計算（每頁一次 PRO call、走計費 pipeline）
+  const callModel = async ({ prompt, imageBase64, mimeType }) => {
+    const r = await runTracked(() => runAiPipeline({
+      apiKey,
+      model: MODEL_PRO,
+      contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { data: imageBase64, mimeType } }] }],
+      requestedRouteKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+      routeHint: { source: 'data' },
+      payload: { generationConfig: { temperature: 0.2 } }
+    }))
+    if (Number(r?.status) < 200 || Number(r?.status) >= 300) return null
+    let t = (r.data?.candidates?.[0]?.content?.parts?.[0]?.text || '').replace(/```(?:json)?/gi, '').trim()
+    const s = t.indexOf('{'), e = t.lastIndexOf('}')
+    if (s >= 0 && e > s) t = t.slice(s, e + 1)
+    try { return JSON.parse(t) } catch { return null }
+  }
+  const { locations, missing, meta } = await localizeBookletQuestions({
+    bookletImages, answerKeyQuestions, callModel, log: (m) => console.log(`${logPrefix} ${m}`)
+  })
+  // 3. 寫快取（只在有結果時）
+  if (templateId && Object.keys(locations).length > 0) {
+    try {
+      await supabaseDb
+        .from('answer_key_templates')
+        .update({ booklet_question_locations: { locations, missing, meta, computed_at: new Date().toISOString() } })
+        .eq('id', templateId)
+    } catch (e) {
+      console.warn(`${logPrefix} booklet locations cache write failed (non-fatal):`, e?.message)
+    }
+  }
+  return { locations, source: 'computed' }
+}
 
 const TAG_QUIET_MINUTES = 5
 const DEFAULT_CORRECTION_ATTEMPT_LIMIT = 3
@@ -8612,7 +8667,12 @@ async function handleRefreshAssignmentSummary(req, res) {
     // 建立題號 → 頁碼對照表（讓 AI 知道哪些題目在哪張圖上）
     const questionIds = Object.keys(questionInfoById)
     let imageGuide = ''
-    if (answerSheetImages.length > 0) {
+    if (assignment?.answer_sheet_mode === 'answer_only') {
+      // answer_only：id 第一段是「答案卡照片編號」不是題本頁碼，舊的「前綴1-→第1張圖」對題本是錯的
+      // （會害 AI 跨頁把題號對錯，例：1-2-14 被當成標點題 1-2-5）。一律改中性指引、不假設某題在第幾張圖。
+      // 真正的精準定位由下方「題本題目截圖（已標題號）」提供；無截圖時也只依印刷題號對應、不猜頁。
+      imageGuide = `\n📷 附圖說明：附圖為此份作業的「題目內容」。\n  - 內部題號最後一段＝該題的印刷題號（例「1-2-14」＝大題二的印刷第 14 題；「1-3-2-3」＝大題三第(二)篇的印刷第 3 題）。\n  - 請務必依「印刷題號」找到對應題目再分析迷思；**切勿假設某題固定在第幾張圖**。\n  - 若附有「已標注題號的題目截圖」，請只依該截圖標注的題號對應其內容。\n`
+    } else if (answerSheetImages.length > 0) {
       if (answerSheetImages.length === 1) {
         imageGuide = `\n📷 附圖說明：附上 1 張作業原卷圖片，所有題目都在這張圖上。請參考圖片中的題目內容（題幹、選項等）來撰寫更具體的錯誤描述。\n`
       } else {
@@ -8697,6 +8757,52 @@ ${studentLines || '（無錯誤）'}
       console.warn(`${logPrefix} ink balance check failed (non-fatal):`, e?.message)
     }
 
+    // 3c. answer_only：用題本定位（id→頁）只附「常錯題所在的正確整頁」+ 正確 id→頁 指引，
+    //     取代「整本題本丟圖 + 亂猜頁碼」，避免 AI 跨頁把題號對錯。只處理 TOP3 最多人錯（≥2 人）的題。
+    //     任何失敗自動 fallback 回整本題本（見下方 summaryParts）。
+    let bookletPageParts = []  // 預先組好的 multimodal parts（指引文字 + 該頁圖）
+    try {
+      if (assignment?.answer_sheet_mode === 'answer_only' && answerSheetImages.length > 0 && studentErrors.length > 0) {
+        const errCount = new Map()
+        for (const s of studentErrors) for (const e of s.errors) errCount.set(e.questionId, (errCount.get(e.questionId) || 0) + 1)
+        const top3 = [...errCount.entries()].filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id]) => id)
+        if (top3.length > 0) {
+          const akQuestions = (() => {
+            try { const ak = typeof assignment.answer_key === 'string' ? JSON.parse(assignment.answer_key) : assignment.answer_key; return ak?.questions || [] } catch { return [] }
+          })()
+          const runTracked = (fn) => trackingContext.run(
+            { supabaseAdmin: supabaseDb, actorUserId: user.id, billingUserId: user.id, isAdmin: isAdminUser, inkSessionId: null, assignmentId, submissionId: null },
+            fn
+          )
+          const { locations, source } = await getOrComputeBookletLocations({
+            supabaseDb, templateId: assignment.answer_key_template_id, answerKeyQuestions: akQuestions,
+            bookletImages: answerSheetImages, apiKey, runTracked, logPrefix
+          })
+          // TOP3 中有定位到頁的 → 收集 (id, page)
+          const placed = top3
+            .map(id => ({ id, page: locations?.[id]?.page }))
+            .filter(x => typeof x.page === 'number' && answerSheetImages[x.page])
+          if (placed.length > 0) {
+            const printedOf = (id) => {
+              const seg = String(id).split('-')
+              return seg.length >= 4 ? `大題${seg[1]}第(${seg[2]})篇印刷第${seg[3]}題` : `大題${seg[1]}印刷第${seg[2]}題`
+            }
+            const guideLines = placed.map(x => `  - 題號 ${x.id}（${printedOf(x.id)}）→ 在下方第 ${x.page + 1} 頁`).join('\n')
+            const pages = [...new Set(placed.map(x => x.page))].sort((a, b) => a - b)
+            bookletPageParts.push({ text: `📷 以下附上題本中「含常錯題」的頁面（非整本）。題號 → 頁 對應如下，請務必依此對應、在指定頁面用印刷題號找到該題再分析迷思：\n${guideLines}` })
+            for (const p of pages) {
+              bookletPageParts.push({ text: `--- 題本第 ${p + 1} 頁 ---` })
+              bookletPageParts.push({ inlineData: answerSheetImages[p] })
+            }
+            console.log(`${logPrefix} booklet pages attached: pages=[${pages.map(p => p + 1).join(',')}] for top3=[${top3.join(',')}] (locations=${source})`)
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`${logPrefix} booklet page attach failed (non-fatal, fallback to whole booklet):`, e?.message)
+      bookletPageParts = []
+    }
+
     // 2026-05-21: model 由 model-config.js 統一管理（report 走 REPORT_TEACHER_SUMMARY → FLASH）
     // orchestrator 內 executeSinglePipelineCall 會依 routeKey 再查一次、這裡只是 label
     const { MODEL_FLASH } = await import('../../server/ai/model-config.js')
@@ -8704,9 +8810,15 @@ ${studentLines || '（無錯誤）'}
     const SUMMARY_TIMEOUT_MS = 120_000
     // 組合 multimodal parts：圖片（若有）+ 文字 prompt
     const summaryParts = []
-    for (let i = 0; i < answerSheetImages.length; i++) {
-      summaryParts.push({ text: `--- 作業原卷第 ${i + 1} 頁 ---` })
-      summaryParts.push({ inlineData: answerSheetImages[i] })
+    if (bookletPageParts.length > 0) {
+      // 精準模式：只附「常錯題所在的正確整頁」+ id→頁 指引，AI 不會跨頁對錯題號
+      summaryParts.push(...bookletPageParts)
+    } else {
+      // fallback：無定位/非 answer_only → 維持原本整本題本丟圖
+      for (let i = 0; i < answerSheetImages.length; i++) {
+        summaryParts.push({ text: `--- 作業原卷第 ${i + 1} 頁 ---` })
+        summaryParts.push({ inlineData: answerSheetImages[i] })
+      }
     }
     summaryParts.push({ text: prompt })
 
