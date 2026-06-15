@@ -3980,6 +3980,7 @@ async function handleSync(req, res) {
           id: row.id,
           name: row.name,
           folder: row.folder ?? undefined,
+          school_id: row.school_id ?? undefined,
           grade: row.grade ?? undefined,
           updatedAt: toMillis(row.updated_at) ?? undefined
         })
@@ -7443,6 +7444,17 @@ async function handleCampus1ClassroomSync(req, res) {
   const results = []
   const nowIso = new Date().toISOString()
 
+  // classrooms.school_id 有 FK → schools(id)，設 school_id 前需先確保該 dsns 的 schools 列存在。
+  // 目前無友善校名來源（1Campus API 不回校名、schools 表幾乎空），先用 dsns 當 id/name；
+  // ignoreDuplicates：已存在就不覆蓋（日後在 schools 補正式名稱不會被同步洗掉）。
+  const schoolId = dsns
+  await supabaseAdmin
+    .from('schools')
+    .upsert(
+      { id: schoolId, name: dsns, provider: 'campus1', provider_dsns: dsns },
+      { onConflict: 'id', ignoreDuplicates: true }
+    )
+
   for (const cls of groupedClasses) {
     const providerClassId = cls.courseID
     const className = cls.className
@@ -7467,7 +7479,7 @@ async function handleCampus1ClassroomSync(req, res) {
         classroomId = syncRecord.classroom_id
         await supabaseAdmin
           .from('classrooms')
-          .update({ name: className, ...(gradeValue != null ? { grade: gradeValue } : {}) })
+          .update({ name: className, folder: dsns, school_id: schoolId, ...(gradeValue != null ? { grade: gradeValue } : {}) })
           .eq('id', classroomId)
           .eq('owner_id', user.id)
       } else {
@@ -7476,7 +7488,7 @@ async function handleCampus1ClassroomSync(req, res) {
         const { data: newClassroom, error: classroomError } =
           await supabaseAdmin
             .from('classrooms')
-            .insert({ id: generatedId, owner_id: user.id, name: className, folder: '1Campus', ...(gradeValue != null ? { grade: gradeValue } : {}) })
+            .insert({ id: generatedId, owner_id: user.id, name: className, folder: dsns, school_id: schoolId, ...(gradeValue != null ? { grade: gradeValue } : {}) })
             .select('id')
             .single()
 
