@@ -338,12 +338,41 @@ async function handlePhase1(req, res) {
         }
       }
 
+      // 備援（老師）：同一位老師可能從不同學校(dsns)或大小寫不同的 account 登入，
+      // virtualEmail 內含 dsns 故跨校永遠不相等。以 provider_account（不分大小寫）找既有身分，
+      // 把這次的新學校身分掛到同一個既有帳號，避免替同一人重複建立 profile / auth user。
+      // 僅在 account 為 email 形態時啟用（目前所有老師 account 皆為 email）；
+      // 非 email 形態則不跨 dsns 合併、維持原本 per-dsns 行為，避免誤併不同人。
+      let existingTeacherUserId = null
+      if (!existingProfile && !isStudent && account.includes('@')) {
+        const { data: candidateIdentities } = await supabaseAdmin
+          .from('external_identities')
+          .select('user_id, provider_account')
+          .eq('provider', 'campus1')
+          .ilike('provider_account', account)
+          .limit(5)
+        // ilike 只當粗篩（不分大小寫）；用 JS 做權威的 lower()===lower() 精確比對，
+        // 避免 ilike 把 email 內的 _ / % 當萬用字元而誤判。
+        const matched = (candidateIdentities || []).find(
+          (c) => String(c.provider_account || '').toLowerCase() === account.toLowerCase()
+        )
+        if (matched?.user_id) {
+          existingTeacherUserId = matched.user_id
+          console.log('[1campus Phase1] teacher matched existing user by account (cross-dsns):', account, '→', existingTeacherUserId)
+        }
+      }
+
       if (existingProfile) {
         userId = existingProfile.id
         console.log('[1campus Phase1] path=existing_profile userId:', userId)
       } else if (existingStudentUserId) {
         userId = existingStudentUserId
         console.log('[1campus Phase1] path=existing_student_user userId:', userId)
+      } else if (existingTeacherUserId) {
+        // 同一位老師的新學校身分：沿用既有帳號，下方只會 insert 一列新的
+        // external_identity（新 account/dsns）指向同一 user_id，不新建 profile / auth user。
+        userId = existingTeacherUserId
+        console.log('[1campus Phase1] path=existing_teacher_user userId:', userId)
       } else {
         const { data: newUserData, error: createError } =
           await supabaseAdmin.auth.admin.createUser({
