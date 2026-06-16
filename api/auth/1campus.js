@@ -256,12 +256,16 @@ async function handlePhase1(req, res) {
 
   let userId
   try {
+    // 完全中學：同一 account 可能跨多個 dsns（高中部 / 國中部），各自一列、各保 teacherID。
+    // 必須帶 provider_dsns 一起比對，否則 (a) 多列時 .maybeSingle() 會出錯、
+    // (b) 找到他部的列而誤把本次登入的 teacherID/dsns 覆寫上去。
     const { data: existingIdentity, error: identityError } =
       await supabaseAdmin
         .from('external_identities')
         .select('user_id, provider_meta')
         .eq('provider', 'campus1')
         .eq('provider_account', account)
+        .eq('provider_dsns', dsns)
         .maybeSingle()
 
     if (identityError) throw new Error('查詢身份記錄失敗')
@@ -282,6 +286,7 @@ async function handlePhase1(req, res) {
         .update({ provider_meta: updatedMeta, updated_at: nowIso })
         .eq('provider', 'campus1')
         .eq('provider_account', account)
+        .eq('provider_dsns', dsns)
 
       // 補建遺失的 profile（profile 可能被手動刪除或當初建立失敗）
       const { data: existingProfileCheck } = await supabaseAdmin
