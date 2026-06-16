@@ -7305,17 +7305,32 @@ async function handleCampus1ClassroomSync(req, res) {
 
   const supabaseAdmin = getSupabaseAdmin()
 
-  // 確認此帳號確實有 1Campus 身份
-  const { data: identity, error: identityError } = await supabaseAdmin
+  // 確認此帳號確實有 1Campus 身份。
+  // 老師可能任教多校 → 多列 campus1 身份，不可用 .maybeSingle()（多列會回 error+null → 誤判沒身分而 403）。
+  // 取全部後挑出與本次請求 dsns 相符的那一筆，用該校自己的 teacherID / account 同步。
+  const { data: identities, error: identityError } = await supabaseAdmin
     .from('external_identities')
-    .select('provider_meta, provider_account')
+    .select('provider_meta, provider_account, provider_dsns')
     .eq('user_id', user.id)
     .eq('provider', 'campus1')
-    .maybeSingle()
 
-  if (identityError || !identity) {
+  if (identityError || !Array.isArray(identities) || identities.length === 0) {
     console.warn('[1campus sync] 找不到 external_identities userId=', user.id, 'error=', identityError?.message)
     res.status(403).json({ error: '此帳號沒有 1Campus 身份' })
+    return
+  }
+
+  const dsnsLowerForMatch = dsns.toLowerCase()
+  const identity =
+    identities.find(
+      (row) => String(row.provider_dsns || '').trim().toLowerCase() === dsnsLowerForMatch
+    ) ||
+    // 舊資料可能未寫 provider_dsns；僅在單一身分時退回使用它，避免多校誤用他校身分
+    (identities.length === 1 ? identities[0] : null)
+
+  if (!identity) {
+    console.warn('[1campus sync] dsns 與綁定身分不符 userId=', user.id, 'dsns=', dsns, 'identities=', identities.length)
+    res.status(403).json({ error: '此帳號沒有對應該學校的 1Campus 身份' })
     return
   }
 
