@@ -507,24 +507,32 @@ export default async function handler(req, res) {
           : profileRole
 
     let campus1Binding = null
+    let campus1Bindings = []
     let campus1BindingError = null
     try {
       const supabaseDb = getSupabaseAdmin()
-      const { data: campus1Data } = await supabaseDb
+      // 一位老師可能任教多校 → 多列 campus1 external_identities。
+      // 不可用 .maybeSingle()：多列時它會回 error + data=null，導致整個綁定消失
+      // （偏好設定的「1Campus 同步」按鈕跟著不見）。改取全部後組成清單。
+      const { data: campus1Rows, error: campus1Err } = await supabaseDb
         .from('external_identities')
         .select('provider_account, provider_dsns, provider_meta')
         .eq('user_id', user.id)
         .eq('provider', 'campus1')
-        .maybeSingle()
+        .order('provider_dsns', { ascending: true })
 
-      if (campus1Data) {
-        campus1Binding = {
-          account: campus1Data.provider_account,
-          dsns: campus1Data.provider_dsns,
-          displayName: campus1Data.provider_meta?.displayName || '',
-          roleType: campus1Data.provider_meta?.roleType || ''
-        }
-      }
+      if (campus1Err) throw campus1Err
+
+      campus1Bindings = (campus1Rows || [])
+        .filter((r) => r && r.provider_dsns)
+        .map((r) => ({
+          account: r.provider_account,
+          dsns: r.provider_dsns,
+          displayName: r.provider_meta?.displayName || '',
+          roleType: r.provider_meta?.roleType || ''
+        }))
+      // 向後相容：campus1Binding 仍回單一（第一個）綁定，供舊有 UI（綁定徽章 / OAuth 重試 / 自動同步單校路徑）使用
+      campus1Binding = campus1Bindings[0] || null
     } catch (err) {
       campus1BindingError = err?.message || 'unknown error'
       console.warn('[AUTH-ME] campus1 binding query failed:', campus1BindingError)
@@ -571,6 +579,7 @@ export default async function handler(req, res) {
         student: studentContext ?? undefined,
         students: studentContexts.length ? studentContexts : undefined,
         campus1Binding: campus1Binding ?? undefined,
+        campus1Bindings: campus1Bindings.length ? campus1Bindings : undefined,
         schoolAdmin: schoolAdmin ?? undefined,
         studentLookupStatus: studentContexts.length > 0
           ? 'ok'
@@ -585,6 +594,7 @@ export default async function handler(req, res) {
         hasStudentContext: !!studentContext,
         dataSource: profileLoaded ? 'database' : 'oauth_metadata',
         campus1BindingFound: campus1Binding !== null,
+        campus1BindingCount: campus1Bindings.length,
         campus1BindingError,
         timestamp: Date.now() // 加入時間戳，幫助除錯
       }
