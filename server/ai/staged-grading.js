@@ -7046,12 +7046,20 @@ export async function runStagedGradingPhaseA({
     const inlineImage = inlineImages[0]
     const cropResults = await Promise.all(
       focusedCheckboxCandidates.map(async (q) => {
+        // 2026-06-17：focused checkbox 裁切的「垂直」pad 收緊到列高的一小部分。
+        // 密集清單（列距 ≈ 格高，如 House for Rent 的 Yes/No 表）若用固定 dynamicPad，
+        // 會把上下鄰列一起裁進來 → 一張圖含多列打勾 → focused read 無法判斷打勾在哪一列
+        // （盲讀 AI1 + thinking MINIMAL 最常 unreadable/誤判 → 與 AI2 不一致 → 整段送審）。
+        // pad 收緊成「對稱小邊距」(隨格高縮放)。bbox 本身已涵蓋 Yes/No 兩欄，不需額外橫向擴張；
+        // 橫向擴張反而會把鄰欄/題幹拉進來、讓「第幾個框」位移誤判。
+        // 實驗(student1 I 表)：對稱 pad 0.0075→誤判、0.0035→誤判、≤0.002→穩定讀對。
+        const checkboxPad = Math.min(dynamicPad, (q.answerBbox?.h || dynamicPad) * 0.25)
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
           q.answerBbox,
           true,
-          dynamicPad
+          checkboxPad
         )
         return { questionId: q.questionId, cropData }
       })
@@ -7487,7 +7495,11 @@ export async function runStagedGradingPhaseA({
         const focusedPrompt = buildFocusedCheckboxReadPrompt(questionId, questionType)
         const focusedResponse = await executeStage({
           apiKey,
-          model: readModel,
+          // 2026-06-17：focused checkbox read 改用 MODEL_PRO（3.5-flash）。
+          // 「判斷小小的 Yes/No 打勾在哪一欄」是視覺辨識題，MODEL_FLASH（2.5-flash）做不穩——
+          // 同一張裁切 2.5-flash 讀錯欄(「2」)或無法辨識、3.5-flash 4/4 全對（student1 I 表實證）。
+          // 盲讀 AI1 用弱 model 最常中 → 與知道答案的 AI2 不一致 → 整段送審。
+          model: MODEL_PRO,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
