@@ -20,7 +20,8 @@ import {
   isValidDsns,
   getJasmineAccessToken,
   fetchCampus1Courses,
-  fetchCampus1CourseStudents
+  fetchCampus1CourseStudents,
+  fetchCampus1Schools
 } from '../../server/_1campus.js'
 
 // 題本題目定位：lazy 算 + 快取在 answer_key_templates.booklet_question_locations（template 層、跨端共用）。
@@ -7459,15 +7460,39 @@ async function handleCampus1ClassroomSync(req, res) {
   const results = []
   const nowIso = new Date().toISOString()
 
-  // classrooms.school_id 有 FK → schools(id)，設 school_id 前需先確保該 dsns 的 schools 列存在。
-  // 目前無友善校名來源（1Campus API 不回校名、schools 表幾乎空），先用 dsns 當 id/name；
-  // ignoreDuplicates：已存在就不覆蓋（日後在 schools 補正式名稱不會被同步洗掉）。
+  // 取得學校資料（schoolType 學制 + 正式校名）。getSchool 回傳本 app 被授權的所有學校，
+  // 依本次 dsns 比對挑出該校。失敗不阻斷同步（學制/校名退回保守值）。
+  let schoolType = ''
+  let schoolDisplayName = dsns
+  try {
+    const schools = await fetchCampus1Schools(accessToken)
+    const matched = (schools || []).find(
+      (s) => String(s?.schoolDsns || '').trim().toLowerCase() === dsns.toLowerCase()
+    )
+    if (matched) {
+      schoolType = String(matched.schoolType || '').trim()
+      schoolDisplayName =
+        String(matched.schoolName || matched.schoolOfficialName || '').trim() || dsns
+    }
+    console.log('[1campus sync] schoolType:', schoolType, 'name:', schoolDisplayName)
+  } catch (err) {
+    console.warn('[1campus sync] fetchCampus1Schools failed (non-blocking):', err?.message)
+  }
+
+  // 學制 → 年級起點偏移：高中 +9（高一=10）、國中 +6（國一=7）、國小 +0；未知則不換算（null，不設 grade）。
+  const gradeOffset =
+    schoolType.includes('高中') ? 9 :
+    schoolType.includes('國中') ? 6 :
+    schoolType.includes('國小') ? 0 : null
+
+  // classrooms.school_id 有 FK → schools(id)。upsert schools 列（用真實校名 + 學制，每次同步刷新）。
   const schoolId = dsns
+  const folderName = schoolDisplayName // 班級資料夾顯示名（真實校名；無則退回 dsns）
   await supabaseAdmin
     .from('schools')
     .upsert(
-      { id: schoolId, name: dsns, provider: 'campus1', provider_dsns: dsns },
-      { onConflict: 'id', ignoreDuplicates: true }
+      { id: schoolId, name: schoolDisplayName, provider: 'campus1', provider_dsns: dsns, school_type: schoolType || null },
+      { onConflict: 'id' }
     )
 
   for (const cls of groupedClasses) {
@@ -7488,29 +7513,60 @@ async function handleCampus1ClassroomSync(req, res) {
       let classroomId
 
       const gradeNum = cls.gradeYear != null ? parseInt(String(cls.gradeYear), 10) : null
-      const gradeValue = gradeNum != null && !isNaN(gradeNum) ? gradeNum : null
+      const gradeYearRaw = gradeNum != null && !isNaN(gradeNum) ? gradeNum : null
+      // 依學制換算絕對年級（高中高一=10…）；學制未知（gradeOffset=null）則不設 grade，避免誤標國小
+      const gradeValue =
+        gradeYearRaw != null && gradeOffset != null ? gradeYearRaw + gradeOffset : null
 
       if (syncRecord?.classroom_id) {
         classroomId = syncRecord.classroom_id
-        await supabaseAdmin
-          .from('classrooms')
-          .update({ name: className, folder: dsns, school_id: schoolId, ...(gradeValue != null ? { grade: gradeValue } : {}) })
-          .eq('id', classroomId)
-          .eq('owner_id', user.id)
       } else {
-        // 生成與前端相同格式的 ID（timestamp-random）
-        const generatedId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
-        const { data: newClassroom, error: classroomError } =
-          await supabaseAdmin
-            .from('classrooms')
-            .insert({ id: generatedId, owner_id: user.id, name: className, folder: dsns, school_id: schoolId, ...(gradeValue != null ? { grade: gradeValue } : {}) })
-            .select('id')
-            .single()
+        // 防併發重複：先以唯一鍵「搶」同步記錄（已存在則不覆蓋），再回讀取得權威 classroom_id。
+        // 兩次併發同步搶同一鍵只會成立一筆，雙方都拿到同一個 classroom_id → 不會重複建班。
+        const candidateId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+        await supabaseAdmin
+          .from('campus_classroom_sync')
+          .upsert(
+            {
+              owner_id: user.id,
+              provider: 'campus1',
+              provider_dsns: dsns,
+              provider_class_id: providerClassId,
+              classroom_id: candidateId,
+              provider_class_name: className,
+              sync_status: 'pending'
+            },
+            { onConflict: 'owner_id,provider,provider_dsns,provider_class_id', ignoreDuplicates: true }
+          )
+        const { data: claimed } = await supabaseAdmin
+          .from('campus_classroom_sync')
+          .select('classroom_id')
+          .eq('owner_id', user.id)
+          .eq('provider', 'campus1')
+          .eq('provider_dsns', dsns)
+          .eq('provider_class_id', providerClassId)
+          .maybeSingle()
+        classroomId = claimed?.classroom_id || candidateId
+      }
 
+      // classroom 以 id upsert（冪等）：存在則更新、不存在則建立；兩次併發同 id 不會重複建班。
+      {
+        const { error: classroomError } = await supabaseAdmin
+          .from('classrooms')
+          .upsert(
+            {
+              id: classroomId,
+              owner_id: user.id,
+              name: className,
+              folder: folderName,
+              school_id: schoolId,
+              ...(gradeValue != null ? { grade: gradeValue } : {})
+            },
+            { onConflict: 'id' }
+          )
         if (classroomError) {
-          throw new Error(`建立班級失敗: ${classroomError.message}`)
+          throw new Error(`建立/更新班級失敗: ${classroomError.message}`)
         }
-        classroomId = newClassroom.id
       }
 
       // 轉換學生格式（getCourseStudent 回傳 seatNo, studentName, studentNumber, studentAcc, email）
@@ -7617,30 +7673,22 @@ async function handleCampus1ClassroomSync(req, res) {
         }
       }
 
-      // 更新/建立同步記錄
-      const syncPayload = {
-        classroom_id: classroomId,
-        sync_status: 'success',
-        last_sync_at: nowIso,
-        provider_class_name: className,
-        last_student_count: studentCount,
-        updated_at: nowIso
-      }
-
-      if (syncRecord) {
-        await supabaseAdmin
-          .from('campus_classroom_sync')
-          .update(syncPayload)
-          .eq('id', syncRecord.id)
-      } else {
-        await supabaseAdmin.from('campus_classroom_sync').insert({
+      // 更新同步記錄（按自然鍵 upsert，搭配唯一鍵冪等、防併發）
+      await supabaseAdmin.from('campus_classroom_sync').upsert(
+        {
           owner_id: user.id,
           provider: 'campus1',
           provider_dsns: dsns,
           provider_class_id: providerClassId,
-          ...syncPayload
-        })
-      }
+          classroom_id: classroomId,
+          sync_status: 'success',
+          last_sync_at: nowIso,
+          provider_class_name: className,
+          last_student_count: studentCount,
+          updated_at: nowIso
+        },
+        { onConflict: 'owner_id,provider,provider_dsns,provider_class_id' }
+      )
 
       results.push({
         classID: providerClassId,
@@ -7653,31 +7701,19 @@ async function handleCampus1ClassroomSync(req, res) {
       const errMessage = err instanceof Error ? err.message : String(err)
 
       try {
-        const { data: existingSyncRecord } = await supabaseAdmin
-          .from('campus_classroom_sync')
-          .select('id')
-          .eq('owner_id', user.id)
-          .eq('provider', 'campus1')
-          .eq('provider_dsns', dsns)
-          .eq('provider_class_id', providerClassId)
-          .maybeSingle()
-
-        if (existingSyncRecord) {
-          await supabaseAdmin
-            .from('campus_classroom_sync')
-            .update({ sync_status: 'error', last_error: errMessage, updated_at: nowIso })
-            .eq('id', existingSyncRecord.id)
-        } else {
-          await supabaseAdmin.from('campus_classroom_sync').insert({
+        await supabaseAdmin.from('campus_classroom_sync').upsert(
+          {
             owner_id: user.id,
             provider: 'campus1',
             provider_dsns: dsns,
             provider_class_id: providerClassId,
             provider_class_name: className,
             sync_status: 'error',
-            last_error: errMessage
-          })
-        }
+            last_error: errMessage,
+            updated_at: nowIso
+          },
+          { onConflict: 'owner_id,provider,provider_dsns,provider_class_id' }
+        )
       } catch {
         // 記錄更新失敗不影響主流程
       }

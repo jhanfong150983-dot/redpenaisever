@@ -366,3 +366,25 @@ export async function fetchCampus1CourseStudents(dsns, teacherID, accessToken) {
   const courses = json?.course ?? json?.data?.course ?? []
   return Array.isArray(courses) ? courses : []
 }
+
+/**
+ * 取得本 app 被授權的所有學校資料（含 schoolType 學制 / 正式校名）。
+ * 端點為 /api/jasmine/getSchool（dsns 不在路徑、回全部授權學校）。
+ * @param {string} accessToken - Jasmine access token
+ * @returns {Promise<Array>} school 陣列，每筆含 { schoolDsns, schoolType, schoolName, schoolOfficialName, ... }
+ */
+export async function fetchCampus1Schools(accessToken) {
+  const base = getJasmineApiBase()
+  const url = `${base}/getSchool`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  })
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`Jasmine getSchool failed ${response.status}: ${text.slice(0, 200)}`)
+  }
+  const json = await response.json()
+  const schools = json?.school ?? json?.data?.school ?? []
+  return Array.isArray(schools) ? schools : []
+}
