@@ -7485,15 +7485,34 @@ async function handleCampus1ClassroomSync(req, res) {
     schoolType.includes('國中') ? 6 :
     schoolType.includes('國小') ? 0 : null
 
-  // classrooms.school_id 有 FK → schools(id)。upsert schools 列（用真實校名 + 學制，每次同步刷新）。
-  const schoolId = dsns
+  // classrooms.school_id 有 FK → schools(id)。先找該 dsns 對應的既有 schools 列
+  // （歸戶/學校端可能已建立，其 id 非 dsns，例如 sch_xxx）；用它的 id 當 school_id。
+  // ⚠️ 不可硬用 id=dsns upsert：對「已存在但 id≠dsns」的學校會建不出 id=dsns 的列 → classroom FK 失敗。
+  let schoolId = dsns
   const folderName = schoolDisplayName // 班級資料夾顯示名（真實校名；無則退回 dsns）
-  await supabaseAdmin
-    .from('schools')
-    .upsert(
-      { id: schoolId, name: schoolDisplayName, provider: 'campus1', provider_dsns: dsns, school_type: schoolType || null },
-      { onConflict: 'id' }
-    )
+  {
+    const { data: existingSchools } = await supabaseAdmin
+      .from('schools')
+      .select('id')
+      .eq('provider_dsns', dsns)
+      .limit(1)
+    if (existingSchools && existingSchools.length > 0) {
+      schoolId = existingSchools[0].id
+      await supabaseAdmin
+        .from('schools')
+        .update({ name: schoolDisplayName, school_type: schoolType || null, updated_at: nowIso })
+        .eq('id', schoolId)
+    } else {
+      schoolId = dsns
+      const { error: schoolErr } = await supabaseAdmin
+        .from('schools')
+        .upsert(
+          { id: dsns, name: schoolDisplayName, provider: 'campus1', provider_dsns: dsns, school_type: schoolType || null },
+          { onConflict: 'id' }
+        )
+      if (schoolErr) console.warn('[1campus sync] schools upsert failed:', schoolErr.message)
+    }
+  }
 
   for (const cls of groupedClasses) {
     const providerClassId = cls.courseID
