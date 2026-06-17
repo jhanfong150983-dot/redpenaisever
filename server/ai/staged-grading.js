@@ -778,10 +778,13 @@ const STEM_LABEL_NUMBER_MAP = {
 // - 去除 emoji、勾選符號、結尾方向箭頭、開頭選項前綴、外層括號
 // 正規化 true_false 答案（○/✗ 及其異體）
 function normalizeTrueFalseAnswer(raw) {
-  const s = String(raw ?? '').trim()
-  // 各種「正確」形式 → ○
-  if (/^[○〇OoTt]$/.test(s) || /^(?:對|是|正確|ｏ|O|yes|Yes|true|True|TRUE)$/u.test(s)) return '○'
-  // 各種「錯誤」形式 → ✗
+  // 先剝除標點/括號/空白殘跡：「X.」「(○)」「✗。」「x、」→ X / ○ / ✗，
+  // 避免單一符號因尾隨句點/括號等而比不出來（同 canonicalOptionIndex 的選項標點問題）。
+  // 有效形式皆為單一符號或無內部標點的詞（對/是/yes…），全域剝除不影響它們。
+  const s = String(raw ?? '').replace(/[.。．、,，:：;；()（）\s]/gu, '').trim()
+  // 各種「正確」形式 → ○（含英文字母 O/o、〇、T/t）
+  if (/^[○〇OoTt]$/.test(s) || /^(?:對|是|正確|ｏ|yes|Yes|true|True|TRUE)$/u.test(s)) return '○'
+  // 各種「錯誤」形式 → ✗（含英文字母 X/x、×、F/f、叉）
   if (/^[✗✘×XxFf叉]$/.test(s) || /^(?:錯|否|不對|不是|no|No|false|False|FALSE)$/u.test(s)) return '✗'
   return null  // 無法正規化
 }
