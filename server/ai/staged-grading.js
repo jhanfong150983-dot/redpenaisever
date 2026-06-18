@@ -4934,7 +4934,8 @@ export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gra
     // 標點符號檢查（老師選擇）
     if (englishRules?.punctuationCheck?.enabled) {
       const d = englishRules.punctuationCheck.deductionPerError || 1
-      rules.push(`PUNCTUATION CHECK (enabled): For fill_blank and short_answer, check sentence-ending punctuation (? . !) and apostrophes in contractions (e.g. don't, it's). Each missing or wrong punctuation = deduct ${d} point(s). Deduct until score reaches 0. errorType='spelling'.`)
+      rules.push(`PUNCTUATION CHECK (enabled): Applies ONLY to SENTENCE-level answers — correctAnswer has 3+ words (e.g. "Dad is cooking in the kitchen."). For such sentence answers, check sentence-ending punctuation (? . !) and apostrophes in contractions (e.g. don't, it's); each missing or wrong punctuation = deduct ${d} point(s) until score reaches 0. errorType='spelling'.
+🚫 DO NOT apply punctuation check to single-word / short-phrase answers — correctAnswer has 1-2 words (e.g. "lion", "polar bear", "twenty-four"). A trailing . ! ? on such a short answer (student "lion." vs correct "lion") is NOT an error; ignore it and do NOT deduct.`)
     }
     // 單字順序/缺漏檢查（老師選擇）
     if (englishRules?.wordOrderCheck?.enabled) {
@@ -4949,6 +4950,7 @@ Focus: does the student know the word?
 - SPACING ERROR — WRONG SPACE IN SINGLE WORD (correct letters but student inserted a space inside one word, e.g. "bath room" → "bathroom", "din ing" → "dining"): student does not know the word boundary → score = 0. This is NOT a minor error.
 - SPACING ERROR — MISSING SPACE IN TWO-WORD ANSWER (correct letters but student omitted the space between two words, e.g. "diningroom" → "dining room"): minor → deduct 1 point.
 - MISSPELLING (wrong/extra/missing letters, e.g. "writeing" → "writing", "kitchan" → "kitchen"): student cannot spell → score = 0.
+- TRAILING PUNCTUATION: a trailing sentence mark (. ! ?) is NOT part of a single-word answer — ignore it, never deduct (e.g. "lion." = "lion", "zebra." = "zebra").
 
 【SENTENCE MODE】(correctAnswer has 3+ words, e.g. "Dad is cooking in the kitchen."):
 Focus: can the student construct the sentence?
