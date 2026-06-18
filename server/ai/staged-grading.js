@@ -239,6 +239,44 @@ function normalizeShortAnswerQuestion(question, domainHint) {
   }
 }
 
+// table_check（表格勾選題）→ 正規化成 table_cell 內部結構，重用 table_cell 的 classify / read / accessor。
+// 每一計分列 → 1 個 cell（col=2 第一個勾選欄當位置錨點、answer = 正確被勾欄標題文字）；
+// 保留 _checkTable 旗標讓 read 階段改用「讀勾選欄」語意（而非讀格內手寫值）。
+// 範例列（e.g.）由 extract 階段排除、不進 rows，故此處 rows 即計分列。非破壞性：回傳新物件。
+function normalizeTableCheckQuestion(question) {
+  if (!question || typeof question !== 'object') return question
+  if (ensureString(question.questionCategory, '').trim() !== 'table_check') return question
+  const rows = Array.isArray(question.rows) ? question.rows : []
+  if (rows.length === 0) return question
+  const checkColumns = (Array.isArray(question.checkColumns) && question.checkColumns.length
+    ? question.checkColumns : ['Yes', 'No'])
+    .map((c) => ensureString(c, '').trim()).filter(Boolean)
+  if (checkColumns.length === 0) return question
+  const rowLabels = rows.map((r) => ensureString(r?.label, '').trim())
+  const tableMeta = {
+    rowHeaders: ['', ...rowLabels],
+    colHeaders: ['', ...checkColumns],
+    totalRows: rows.length + 1,
+    totalCols: checkColumns.length + 1
+  }
+  const cells = rows.map((r, i) => ({
+    row: i + 2,
+    col: 2, // 第一個勾選欄當位置錨點；實際 answer 是被勾欄標題、非格內值
+    label: ensureString(r?.label, '').trim(),
+    answer: ensureString(r?.answer, '').trim()
+  }))
+  const maxScore = toFiniteNumber(question.maxScore) ?? rows.length
+  return {
+    ...question,
+    questionCategory: 'table_cell',
+    _checkTable: true,
+    _checkColumns: checkColumns,
+    tableMeta,
+    cells,
+    maxScore
+  }
+}
+
 function normalizeAnswerKeyForRubricScoring(answerKey, domainHint) {
   if (!answerKey || typeof answerKey !== 'object') {
     return { answerKey, convertedShortAnswerIds: [] }
@@ -248,9 +286,10 @@ function normalizeAnswerKeyForRubricScoring(answerKey, domainHint) {
 
   const convertedShortAnswerIds = []
   const normalizedQuestions = questions.map((question) => {
-    const normalized = normalizeShortAnswerQuestion(question, domainHint)
+    const tableNormalized = normalizeTableCheckQuestion(question)
+    const normalized = normalizeShortAnswerQuestion(tableNormalized, domainHint)
     const isConverted =
-      normalized !== question &&
+      normalized !== tableNormalized &&
       ensureString(question?.questionCategory, '').trim() === 'short_answer'
     if (isConverted) {
       const questionId = ensureString(question?.id, '').trim()
@@ -3841,7 +3880,12 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
     const akQ = (Array.isArray(options?.answerKeyQuestions) ? options.answerKeyQuestions : [])
       .find((aq) => aq?.id === q.questionId)
     if (akQ?.tableMeta && Array.isArray(akQ?.cells)) {
-      tableCellMetaMap.set(q.questionId, { tableMeta: akQ.tableMeta, cells: akQ.cells })
+      tableCellMetaMap.set(q.questionId, {
+        tableMeta: akQ.tableMeta,
+        cells: akQ.cells,
+        checkTable: akQ._checkTable === true,
+        checkColumns: Array.isArray(akQ._checkColumns) ? akQ._checkColumns : null
+      })
     }
   }
 
@@ -4296,6 +4340,13 @@ TABLE-CELL (table_cell 題)：crop 是「整張表格」（含 header 列/欄 + 
 - 對每個 questionId，依下方 SPEC 找到該題對應的 tableMeta（rowHeaders / colHeaders / totalRows / totalCols）+ 要讀的 cells 清單。
 - 用印刷的列標題（rowHeaders）+ 欄標題（colHeaders）當錨點，視覺定位每個 cell 在 crop 的位置（cell.row × cell.col）。
 
+🚨 CHECK-TABLE（勾選表）特例：若該 questionId 的 SPEC 標記「【勾選表 CHECK-TABLE】」：
+- 這是「每列在多個勾選欄(如 Yes/No)中打一個 ✓」的矩陣表。crop 是整張勾選表。
+- 對每一列，判斷學生的 ✓ 打在哪一個勾選欄，cellValues 的 student 填**被打勾那一欄的欄標題文字**（如 "Yes" 或 "No"）。
+- 🚫 不是讀格內手寫文字、不是讀 Note 等非勾選欄的內容；那些一律忽略。
+- 該列完全沒有任何勾 → student=""；看不清楚哪一欄 → student="?"。col 一律填 2。
+- studentAnswerRaw 依列順序摘要，如「bedroom:Yes, dining room:Yes, ...」。
+
 🚨 PRINTED-TEMPLATE vs STUDENT-HANDWRITING（2026-05-22 critical rule）:
 某些 cell 內含**印刷的算式模板**（教科書印的、學生只填空格）。常見模板：
   - "(  )×(  )×3.14"   ← 印 ×3.14、學生填兩個括號裡的數字
@@ -4334,6 +4385,10 @@ ${tableCellIds.map((qid) => {
   const meta = tableCellMetaMap.get(qid)
   if (!meta) return `- questionId="${qid}": (no tableMeta available, skip cellValues)`
   const tm = meta.tableMeta
+  if (meta.checkTable) {
+    const rowsDesc = meta.cells.map((c) => `(r${c.row}${c.label ? `,${c.label}` : ''})`).join(' ')
+    return `- questionId="${qid}": 【勾選表 CHECK-TABLE】可勾選欄=${JSON.stringify(meta.checkColumns || [])}，對每列判斷 ✓ 打在哪一欄、student 填該欄標題；列: ${rowsDesc}`
+  }
   const cellsDesc = meta.cells.map((c) => `(r${c.row},c${c.col}${c.label ? `,${c.label}` : ''})`).join(' ')
   return `- questionId="${qid}": 表 ${tm.totalRows}×${tm.totalCols}, rowHeaders=${JSON.stringify(tm.rowHeaders || [])}, colHeaders=${JSON.stringify(tm.colHeaders || [])}, 要讀 cells: ${cellsDesc}`
 }).join('\n')}
@@ -9225,7 +9280,11 @@ export async function runStagedGradingPhaseB({
     // 2026-05-18: answerKey 用 assignments 的 live 版、不用 phase_a_state.answerKey 快取
     //   原 bug：老師改 assignment.answer_key 後按重新批改、accessor 仍用快取舊答案、分數不變
     //   修法：fromCache path 永遠抓 live；phase_a_state 只該快取 classify/read 結果（bbox/學生筆跡）、不該快取標準答案
-    const liveAnswerKey = cached.live_answer_key || cachedState.answerKey
+    const liveAnswerKeyRaw = cached.live_answer_key || cachedState.answerKey
+    // table_check → table_cell 正規化（fromCache/重新批改路徑不經 PhaseA funnel，需在此補做、否則 accessor 看到 table_check 會斷判分）
+    const liveAnswerKey = liveAnswerKeyRaw && Array.isArray(liveAnswerKeyRaw.questions)
+      ? { ...liveAnswerKeyRaw, questions: liveAnswerKeyRaw.questions.map(normalizeTableCheckQuestion) }
+      : liveAnswerKeyRaw
     if (cached.live_answer_key && cachedState.answerKey) {
       const cachedAnsJson = JSON.stringify(cachedState.answerKey?.questions || [])
       const liveAnsJson = JSON.stringify(cached.live_answer_key?.questions || [])
