@@ -3734,15 +3734,27 @@ async function qualityAssignmentList(db, day) {
   const { fromIso, toIso, date } = day
   const { data, error } = await db
     .from('grading_stage_logs')
-    .select('assignment_id, created_at')
+    .select('submission_id, created_at')
     .gte('created_at', fromIso)
     .lte('created_at', toIso)
     .order('created_at', { ascending: false })
     .limit(5000)
   if (error) throw new Error(error.message)
+  // 2026-06-20: 用 submission 的真實 assignment 歸戶（不信 log.assignment_id）——跨班舊資料 log 可能全
+  //   掛在主作業名下，會讓別班的作業不出現在選單、且主作業 count 灌水（混班）。解析真實歸屬即正確。
+  const sids = [...new Set((data || []).map((r) => r.submission_id).filter(Boolean))]
+  if (sids.length === 0) return { assignments: [], date }
+  const sidToAid = new Map()
+  for (let i = 0; i < sids.length; i += 300) {  // .in() 大量 ID 需 chunk
+    const chunk = sids.slice(i, i + 300)
+    const { data: subs } = await db.from('submissions').select('id, assignment_id').in('id', chunk)
+    for (const s of subs || []) sidToAid.set(s.id, s.assignment_id)
+  }
   const counts = new Map()
   for (const r of data || []) {
-    counts.set(r.assignment_id, (counts.get(r.assignment_id) || 0) + 1)
+    const aid = sidToAid.get(r.submission_id)
+    if (!aid) continue
+    counts.set(aid, (counts.get(aid) || 0) + 1)
   }
   const aids = [...counts.keys()]
   if (aids.length === 0) return { assignments: [], date }
@@ -3842,18 +3854,30 @@ async function qualityTiming(db, day) {
 
 // ── Submission list（某 assignment 下、按學生）──
 async function qualitySubmissionList(db, assignmentId) {
-  // ⚠️ DB-safety: 拆兩個 query、避免一次 SELECT 拉所有 log 的 read_answer_1 JSONB
-  //   - countsQuery: 只拿 phase metadata 算 runCount/phaseACount/phaseBCount（無 JSONB、~30B/row）
+  // 2026-06-20: 跨班正確性——用「submissions.assignment_id（權威）」決定哪些 submission 屬於這份作業，
+  //   再用 submission_id 撈 grading_stage_logs；不要用 log.assignment_id 撈。
+  //   原因：跨班批改的舊資料 log 可能全記在「主作業」名下（client 曾傳批次第一個 assignmentId），
+  //   用 log.assignment_id 撈會把別班的卷也撈進來→admin 兩班混在一起。改用真實歸屬即可分開（含舊資料）。
+  const { data: subs, error: subErr } = await db
+    .from('submissions')
+    .select('id, student_id, image_url, graded_at, source, status')
+    .eq('assignment_id', assignmentId)
+  if (subErr) throw new Error(subErr.message)
+  const ownIds = (subs || []).map((s) => s.id)
+  if (ownIds.length === 0) return { assignmentId, submissions: [] }
+
+  // ⚠️ DB-safety: 拆兩個 query、避免一次 SELECT 拉所有 log 的 read_answer_1 JSONB（可達 500KB/筆）
+  //   - countsQuery: 只拿 phase metadata 算 runCount/phaseACount/phaseBCount（無 JSONB）
   //   - phaseAQuery: filter Phase A only、SELECT read_answer_1、最新一筆給 sidebar 用
-  // 之前一次 SELECT 5000 筆 read_answer_1 JSONB → 把 DB 打爆。教訓：拉大欄位前先 filter。
+  // ownIds 為單一作業的學生數（數十）、.in() 不需 chunk。
   const [countsRes, phaseARes] = await Promise.all([
     db.from('grading_stage_logs')
       .select('submission_id, phase, created_at')
-      .eq('assignment_id', assignmentId)
+      .in('submission_id', ownIds)
       .limit(5000),
     db.from('grading_stage_logs')
       .select('submission_id, created_at, needs_review_count, read_answer_1')
-      .eq('assignment_id', assignmentId)
+      .in('submission_id', ownIds)
       .not('read_answer_1', 'is', null)
       .order('created_at', { ascending: false })
       .limit(2000)
@@ -3883,20 +3907,14 @@ async function qualitySubmissionList(db, assignmentId) {
   for (const r of phaseARes.data || []) {
     if (!latestPhaseABySid.has(r.submission_id)) latestPhaseABySid.set(r.submission_id, r)
   }
-  const sids = [...latestPhaseABySid.keys()]
-  if (sids.length === 0) return { assignmentId, submissions: [] }
-
-  const { data: subs } = await db
-    .from('submissions')
-    .select('id, student_id, image_url, graded_at, source, status')
-    .in('id', sids)
   const studentIds = [...new Set((subs || []).map((s) => s.student_id).filter(Boolean))]
   const { data: students } = studentIds.length > 0
     ? await db.from('students').select('id, name, seat_number').in('id', studentIds)
     : { data: [] }
   const studentById = new Map((students || []).map((s) => [s.id, s]))
 
-  const submissions = (subs || []).map((s) => {
+  // 只列「有批改 log」的卷（與原行為一致；ungraded 不顯示）
+  const submissions = (subs || []).filter((s) => countsBySid.has(s.id)).map((s) => {
     const log = latestPhaseABySid.get(s.id)
     const counts = countsBySid.get(s.id) || { runCount: 0, phaseACount: 0, phaseBCount: 0 }
     const student = s.student_id ? studentById.get(s.student_id) : null
