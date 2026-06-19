@@ -7,6 +7,35 @@
 
 import { getSupabaseAdmin } from '../_supabase.js'
 
+// 2026-06-20: routeKey → UI 五階段，用於 stage_latencies.by_stage（逐階段耗時）。
+//   classify=版面掃描；read/re_read/detail_read/vj_blank=讀取答案；arbiter/consistency=仔細校對；
+//   accessor=批改評分；explain=生成引導。其餘歸 other。
+function stageGroupOf(routeKey) {
+  const rk = String(routeKey || '')
+  if (rk.includes('classify')) return 'classify'
+  if (rk.includes('read') || rk.includes('vj_blank')) return 'read'
+  if (rk.includes('arbiter') || rk.includes('consistency')) return 'arbiter'
+  if (rk.includes('accessor')) return 'accessor'
+  if (rk.includes('explain')) return 'explain'
+  return 'other'
+}
+
+// 由 stageResponses 聚合 { total_ms, by_stage: { classify, read, arbiter, accessor, explain, other } }。
+//   total_ms 與舊版一致（向後相容）；by_stage 為逐階段 modelLatencyMs 加總（四捨五入到整數 ms）。
+function buildStageLatencies(stageResponses) {
+  const responses = Array.isArray(stageResponses) ? stageResponses : []
+  const by_stage = {}
+  let total = 0
+  for (const r of responses) {
+    const ms = Number(r?.modelLatencyMs) || 0
+    total += ms
+    const g = stageGroupOf(r?.routeKey)
+    by_stage[g] = (by_stage[g] || 0) + ms
+  }
+  for (const k of Object.keys(by_stage)) by_stage[k] = Math.round(by_stage[k])
+  return { total_ms: total, by_stage }
+}
+
 /**
  * 2026-05-17: Phase A 完成後寫 phase_a_state 進 submissions。
  * Phase B「重新批改」(fromCache) 從這裡讀、不用整份重跑 Phase A。
@@ -270,11 +299,8 @@ export function extractPhaseALogData({
     reason: a.reason || undefined
   }))
 
-  // stage latencies
-  const responses = Array.isArray(stageResponses) ? stageResponses : []
-  const stageLatencies = {
-    total_ms: responses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0)
-  }
+  // stage latencies（含逐階段 by_stage）
+  const stageLatencies = buildStageLatencies(stageResponses)
 
   return {
     classify,
@@ -321,11 +347,8 @@ export function extractPhaseBLogData({
     explanation: d.explanation || ''
   }))
 
-  // stage latencies
-  const responses = Array.isArray(stageResponses) ? stageResponses : []
-  const stageLatencies = {
-    total_ms: responses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0)
-  }
+  // stage latencies（含逐階段 by_stage）
+  const stageLatencies = buildStageLatencies(stageResponses)
 
   return {
     accessor,

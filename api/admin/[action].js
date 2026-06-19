@@ -3758,9 +3758,10 @@ async function qualityAssignmentList(db, day) {
   }
 }
 
-// ── 批改計時（某一天）：系統總覽 + 逐作業，純 stage_latencies.total_ms 聚合 ──
+// ── 批改計時（某一天）：系統總覽 + 逐作業 + 逐階段(by_stage) 聚合 ──
 // ⚠️ DB-safety: 只 SELECT 小欄位(assignment_id, phase, stage_latencies, created_at)、
-//   絕不碰 classify/arbiter/read_answer 等大 JSONB(可達 500KB/筆)。stage_latencies 僅 {total_ms}、~30B。
+//   絕不碰 classify/arbiter/read_answer 等大 JSONB(可達 500KB/筆)。stage_latencies={total_ms,by_stage}、~百 B。
+//   by_stage 為 2026-06-20 新增的逐階段耗時(版面掃描/讀取答案/仔細校對/批改評分/生成引導)；舊資料無此欄、自動略過。
 //   聚合在 JS 端做（單日 row 數有限）；超過 limit 才會截斷、實務上單日遠不及。
 async function qualityTiming(db, day) {
   const { fromIso, toIso, date } = day
@@ -3773,28 +3774,48 @@ async function qualityTiming(db, day) {
   if (error) throw new Error(error.message)
   const rows = (data || []).filter((r) => r?.stage_latencies && typeof r.stage_latencies.total_ms === 'number')
 
-  const makeAgg = () => ({ a: { n: 0, sum: 0, min: Infinity, max: 0 }, b: { n: 0, sum: 0, min: Infinity, max: 0 } })
-  const add = (agg, phase, ms) => {
+  // 逐階段順序（UI 五階段）：版面掃描→讀取答案→仔細校對→批改評分→生成引導
+  const STAGE_ORDER = ['classify', 'read', 'arbiter', 'accessor', 'explain']
+  const STAGE_LABELS = { classify: '版面掃描', read: '讀取答案', arbiter: '仔細校對', accessor: '批改評分', explain: '生成引導' }
+  const makeAgg = () => ({ a: { n: 0, sum: 0, min: Infinity, max: 0, stages: {} }, b: { n: 0, sum: 0, min: Infinity, max: 0, stages: {} } })
+  const add = (agg, phase, sl) => {
     const k = phase === 'phase_b' ? 'b' : (phase === 'phase_a' ? 'a' : null)
     if (!k) return
+    const ms = sl.total_ms
     const s = agg[k]
     s.n++; s.sum += ms
     if (ms < s.min) s.min = ms
     if (ms > s.max) s.max = ms
+    // 逐階段（by_stage 為新欄位、舊資料沒有 → 自動略過、不影響 total）。
+    //   phase_a 的 by_stage 只含 classify/read/arbiter；phase_b 只含 accessor/explain → 各記在自己 phase 下。
+    const bs = sl.by_stage && typeof sl.by_stage === 'object' ? sl.by_stage : null
+    if (bs) {
+      for (const [st, v] of Object.entries(bs)) {
+        const ss = s.stages[st] || (s.stages[st] = { n: 0, sum: 0 })
+        ss.n++; ss.sum += Number(v) || 0
+      }
+    }
+  }
+  const finalizeStages = (stages) => {
+    const out = STAGE_ORDER.filter((st) => stages[st]?.n > 0).map((st) => ({
+      stage: st, label: STAGE_LABELS[st], runs: stages[st].n, avgSec: Math.round(stages[st].sum / stages[st].n / 100) / 10,
+    }))
+    return out.length ? out : null
   }
   const finalize = (s) => s.n === 0 ? null : {
     runs: s.n,
     avgSec: Math.round(s.sum / s.n / 100) / 10,
     minSec: Math.round(s.min / 100) / 10,
     maxSec: Math.round(s.max / 100) / 10,
+    byStage: finalizeStages(s.stages),
   }
 
   const sys = makeAgg()
   const byAssign = new Map()
   for (const r of rows) {
-    add(sys, r.phase, r.stage_latencies.total_ms)
+    add(sys, r.phase, r.stage_latencies)
     if (!byAssign.has(r.assignment_id)) byAssign.set(r.assignment_id, makeAgg())
-    add(byAssign.get(r.assignment_id), r.phase, r.stage_latencies.total_ms)
+    add(byAssign.get(r.assignment_id), r.phase, r.stage_latencies)
   }
 
   const aids = [...byAssign.keys()]
