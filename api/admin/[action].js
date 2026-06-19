@@ -3693,6 +3693,10 @@ async function handleQuality(req, res, supabaseAdmin) {
       const day = parseDateForDay(dateStr)
       return res.status(200).json(await qualityAssignmentList(supabaseAdmin, day))
     }
+    if (mode === 'timing') {
+      const day = parseDateForDay(dateStr)
+      return res.status(200).json(await qualityTiming(supabaseAdmin, day))
+    }
     if (mode === 'submissions') {
       if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
       return res.status(200).json(await qualitySubmissionList(supabaseAdmin, assignmentId))
@@ -3751,6 +3755,67 @@ async function qualityAssignmentList(db, day) {
       .map((a) => ({ ...a, log_count: counts.get(a.id) || 0 }))
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
     date
+  }
+}
+
+// ── 批改計時（某一天）：系統總覽 + 逐作業，純 stage_latencies.total_ms 聚合 ──
+// ⚠️ DB-safety: 只 SELECT 小欄位(assignment_id, phase, stage_latencies, created_at)、
+//   絕不碰 classify/arbiter/read_answer 等大 JSONB(可達 500KB/筆)。stage_latencies 僅 {total_ms}、~30B。
+//   聚合在 JS 端做（單日 row 數有限）；超過 limit 才會截斷、實務上單日遠不及。
+async function qualityTiming(db, day) {
+  const { fromIso, toIso, date } = day
+  const { data, error } = await db
+    .from('grading_stage_logs')
+    .select('assignment_id, phase, stage_latencies, created_at')
+    .gte('created_at', fromIso)
+    .lte('created_at', toIso)
+    .limit(20000)
+  if (error) throw new Error(error.message)
+  const rows = (data || []).filter((r) => r?.stage_latencies && typeof r.stage_latencies.total_ms === 'number')
+
+  const makeAgg = () => ({ a: { n: 0, sum: 0, min: Infinity, max: 0 }, b: { n: 0, sum: 0, min: Infinity, max: 0 } })
+  const add = (agg, phase, ms) => {
+    const k = phase === 'phase_b' ? 'b' : (phase === 'phase_a' ? 'a' : null)
+    if (!k) return
+    const s = agg[k]
+    s.n++; s.sum += ms
+    if (ms < s.min) s.min = ms
+    if (ms > s.max) s.max = ms
+  }
+  const finalize = (s) => s.n === 0 ? null : {
+    runs: s.n,
+    avgSec: Math.round(s.sum / s.n / 100) / 10,
+    minSec: Math.round(s.min / 100) / 10,
+    maxSec: Math.round(s.max / 100) / 10,
+  }
+
+  const sys = makeAgg()
+  const byAssign = new Map()
+  for (const r of rows) {
+    add(sys, r.phase, r.stage_latencies.total_ms)
+    if (!byAssign.has(r.assignment_id)) byAssign.set(r.assignment_id, makeAgg())
+    add(byAssign.get(r.assignment_id), r.phase, r.stage_latencies.total_ms)
+  }
+
+  const aids = [...byAssign.keys()]
+  const titleMap = new Map()
+  if (aids.length > 0) {
+    const { data: ass } = await db.from('assignments').select('id, title, total_pages').in('id', aids)
+    for (const a of ass || []) titleMap.set(a.id, { title: a.title, totalPages: a.total_pages })
+  }
+
+  const perAssignment = aids.map((id) => ({
+    assignmentId: id,
+    title: titleMap.get(id)?.title || '(未知)',
+    totalPages: titleMap.get(id)?.totalPages ?? null,
+    phaseA: finalize(byAssign.get(id).a),
+    phaseB: finalize(byAssign.get(id).b),
+  })).sort((x, y) => (y.phaseA?.runs || 0) - (x.phaseA?.runs || 0))
+
+  return {
+    date,
+    system: { phaseA: finalize(sys.a), phaseB: finalize(sys.b) },
+    perAssignment,
   }
 }
 
