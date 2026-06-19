@@ -1043,19 +1043,22 @@ function applySelectionDisplayNormalization(readResult, answerKey) {
     ...readResult,
     answers: readResult.answers.map(answer => {
       if (answer.status !== 'read') return answer
-      const qType = typeByQuestionId.get(answer.questionId)
-      // 2026-06-20: 單選題 L→C 還原。某些學生的「C」字跡會被 read 誤判成 L，
-      //   而 single_choice 合法選項只到 a-e、L 必為誤讀 → 還原成 C（保留大小寫）。
-      //   只改 read 值、不改判分邏輯：還原後仍走原本的 read1/read2 雙讀一致性把關，
-      //   若兩讀真的不同(如另一讀=b)仍會走 arbiter/複核，不會盲目當成 C。
+      // 2026-06-20: 通用字元誤讀修正——圈起來的 a 常被讀成「@」(@＝a 加一圈)。'@' 在本領域從不是合法答案，
+      //   一律還原成 'a'(各題型皆適用：圈選/單選/冠詞圈選 fill_blank「a, monkey」)。仍走雙讀一致性把關。
+      let a = answer
+      const rawSa = ensureString(a.studentAnswerRaw, '')
+      if (rawSa.includes('@')) a = { ...a, studentAnswerRaw: rawSa.replace(/@/g, 'a') }
+      const qType = typeByQuestionId.get(a.questionId)
+      // 單選題 L→C 還原：某些學生的「C」字跡被 read 誤判成 L、而 single_choice 合法選項只到 a-e、L 必為誤讀。
+      //   只改 read 值、不改判分；還原後仍走 read1/read2 雙讀一致性，另一讀真不同(如 b)仍走 arbiter/複核、不盲信。
       if (qType === 'single_choice') {
-        const core = ensureString(answer.studentAnswerRaw, '').replace(/[()（）\[\]【】.,，。、\s]/g, '')
-        if (core === 'L') return { ...answer, studentAnswerRaw: 'C' }
-        if (core === 'l') return { ...answer, studentAnswerRaw: 'c' }
-        return answer
+        const core = ensureString(a.studentAnswerRaw, '').replace(/[()（）\[\]【】.,，。、\s]/g, '')
+        if (core === 'L') return { ...a, studentAnswerRaw: 'C' }
+        if (core === 'l') return { ...a, studentAnswerRaw: 'c' }
+        return a
       }
-      if (!POSITION_SELECTION_TYPES.has(qType)) return answer
-      return { ...answer, studentAnswerRaw: normalizeSelectionAnswerToDisplay(answer.studentAnswerRaw, qType) }
+      if (!POSITION_SELECTION_TYPES.has(qType)) return a
+      return { ...a, studentAnswerRaw: normalizeSelectionAnswerToDisplay(a.studentAnswerRaw, qType) }
     })
   }
 }
