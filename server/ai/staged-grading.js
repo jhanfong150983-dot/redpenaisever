@@ -1224,6 +1224,34 @@ function numericValuesDiffer(a1, a2) {
   return false
 }
 
+// 2026-06-20: table_cell（含 table_check 正規化來的）勾選清單比對正規化。
+//   read 常出現格式差異：列號前綴「1. bedroom:Yes」vs「bedroom:Yes」、e.g.範例列、Note 註解、順序——
+//   值其實一致卻被判不一致進 NR。這裡只取「room→勾選值」集合、忽略上述雜訊。
+const TABLE_CHECK_VALUE_MAP = {
+  yes: 'y', y: 'y', '是': 'y', v: 'y', '✓': 'y', '○': 'y', '勾': 'y', true: 'y',
+  no: 'n', n: 'n', '否': 'n', x: 'n', '✗': 'n', '×': 'n', '空': 'n', false: 'n'
+}
+function normalizeTableCellForComparison(raw) {
+  const text = ensureString(raw, '').trim()
+  if (!text || text === '未作答' || text === '無法辨識') return ''
+  const norm = text.replace(/：/g, ':').replace(/，/g, ',')
+  const map = new Map()
+  for (let seg of norm.split(',')) {
+    seg = seg.trim().replace(/^\(?\d+\)?[.．、)]*\s*/u, '')  // 去開頭列號 "1. " / "(1)" / "1."
+    if (!seg) continue
+    const ci = seg.lastIndexOf(':')
+    if (ci < 0) continue  // 無冒號＝註解/雜訊（如「They need 4 bedroom」）→跳過
+    const key = seg.slice(0, ci).replace(/\s+/g, '').toLowerCase()
+    const val = TABLE_CHECK_VALUE_MAP[seg.slice(ci + 1).replace(/\s+/g, '').toLowerCase()]
+    if (!val) continue                              // value 非勾選值（Note 之類）→跳過
+    if (key.endsWith('note')) continue              // 「bedroom Note:…」→跳過
+    if (/^(e\.?g\.?|範例|例)/u.test(key)) continue  // e.g.範例列→跳過
+    if (!map.has(key)) map.set(key, val)
+  }
+  if (map.size === 0) return ''
+  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => `${k}:${v}`).join(',')
+}
+
 function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s1 = ensureString(read1?.status, '').toLowerCase()
   const s2 = ensureString(read2?.status, '').toLowerCase()
@@ -1257,6 +1285,13 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
     const t1 = normalizeTrueFalseAnswer(ensureString(read1?.studentAnswerRaw, ''))
     const t2 = normalizeTrueFalseAnswer(ensureString(read2?.studentAnswerRaw, ''))
     if (t1 && t2) return t1 === t2 ? 'stable' : 'diff'
+  }
+
+  // table_cell（含 table_check 正規化來的勾選清單）：忽略列號前綴/e.g.範例列/Note/順序，只比 room→勾選值集合
+  if (questionType === 'table_cell') {
+    const tc1 = normalizeTableCellForComparison(read1?.studentAnswerRaw)
+    const tc2 = normalizeTableCellForComparison(read2?.studentAnswerRaw)
+    if (tc1 && tc2) return tc1 === tc2 ? 'stable' : 'diff'
   }
 
   // diagram_draw（圖表題：長條圖/圓餅圖）：提取標籤-數值對比對，忽略描述用字差異
