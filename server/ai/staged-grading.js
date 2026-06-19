@@ -1044,6 +1044,16 @@ function applySelectionDisplayNormalization(readResult, answerKey) {
     answers: readResult.answers.map(answer => {
       if (answer.status !== 'read') return answer
       const qType = typeByQuestionId.get(answer.questionId)
+      // 2026-06-20: 單選題 L→C 還原。某些學生的「C」字跡會被 read 誤判成 L，
+      //   而 single_choice 合法選項只到 a-e、L 必為誤讀 → 還原成 C（保留大小寫）。
+      //   只改 read 值、不改判分邏輯：還原後仍走原本的 read1/read2 雙讀一致性把關，
+      //   若兩讀真的不同(如另一讀=b)仍會走 arbiter/複核，不會盲目當成 C。
+      if (qType === 'single_choice') {
+        const core = ensureString(answer.studentAnswerRaw, '').replace(/[()（）\[\]【】.,，。、\s]/g, '')
+        if (core === 'L') return { ...answer, studentAnswerRaw: 'C' }
+        if (core === 'l') return { ...answer, studentAnswerRaw: 'c' }
+        return answer
+      }
       if (!POSITION_SELECTION_TYPES.has(qType)) return answer
       return { ...answer, studentAnswerRaw: normalizeSelectionAnswerToDisplay(answer.studentAnswerRaw, qType) }
     })
