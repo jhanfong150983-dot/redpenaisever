@@ -6210,30 +6210,16 @@ export async function runStagedGradingPhaseA({
     const dataPreview = JSON.stringify(response?.data || {}).slice(0, 300)
     // 2026-05-21: 用 stage 實際 model（response.stageModel）、不是外層 phase_a 的 model
     const stageModel = response?.stageModel || model
-    let userMessage
-    let userAction
+    // 2026-06-20: 老師看的文案統一友善化（① AI 暫時出錯/忙線）、技術詞(狀態碼)不外露；
+    //   reasonCode 仍依狀態保留、連同 httpStatus 進 technical 供除錯（400=config bug、504=timeout…）。
     let reasonCode
-    if (status === 400) {
-      reasonCode = 'MODEL_400_BAD_REQUEST'
-      userMessage = `批改失敗：AI 模型 ${stageModel} 拒絕請求 (400)、可能是模型參數不相容或 prompt 格式問題`
-      userAction = '請聯絡工程師檢查 model config、可能需切換模型版本'
-    } else if (status === 503) {
-      reasonCode = 'MODEL_503_OVERLOAD'
-      userMessage = `批改失敗：AI 服務忙線中 (503)`
-      userAction = '稍後 1-2 分鐘再重試'
-    } else if (status === 504 || status === 408) {
-      reasonCode = 'MODEL_TIMEOUT'
-      userMessage = `批改失敗：AI 回應 timeout (${status})、可能是圖片太大或網路問題`
-      userAction = '重試一次、或檢查作業圖片是否過大'
-    } else if (status === 429) {
-      reasonCode = 'MODEL_RATE_LIMIT'
-      userMessage = `批改失敗：API 配額用盡 (429)`
-      userAction = '稍後重試、或聯絡管理員加額度'
-    } else {
-      reasonCode = `MODEL_HTTP_${status}`
-      userMessage = `批改失敗：AI 模型回應錯誤 (${status})`
-      userAction = '重試一次、若持續失敗請聯絡工程師'
-    }
+    if (status === 400) reasonCode = 'MODEL_400_BAD_REQUEST'
+    else if (status === 503) reasonCode = 'MODEL_503_OVERLOAD'
+    else if (status === 504 || status === 408) reasonCode = 'MODEL_TIMEOUT'
+    else if (status === 429) reasonCode = 'MODEL_RATE_LIMIT'
+    else reasonCode = `MODEL_HTTP_${status}`
+    const userMessage = '🙂 AI 剛剛有點忙、出了點小差錯。再請它批一次，通常就好了。'
+    const userAction = ''
     const failure = {
       stage,
       reasonCode,

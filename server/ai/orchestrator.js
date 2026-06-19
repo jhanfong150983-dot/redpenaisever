@@ -233,8 +233,9 @@ export async function runAiPipeline({
         pipelineFailure: {
           stage: 'arbiter',
           reasonCode: 'PHASE_A_ARBITER_CRASHED',
-          userMessage: '批改失敗：AI3 一致性判斷階段發生錯誤',
-          userAction: '請重新批改',
+          // 2026-06-20: 老師看友善句（① AI 暫時出錯）、技術細節留 technical
+          userMessage: '🙂 AI 剛剛有點忙、出了點小差錯。再請它批一次，通常就好了。',
+          userAction: '',
           technical: { error: error?.message }
         }
       }

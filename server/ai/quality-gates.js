@@ -7,106 +7,48 @@ import { AI_ROUTE_KEYS } from './routes.js'
 export const QG_SEVERITY = { PASS: 'pass', WARN: 'warn', FAIL: 'fail' }
 
 // ── Pipeline failure messages (frontend-facing) ─────────────────────────────
-// Translates QG warning reason codes into teacher-readable Chinese + suggested action.
-// 用於 Phase A 失敗時、回給前端展示給老師看的訊息。
+// 2026-06-20: 老師看的失敗文案改人性化、技術詞全拿掉（504/reasonCode 等留在 pipelineFailure.technical 供除錯）。
+//   分 3 情境共用句：① AI 暫時出錯/忙線（重試有用）② 答題位置沒抓穩 ③ 讀取作答吃力。userAction 清空（動作已併入句子）。
+//   reasonCode 仍是 key（保留分類/技術歸屬），只是 userMessage 文案統一友善化。
+const FRIENDLY_FAIL = {
+  AI_BUSY: '🙂 AI 剛剛有點忙、出了點小差錯。再請它批一次，通常就好了。',
+  LOCATE: 'AI 對這張的答題位置抓得不太穩。再批一次多半會好；如果同一張一直這樣，建議看看掃描是否完整、清晰。',
+  READ: 'AI 讀這張的作答有點吃力。再批一次看看；若還是這樣，可能是字跡較淡或照片不夠清楚。',
+  GENERIC: '🙂 批改時出了點小狀況，再批一次試試。',
+}
+const fail = (msg) => ({ userMessage: msg, userAction: '' })
 const PIPELINE_FAILURE_MESSAGES = {
+  // classify 階段：全部＝「答題位置沒抓穩」
   classify: {
-    CLASSIFY_BBOX_EDGE_PUSHED: {
-      userMessage: '批改失敗：這份作業的答題框被推到紙張邊緣，AI 沒抓到正確的答題區起點。',
-      userAction: '請重新批改這份作業（同一張圖、再跑一次通常能修正）。'
-    },
-    CLASSIFY_BBOX_PEER_OUTLIER: {
-      userMessage: '批改失敗：這份作業的答題框跟其他學生的位置明顯不同，可能 AI 框錯位置。',
-      userAction: '請重新批改這份作業（再跑一次 AI 通常能修正）。'
-    },
-    CLASSIFY_BBOX_SHIFTED: {
-      userMessage: '批改失敗：這份作業的答題框整批位置對錯了。',
-      userAction: '請重新批改這份作業。'
-    },
-    CLASSIFY_BBOX_OVERLAP_DRIFT: {
-      userMessage: '批改失敗：這份作業的答題框畫得太大、相鄰題目互相壓到，可能讀到別題的答案。',
-      userAction: '請重新批改這份作業；若仍失敗，請重新拍攝或掃描得清楚一點。'
-    },
-    CLASSIFY_BBOX_JITTER: {
-      userMessage: '批改失敗：這份作業的答題框沒對齊印刷格子、可能切到學生筆跡。',
-      userAction: '請重新批改這份作業。'
-    },
-    CLASSIFY_BBOX_OVERLAP: {
-      userMessage: '批改失敗：這份作業的答題框嚴重重疊。',
-      userAction: '請重新批改這份作業。'
-    },
-    CLASSIFY_LOW_COVERAGE: {
-      userMessage: '批改失敗：AI 無法辨識出大部分題目的答題位置。',
-      userAction: '請確認上傳的是正確的答案卷；如是，請重新批改試試。'
-    },
-    CLASSIFY_HIGH_MISSING_BBOX: {
-      userMessage: '批改失敗：AI 找到題目但無法定位答題框。',
-      userAction: '請重新批改；若仍失敗，請改善掃描品質。'
-    },
-    CLASSIFY_BBOX_SIZE_ANOMALY: {
-      userMessage: '批改失敗：答題框尺寸異常（太大或太小）。',
-      userAction: '請重新批改。'
-    },
-    CLASSIFY_BBOX_OUT_OF_BOUNDS: {
-      userMessage: '批改失敗：答題框超出頁面邊界。',
-      userAction: '請重新批改。'
-    },
-    CLASSIFY_BBOX_CLUSTERED: {
-      userMessage: '批改失敗：答題框全部擠在一個小區域。',
-      userAction: '請重新批改。'
-    },
-    CLASSIFY_PIXEL_BBOX_REJECTED: {
-      userMessage: '批改失敗：部分答題框格式不正確。',
-      userAction: '請重新批改。'
-    },
-    __default__: {
-      userMessage: '批改失敗：答題框識別出問題。',
-      userAction: '請重新批改。'
-    }
+    CLASSIFY_BBOX_EDGE_PUSHED: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_BBOX_PEER_OUTLIER: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_BBOX_SHIFTED: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_BBOX_OVERLAP_DRIFT: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_BBOX_JITTER: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_BBOX_OVERLAP: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_LOW_COVERAGE: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_HIGH_MISSING_BBOX: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_BBOX_SIZE_ANOMALY: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_BBOX_OUT_OF_BOUNDS: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_BBOX_CLUSTERED: fail(FRIENDLY_FAIL.LOCATE),
+    CLASSIFY_PIXEL_BBOX_REJECTED: fail(FRIENDLY_FAIL.LOCATE),
+    __default__: fail(FRIENDLY_FAIL.LOCATE)
   },
+  // read 階段：讀取吃力＝③；AI2 偶發出包（沒回應/整份空白）＝① AI 暫時出錯
   read: {
-    READ_LOW_COVERAGE: {
-      userMessage: '批改失敗：AI 沒讀到大部分題目的學生答案。',
-      userAction: '請重新批改；若仍失敗，請檢查學生作答是否清楚。'
-    },
-    READ_LOW_READ_RATE: {
-      userMessage: '批改失敗：太多題目 AI 標記為「讀不到」。',
-      userAction: '請重新批改；若仍失敗，請改善掃描或拍攝品質。'
-    },
-    READ_HIGH_DISAGREEMENT: {
-      userMessage: '批改失敗：兩位 AI 讀出來的答案大幅不一致。',
-      userAction: '請重新批改。'
-    },
-    READ_AI2_EMPTY_STAGE: {
-      userMessage: '批改失敗：AI 校對階段（第二位 AI）整個沒回應，可能是模型短暫故障或網路問題。',
-      userAction: '已自動重試一次仍失敗，請手動重新批改這份作業。'
-    },
-    READ_AI2_ALL_BLANK: {
-      userMessage: '批改失敗：AI 校對階段（第二位 AI）整份判定為「未作答」，但第一位 AI 有讀到答案，這通常是 AI 偶發出包。',
-      userAction: '已自動重試一次仍失敗，請手動重新批改這份作業。'
-    },
-    CROSS_CLASSIFY_READ_HIGH_UNREADABLE: {
-      userMessage: '批改失敗：找到答題框但讀不到內容（可能框錯位置）。',
-      userAction: '請重新批改。'
-    },
-    __default__: {
-      userMessage: '批改失敗：學生答案讀取出問題。',
-      userAction: '請重新批改。'
-    }
+    READ_LOW_COVERAGE: fail(FRIENDLY_FAIL.READ),
+    READ_LOW_READ_RATE: fail(FRIENDLY_FAIL.READ),
+    READ_HIGH_DISAGREEMENT: fail(FRIENDLY_FAIL.READ),
+    READ_AI2_EMPTY_STAGE: fail(FRIENDLY_FAIL.AI_BUSY),
+    READ_AI2_ALL_BLANK: fail(FRIENDLY_FAIL.AI_BUSY),
+    CROSS_CLASSIFY_READ_HIGH_UNREADABLE: fail(FRIENDLY_FAIL.READ),
+    __default__: fail(FRIENDLY_FAIL.READ)
   },
+  // arbiter 階段：AI 內部判斷出錯＝① AI 暫時出錯
   arbiter: {
-    ARBITER_MISSING_DECISIONS: {
-      userMessage: '批改失敗：AI 一致性判斷階段漏題。',
-      userAction: '請重新批改。'
-    },
-    ARBITER_INVALID_STATUS: {
-      userMessage: '批改失敗：AI 一致性判斷階段回傳異常狀態。',
-      userAction: '請重新批改。'
-    },
-    __default__: {
-      userMessage: '批改失敗：AI 一致性判斷階段出錯。',
-      userAction: '請重新批改。'
-    }
+    ARBITER_MISSING_DECISIONS: fail(FRIENDLY_FAIL.AI_BUSY),
+    ARBITER_INVALID_STATUS: fail(FRIENDLY_FAIL.AI_BUSY),
+    __default__: fail(FRIENDLY_FAIL.AI_BUSY)
   }
 }
 
@@ -123,10 +65,7 @@ export function buildPipelineFailure(stage, qgResults) {
   const firstFail = failWarnings[0] ?? ''
   const reasonCode = firstFail.match(/FAIL:([A-Z_]+)/)?.[1] ?? `${stage.toUpperCase()}_UNKNOWN`
   const msgMap = PIPELINE_FAILURE_MESSAGES[stage] ?? {}
-  const msg = msgMap[reasonCode] ?? msgMap.__default__ ?? {
-    userMessage: '批改失敗',
-    userAction: '請重新批改。'
-  }
+  const msg = msgMap[reasonCode] ?? msgMap.__default__ ?? fail(FRIENDLY_FAIL.GENERIC)
   const mergedMetrics = Object.assign({}, ...results.map((r) => r?.metrics ?? {}))
   return {
     stage,
