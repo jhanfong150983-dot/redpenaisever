@@ -7540,9 +7540,14 @@ async function handleCampus1ClassroomSync(req, res) {
       if (syncRecord?.classroom_id) {
         classroomId = syncRecord.classroom_id
       } else {
-        // 防併發重複：先以唯一鍵「搶」同步記錄（已存在則不覆蓋），再回讀取得權威 classroom_id。
-        // 兩次併發同步搶同一鍵只會成立一筆，雙方都拿到同一個 classroom_id → 不會重複建班。
+        // 防併發重複：先以唯一鍵「搶」同步記錄，再回讀取得權威 classroom_id。
+        // ⚠️ 不能只靠 ignoreDuplicates upsert：若同步列已存在但 classroom_id 為 NULL
+        //   （例如先前同步在建班前就失敗、或舊版錯誤分支留下的空殼列），upsert 會被整列忽略、
+        //   填不進 classroom_id，回讀仍是 NULL → 每個併發 run 退回自己的 candidateId → 分岔建出重複班。
+        //   故改為「原子補洞」：只有當 classroom_id 仍為 NULL 時才寫入本 run 的 candidate；
+        //   Postgres 會對同一列的 UPDATE 序列化，只有一個 run 能填、其餘 WHERE 不再成立 → 不重複建班。
         const candidateId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+        // 1) 確保同步列存在（不存在才建；已存在則完全不動）
         await supabaseAdmin
           .from('campus_classroom_sync')
           .upsert(
@@ -7557,6 +7562,16 @@ async function handleCampus1ClassroomSync(req, res) {
             },
             { onConflict: 'owner_id,provider,provider_dsns,provider_class_id', ignoreDuplicates: true }
           )
+        // 2) 原子補洞：classroom_id 仍為 NULL 時才填本 run 的 candidate（併發只有一個能成立）
+        await supabaseAdmin
+          .from('campus_classroom_sync')
+          .update({ classroom_id: candidateId })
+          .eq('owner_id', user.id)
+          .eq('provider', 'campus1')
+          .eq('provider_dsns', dsns)
+          .eq('provider_class_id', providerClassId)
+          .is('classroom_id', null)
+        // 3) 回讀權威 classroom_id（此時必非 NULL；併發各 run 取得同一個值）
         const { data: claimed } = await supabaseAdmin
           .from('campus_classroom_sync')
           .select('classroom_id')
@@ -7720,19 +7735,19 @@ async function handleCampus1ClassroomSync(req, res) {
       const errMessage = err instanceof Error ? err.message : String(err)
 
       try {
-        await supabaseAdmin.from('campus_classroom_sync').upsert(
-          {
-            owner_id: user.id,
-            provider: 'campus1',
-            provider_dsns: dsns,
-            provider_class_id: providerClassId,
+        // ⚠️ 只更新既有同步列、不得 upsert 新列：error 分支沒有 classroom_id，
+        //   若 insert 出新列會留下 classroom_id=NULL 的空殼，下次同步併發時造成分岔建出重複班。
+        await supabaseAdmin.from('campus_classroom_sync')
+          .update({
             provider_class_name: className,
             sync_status: 'error',
             last_error: errMessage,
             updated_at: nowIso
-          },
-          { onConflict: 'owner_id,provider,provider_dsns,provider_class_id' }
-        )
+          })
+          .eq('owner_id', user.id)
+          .eq('provider', 'campus1')
+          .eq('provider_dsns', dsns)
+          .eq('provider_class_id', providerClassId)
       } catch {
         // 記錄更新失敗不影響主流程
       }
