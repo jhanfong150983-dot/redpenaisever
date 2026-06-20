@@ -6099,6 +6099,14 @@ export async function runStagedGradingPhaseA({
   const stopAfterClassify = payload?.stopAfterClassify === true
   const stopBeforeArbiter = payload?.phaseAStopBeforeArbiter === true
   const precomputedClassifyContext = payload?._phaseAClassifyContext || internalContext?._phaseAClassifyContext || null
+  // 2026-06-20 ②: 只重跑指定頁的 classify（partial rerun、省成本）。
+  //   用獨立 key rerunClassifyPriorContext（不可用 _phaseAClassifyContext、那會觸發上面的 precomputed-skip）。
+  //   非重跑頁沿用 prior 的 alignedQuestions（已全圖座標+後處理）、只 AI 重跑指定頁再併回。
+  const rerunPageNums = Array.isArray(payload?.rerunPageNums)
+    ? payload.rerunPageNums.map(Number).filter((n) => Number.isFinite(n))
+    : null
+  const rerunPriorAligned = payload?.rerunClassifyPriorContext?.classifyResult?.alignedQuestions
+  const isPartialRerun = !!(rerunPageNums && rerunPageNums.length > 0 && Array.isArray(rerunPriorAligned) && rerunPriorAligned.length > 0)
   const pipelineRunId = precomputedClassifyContext?.pipelineRunId
     || createPipelineRunId(internalContext?.requestId)
   // 2026-05-21: model 分流移到 executeStage 內統一查 STAGE_MODEL[routeKey]
@@ -6445,7 +6453,68 @@ export async function runStagedGradingPhaseA({
     pages: pageEntries.map(([p, ids]) => ({ page: p, count: ids.length }))
   })
 
-  if (pageEntries.length <= 1) {
+  if (isPartialRerun && pageEntries.length > 1) {
+    // ── ② PARTIAL_RERUN：只 AI 重跑 rerunPageNums 指定的頁、其餘頁沿用 prior context ──
+    // 自成一體、不碰下面 single/multi-page 兩條既有路徑。用於 peer 偵測到「某頁 off-by-one」時只重擲那頁、
+    // 省掉重跑其他 3 頁 classify 的成本。座標仍 AI 自產（只重 AI 該頁、非外部覆寫）。
+    logStaged(pipelineRunId, 'basic', 'classify path = PARTIAL_RERUN (②)', { rerunPageNums, priorCount: rerunPriorAligned.length })
+    const submissionImg = inlineImages[0].inlineData
+    const splitPages = await splitSubmissionImageByPageBreaks(submissionImg.data, submissionImg.mimeType, pageBreaks)
+    if (!splitPages || splitPages.length !== pageEntries.length) {
+      throw new Error(`PARTIAL_RERUN split mismatch: got ${splitPages?.length}, expected ${pageEntries.length}`)
+    }
+    const freshResponses = await Promise.all(pageEntries.map(([pageNum, ids], i) => {
+      if (!rerunPageNums.includes(pageNum)) return null
+      const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
+      const prompt = buildClassifyPrompt(ids, specs, [], 0, classifyCorrections.filter((c) => ids.includes(c.questionId)), answerSheetMode)
+      return executeStage({
+        apiKey, model, payload, timeoutMs: getRemainingBudget(), routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+        stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: splitPages[i].inlineData }] }]
+      })
+    }))
+    freshResponses.forEach((resp, i) => {
+      if (!resp) return
+      logStageEnd(pipelineRunId, `classify-rerun-p${pageEntries[i][0]}`, resp)
+      stageResponses.push(resp)
+    })
+    const failedResp = freshResponses.find((r) => r && !r.ok)
+    if (failedResp) {
+      return {
+        status: failedResp.status, data: failedResp.data,
+        pipelineMeta: { pipeline: STAGED_PIPELINE_NAME, prepareLatencyMs: failedResp.prepareLatencyMs, modelLatencyMs: failedResp.modelLatencyMs, warnings: failedResp.warnings, metrics: { stage: 'classify' } }
+      }
+    }
+    // 從 prior（全圖座標、已後處理）做底、把重跑頁的題覆蓋上去
+    const byId = new Map(rerunPriorAligned.map((q) => [q.questionId, q]))
+    freshResponses.forEach((resp, i) => {
+      if (!resp) return
+      const parsed = parseCandidateJson(resp.data)
+      if (!parsed || typeof parsed !== 'object') throw new Error(`PARTIAL_RERUN parse failed p${pageEntries[i][0]}`)
+      const ids = pageEntries[i][1]
+      const norm = decorateClassifyWithDiagnostics(normalizeClassifyResult(parsed, ids), akByIdForLog)
+      const classifyBboxesBefore = norm.alignedQuestions
+        .filter((q) => q.answerBbox)
+        .map((q) => ({ qid: q.questionId, bbox: { x: +q.answerBbox.x.toFixed(3), y: +q.answerBbox.y.toFixed(3), w: +q.answerBbox.w.toFixed(3), h: +q.answerBbox.h.toFixed(3) } }))
+      ocrAssistMeta.perPage.push({ page: pageEntries[i][0], stats: { partialRerun: true }, candidates: {}, classifyBboxes: classifyBboxesBefore })
+      const { pageStartY, pageEndY } = splitPages[i]
+      for (const q of norm.alignedQuestions) {
+        if (q.answerBbox) q.answerBbox = remapBboxToFullImage(q.answerBbox, pageStartY, pageEndY)
+        if (q.questionBbox) q.questionBbox = remapBboxToFullImage(q.questionBbox, pageStartY, pageEndY)
+        if (q.bracketBbox) q.bracketBbox = remapBboxToFullImage(q.bracketBbox, pageStartY, pageEndY)
+        byId.set(q.questionId, q)
+      }
+    })
+    const mergedAligned = questionIds.map((id) => byId.get(id) ?? { questionId: id, visible: false, questionType: 'fill_blank' })
+    classifyResult = applyClassifyQuestionSpecs({
+      alignedQuestions: mergedAligned,
+      coverage: questionIds.length === 0 ? 0 : mergedAligned.filter((q) => q.visible).length / questionIds.length,
+      unmappedQuestionIds: [],
+      pixelBboxRejected: []
+    }, classifyQuestionSpecs)
+    // 注意：partial rerun 刻意不跑 math-eq-blank crop override（省成本；prior 已對非重跑頁套過、
+    //   罕見的重跑頁 math 題由雙讀/複核兜底）。
+  } else if (pageEntries.length <= 1) {
     // Single page (or all questions share one page) — one call
     const ids = pageEntries.length === 0 ? questionIds : pageEntries[0][1]
     const specs = classifyQuestionSpecs.filter((s) => ids.includes(s.questionId))
