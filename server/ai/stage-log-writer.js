@@ -102,6 +102,7 @@ export async function clearPhaseAState(submissionId) {
     const { error } = await supabase
       .from('submissions')
       .update({
+        status: 'synced',  // 2026-06-20: 清除後一定要把 status 拉回 synced，否則殘留 'graded' → 卡片誤判
         phase_a_state: null,
         final_answers: null,
         grading_result: null,
