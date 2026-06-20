@@ -2592,6 +2592,21 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
           }))
       : undefined
 
+    // 2026-06-20: 多空格(合題)題 → 用結構化 partResults 組「逐空格清單」當 scoringReason、
+    //   取代 AI 自由拼湊的版本（後者常亂編學生作答、重複同一格、張冠李戴）。
+    //   每格各一行：對→「學生寫「X」，答案正確」；錯→優先用 AI 的逐格 reason（已含扣分類型）。
+    let finalScoringReason = scoringReason
+    if (Array.isArray(partResults) && partResults.length >= 2) {
+      const lines = partResults.map((p) => {
+        const head = `${p.subId}. `
+        if (p.correct) return `${head}學生寫「${p.student}」，答案正確`
+        const r = (p.reason || '').trim()
+        if (r) return `${head}${r}`
+        return `${head}學生寫「${p.student}」，正確為「${p.expected}」`
+      })
+      finalScoringReason = `學生作答內容如下：\n${lines.join('\n')}`
+    }
+
     const normalizedBase = {
       questionId,
       score,
@@ -2599,7 +2614,7 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
       isCorrect,
       needExplain,
       matchType,
-      scoringReason,
+      scoringReason: finalScoringReason,
       feedbackBrief,
       studentFinalAnswer: studentFinalAnswer || undefined,
       errorType,
@@ -5137,7 +5152,12 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   - 對每個 answerKey.parts[i]，依 subId 找到對應的 partValues 元素，比對 student vs answer。
   - 比對規則同 fill_blank 單空（精確比對 + UNIT RULE + DUAL-ANSWER RULE）；單位、空白、不可讀的處理一致。
   - partResults 陣列輸出每空對錯細節：[{ subId, student, expected, correct, reason }]
-    - reason 簡短說明錯誤原因（如「單位錯」「數值錯」「未作答」），correct 時可省。
+    - student 必須照抄該 part 對應 partValues 的「實際學生作答」，**嚴禁杜撰或寫成別格的答案**；每個 subId 只輸出一次、不可重複。
+    - reason（錯時必填）寫具體錯誤原因。英語領域用扣分格式（與 ENGLISH DOMAIN EXTRA 一致），例：
+      「大小寫錯誤：學生寫 south africa，正確為 South Africa，扣1分」、
+      「空格錯誤：學生寫 Twenty four，正確為 twenty-four，不認識該單字，0分」、
+      「拼寫錯誤：學生寫 writeing，正確為 writing，扣1分」。correct 時 reason 可省。
+    - 注意：scoringReason 最終由系統用 partResults 自動組「逐空格清單」、所以 partResults 必須每格正確、完整、不重複。
   - 配分：每 part 各自有 maxScore；漏填或預設 → 平均分（maxScore / parts.length，向下取整、最後 1 個取餘）。
   - score = sum(partResults.filter(p => p.correct).map(p => part.maxScore))
   - isCorrect = (所有 parts 都對才算)
