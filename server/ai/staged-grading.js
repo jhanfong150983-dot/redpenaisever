@@ -5098,9 +5098,12 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
   //   → fallback 「需人工複核」誤導老師（19 題 word_problem 全中招）
   // 修法：prompt-only fallback、不動 DB schema、不動 AnswerBank 寫入流程
   const rawQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
-  // 2026-06-22: 英語 fill_blank/short_answer → 大小寫等價確定性正規化（正解＋學生讀值兩邊都套）
+  // 2026-06-22: 英語 fill_blank/short_answer → 大小寫等價確定性正規化（正解＋學生讀值兩邊都套）。
+  //   ⚠️ 答案卷 question 的 ID 欄是 `id`（questionId 多為 null），read 的才叫 questionId；用 id||questionId 取。
+  //   正解可能在 answer / referenceAnswer，或多空格在 parts[].answer（如 [{subId,answer:"monkey"}]）。
+  const qidOf = (q) => q?.id || q?.questionId
   const englishCaseNormIds = isEnglishDomain
-    ? new Set(rawQuestions.filter((q) => q?.questionCategory === 'fill_blank' || q?.questionCategory === 'short_answer').map((q) => q?.questionId))
+    ? new Set(rawQuestions.filter((q) => q?.questionCategory === 'fill_blank' || q?.questionCategory === 'short_answer').map(qidOf))
     : new Set()
   const compactAnswerKey = {
     questions: rawQuestions.map((q) => {
@@ -5108,10 +5111,11 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
       const hasRef = typeof q.referenceAnswer === 'string' && q.referenceAnswer.trim().length > 0
       const hasAns = typeof q.answer === 'string' && q.answer.trim().length > 0
       let out = (!hasRef && hasAns) ? { ...q, referenceAnswer: q.answer } : q
-      if (englishCaseNormIds.has(q.questionId)) {
+      if (englishCaseNormIds.has(qidOf(q))) {
         out = { ...out }
         if (typeof out.referenceAnswer === 'string') out.referenceAnswer = caseEquivNormalize(out.referenceAnswer)
         if (typeof out.answer === 'string') out.answer = caseEquivNormalize(out.answer)
+        if (Array.isArray(out.parts)) out.parts = out.parts.map((p) => (p && typeof p.answer === 'string') ? { ...p, answer: caseEquivNormalize(p.answer) } : p)
       }
       return out
     }),
