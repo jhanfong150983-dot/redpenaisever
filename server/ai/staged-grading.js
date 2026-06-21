@@ -1055,6 +1055,12 @@ function applySelectionDisplayNormalization(readResult, answerKey) {
         const core = ensureString(a.studentAnswerRaw, '').replace(/[()（）\[\]【】.,，。、\s]/g, '')
         if (core === 'L') return { ...a, studentAnswerRaw: 'C' }
         if (core === 'l') return { ...a, studentAnswerRaw: 'c' }
+        // 2026-06-21 值域驗證:single_choice 合法只有 A-E / 甲乙丙丁戊 / 1-5 / ①-⑤。
+        //   非法值(座5 圈讀成「O」、座11 讀成整句選項長文)→ 送人工審查(unreadable)、不靜默吃下當 0 分。
+        //   (O 不亂等價成某選項——不知圈哪個、硬猜不安全;一律送審讓老師定。)
+        if (core && !/^[A-Ea-e1-5甲乙丙丁戊]$/u.test(core) && !/^[①②③④⑤]$/u.test(core)) {
+          return { ...a, status: 'unreadable', studentAnswerRaw: '無法辨識' }
+        }
         return a
       }
       // 2026-06-21 Bug D：是非題只該出現 ○/✗(及異體)。非法值(如座6 圈被讀成「Q」)目前靜默放行→被當作答冤判。
