@@ -2570,7 +2570,10 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
 
     // 2026-06-22: code 兜底 B——英語 fill_blank/short_answer，若與正解「只差大小寫(等價下完全相符)」，
     //   即使 AI 扣了分也強制滿分、推翻 AI(防 Polar bear 這類偶發誤扣、也防預防層失效)。
-    const caseOverride = readStatus === 'read' && maxScore > 0 && isEnglishForCase
+    //   只在「AI 沒給滿分」時才觸發(本就是救誤扣用)——AI 本來判對的題不碰、保留其逐格理由，
+    //   避免「完全正確、無差異」的題也被蓋成「僅大小寫/標點差異」的誤導理由。
+    const aiSaysFull = typeof row?.isCorrect === 'boolean' ? row.isCorrect : (maxScore > 0 && score >= maxScore)
+    const caseOverride = !aiSaysFull && readStatus === 'read' && maxScore > 0 && isEnglishForCase
       && (question?.questionCategory === 'fill_blank' || question?.questionCategory === 'short_answer')
       && englishCaseFullMatch(question, answer)
     if (caseOverride) score = maxScore
