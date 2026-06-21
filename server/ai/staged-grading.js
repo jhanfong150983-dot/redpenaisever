@@ -828,7 +828,7 @@ function normalizeTrueFalseAnswer(raw) {
   return null  // 無法正規化
 }
 
-function normalizeAnswerForComparison(raw) {
+export function normalizeAnswerForComparison(raw) {
   let s = String(raw ?? '').trim()
   // 勾選文字描述 → 只取選項字母
   // "勾選(A)" / "選擇(B)" / "已選(C)" → "A"/"B"/"C"
@@ -1271,7 +1271,13 @@ function normalizeTableCellForComparison(raw) {
   return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => `${k}:${v}`).join(',')
 }
 
-function computeConsistencyStatus(read1, read2, questionType = 'other') {
+// 2026-06-21 全系統一致性：AI3（LLM 一致性判官）預設停用、改用確定性 computeConsistencyStatus。
+//   實證(沙盒 exp-ai3-vs-deterministic、142 卷/4129 題)：det 與 AI3 一致率 98.8%、描述型硬化後硬危險=0、
+//   分歧只往「多送審」安全方向錯（永不靜默算錯）。送多了再用確定性 equivalence 規則逐案放行
+//   （同 X/O、英語首字母大小寫等價的作法）。回退：設 env AI3_ARBITER_ENABLED=1 即恢復 AI3（免改碼）。
+const AI3_ARBITER_ENABLED = process.env.AI3_ARBITER_ENABLED === '1'
+
+export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s1 = ensureString(read1?.status, '').toLowerCase()
   const s2 = ensureString(read2?.status, '').toLowerCase()
   // 兩者皆空白 → 一致（都沒作答）
@@ -1340,6 +1346,10 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   //   誤判成 stable、又由 getContainmentPreferredRaw 挑到缺字的那一讀 → 學生被冤枉扣分、且不送審。
   //   （純格式差如「1,000」vs「1000」normalize 後相等、已在上面 a1===a2 放行，不受影響。）
   if (questionType === 'fill_blank') return 'diff'
+  // 2026-06-21 全系統(無 AI3)：描述型自由文字（short_answer / compound_*）不走下方模糊相似度/包含關係
+  //   「自動採用」啟發式——那會把「真的不同的文字」（如「用耳」vs「用牙」、多/少一詞）靜默判一致→自動採用→
+  //   冤枉算錯（沙盒 R→A 危險全在此類）。改：exact-normalized 不等就 diff 送審；多送的再用確定性等價逐案放行。
+  if (questionType === 'short_answer' || String(questionType).startsWith('compound_')) return 'diff'
   // 計算題：不使用字元集相似度（不同算式可能共享相同數字/符號，Jaccard 會誤判）
   // 只做精確比對和後段的包含關係檢查
   if (questionType !== 'calculation') {
@@ -8572,7 +8582,9 @@ Return JSON:
 
   const arbiterByQuestionId = new Map()
   const arbiterItemsForAI3 = arbiterItems
-  if (arbiterItemsForAI3.length > 0) {
+  if (!AI3_ARBITER_ENABLED) {
+    logStaged(pipelineRunId, 'basic', `[A3] AI3 停用 → 全系統確定性一致性（${arbiterItemsForAI3.length} 題走 computeConsistencyStatus fallback）`)
+  } else if (arbiterItemsForAI3.length > 0) {
     try {
       // Build AI3 parts: text prompt + full image + interleaved (label + crop) per question
       const arbiterPromptText = buildArbiterPrompt(arbiterItemsForAI3)
@@ -9021,7 +9033,9 @@ export async function runStagedGradingPhaseAArbiter({
   logStaged(pipelineRunId, 'basic', `[A3] arbiter 候選 ${arbiterItems.length} 題（已扣掉雙 blank）`)
 
   const arbiterByQuestionId = new Map()
-  if (arbiterItems.length > 0) {
+  if (!AI3_ARBITER_ENABLED) {
+    logStaged(pipelineRunId, 'basic', `[A3] AI3 停用 → 全系統確定性一致性（${arbiterItems.length} 題走 computeConsistencyStatus fallback）`)
+  } else if (arbiterItems.length > 0) {
     try {
       const arbiterPromptText = buildArbiterPrompt(arbiterItems)
       const arbiterParts = [{ text: arbiterPromptText }]
