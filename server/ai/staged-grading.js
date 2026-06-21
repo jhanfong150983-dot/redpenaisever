@@ -1057,6 +1057,16 @@ function applySelectionDisplayNormalization(readResult, answerKey) {
         if (core === 'l') return { ...a, studentAnswerRaw: 'c' }
         return a
       }
+      // 2026-06-21 Bug D：是非題只該出現 ○/✗(及異體)。非法值(如座6 圈被讀成「Q」)目前靜默放行→被當作答冤判。
+      //   合法→不動；圓形誤讀(Q/q/Ø/ø/◯/⊙ 一看就是圈)→等價成 ○(比照 L→C 高信心字形兜底、仍走雙讀把關)；
+      //   其餘非法怪值→送人工審查(unreadable)、不靜默吃下。
+      if (qType === 'true_false') {
+        const core = ensureString(a.studentAnswerRaw, '').replace(/[()（）\[\]【】.,，。、\s]/g, '')
+        const tf = normalizeTrueFalseAnswer(core)
+        if (tf) return { ...a, studentAnswerRaw: tf }  // 合法(O/T/yes/對/X/F/no/錯…)→ 統一成 ○/✗、前端顯示一致
+        if (/^[QqØø◯⊙]$/u.test(core)) return { ...a, studentAnswerRaw: '○' }  // 圓形誤讀(座6 Q)→ ○
+        return { ...a, status: 'unreadable', studentAnswerRaw: '無法辨識' }  // 其餘非法 → 送審
+      }
       if (!POSITION_SELECTION_TYPES.has(qType)) return a
       return { ...a, studentAnswerRaw: normalizeSelectionAnswerToDisplay(a.studentAnswerRaw, qType) }
     })
@@ -1318,6 +1328,12 @@ function computeConsistencyStatus(read1, read2, questionType = 'other') {
   // 錯誤讀值、不送審（AI3 缺席時 fallback 用到這個 status → 學生被冤枉 0 分）。
   // 數字相同的措辭/單位/前綴差異（約518.1=518.1、5=5.0）才繼續走後面的相似度判定。
   if (numericValuesDiffer(a1, a2)) return 'diff'
+  // 2026-06-21 Bug C：fill_blank（逐空格評分）normalize 後仍不相等（逗號/空白/格式已全扣除）
+  //   = 某個空格的內容真的不同（如座15「a, polar bear」vs「, polar bear」少了 "a"）→ 一律 diff 送審。
+  //   不套用下方「整串相似度 ≥0.75 / 包含關係」啟發式——那是給長描述題的，對 fill_blank 會把「少一個 token」
+  //   誤判成 stable、又由 getContainmentPreferredRaw 挑到缺字的那一讀 → 學生被冤枉扣分、且不送審。
+  //   （純格式差如「1,000」vs「1000」normalize 後相等、已在上面 a1===a2 放行，不受影響。）
+  if (questionType === 'fill_blank') return 'diff'
   // 計算題：不使用字元集相似度（不同算式可能共享相同數字/符號，Jaccard 會誤判）
   // 只做精確比對和後段的包含關係檢查
   if (questionType !== 'calculation') {
