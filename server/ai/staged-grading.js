@@ -5170,9 +5170,9 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
       let out = (!hasRef && hasAns) ? { ...q, referenceAnswer: q.answer } : q
       if (englishCaseNormIds.has(qidOf(q))) {
         out = { ...out }
-        if (typeof out.referenceAnswer === 'string') out.referenceAnswer = caseEquivNormalize(out.referenceAnswer)
-        if (typeof out.answer === 'string') out.answer = caseEquivNormalize(out.answer)
-        if (Array.isArray(out.parts)) out.parts = out.parts.map((p) => (p && typeof p.answer === 'string') ? { ...p, answer: caseEquivNormalize(p.answer) } : p)
+        if (typeof out.referenceAnswer === 'string') out.referenceAnswer = overrideNormItem(out.referenceAnswer)
+        if (typeof out.answer === 'string') out.answer = overrideNormItem(out.answer)
+        if (Array.isArray(out.parts)) out.parts = out.parts.map((p) => (p && typeof p.answer === 'string') ? { ...p, answer: overrideNormItem(p.answer) } : p)
       }
       return out
     }),
@@ -5211,10 +5211,10 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
         }
         // 2026-06-22: 英語 fill_blank/short_answer → 學生讀值大小寫等價正規化（與正解對稱）
         const normEngCase = englishCaseNormIds.has(a.questionId)
-        if (normEngCase && typeof out.studentAnswerRaw === 'string') out.studentAnswerRaw = caseEquivNormalize(out.studentAnswerRaw)
+        if (normEngCase && typeof out.studentAnswerRaw === 'string') out.studentAnswerRaw = overrideNormItem(out.studentAnswerRaw)
         // table_cell / fill_blank 合題：保留結構化讀值給 accessor 對齊每 cell/part
         if (Array.isArray(a.cellValues)) out.cellValues = a.cellValues
-        if (Array.isArray(a.partValues)) out.partValues = normEngCase ? a.partValues.map((v) => typeof v === 'string' ? caseEquivNormalize(v) : v) : a.partValues
+        if (Array.isArray(a.partValues)) out.partValues = normEngCase ? a.partValues.map((v) => typeof v === 'string' ? overrideNormItem(v) : v) : a.partValues
         return out
       })
     : []
