@@ -5029,11 +5029,15 @@ export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gra
   let englishRulesSection = ''
   if (hasEnglishRules || (domainHint || '').includes('英語')) {
     const rules = []
-    // 大小寫一致（強制）+ 首字母大小寫易混例外
-    // 2026-06-21: C K O P S U V W X Z 的大小寫同形（只差大小、手寫孤立分不出），加上 T/t（手寫常混）。
-    //   只放行「每個單字的首字母」、且只在「除首字母大小寫外其餘全對」時；非首字母 / 其他字母 / 拼字錯一律照舊扣。
-    rules.push('CASE SENSITIVITY (mandatory): For fill_blank and short_answer, the student\'s answer must match the correctAnswer\'s capitalization exactly. Each word with wrong capitalization (e.g. "apple" instead of "Apple") = deduct 1 point. errorType=\'spelling\'.\n'
-      + 'EXCEPTION — AMBIGUOUS FIRST LETTER (do NOT deduct for case): For these letters the uppercase and lowercase glyphs are visually identical in handwriting (they differ only in size, so a single handwritten letter cannot be told apart): C K O P S U V W X Z — plus T (T/t is commonly confused by hand). Rule: when a word matches the correctAnswer in every letter and differs ONLY by the case of its FIRST letter, and that first letter is one of these (case-insensitive: C/c K/k O/o P/p S/s U/u V/v W/w X/x Z/z T/t), score that word\'s capitalization as CORRECT — do NOT deduct. Judge each word by its OWN first letter. This does NOT apply to: (a) a first letter outside this set (e.g. "apple" vs "Apple" → A/a are distinguishable → still deduct); (b) case differences on any non-first letter; (c) actual spelling/letter errors (judge those normally). Example: correct "Sunday", student wrote a word reading "sunday" with identical letters → S/s ambiguous → CORRECT, no deduction.')
+    // 大小寫一致（強制）+ 首字母易混例外 + 非首字母一律忽略大小寫
+    // 2026-06-21: 首字母同形字母 C K O P S U V W X Z + T/t 忽略大小寫。
+    // 2026-06-22: 首字母再加 M/m（手寫常混）；且「非首字母(單字中間)一律忽略大小寫」——
+    //   手寫不可能在單字中間寫大寫，中間出現大寫一定是讀取把大小寫同形字母讀成大寫的假象
+    //   (如 monKey/ZEbra)，不該扣分。正規化對稱套用、不影響真拼字錯。
+    rules.push('CASE SENSITIVITY (mandatory): For fill_blank and short_answer, compare the student answer to correctAnswer with these capitalization rules:\n'
+      + 'FIRST LETTER of each word — capitalization matters, EXCEPT for visually-ambiguous letters whose uppercase and lowercase glyphs are identical in handwriting (differ only in size): C K M O P S U V W X Z, plus T. If a word differs from correctAnswer ONLY by the case of its first letter and that letter is one of these (case-insensitive: C/c K/k M/m O/o P/p S/s U/u V/v W/w X/x Z/z T/t), treat the capitalization as CORRECT — do NOT deduct. For a first letter OUTSIDE this set (e.g. "apple" vs "Apple" → A/a are distinguishable), wrong first-letter case = deduct 1 point, errorType=\'spelling\'.\n'
+      + 'NON-FIRST (mid-word) letters — case is ALWAYS ignored. A capital in the MIDDLE of a word is never an intentional capitalization (handwriting has no mid-word capitals); an uppercase mid-word letter is only a reading artifact of a size-ambiguous glyph. So "monKey"="monkey", "ZEbra"="zebra", "eLephAnt"="elephant" — do NOT deduct for ANY mid-word case difference.\n'
+      + 'These rules cover CAPITALIZATION ONLY; actual spelling/letter errors (wrong/extra/missing letters) are judged normally. Judge each word by its own first letter.')
     // 標點符號檢查（老師選擇）
     if (englishRules?.punctuationCheck?.enabled) {
       const d = englishRules.punctuationCheck.deductionPerError || 1
