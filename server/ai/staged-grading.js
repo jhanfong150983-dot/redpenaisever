@@ -4904,6 +4904,11 @@ ${questionBlocks}
 // Apply consistency decision: consistent → use AI1 answer, inconsistent → needs_review
 function applyForensicDecision(forensic, ai1Answer, ai2Answer) {
   const isConsistent = forensic?.consistent === true
+  // 2026-06-21 Bug H 防呆：「無法辨識」永遠不該被當成「一致的答案」靜默採用、給 0 分不送審。
+  //   不論 AI3 是否判一致，最終答案是「無法辨識」一律送人工審查。
+  if (ensureString(ai1Answer, '').trim() === '無法辨識' || ensureString(ai2Answer, '').trim() === '無法辨識') {
+    return { arbiterStatus: 'needs_review' }
+  }
   if (isConsistent) {
     // 一致 → 一律使用 AI1（客觀抄寫員）的答案
     return { arbiterStatus: 'arbitrated_agree', finalAnswer: ai1Answer }
@@ -8534,6 +8539,11 @@ Return JSON:
       const s2 = qr.readAnswer2.status
       // 雙方都 blank → 自動一致，不需送 AI3
       if (s1 === 'blank' && s2 === 'blank') return false
+      // 2026-06-21 Bug H：雙方都 unreadable → 自動 needs_review（不送 AI3）。
+      //   否則 AI3 會把「無法辨識」=「無法辨識」判成一致 → arbitrated_agree、finalAnswer=「無法辨識」
+      //   → 靜默 0 分、不進人工審查、Bug A 閘門也漏接(因 arbiterStatus 非 needs_review、finalAnswer 非空)。
+      //   排除後掉進下方「both unreadable → needs_review」fallback(原註解本意)。
+      if (s1 === 'unreadable' && s2 === 'unreadable') return false
       // status='auto' → map_fill 舊資料 fallback、Phase B 視覺評分、不需 AI3
       if (s1 === 'auto' || s2 === 'auto') return false
       // map_fill 走 per-position consistency、不用 AI3 整題比對
