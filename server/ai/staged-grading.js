@@ -5005,6 +5005,19 @@ function gateAccessorCategoryRules(prompt, typesUsed) {
   } catch { return prompt }
 }
 
+// 2026-06-22: 英語大小寫等價（確定性、取代原 prompt 規則——AI 套用會漂，如 "Polar bear" 偶爾誤扣）。
+//   非首字母一律小寫（手寫無字中大寫、中間大寫=讀取假象）；首字母若是大小寫同形/易混字母
+//   C K M O P S U V W X Z T 也小寫。套在「學生讀值」與「正解」兩邊 → AI 看不到「可原諒的大小寫差異」、
+//   無從誤扣；可分辨的首字母大小寫（apple/Apple、Indonesia/indonesia 的 I/A）仍保留給 AI 判。
+const CASE_AMBIGUOUS_FIRST = new Set(['c', 'k', 'm', 'o', 'p', 's', 'u', 'v', 'w', 'x', 'z', 't'])
+function caseEquivNormalize(text) {
+  return String(text ?? '').replace(/[A-Za-z]+/g, (word) => {
+    const first = word[0]
+    const rest = word.slice(1).toLowerCase()
+    return (CASE_AMBIGUOUS_FIRST.has(first.toLowerCase()) ? first.toLowerCase() : first) + rest
+  })
+}
+
 export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
   const strictness = answerKey?.strictness || 'standard'
   // gradeBand: 'high' (10-12) → 多選用大考中心固定扣分；其他 (含 NULL/k9) → 現行 substitution-discount 公式
@@ -5026,18 +5039,14 @@ export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gra
   // 英語領域專屬規則（直接從 answerKey 讀，不依賴 domainHint）
   const englishRules = answerKey?.englishRules
   const hasEnglishRules = englishRules?.punctuationCheck?.enabled || englishRules?.wordOrderCheck?.enabled
+  const isEnglishDomain = hasEnglishRules || (domainHint || '').includes('英語')
   let englishRulesSection = ''
-  if (hasEnglishRules || (domainHint || '').includes('英語')) {
+  if (isEnglishDomain) {
     const rules = []
-    // 大小寫一致（強制）+ 首字母易混例外 + 非首字母一律忽略大小寫
-    // 2026-06-21: 首字母同形字母 C K O P S U V W X Z + T/t 忽略大小寫。
-    // 2026-06-22: 首字母再加 M/m（手寫常混）；且「非首字母(單字中間)一律忽略大小寫」——
-    //   手寫不可能在單字中間寫大寫，中間出現大寫一定是讀取把大小寫同形字母讀成大寫的假象
-    //   (如 monKey/ZEbra)，不該扣分。正規化對稱套用、不影響真拼字錯。
-    rules.push('CASE SENSITIVITY (mandatory): For fill_blank and short_answer, compare the student answer to correctAnswer with these capitalization rules:\n'
-      + 'FIRST LETTER of each word — capitalization matters, EXCEPT for visually-ambiguous letters whose uppercase and lowercase glyphs are identical in handwriting (differ only in size): C K M O P S U V W X Z, plus T. If a word differs from correctAnswer ONLY by the case of its first letter and that letter is one of these (case-insensitive: C/c K/k M/m O/o P/p S/s U/u V/v W/w X/x Z/z T/t), treat the capitalization as CORRECT — do NOT deduct. For a first letter OUTSIDE this set (e.g. "apple" vs "Apple" → A/a are distinguishable), wrong first-letter case = deduct 1 point, errorType=\'spelling\'.\n'
-      + 'NON-FIRST (mid-word) letters — case is ALWAYS ignored. A capital in the MIDDLE of a word is never an intentional capitalization (handwriting has no mid-word capitals); an uppercase mid-word letter is only a reading artifact of a size-ambiguous glyph. So "monKey"="monkey", "ZEbra"="zebra", "eLephAnt"="elephant" — do NOT deduct for ANY mid-word case difference.\n'
-      + 'These rules cover CAPITALIZATION ONLY; actual spelling/letter errors (wrong/extra/missing letters) are judged normally. Judge each word by its own first letter.')
+    // 大小寫：可原諒的差異（首字母同形字母 C K M O P S U V W X Z T、非首字母中間大寫）已在送 AI 前由
+    //   caseEquivNormalize 對「學生讀值＋正解」兩邊確定性正規化掉（2026-06-22 改 code、棄 prompt——AI 套規則會漂、
+    //   如 Polar bear 偶爾誤扣）。所以 AI 看到的大小寫差異都是「可分辨的真差異」、照扣即可。
+    rules.push('CASE SENSITIVITY (mandatory): For fill_blank and short_answer, capitalization must match the correctAnswer. Each word whose capitalization differs (e.g. "apple" vs "Apple") = deduct 1 point, errorType=\'spelling\'. NOTE: visually-ambiguous letter cases (C K M O P S U V W X Z T as a first letter) and ALL mid-word cases are already normalized upstream deterministically — so any capitalization difference you still see is a genuine, distinguishable one; deduct for it.')
     // 標點符號檢查（老師選擇）
     if (englishRules?.punctuationCheck?.enabled) {
       const d = englishRules.punctuationCheck.deductionPerError || 1
@@ -5089,13 +5098,22 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
   //   → fallback 「需人工複核」誤導老師（19 題 word_problem 全中招）
   // 修法：prompt-only fallback、不動 DB schema、不動 AnswerBank 寫入流程
   const rawQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+  // 2026-06-22: 英語 fill_blank/short_answer → 大小寫等價確定性正規化（正解＋學生讀值兩邊都套）
+  const englishCaseNormIds = isEnglishDomain
+    ? new Set(rawQuestions.filter((q) => q?.questionCategory === 'fill_blank' || q?.questionCategory === 'short_answer').map((q) => q?.questionId))
+    : new Set()
   const compactAnswerKey = {
     questions: rawQuestions.map((q) => {
       if (!q || typeof q !== 'object') return q
       const hasRef = typeof q.referenceAnswer === 'string' && q.referenceAnswer.trim().length > 0
       const hasAns = typeof q.answer === 'string' && q.answer.trim().length > 0
-      if (!hasRef && hasAns) return { ...q, referenceAnswer: q.answer }
-      return q
+      let out = (!hasRef && hasAns) ? { ...q, referenceAnswer: q.answer } : q
+      if (englishCaseNormIds.has(q.questionId)) {
+        out = { ...out }
+        if (typeof out.referenceAnswer === 'string') out.referenceAnswer = caseEquivNormalize(out.referenceAnswer)
+        if (typeof out.answer === 'string') out.answer = caseEquivNormalize(out.answer)
+      }
+      return out
     }),
     totalScore: toFiniteNumber(answerKey?.totalScore) ?? null
   }
@@ -5130,9 +5148,12 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
             ? a.studentAnswerRaw.replace(/[，、；;｜|]/g, ',')
             : a.studentAnswerRaw
         }
+        // 2026-06-22: 英語 fill_blank/short_answer → 學生讀值大小寫等價正規化（與正解對稱）
+        const normEngCase = englishCaseNormIds.has(a.questionId)
+        if (normEngCase && typeof out.studentAnswerRaw === 'string') out.studentAnswerRaw = caseEquivNormalize(out.studentAnswerRaw)
         // table_cell / fill_blank 合題：保留結構化讀值給 accessor 對齊每 cell/part
         if (Array.isArray(a.cellValues)) out.cellValues = a.cellValues
-        if (Array.isArray(a.partValues)) out.partValues = a.partValues
+        if (Array.isArray(a.partValues)) out.partValues = normEngCase ? a.partValues.map((v) => typeof v === 'string' ? caseEquivNormalize(v) : v) : a.partValues
         return out
       })
     : []
