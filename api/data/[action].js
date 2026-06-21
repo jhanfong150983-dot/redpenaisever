@@ -2814,11 +2814,18 @@ async function handleClearGrading(req, res) {
         feedback: null,
         grading_result: null,
         graded_at: null,
+        // 2026-06-21 Bug F：換答案卷 = 全部重來 → 連 reads/最終答案一起清。
+        //   read2 知答案、classify 依答案卷對位 → 舊讀取受舊(錯)答案卷污染。phase_a_state sync 是 server-first，
+        //   不在 server 清，client 清了也會被 sync pull 拉回。
+        phase_a_state: null,
+        final_answers: null,
         updated_at: nowIso
       })
       .eq('assignment_id', assignmentId)
       .eq('owner_id', user.id)
-      .not('grading_result', 'is', null)
+      // 2026-06-21: filter 改 OR——否則「已清過 grading_result 的卷」(grading_result 已 null) 再次換答案卷時
+      //   篩不到、phase_a_state/final_answers 永遠清不掉。手動批改 stub(三者皆 null)不被匹配、維持保留。
+      .or('grading_result.not.is.null,phase_a_state.not.is.null,final_answers.not.is.null')
     if (error) throw new Error(error.message)
 
     // 2026-05-30: 更換答案卷 = 評分「標準」變了 → 連訂正/申訴狀態也必須失效。
