@@ -2651,7 +2651,7 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
       finalScoringReason = `學生作答內容如下：\n${lines.join('\n')}`
     }
     // 兜底 B 觸發 → 用一致的覆寫理由，蓋掉 AI 自相矛盾的「大小寫扣分」說明
-    if (caseOverride) finalScoringReason = '大小寫等價判定：學生作答與正解僅大小寫差異（全大寫縮寫除外），視為正確、給滿分。'
+    if (caseOverride) finalScoringReason = '等價判定：學生作答與正解僅大小寫／結尾標點差異（全大寫縮寫、句子句末標點除外），視為正確、給滿分。'
 
     const normalizedBase = {
       questionId,
@@ -5038,12 +5038,27 @@ function caseEquivNormalize(text) {
 //   即使 AI 因任何理由(含預防層失效)對「只差大小寫」扣分，code 在此判斷：逐空格嚴格比
 //   (只赦免大小寫，字母/空格/標點/順序全須一致)，全部相符 → 回 true → 由呼叫端強制滿分。
 //   全大寫縮寫(USA/OK)已由 caseEquivNormalize 原樣保留、不會被誤救。對不齊(空格數不符)→ 不覆寫。
+// 兜底比對的單項正規化：赦免「大小寫」＋「結尾雜訊標點」，但保護句子標點。
+//   - 結尾逗號/分號 ,; → 永遠去（任何答案結尾逗號都非刻意、多為誤點/分隔殘留）。
+//   - 句末 . ! ? → 只在「短答案(≤2字)」赦免；句子(3+字)保留(punctuationCheck 有意義、不可動)。
+//   - 字母/空格/內部標點/撇號(don't) 一律不動。
+function overrideNormItem(text) {
+  let s = caseEquivNormalize(String(text ?? '')).trim()
+  s = s.replace(/[,;]+$/u, '').trim()
+  if (s.split(/\s+/).filter(Boolean).length <= 2) s = s.replace(/[.!?]+$/u, '').trim()
+  return s
+}
 function englishCaseFullMatch(question, studentAnswer) {
   const parts = Array.isArray(question?.parts) ? question.parts : null
   let correctList, studentList
   if (parts && parts.length > 0) {
-    const pv = Array.isArray(studentAnswer?.partValues) ? studentAnswer.partValues : null
-    if (!pv || pv.length !== parts.length) return false
+    let pv = Array.isArray(studentAnswer?.partValues) ? studentAnswer.partValues.slice() : null
+    if (!pv) {
+      // partValues 缺 → 從 studentAnswerRaw 拆逗號重建；去掉結尾逗號造成的單一空項
+      pv = ensureString(studentAnswer?.studentAnswerRaw, '').split(',').map((x) => x.trim())
+      if (pv.length > parts.length && pv[pv.length - 1] === '') pv.pop()
+    }
+    if (pv.length !== parts.length) return false
     correctList = parts.map((p) => ensureString(p?.answer, ''))
     studentList = pv.map((v) => ensureString(v, ''))
   } else {
@@ -5053,8 +5068,8 @@ function englishCaseFullMatch(question, studentAnswer) {
     studentList = [ensureString(studentAnswer?.studentAnswerRaw, '')]
   }
   for (let i = 0; i < correctList.length; i++) {
-    const c = caseEquivNormalize(correctList[i]).trim()
-    const s = caseEquivNormalize(studentList[i]).trim()
+    const c = overrideNormItem(correctList[i])
+    const s = overrideNormItem(studentList[i])
     if (!c || c !== s) return false
   }
   return true
