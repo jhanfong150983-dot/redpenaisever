@@ -2548,6 +2548,9 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
   const scoresRaw = Array.isArray(parsed?.scores) ? parsed.scores : []
   const byQuestionId = mapByQuestionId(scoresRaw, (item) => item?.questionId)
   const keyQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+  // 2026-06-22: 英語領域 → 啟用大小寫等價確定性覆寫(兜底 B)
+  const isEnglishForCase = ensureString(domainHint, '').includes('英語')
+    || answerKey?.englishRules?.punctuationCheck?.enabled || answerKey?.englishRules?.wordOrderCheck?.enabled
 
   const scores = []
   let totalScore = 0
@@ -2565,15 +2568,24 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
     if (score < 0) score = 0
     if (score > maxScore) score = maxScore
 
+    // 2026-06-22: code 兜底 B——英語 fill_blank/short_answer，若與正解「只差大小寫(等價下完全相符)」，
+    //   即使 AI 扣了分也強制滿分、推翻 AI(防 Polar bear 這類偶發誤扣、也防預防層失效)。
+    const caseOverride = readStatus === 'read' && maxScore > 0 && isEnglishForCase
+      && (question?.questionCategory === 'fill_blank' || question?.questionCategory === 'short_answer')
+      && englishCaseFullMatch(question, answer)
+    if (caseOverride) score = maxScore
+
     // Hard override: blank/unreadable always score=0 regardless of model output
     if (readStatus === 'blank' || readStatus === 'unreadable') score = 0
 
     const isCorrect =
       (readStatus === 'blank' || readStatus === 'unreadable')
         ? false
-        : typeof row?.isCorrect === 'boolean'
-          ? row.isCorrect
-          : maxScore > 0 && score >= maxScore
+        : caseOverride
+          ? true
+          : typeof row?.isCorrect === 'boolean'
+            ? row.isCorrect
+            : maxScore > 0 && score >= maxScore
 
     const matchType = ensureString(row?.matchType, '').trim() || (readStatus || 'unreadable')
     const scoringReason = ensureString(row?.scoringReason, '').trim()
@@ -2589,7 +2601,7 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
           : isCorrect
             ? 'none'
             : 'concept'
-    const errorType = errorTypeRaw || inferredErrorType
+    const errorType = caseOverride ? 'none' : (errorTypeRaw || inferredErrorType)
     const needExplain =
       typeof row?.needExplain === 'boolean'
         ? row.needExplain
@@ -2638,6 +2650,8 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
       })
       finalScoringReason = `學生作答內容如下：\n${lines.join('\n')}`
     }
+    // 兜底 B 觸發 → 用一致的覆寫理由，蓋掉 AI 自相矛盾的「大小寫扣分」說明
+    if (caseOverride) finalScoringReason = '大小寫等價判定：學生作答與正解僅大小寫差異（全大寫縮寫除外），視為正確、給滿分。'
 
     const normalizedBase = {
       questionId,
@@ -5012,10 +5026,38 @@ function gateAccessorCategoryRules(prompt, typesUsed) {
 const CASE_AMBIGUOUS_FIRST = new Set(['c', 'k', 'm', 'o', 'p', 's', 'u', 'v', 'w', 'x', 'z', 't'])
 function caseEquivNormalize(text) {
   return String(text ?? '').replace(/[A-Za-z]+/g, (word) => {
+    // 2026-06-22: 全大寫單字(2+字母)= 縮寫/專有名詞(USA/OK/TV)→ 大小寫有意義、原樣保留、不參與等價。
+    if (word.length >= 2 && word === word.toUpperCase()) return word
     const first = word[0]
     const rest = word.slice(1).toLowerCase()
     return (CASE_AMBIGUOUS_FIRST.has(first.toLowerCase()) ? first.toLowerCase() : first) + rest
   })
+}
+
+// 2026-06-22: code 兜底 B——英語 fill_blank/short_answer 大小寫等價「確定性覆寫」。
+//   即使 AI 因任何理由(含預防層失效)對「只差大小寫」扣分，code 在此判斷：逐空格嚴格比
+//   (只赦免大小寫，字母/空格/標點/順序全須一致)，全部相符 → 回 true → 由呼叫端強制滿分。
+//   全大寫縮寫(USA/OK)已由 caseEquivNormalize 原樣保留、不會被誤救。對不齊(空格數不符)→ 不覆寫。
+function englishCaseFullMatch(question, studentAnswer) {
+  const parts = Array.isArray(question?.parts) ? question.parts : null
+  let correctList, studentList
+  if (parts && parts.length > 0) {
+    const pv = Array.isArray(studentAnswer?.partValues) ? studentAnswer.partValues : null
+    if (!pv || pv.length !== parts.length) return false
+    correctList = parts.map((p) => ensureString(p?.answer, ''))
+    studentList = pv.map((v) => ensureString(v, ''))
+  } else {
+    const correct = ensureString(question?.answer || question?.referenceAnswer, '')
+    if (!correct) return false
+    correctList = [correct]
+    studentList = [ensureString(studentAnswer?.studentAnswerRaw, '')]
+  }
+  for (let i = 0; i < correctList.length; i++) {
+    const c = caseEquivNormalize(correctList[i]).trim()
+    const s = caseEquivNormalize(studentList[i]).trim()
+    if (!c || c !== s) return false
+  }
+  return true
 }
 
 export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
