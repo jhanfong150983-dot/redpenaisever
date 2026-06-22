@@ -67,7 +67,11 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.GRADING_PHASE_B_ACCESSOR]: MODEL_FLASH,   // 同 ACCESSOR
   [AI_ROUTE_KEYS.GRADING_EXPLAIN]: MODEL_FLASH,            // Phase B2 錯題解釋
   [AI_ROUTE_KEYS.GRADING_PHASE_B_EXPLAIN]: MODEL_FLASH,    // 同 EXPLAIN
-  [AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT]: MODEL_FLASH,         // 答案卷題目辨識（印刷 OCR、FLASH 夠）
+  // 2026-06-22: FLASH(2.5-flash) 對「密集勾選題」讀不準——A大題 multi_check 整頁 3/5、
+  //   常誤判成 single_check 只收一個答案、B1 題號 off-by-one 2/5。換 PRO(3.5-flash) 後整頁
+  //   ① multi_check 5/5、② 題號 5/5（N=5 實證，local-only/eng_final_exam_2026-06-22）。
+  //   extract 是一次性建答案卷（非每生），成本可接受；印刷 OCR 部分 PRO 同樣勝任。
+  [AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT]: MODEL_PRO,           // 答案卷題目辨識（含密集勾選、需 PRO 視覺）
   [AI_ROUTE_KEYS.ANSWER_KEY_REANALYZE]: MODEL_FLASH,       // 答案卷重新分析
   [AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS]: MODEL_FLASH,    // 108 課綱概念標記
   [AI_ROUTE_KEYS.REPORT_TEACHER_SUMMARY]: MODEL_FLASH,     // 老師週報
