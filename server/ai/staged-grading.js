@@ -1516,6 +1516,69 @@ export function gradeObjectiveDeterministic(q, studentAnswerRaw, status) {
   return { gradable: false }
 }
 
+// ── 句子克漏字（sentence cloze）確定性批改 ────────────────────────────────
+// 情境：英語閱讀／聽力問答題，答句是「整句」（部分單字是印刷的、部分是學生填的計分關鍵詞）。
+// 學生寫整句、印刷字一定對 → 跟標準答案逐詞做 LCS 對齊，未對上的「標準答案詞」= 學生填錯/漏的空。
+// 分數 = maxScore − 錯詞數（clamp 0..maxScore）。詳見 local-only/eng_final_exam_2026-06-22/cloze-grader.test.mjs。
+// 由 env CLOZE_DETERMINISTIC_ENABLED 控制（預設關），只走 fill_blank 單一整句、不動 parts 合題（仍交 AI）。
+function clozeNormToken(t) {
+  return String(t || '').toLowerCase().replace(/[’]/g, "'").replace(/^[^a-z0-9'-]+|[^a-z0-9'-]+$/g, '')
+}
+function clozeTokenize(s) {
+  return String(s || '').trim().split(/\s+/).map(clozeNormToken).filter(Boolean)
+}
+// 回傳「有對上的 model index 集合」（LCS backtrack）。
+function clozeLcsMatchedModelIdx(model, stu) {
+  const n = model.length, m = stu.length
+  const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1))
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      dp[i][j] = model[i - 1] === stu[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1])
+    }
+  }
+  const matched = new Set()
+  let i = n, j = m
+  while (i > 0 && j > 0) {
+    if (model[i - 1] === stu[j - 1]) { matched.add(i - 1); i--; j-- }
+    else if (dp[i - 1][j] >= dp[i][j - 1]) i--
+    else j--
+  }
+  return matched
+}
+// 判斷一個 fill_blank 單一答案是不是「句子克漏字」（英文整句、≥3 詞、配分≥2）。
+// 避免誤傷「值+單位」型（如 "5 公分"、中文短答）→ 那些仍走原本嚴格/AI 路徑。
+function isSentenceClozeAnswer(answer, maxScore) {
+  const toks = clozeTokenize(answer)
+  if (toks.length < 3 || !(maxScore >= 2)) return false
+  const asciiWords = toks.filter((t) => /^[a-z0-9'-]+$/.test(t)).length
+  return asciiWords / toks.length >= 0.8
+}
+function gradeSentenceClozeDeterministic(q, studentAnswerRaw, status) {
+  const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+  const key = ensureString(q?.answer, '').trim()
+  if (status === 'unreadable') return { gradable: false }
+  if (status === 'blank') return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'blank', scoringReason: '學生未作答' }
+  const raw = ensureString(studentAnswerRaw, '').trim()
+  if (!raw || !key || maxScore <= 0) return { gradable: false }
+  if (!isSentenceClozeAnswer(key, maxScore)) return { gradable: false }
+  const model = clozeTokenize(key)
+  const stu = clozeTokenize(raw)
+  const matched = clozeLcsMatchedModelIdx(model, stu)
+  const wrongTokens = model.filter((_, idx) => !matched.has(idx))
+  const wrongCount = wrongTokens.length
+  const score = Math.max(0, Math.min(maxScore, maxScore - wrongCount))
+  return {
+    gradable: true,
+    isCorrect: wrongCount === 0,
+    score,
+    maxScore,
+    errorType: wrongCount === 0 ? 'none' : 'concept',
+    scoringReason: wrongCount === 0
+      ? `整句正確（${maxScore} 個關鍵詞全對）`
+      : `錯/漏 ${wrongCount} 個關鍵詞：${wrongTokens.join('、')}；正確答案「${key}」`,
+  }
+}
+
 function mapByQuestionId(items, itemToQuestionId) {
   const map = new Map()
   for (const item of items) {
@@ -9806,6 +9869,43 @@ export async function runStagedGradingPhaseB({
     })
   }
 
+  // ── Phase 0c：句子克漏字（fill_blank 單一整句）確定性批改、不送 Accessor ─────────
+  // 英語閱讀／聽力問答題答句整句、印刷字一定對 → 逐詞 LCS、分數=配分−錯詞數。詳見 gradeSentenceClozeDeterministic。
+  // env CLOZE_DETERMINISTIC_ENABLED 預設關 → 此區完全 inert、production 零影響。
+  // 只收 fill_blank 「單一整句」（無 parts、英文≥3詞、配分≥2）；parts 合題仍交 Accessor（不變）。
+  const clozeBypassIds = new Set()
+  if (process.env.CLOZE_DETERMINISTIC_ENABLED === 'true') {
+    for (const ans of finalReadAnswerResult.answers) {
+      const qid = ensureString(ans?.questionId).trim()
+      if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
+      const q = akQById.get(qid)
+      if (!q || q.questionCategory !== 'fill_blank') continue
+      if (Array.isArray(q?.parts) && q.parts.length >= 2) continue  // 文章克漏字 parts → 交 AI
+      const res = gradeSentenceClozeDeterministic(q, ans.studentAnswerRaw, ans.status)
+      if (!res.gradable) continue
+      clozeBypassIds.add(qid)
+      deterministicScores.push({
+        questionId: qid,
+        isCorrect: res.isCorrect,
+        score: res.score,
+        maxScore: res.maxScore,
+        errorType: res.errorType,
+        reason: res.scoringReason,
+        scoringReason: res.scoringReason,
+        confidence: 100,
+        scoreConfidence: 100,
+        studentFinalAnswer: ensureString(ans.studentAnswerRaw, ''),
+        needExplain: !res.isCorrect && res.errorType !== 'blank',
+        _clozeBypass: true
+      })
+    }
+    if (clozeBypassIds.size > 0) {
+      logStaged(pipelineRunId, 'basic', `[B-Phase0c] 句子克漏字 code-bypass（不送 Accessor）`, {
+        count: clozeBypassIds.size, questionIds: [...clozeBypassIds]
+      })
+    }
+  }
+
   // ── Phase 1: map_fill 評分 ─────────────────────────────────────────────
   // 2026-05-28 pivot: 優先用 Phase A confirmed readings + deterministic match（不跑 AI）
   // 如果 finalAnswer 沒帶 per-position readings（舊資料）→ fallback 跑 Stage A+B（map-fill-grader）
@@ -10182,7 +10282,7 @@ export async function runStagedGradingPhaseB({
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
   // 2026-05-28: 也排除 mapFillBypassIds（map_fill 走 Direction Y、Accessor 不看）
-  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id)
+  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id) || clozeBypassIds.has(id)
   const allAnswerIds = finalReadAnswerResult.answers
     .map((a) => ensureString(a?.questionId).trim())
     .filter((id) => id && !isBypassed(id))
@@ -10191,7 +10291,7 @@ export async function runStagedGradingPhaseB({
   const otherAnswerIds = allAnswerIds.filter((id) => !id.startsWith('1-') && !id.startsWith('2-'))
   const canSplitAccessor = page1AnswerIds.length > 0 && page2AnswerIds.length > 0
   // 給 Accessor 的 readAnswerResult / answerKey 都要剔除所有 bypass 的題（manual + map_fill + VJ）
-  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0 || vjBypassIds.size > 0 || objectiveBypassIds.size > 0
+  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0 || vjBypassIds.size > 0 || objectiveBypassIds.size > 0 || clozeBypassIds.size > 0
   const accessorReadAnswerResult = hasBypass
     ? { answers: finalReadAnswerResult.answers.filter((a) => !isBypassed(a.questionId)) }
     : finalReadAnswerResult
