@@ -2568,15 +2568,35 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
     if (score < 0) score = 0
     if (score > maxScore) score = maxScore
 
-    // 2026-06-22: code 兜底 B——英語 fill_blank/short_answer，若與正解「只差大小寫(等價下完全相符)」，
-    //   即使 AI 扣了分也強制滿分、推翻 AI(防 Polar bear 這類偶發誤扣、也防預防層失效)。
-    //   只在「AI 沒給滿分」時才觸發(本就是救誤扣用)——AI 本來判對的題不碰、保留其逐格理由，
-    //   避免「完全正確、無差異」的題也被蓋成「僅大小寫/標點差異」的誤導理由。
-    const aiSaysFull = typeof row?.isCorrect === 'boolean' ? row.isCorrect : (maxScore > 0 && score >= maxScore)
-    const caseOverride = !aiSaysFull && readStatus === 'read' && maxScore > 0 && isEnglishForCase
-      && (question?.questionCategory === 'fill_blank' || question?.questionCategory === 'short_answer')
-      && englishCaseFullMatch(question, answer)
-    if (caseOverride) score = maxScore
+    // 2026-06-22: code 兜底——英語 fill_blank/short_answer「大小寫誤扣」逐空格救回(依答案卷專有名詞規則)。
+    //   AI 對「只差可赦免大小寫/結尾標點」的 blank 扣分時，code 在此推翻、把那格的分加回(逐格、部分給分也保護)。
+    //   只加分不減分；專有名詞(Indonesia)/全大寫(USA)仍由 AI 扣、不救。
+    const caseRestoredSubIds = new Set()
+    let caseRestoredWhole = false
+    if (readStatus === 'read' && maxScore > 0 && isEnglishForCase
+        && (question?.questionCategory === 'fill_blank' || question?.questionCategory === 'short_answer')) {
+      const rawParts = Array.isArray(row?.partResults) ? row.partResults : null
+      const keyParts = Array.isArray(question?.parts) ? question.parts : null
+      if (rawParts && keyParts && keyParts.length > 0) {
+        const ansBySub = new Map(keyParts.map((p) => [String(p?.subId ?? '').trim(), ensureString(p?.answer, '')]))
+        const maxBySub = new Map(keyParts.map((p) => [String(p?.subId ?? '').trim(), Math.max(0, toFiniteNumber(p?.maxScore) ?? 0)]))
+        let restored = 0
+        for (const pr of rawParts) {
+          const sub = String(pr?.subId ?? '').trim()
+          if (!sub || pr?.correct === true) continue
+          if (caseForgivableEqual(ensureString(pr?.student, ''), ansBySub.get(sub) ?? ensureString(pr?.expected, ''))) {
+            caseRestoredSubIds.add(sub)
+            restored += (maxBySub.get(sub) ?? 0)
+          }
+        }
+        if (restored > 0) score = Math.min(maxScore, score + restored)
+      } else if (!(typeof row?.isCorrect === 'boolean' ? row.isCorrect : score >= maxScore)) {
+        // 單一答案(無 parts)：整體比對，只差赦免項 → 滿分
+        const correct = ensureString(question?.answer || question?.referenceAnswer, '')
+        if (correct && caseForgivableEqual(ensureString(answer?.studentAnswerRaw, ''), correct)) { score = maxScore; caseRestoredWhole = true }
+      }
+    }
+    const caseRestored = caseRestoredSubIds.size > 0 || caseRestoredWhole
 
     // Hard override: blank/unreadable always score=0 regardless of model output
     if (readStatus === 'blank' || readStatus === 'unreadable') score = 0
@@ -2584,8 +2604,8 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
     const isCorrect =
       (readStatus === 'blank' || readStatus === 'unreadable')
         ? false
-        : caseOverride
-          ? true
+        : caseRestored
+          ? maxScore > 0 && score >= maxScore
           : typeof row?.isCorrect === 'boolean'
             ? row.isCorrect
             : maxScore > 0 && score >= maxScore
@@ -2604,7 +2624,7 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
           : isCorrect
             ? 'none'
             : 'concept'
-    const errorType = caseOverride ? 'none' : (errorTypeRaw || inferredErrorType)
+    const errorType = isCorrect ? 'none' : (errorTypeRaw || inferredErrorType)
     const needExplain =
       typeof row?.needExplain === 'boolean'
         ? row.needExplain
@@ -2630,13 +2650,17 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
     const partResults = Array.isArray(row?.partResults)
       ? row.partResults
           .filter((p) => p && typeof p.subId === 'string' && p.subId.trim())
-          .map((p) => ({
-            subId: String(p.subId).trim(),
-            student: ensureString(p.student, ''),
-            expected: ensureString(p.expected, ''),
-            correct: p.correct === true,
-            reason: typeof p.reason === 'string' ? p.reason : undefined
-          }))
+          .map((p) => {
+            const sub = String(p.subId).trim()
+            const restored = caseRestoredSubIds.has(sub)  // 大小寫救回 → 標記為對
+            return {
+              subId: sub,
+              student: ensureString(p.student, ''),
+              expected: ensureString(p.expected, ''),
+              correct: p.correct === true || restored,
+              reason: restored ? '大小寫等價（普通字首字母／結尾標點），視為正確' : (typeof p.reason === 'string' ? p.reason : undefined)
+            }
+          })
       : undefined
 
     // 2026-06-20: 多空格(合題)題 → 用結構化 partResults 組「逐空格清單」當 scoringReason、
@@ -2653,8 +2677,8 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
       })
       finalScoringReason = `學生作答內容如下：\n${lines.join('\n')}`
     }
-    // 兜底 B 觸發 → 用一致的覆寫理由，蓋掉 AI 自相矛盾的「大小寫扣分」說明
-    if (caseOverride) finalScoringReason = '等價判定：學生作答與正解僅大小寫／結尾標點差異（全大寫縮寫、句子句末標點除外），視為正確、給滿分。'
+    // 單一答案(無 parts)整體救回 → 用一致理由蓋掉 AI 矛盾的大小寫扣分說明(多空格題已由上方逐格 partResults 處理)
+    if (caseRestoredWhole) finalScoringReason = '大小寫等價判定：學生作答與正解僅大小寫／結尾標點差異（專有名詞、全大寫縮寫除外），視為正確。'
 
     const normalizedBase = {
       questionId,
@@ -5074,6 +5098,37 @@ function englishCaseFullMatch(question, studentAnswer) {
     const c = overrideNormItem(correctList[i])
     const s = overrideNormItem(studentList[i])
     if (!c || c !== s) return false
+  }
+  return true
+}
+
+// 2026-06-22: 大小寫等價「依答案卷專有名詞規則」(user 拍板，取代只看同形字母)。
+//   答案卷該字「全大寫(USA)」或「大寫開頭且首字母可分辨(Indonesia 的 I/America 的 A)」→ 大小寫有意義、要扣；
+//   其餘(普通小寫字 eating、同形首字母專有名詞 Sunday/Muslim/South 的 S/M)→ 首字母大小寫赦免(read 對它們本就會幻覺/讀不準)。
+//   中間大寫一律赦免(手寫不可能、必為讀取假象)。
+function caseSignificant(word) {
+  const s = String(word ?? '').trim()
+  if (!s) return false
+  if (s.length >= 2 && s === s.toUpperCase() && /[A-Z]/.test(s)) return true   // 全大寫縮寫 USA/TV
+  const f = s[0]
+  return /[A-Z]/.test(f) && !CASE_AMBIGUOUS_FIRST.has(f.toLowerCase())          // 大寫＋可分辨首字母 = 專有名詞
+}
+function caseFoldWord(word, significant) {
+  const s = String(word ?? '')
+  if (!s) return s
+  return (significant ? s[0] : s[0].toLowerCase()) + s.slice(1).toLowerCase()   // 中間一律小寫；首字母看 significant
+}
+// 一個 blank/答案：student 與 correct 是否「只差可赦免的大小寫 + 結尾雜訊標點」(字母/拼字/字數/順序不同 → false，交回正常批改)
+function caseForgivableEqual(studentText, correctText) {
+  const strip = (x) => String(x ?? '').trim().replace(/[,;]+$/u, '').trim()
+  let sp = strip(studentText), cp = strip(correctText)
+  if (cp.split(/\s+/).filter(Boolean).length <= 2) { sp = sp.replace(/[.!?]+$/u, '').trim(); cp = cp.replace(/[.!?]+$/u, '').trim() }
+  if (!cp) return false
+  const sw = sp.split(/\s+/).filter(Boolean), cw = cp.split(/\s+/).filter(Boolean)
+  if (sw.length !== cw.length) return false
+  for (let i = 0; i < cw.length; i++) {
+    const sig = caseSignificant(cw[i])
+    if (caseFoldWord(sw[i], sig) !== caseFoldWord(cw[i], sig)) return false
   }
   return true
 }
