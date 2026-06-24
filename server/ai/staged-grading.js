@@ -3677,6 +3677,61 @@ Return strict JSON:
 }`.trim()
 }
 
+// ── 密集勾選清單「整段讀」（2026-06-24）─────────────────────────────────────
+// 逐列 tight crop 在密集清單（列距≈框高，如 B1）會吃到上下鄰列 → read1 盲讀讀錯列。
+// 改成：把同 type＋同欄＋連續＋密集的列群成一個 list、整段裁 1 張圖、1 次讀、逐列回報、map 回各 qid。
+// 沙盒實證(local-only/exp-read1-eng-2026-06-24)：B1 整段盲讀 2.5/3.5-flash 皆 14/14、100%、穩定。
+// env DENSE_SECTION_READ_ENABLED 控制（預設關）。
+// 群組條件：同 questionType + x 重疊(同欄) + y 連續 + 列距 ≤ max(框高)×1.2(margin) + 該串 ≥3 列。
+function groupDenseCheckboxLists(candidates) {
+  const byType = new Map()
+  for (const q of candidates) {
+    if (!q?.answerBbox) continue
+    if (!byType.has(q.questionType)) byType.set(q.questionType, [])
+    byType.get(q.questionType).push(q)
+  }
+  const groups = []
+  for (const [, qs] of byType) {
+    const sorted = qs.slice().sort((a, b) => a.answerBbox.y - b.answerBbox.y)
+    let cur = []
+    const flush = () => { if (cur.length >= 3) groups.push(cur); cur = [] }
+    for (const q of sorted) {
+      if (cur.length === 0) { cur = [q]; continue }
+      const pb = cur[cur.length - 1].answerBbox, qb = q.answerBbox
+      const xOverlap = (Math.min(pb.x + pb.w, qb.x + qb.w) - Math.max(pb.x, qb.x)) > 0
+      const pitch = Math.abs((qb.y + qb.h / 2) - (pb.y + pb.h / 2))
+      const dense = pitch <= Math.max(pb.h, qb.h) * 1.2
+      if (xOverlap && dense) cur.push(q)
+      else { flush(); cur = [q] }
+    }
+    flush()
+  }
+  return groups
+}
+
+// 取 questionId 末段數字當「列印刷編號」（如 1-B1-13 → 13）；沒有就用位置序。
+function sectionRowNumber(qid, fallbackIdx) {
+  const m = String(qid).match(/(\d+)\s*$/)
+  return m ? m[1] : String(fallbackIdx + 1)
+}
+
+// group: sorted-by-y 的同類列；items: [{ qid, num, answer? }]
+function buildSectionCheckboxReadPrompt(items, questionType, withAnswers) {
+  const isSingle = questionType === 'single_check'
+  const numList = items.map((it) => it.num).join(', ')
+  const jsonShape = items.map((it) => `"${it.num}": <box>`).join(', ')
+  return `這是一張答案卷某大題「整段勾選清單」的裁切圖（共 ${items.length} 列）。
+每一列：左邊有印刷編號，中間可能有文字，右邊有一排方框選項（□1 □2 □3…）。學生在某一格打了記號（✓/✗/塗黑/塗黑）。
+本清單由上而下的列印刷編號為：${numList}。
+
+任務：對**每一個編號的列**，判斷學生的記號打在第幾個方框（1-based、由左到右數）。
+- ${withAnswers ? '下方附每列正確答案僅供對位參考；你仍只回報「你實際看到學生打記號」的那一格、不要直接抄正解。' : '你不知道正確答案，只讀學生實際打的記號、不要猜。'}
+- **用左邊的印刷編號逐列對齊**，不要把上一列或下一列的記號讀到這一列。
+- ${isSingle ? '每列只勾一格 → 回報一個數字。' : '每列可勾多格 → 回報逗號分隔（如 1,3）。'}某列完全沒勾 → 該列填 0。
+${withAnswers ? '（參考）每列正解：' + items.map((it) => `${it.num}=${ensureString(it.answer, '')}`).join('、') + '\n' : ''}
+回傳嚴格 JSON：{ "rows": { ${jsonShape} } }`
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Layered prompt components (used by buildReadAnswerPrompt / buildReviewReadPrompt)
 // Layer 1 = global, Layer 2 = domain, Layer 2-1 = type×domain,
@@ -7501,9 +7556,22 @@ export async function runStagedGradingPhaseA({
 
   // Focused checkbox crops: single_check / multi_check / multi_choice
   // We pre-crop first, then exclude successful IDs from full-image ReadAnswer.
-  const focusedCheckboxCandidates = classifyAligned.filter(
+  const _allCheckboxCandidates = classifyAligned.filter(
     (q) => q.visible && CHECKBOX_FOCUSED_READ_TYPES.has(q.questionType) && q.answerBbox
   )
+  // 2026-06-24: 密集勾選清單（同 type+同欄+連續+列距≤框高×1.2、≥3列）→ 整段讀（gated DENSE_SECTION_READ_ENABLED）。
+  //   逐列 tight crop 在密集清單會吃到鄰列 → read1 盲讀讀錯列；整段讀靠列號對位、實證 14/14。
+  //   其餘（寬鬆/落單）維持逐列 focused crop。
+  const denseSectionGroups = process.env.DENSE_SECTION_READ_ENABLED === 'true'
+    ? groupDenseCheckboxLists(_allCheckboxCandidates)
+    : []
+  const denseSectionIds = new Set(denseSectionGroups.flat().map((q) => q.questionId))
+  if (denseSectionIds.size > 0) {
+    logStaged(pipelineRunId, stagedLogLevel, 'dense-checkbox-list detected', {
+      groups: denseSectionGroups.length, totalRows: denseSectionIds.size, sizes: denseSectionGroups.map((g) => g.length)
+    })
+  }
+  const focusedCheckboxCandidates = _allCheckboxCandidates.filter((q) => !denseSectionIds.has(q.questionId))
   const focusedCheckboxCropMap = new Map()
   if (focusedCheckboxCandidates.length > 0 && inlineImages.length > 0) {
     const inlineImage = inlineImages[0]
@@ -8185,6 +8253,60 @@ export async function runStagedGradingPhaseA({
       reReadAnswerParsed = reReadAnswerParsed ?? { answers: [] }
       reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, multiFillRead2Map)
       logStaged(pipelineRunId, stagedLogLevel, 'focused-multifill read-2 overrides applied → AI2', { count: multiFillRead2Map.size })
+    }
+  }
+
+  // ── 密集勾選清單「整段讀」（read1 盲 + read2 知答、各清單 1 次、逐列 map 回 qid）──────
+  if (denseSectionGroups.length > 0 && inlineImages.length > 0) {
+    const inlineImage = inlineImages[0]
+    const akByQidDense = mapByQuestionId(answerKeyQuestions, (q) => q?.id)
+    const denseRead1Map = new Map()
+    const denseRead2Map = new Map()
+    await Promise.all(denseSectionGroups.map(async (group) => {
+      const sorted = group.slice().sort((a, b) => a.answerBbox.y - b.answerBbox.y)
+      const minY = Math.min(...sorted.map((q) => q.answerBbox.y))
+      const maxYB = Math.max(...sorted.map((q) => q.answerBbox.y + q.answerBbox.h))
+      const top = Math.max(0, minY - 0.004)
+      // 整段裁圖：全寬（含左側列號 + 右側勾選欄）、y 涵蓋整串 + 小邊距
+      const sectionBbox = { x: 0, y: top, w: 1, h: Math.min(1, maxYB + 0.004) - top }
+      const cropData = await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, sectionBbox, true, 0)
+      if (!cropData) return
+      const qtype = sorted[0].questionType
+      const items = sorted.map((q, i) => ({
+        qid: q.questionId, num: sectionRowNumber(q.questionId, i),
+        answer: ensureString(akByQidDense.get(q.questionId)?.answer, '')
+      }))
+      const numToQid = new Map(items.map((it) => [String(it.num), it.qid]))
+      const [r1, r2] = await Promise.all([
+        executeStage({ apiKey, model: readModel, modelOverride: readModelOverride, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+          stageContents: [{ role: 'user', parts: [{ text: buildSectionCheckboxReadPrompt(items, qtype, false) }, { inlineData: cropData }] }] }),
+        executeStage({ apiKey, model: readModel, modelOverride: readModelOverride, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+          stageContents: [{ role: 'user', parts: [{ text: buildSectionCheckboxReadPrompt(items, qtype, true) }, { inlineData: cropData }] }] })
+      ])
+      const applyRows = (res, map) => {
+        if (!res?.ok) return
+        const rows = parseCandidateJson(res.data)?.rows
+        if (!rows || typeof rows !== 'object') return
+        for (const [num, box] of Object.entries(rows)) {
+          const qid = numToQid.get(String(num))
+          if (!qid) continue
+          const raw = String(box ?? '').trim()
+          const isBlank = raw === '' || raw === '0'
+          const val = raw.replace(/[^\d,]/g, '').replace(/,+/g, ',').replace(/^,|,$/g, '')
+          map.set(qid, { questionId: qid, studentAnswerRaw: isBlank || !val ? '未作答' : val, status: isBlank || !val ? 'blank' : 'read' })
+        }
+      }
+      applyRows(r1, denseRead1Map)
+      applyRows(r2, denseRead2Map)
+    }))
+    if (denseRead1Map.size > 0) {
+      readAnswerParsed = applyAnswerOverrides(readAnswerParsed, denseRead1Map)
+      logStaged(pipelineRunId, stagedLogLevel, 'dense-section-read read-1 overrides applied → AI1', { count: denseRead1Map.size })
+    }
+    if (denseRead2Map.size > 0) {
+      reReadAnswerParsed = reReadAnswerParsed ?? { answers: [] }
+      reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, denseRead2Map)
+      logStaged(pipelineRunId, stagedLogLevel, 'dense-section-read read-2 overrides applied → AI2', { count: denseRead2Map.size })
     }
   }
 
