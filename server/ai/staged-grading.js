@@ -7499,7 +7499,22 @@ export async function runStagedGradingPhaseA({
         // pad 收緊成「對稱小邊距」(隨格高縮放)。bbox 本身已涵蓋 Yes/No 兩欄，不需額外橫向擴張；
         // 橫向擴張反而會把鄰欄/題幹拉進來、讓「第幾個框」位移誤判。
         // 實驗(student1 I 表)：對稱 pad 0.0075→誤判、0.0035→誤判、≤0.002→穩定讀對。
-        const checkboxPad = Math.min(dynamicPad, (q.answerBbox?.h || dynamicPad) * 0.25)
+        // 2026-06-24：列距夾制——量到同欄最近的另一個 focused-checkbox 的中心垂直距(列距)，
+        //   把 pad 夾到「不超過到鄰列框邊的空間」。密集列(框高≥列距，如 B1 14列擠 y0.17~0.25、
+        //   框高0.006>列距0.0053→框本身就疊)→ pitchCap=0 → pad=0(直接用原始 classify 框，不外擴)；
+        //   稀疏列(如 A大題框分散)→ pitchCap 大、維持 h×0.25 小邊距。實證(英語期末 B1 single_check
+        //   送審43%，root=pad後crop吃2~3列、read1分不出哪列；overlay 圖 local-only/.../b1-crop-overlay.html)。
+        const _b = q.answerBbox
+        let _pitch = Infinity
+        for (const o of focusedCheckboxCandidates) {
+          if (o === q || !o.answerBbox) continue
+          const ob = o.answerBbox
+          if (Math.min(_b.x + _b.w, ob.x + ob.w) - Math.max(_b.x, ob.x) <= 0) continue // 水平不重疊=不同欄、跳過
+          const d = Math.abs((_b.y + _b.h / 2) - (ob.y + ob.h / 2))
+          if (d > 1e-6 && d < _pitch) _pitch = d
+        }
+        const _pitchCap = Number.isFinite(_pitch) ? Math.max(0, (_pitch - (_b?.h || 0)) / 2) : Infinity
+        const checkboxPad = Math.min(dynamicPad, (q.answerBbox?.h || dynamicPad) * 0.25, _pitchCap)
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
