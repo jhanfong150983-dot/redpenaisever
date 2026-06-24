@@ -7562,7 +7562,8 @@ export async function runStagedGradingPhaseA({
   // 2026-06-24: 密集勾選清單（同 type+同欄+連續+列距≤框高×1.2、≥3列）→ 整段讀（gated DENSE_SECTION_READ_ENABLED）。
   //   逐列 tight crop 在密集清單會吃到鄰列 → read1 盲讀讀錯列；整段讀靠列號對位、實證 14/14。
   //   其餘（寬鬆/落單）維持逐列 focused crop。
-  const denseSectionGroups = process.env.DENSE_SECTION_READ_ENABLED === 'true'
+  // 2026-06-24: 預設開；要關設環境變數 DENSE_SECTION_READ_ENABLED=false。
+  const denseSectionGroups = process.env.DENSE_SECTION_READ_ENABLED !== 'false'
     ? groupDenseCheckboxLists(_allCheckboxCandidates)
     : []
   const denseSectionIds = new Set(denseSectionGroups.flat().map((q) => q.questionId))
