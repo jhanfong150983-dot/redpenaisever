@@ -7466,6 +7466,22 @@ export async function runStagedGradingPhaseA({
       ? +Math.min(dynamicPad, (q?.answerBbox?.h || dynamicPad) * 0.45).toFixed(4)
       : dynamicPad
 
+  // 2026-06-23: 量某 single_choice 題到「同欄最近的另一個 single_choice」的中心垂直距(=列距)。
+  // 用於一般模式+照片的緊框，把 padY 夾到「不吃進鄰列」。找不到同欄鄰題回 Infinity（夾制不啟動）。
+  const nearestChoicePitchY = (q, candidates) => {
+    const b = q?.answerBbox; if (!b) return Infinity
+    const cy = b.y + b.h / 2, x0 = b.x, x1 = b.x + b.w
+    let best = Infinity
+    for (const o of candidates) {
+      if (o === q || o?.questionType !== 'single_choice' || !o.answerBbox) continue
+      const ob = o.answerBbox
+      if (Math.min(x1, ob.x + ob.w) - Math.max(x0, ob.x) <= 0) continue  // 水平不重疊=不同欄、跳過
+      const d = Math.abs(cy - (ob.y + ob.h / 2))
+      if (d > 1e-6 && d < best) best = d
+    }
+    return best
+  }
+
   // Focused checkbox crops: single_check / multi_check / multi_choice
   // We pre-crop first, then exclude successful IDs from full-image ReadAnswer.
   const focusedCheckboxCandidates = classifyAligned.filter(
@@ -7524,10 +7540,28 @@ export async function runStagedGradingPhaseA({
         //   → read1/read2 各抓不同排 → 大量假性 NR（8號實證 18 題選擇題 NR、crop 疊 2~3 排）。
         //   bbox 已涵蓋該格、答案字在格中央，零 margin 最乾淨。只鎖 answer_only 選擇題、不碰其他模式/題型。
         const aoChoice = answerSheetMode === 'answer_only' && (q.questionType === 'single_choice' || q.questionType === 'multi_choice')
+        // 2026-06-23: 一般模式(with_questions) + 照片(submissionSource≠teacher_scan，即非 PDF) + single_choice → 緊框。
+        //   根因：原本 inflate(±0.005)+dynamicPad(0.03) 的 crop 垂直吃進「下一列」答案，盲讀 read1 抓錯列(off-by-one)
+        //   → 與知答 read2 不一致 → 大量假性 NR。沙盒實證(座號5/9/21/28/30、gemini-2.5-flash、聚焦 read1/read2)：
+        //   NR 35%→4%。做法＝不 inflate、padX 縮到 0.02、padY 夾到「0.35×列距」(min 自我 scope：稀疏版面不啟動)。
+        //   嚴格鎖在已實證範圍：answer_only / PDF(teacher_scan) / 其他題型(multi_choice·true_false·fill_blank…) 一律不動。
+        const tightChoice = answerSheetMode === 'with_questions'
+          && submissionSource !== 'teacher_scan'
+          && q.questionType === 'single_choice'
         // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再有「鄰格括號被切」風險
         // 2026-06-02：其餘選擇題類（含 true_false）維持 choiceAwareCropPad（隨格高縮放）、其他維持 dynamicPad
-        const bboxToUse = aoChoice ? q.answerBbox : inflateBboxForType(q.answerBbox, q.questionType)
-        const cropPad = aoChoice ? 0 : choiceAwareCropPad(q)
+        let bboxToUse, cropPad
+        if (aoChoice) {
+          bboxToUse = q.answerBbox
+          cropPad = 0
+        } else if (tightChoice) {
+          const pitchY = nearestChoicePitchY(q, ai1CropCandidates)
+          bboxToUse = q.answerBbox  // 不 inflate、用原始緊框
+          cropPad = { padX: Math.min(0.02, dynamicPad + 0.005), padY: +Math.min(dynamicPad, 0.35 * pitchY).toFixed(4) }
+        } else {
+          bboxToUse = inflateBboxForType(q.answerBbox, q.questionType)
+          cropPad = choiceAwareCropPad(q)
+        }
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
