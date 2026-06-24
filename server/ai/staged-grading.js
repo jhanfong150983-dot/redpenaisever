@@ -4100,6 +4100,17 @@ function buildReadAnswerPrompt(classifyResult, options = {}) {
   }
   const fillBlankPartsIds = Array.from(fillBlankPartsMap.keys())
 
+  // 2026-06-24: 整句問答題（英語、無 parts、答案是整句）→ read 改「完整抄整句」、不逐空格抓碎片。
+  //   實證 local-only/exp-read1-eng-2026-06-24：read1 從碎片(He,can,by,plane)→忠實整句、可逐詞批改。
+  //   數學/短空格/parts 不在此列、維持原逐空格規則（保 scratch-ignore + partValues）。
+  const _akqById = new Map(
+    (Array.isArray(options?.answerKeyQuestions) ? options.answerKeyQuestions : []).map((q) => [q?.id, q])
+  )
+  const fillBlankSentenceIds = isEnglish
+    ? fillBlankIds.filter((id) => !fillBlankPartsMap.has(id)
+        && isSentenceClozeAnswer(_akqById.get(id)?.answer, toFiniteNumber(_akqById.get(id)?.maxScore) ?? 0))
+    : []
+
   // Bucket A: answer_with_context
   const circleSelectOneIds = idsOf('circle_select_one')
   const circleSelectManyIds = idsOf('circle_select_many')
@@ -4351,7 +4362,13 @@ TRUE-FALSE (true_false 題)：學生在空括號 (    ) 內寫 ○ 或 ✗。
 - 括號空白 → blank。字跡無法辨識為任一符號 → unreadable。
 ` : ''
 
-  const fillBlankRules = fillBlankIds.length > 0 ? `
+  // 2026-06-24: 整句問答題（fillBlankSentenceIds）→ read 改「完整抄整句」；其餘 fill_blank 維持逐空格。
+  const fillBlankRules = fillBlankIds.length === 0 ? '' : `${fillBlankSentenceIds.length > 0 ? `
+🚨 整句問答題（以下題號）— 「寫一整句英文回答」的閱讀／聽力問答題：${fillBlankSentenceIds.map((id) => `"${id}"`).join(', ')}
+  - 對這些題：**逐字、完整抄寫學生手寫的整句答案**（所有單字、依書寫順序），保留原始拼寫／大小寫／標點、不修正錯字。
+  - ❌ 不要逐空格抓字、不要輸出逗號分隔字詞清單、不要只抓底線詞。整句空白 → status="blank"。
+  - ⚠️ 其餘未列在上面的 fill_blank（短空格／數學／合題 parts）才走下方規則。
+` : ''}
 FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
 - Empty blank → "_". Unreadable blank → "?". All blanks empty → status="blank".
@@ -4380,7 +4397,7 @@ ${fillBlankPartsIds.map((qid) => {
   return `- questionId="${qid}": ${meta.parts.length} 空, subIds: ${partsDesc}`
 }).join('\n')}
 ` : ''}
-` : ''
+`
 
   const calculationRules = calculationIds.length > 0 ? `
 CALCULATION (questions in CALCULATION list):
