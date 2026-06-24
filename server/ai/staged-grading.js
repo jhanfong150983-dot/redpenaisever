@@ -2955,7 +2955,11 @@ const CLASSIFY_TYPE_RULES = {
     · 框學生畫記的選項列表 — 即使學生在 (A)(B)(C)(D) 選項上做記號，
       那也不是答案 cell。答案 cell 是題號後的「(   )」括號或「___」底線
     · 多答案 case 框只到印刷底線右端就停 — 會切掉延伸的後半個答案
-    · 「冒號後接空白」格式各題 h/Δy 完全相同 — 那是 lazy mode 外推，重做`,
+    · 「冒號後接空白」格式各題 h/Δy 完全相同 — 那是 lazy mode 外推，重做${process.env.EXP_ANTI_GRID === '1' ? `
+  🚨🚨 [反固定欄] single_choice/multi_choice/true_false 每題 bbox.x 必須各自貼合「該題行首學生實際手寫代號」的位置：
+    · 不同題的 x 會因學生書寫習慣、紙張擺放、拍照透視而**自然不同**（通常逐列略有偏移），這是正常的。
+    · ⛔ 嚴禁所有題輸出**幾乎相同的 x**（等距規則欄 / grid 外推）。若你的輸出裡 20 題的 x 都一樣 → 那是 lazy mode、沒有逐題看、錯的。
+    · 做法：**逐題**找該行行首學生寫的那個代號筆跡、bbox.x 對齊它本身；不要套用前一題的 x。` : ''}`,
 
   table_cell: `▸ table_cell
   答題區視覺形式: 整張表格（多列 × 多欄、清晰格線）
@@ -3730,6 +3734,23 @@ function buildSectionCheckboxReadPrompt(items, questionType, withAnswers) {
 - ${isSingle ? '每列只勾一格 → 回報一個數字。' : '每列可勾多格 → 回報逗號分隔（如 1,3）。'}某列完全沒勾 → 該列填 0。
 ${withAnswers ? '（參考）每列正解：' + items.map((it) => `${it.num}=${ensureString(it.answer, '')}`).join('、') + '\n' : ''}
 回傳嚴格 JSON：{ "rows": { ${jsonShape} } }`
+}
+
+// ── ordering 排序題「focused read」（2026-06-24）─────────────────────────────
+// 主 read（2.5-flash）對「圖片角落小手寫序號」常讀不出 → 未作答；3.5-flash 穩定。
+// 且 extract 與 read 必須用同一條掃描順序才對得齊（gemini.ts ordering spec 已加同句）。
+// 改：ordering 走專屬 focused read（MODEL_PRO + 明確掃描順序）、覆寫 read1(盲)+read2(知答)。
+function buildOrderingReadPrompt(questionId, correctAnswer, withAnswers) {
+  return `這是一張答案卷「排序題（如 Listen and Number）」的裁切圖：一組項目（圖片／詞／句）排成單列或多列網格，每項旁或內有印刷括號 ( )／格，學生在裡面手寫一個序號數字表示順序。
+
+🚨 掃描／輸出順序（固定）：**由上而下、每一列由左而右**掃描每個項目（多列網格：先掃完上面一列、再下一列）。
+- 對每個項目，讀它格內**學生手寫的數字**（不是印刷的圖案／編號）。
+- 依掃描順序，把各項目的數字用「,」串起來。
+- 某項目格內沒寫數字 → 該位置寫 "?"。全部都沒寫 → status="blank"。
+- 只讀實際手寫的數字、不要推測、不要自己排序。
+${withAnswers ? `（參考）此題正解序列為「${ensureString(correctAnswer, '')}」，僅供你對位用；仍只回報你實際看到學生手寫的數字、不要直接抄正解。` : '你不知道正確答案、不要猜。'}
+
+回傳嚴格 JSON：{ "answers": [ { "questionId": "${questionId}", "studentAnswerRaw": "1,5,6,...", "status": "read|blank" } ] }`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8308,6 +8329,44 @@ export async function runStagedGradingPhaseA({
       reReadAnswerParsed = reReadAnswerParsed ?? { answers: [] }
       reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, denseRead2Map)
       logStaged(pipelineRunId, stagedLogLevel, 'dense-section-read read-2 overrides applied → AI2', { count: denseRead2Map.size })
+    }
+  }
+
+  // ── ordering 排序題「focused read」（MODEL_PRO + 明確掃描順序、覆寫 read1+read2）──────
+  // 主 read(2.5-flash) 對圖片角落小手寫序號常 未作答；3.5-flash 穩定。沙盒(B2)：2.5=1/3、3.5=3/3。
+  // extract 與 read 用同一條掃描順序(由上而下、每列由左而右)才對得齊。預設開；要關設 ORDERING_FOCUSED_READ_ENABLED=false。
+  if (process.env.ORDERING_FOCUSED_READ_ENABLED !== 'false') {
+    const orderingCandidates = classifyAligned.filter((q) => q.visible && q.questionType === 'ordering' && q.answerBbox)
+    if (orderingCandidates.length > 0 && inlineImages.length > 0) {
+      const inlineImage = inlineImages[0]
+      const akByQidOrd = mapByQuestionId(answerKeyQuestions, (q) => q?.id)
+      const ordRead1Map = new Map()
+      const ordRead2Map = new Map()
+      await Promise.all(orderingCandidates.map(async (q) => {
+        const cropData = await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, true, 0.01)
+        if (!cropData) return
+        const correct = ensureString(akByQidOrd.get(q.questionId)?.answer, '')
+        const [r1, r2] = await Promise.all([
+          executeStage({ apiKey, model: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+            stageContents: [{ role: 'user', parts: [{ text: buildOrderingReadPrompt(q.questionId, correct, false) }, { inlineData: cropData }] }] }),
+          executeStage({ apiKey, model: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+            stageContents: [{ role: 'user', parts: [{ text: buildOrderingReadPrompt(q.questionId, correct, true) }, { inlineData: cropData }] }] })
+        ])
+        const pick = (res) => { if (!res?.ok) return null; const a = parseCandidateJson(res.data)?.answers; return Array.isArray(a) ? a[0] : null }
+        const a1 = pick(r1), a2 = pick(r2)
+        if (a1) ordRead1Map.set(q.questionId, a1)
+        if (a2) ordRead2Map.set(q.questionId, a2)
+        logStaged(pipelineRunId, stagedLogLevel, `ordering-focused-read qid=${q.questionId}`, { read1: a1?.studentAnswerRaw, read2: a2?.studentAnswerRaw })
+      }))
+      if (ordRead1Map.size > 0) {
+        readAnswerParsed = applyAnswerOverrides(readAnswerParsed, ordRead1Map)
+        logStaged(pipelineRunId, stagedLogLevel, 'ordering-focused-read read-1 overrides applied → AI1', { count: ordRead1Map.size })
+      }
+      if (ordRead2Map.size > 0) {
+        reReadAnswerParsed = reReadAnswerParsed ?? { answers: [] }
+        reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, ordRead2Map)
+        logStaged(pipelineRunId, stagedLogLevel, 'ordering-focused-read read-2 overrides applied → AI2', { count: ordRead2Map.size })
+      }
     }
   }
 
