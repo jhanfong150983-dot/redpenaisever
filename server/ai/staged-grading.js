@@ -1520,7 +1520,7 @@ export function gradeObjectiveDeterministic(q, studentAnswerRaw, status) {
 // 情境：英語閱讀／聽力問答題，答句是「整句」（部分單字是印刷的、部分是學生填的計分關鍵詞）。
 // 學生寫整句、印刷字一定對 → 跟標準答案逐詞做 LCS 對齊，未對上的「標準答案詞」= 學生填錯/漏的空。
 // 分數 = maxScore − 錯詞數（clamp 0..maxScore）。詳見 local-only/eng_final_exam_2026-06-22/cloze-grader.test.mjs。
-// 由 env CLOZE_DETERMINISTIC_ENABLED 控制（預設關），只走 fill_blank 單一整句、不動 parts 合題（仍交 AI）。
+// 由 env CLOZE_DETERMINISTIC_ENABLED 控制（預設開、='false' 可關），只走 fill_blank 單一整句、不動 parts 合題（仍交 AI）。
 function clozeNormToken(t) {
   return String(t || '').toLowerCase().replace(/[’]/g, "'").replace(/^[^a-z0-9'-]+|[^a-z0-9'-]+$/g, '')
 }
@@ -10122,10 +10122,11 @@ export async function runStagedGradingPhaseB({
 
   // ── Phase 0c：句子克漏字（fill_blank 單一整句）確定性批改、不送 Accessor ─────────
   // 英語閱讀／聽力問答題答句整句、印刷字一定對 → 逐詞 LCS、分數=配分−錯詞數。詳見 gradeSentenceClozeDeterministic。
-  // env CLOZE_DETERMINISTIC_ENABLED 預設關 → 此區完全 inert、production 零影響。
+  // 2026-06-28 預設開（kill switch CLOZE_DETERMINISTIC_ENABLED='false' 可關）。沙盒驗證(N=6生×3題、含空白/拼錯/數字錯)：
+  //   分數忠實、印刷框字不誤扣、read2 不幻覺；read1≠read2 仍走 Phase A 待複核（本區只動 Phase B 算分、不碰 arbiterStatus）。
   // 只收 fill_blank 「單一整句」（無 parts、英文≥3詞、配分≥2）；parts 合題仍交 Accessor（不變）。
   const clozeBypassIds = new Set()
-  if (process.env.CLOZE_DETERMINISTIC_ENABLED === 'true') {
+  if (process.env.CLOZE_DETERMINISTIC_ENABLED !== 'false') {
     for (const ans of finalReadAnswerResult.answers) {
       const qid = ensureString(ans?.questionId).trim()
       if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
