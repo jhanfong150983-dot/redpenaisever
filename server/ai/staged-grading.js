@@ -4444,6 +4444,9 @@ TRUE-FALSE (true_false 題)：學生在空括號 (    ) 內寫 ○ 或 ✗。
   - 對這些題：**逐字、完整抄寫學生手寫的整句答案**（所有單字、依書寫順序），保留原始拼寫／大小寫／標點、不修正錯字。
   - ❌ 不要逐空格抓字、不要輸出逗號分隔字詞清單、不要只抓底線詞。整句空白 → status="blank"。
   - ⚠️ 其餘未列在上面的 fill_blank（短空格／數學／合題 parts）才走下方規則。
+  - ⛔【最高優先、凌駕下方所有 FILL-BLANK 規則】上列題號**完全不適用**下方「Output ... comma-separated」規則。
+  - ✅ studentAnswerRaw 必須是「**一個完整連續字串**」：從作答線最左掃到最右，含**印刷字與手寫字**、依視覺書寫順序**逐字抄**，詞與詞間用單一半形空格。
+  - ❌ 嚴禁輸出逗號分隔的字詞清單（例：禁止 "is, idea" / "are, three, one"）、嚴禁只抓片段、嚴禁中途停。即使只認得部分字，也要把整條作答線**從頭到尾掃完**再輸出。
 ` : ''}
 FILL-BLANK (questions in FILL-BLANK list):
 - Output ONLY handwritten content inside each blank, comma-separated left-to-right top-to-bottom.
