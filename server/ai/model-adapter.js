@@ -27,9 +27,36 @@ function getRetryConfig() {
 function get429RetryConfig() {
   const retryRaw = Number(process.env.GEMINI_429_RETRY_COUNT)
   const backoffRaw = Number(process.env.GEMINI_429_RETRY_BACKOFF_MS)
-  const retryCount = Number.isFinite(retryRaw) ? Math.max(0, Math.round(retryRaw)) : 2
+  // 2026-06-29 預設 2→4：併發提高後撞 429 機率上升，多重試幾次（搭配 Retry-After 精準等待）才不會直接失敗。
+  const retryCount = Number.isFinite(retryRaw) ? Math.max(0, Math.round(retryRaw)) : 4
   const backoffMs = Number.isFinite(backoffRaw) ? Math.max(1000, Math.round(backoffRaw)) : 15000
   return { retryCount, backoffMs }
+}
+
+// 429 等多久：優先用伺服器給的 Retry-After header / Google RetryInfo（精準）；否則回 null 由呼叫端用 jitter 退避。
+function parse429RetryAfterMs(response, data) {
+  try {
+    const h = response?.headers?.get?.('retry-after')
+    if (h) {
+      const secs = Number(h)
+      if (Number.isFinite(secs)) return Math.max(0, secs * 1000)
+      const dateMs = Date.parse(h)
+      if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now())
+    }
+  } catch { /* ignore */ }
+  try {
+    const details = data?.error?.details
+    if (Array.isArray(details)) {
+      for (const d of details) {
+        const rd = d?.retryDelay
+        if (typeof rd === 'string') {
+          const m = rd.match(/^([\d.]+)s$/)
+          if (m) return Math.round(parseFloat(m[1]) * 1000)
+        }
+      }
+    }
+  } catch { /* ignore */ }
+  return null
 }
 
 // Calls a single model. Returns { ok, status, data, modelPath, url, is503 }.
@@ -87,13 +114,20 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
       return { ok: false, status: 503, data, modelPath, url, is503: true }
     }
 
-    // 429 = rate limit — retry with fixed backoff, independent of 504 retry counter.
+    // 429 = rate limit — 優先依 Retry-After 精準等待；否則 jitter 退避（破解 thundering herd：併發下多 call 同時被擋，
+    // 若都等同一固定時間會一起重試又一起撞）。獨立於 504 retry counter。
     if (Number(response.status) === 429 && attempts429 < retry429Count) {
       attempts429 += 1
-      console.warn(
-        `[ai-model-adapter] response status=429 model=${model} retry429=${attempts429}/${retry429Count} waitMs=${backoff429Ms}`
+      const retryAfterMs = parse429RetryAfterMs(response, data)
+      const jittered = Math.round(backoff429Ms * (0.5 + Math.random())) // 0.5x–1.5x
+      const waitMs = Math.min(
+        retryAfterMs != null ? retryAfterMs + Math.round(Math.random() * 1000) : jittered,
+        60000
       )
-      await sleep(backoff429Ms)
+      console.warn(
+        `[ai-model-adapter] response status=429 model=${model} retry429=${attempts429}/${retry429Count} waitMs=${waitMs}${retryAfterMs != null ? ' (Retry-After)' : ' (jitter)'}`
+      )
+      await sleep(waitMs)
       attempt -= 1  // don't consume 504 retry budget
       continue
     }
