@@ -64,6 +64,10 @@ const PIPELINE_REGISTRY = new Map([
     createPipeline(AI_ROUTE_KEYS.GRADING_EXPLAIN, 'grading-explain-pipeline')
   ],
   [
+    AI_ROUTE_KEYS.GRADING_ERROR_GUIDANCE,
+    createPipeline(AI_ROUTE_KEYS.GRADING_ERROR_GUIDANCE, 'grading-error-guidance-pipeline')
+  ],
+  [
     AI_ROUTE_KEYS.GRADING_RECHECK,
     createPipeline(AI_ROUTE_KEYS.GRADING_RECHECK, 'grading-recheck-pipeline')
   ],

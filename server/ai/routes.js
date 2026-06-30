@@ -15,6 +15,8 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_ACCESSOR: 'grading.accessor',
   GRADING_LOCATE: 'grading.locate',
   GRADING_EXPLAIN: 'grading.explain',
+  // 2026-06-30 錯題引導改 on-demand：學生在訂正時按鈕觸發、單題生成（server 端取答案卷、不洩漏給 client）
+  GRADING_ERROR_GUIDANCE: 'grading.error_guidance',
   GRADING_RECHECK: 'grading.recheck',
   GRADING_CONSISTENCY_JUDGE: 'grading.consistency_judge',
   // VJ（視覺判斷題：diagram_color / map_symbol / grid_geometry）專用三階段、全走 PRO

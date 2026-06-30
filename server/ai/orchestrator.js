@@ -7,7 +7,8 @@ import {
   runStagedGradingEvaluate,
   runStagedGradingPhaseA,
   runStagedGradingPhaseAArbiter,
-  runStagedGradingPhaseB
+  runStagedGradingPhaseB,
+  runErrorGuidance
 } from './staged-grading.js'
 
 async function executeSinglePipelineCall({
@@ -109,6 +110,7 @@ export async function runAiPipeline({
   const isPhaseB = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B
   const isPhaseBAccessor = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B_ACCESSOR
   const isPhaseBExplain = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B_EXPLAIN
+  const isErrorGuidance = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_ERROR_GUIDANCE
 
   // answer_sheet_mode 對 extract / classify / explain pipeline 的分支都重要，log 到 orchestrator 入口便於追蹤
   const dispatchedAnswerSheetMode = internalContext?.answerSheetMode || 'with_questions'
@@ -290,6 +292,23 @@ export async function runAiPipeline({
         status: errStatus,
         data: { error: error?.message || 'Phase B failed', code: 'PHASE_B_FAILED' },
         pipelineMeta: { pipeline: 'grading-phase-b', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+      }
+    }
+  } else if (isErrorGuidance) {
+    // 2026-06-30 學生 on-demand 單題錯題引導：server 端抓答案卷、不洩漏給 client；費用歸老師。
+    console.log(`${logPrefix} 進入 Error Guidance（學生 on-demand 單題引導）`)
+    try {
+      pipelineResult = await runErrorGuidance({
+        apiKey,
+        model: resolveStageModel(AI_ROUTE_KEYS.GRADING_ERROR_GUIDANCE),
+        contents, payload, routeHint, internalContext
+      })
+    } catch (error) {
+      console.warn(`${logPrefix} error-guidance crashed`, error)
+      pipelineResult = {
+        status: 503,
+        data: { error: error?.message || 'error guidance failed', code: 'ERROR_GUIDANCE_FAILED' },
+        pipelineMeta: { pipeline: 'grading-error-guidance', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
       }
     }
   } else if (shouldRunStagedGrading) {

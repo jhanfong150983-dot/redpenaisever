@@ -6108,6 +6108,136 @@ async function executeStage({
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-06-30 錯題引導 on-demand（學生在訂正時按鈕觸發、單題生成）
+//   設計：引導離開批改管線（Phase B 只剩 accessor），改成學生「卡住才按」。
+//   - 防濫用：學生必須填「哪裡不懂」、server 端也擋消極/空白（client 另有一層）。
+//   - 答案保密：答案卷一律 server 端 live 抓（loadPhaseAState）、prompt 內部參考但嚴禁吐給學生。
+//   - 計費：走 grading.* route → proxy 自動把費用歸老師（resolveBillingUserId）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 消極/空白說明偵測：擋「不會 / 不知道 / 不懂 / 未填」這類無資訊輸入（防學生亂按燒老師點數）。
+export function isMeaningfulConfusion(text) {
+  const raw = ensureString(text, '').trim()
+  if (!raw) return false
+  const stripped = raw.replace(/[\s,，。.!！?？、~～:：;；]/g, '')
+  if (stripped.length < 4) return false  // 太短（「不會」「不懂」「不知道」）一律擋
+  // 整句僅由消極語構成 → 擋
+  if (/^(這題|這個|題目|整題)?(我)?(都|完全|就是|統統|根本)?(不(知道|曉得|懂|會|清楚|明白|瞭解|知)|看不懂|沒(有|概念|想法)|毫無頭緒|忘記了?|忘了|未填|無|不太懂|不太會)$/.test(stripped)) return false
+  // 移除消極詞與題目代稱後若無實質內容 → 擋
+  const meaningful = stripped.replace(/(不知道|不曉得|不清楚|不明白|看不懂|不懂|不會|沒概念|沒想法|毫無頭緒|忘記了?|忘了|不太懂|不太會|這題|這個|這道|題目|整題|我|都|完全|就是|根本)/g, '')
+  if (meaningful.length < 3) return false
+  return true
+}
+
+function buildSingleGuidancePrompt({ question, studentAnswer, studentConfusion, domainHint, answerSheetMode, hasImage }) {
+  const qCat = ensureString(question?.questionCategory || question?.type, '').trim()
+  const correct = ensureString(question?.answer || question?.referenceAnswer, '').trim()
+  const maxScore = toFiniteNumber(question?.maxScore)
+  const isAnswerOnly = answerSheetMode === 'answer_only'
+  return `
+你是國小老師，正在一對一回覆一位學生對「某一題」的提問。學生卡住了、想要引導（不是要答案）。
+
+學生親口說他「哪裡不懂」：「${studentConfusion}」
+你的任務：針對他說的這個困惑，給溫暖、具體、好懂的引導，幫他自己想出來。
+
+題型(questionCategory)：${qCat || '未知'}
+學生的作答：「${studentAnswer || '（空白／未作答）'}」
+${hasImage ? '附圖是學生的作答影像，可參考字跡與作答。' : ''}
+（⚠️ 以下僅供老師內部判斷、絕對不可吐給學生 —— 標準答案：「${correct || '（無）'}」${Number.isFinite(maxScore) ? `、配分 ${maxScore}` : ''}）
+
+== 鐵則 ==
+1. ⛔ 絕對不可以直接講出、拼出或暗示標準答案，禁止「答案是…」「正確答案為…」「應該填 X」這類句子。要引導學生「怎麼想」，不是給他答案。
+2. 必須直接回應學生說的困惑「${studentConfusion}」，不要答非所問。
+3. 用台灣國小生聽得懂的口語、溫暖鼓勵的語氣。2～4 句。
+4. 若學生作答空白或字跡無法判讀，先溫和提醒，再給思考方向。
+${isAnswerOnly ? '5. 你看不到題目原文，只知道題型與作答，不可以編造題目在問什麼、不可指名具體章節或公式。' : ''}
+
+只回傳嚴格 JSON、不要 markdown：
+{
+  "studentGuidance": "針對學生困惑的引導語（2-4 句、繁體中文、不得洩漏答案）",
+  "mistakeType": "concept|calculation|condition|blank|unreadable|other"
+}
+`.trim()
+}
+
+function errorGuidanceFailure(status, code, message) {
+  return {
+    status,
+    data: { error: message, code },
+    pipelineMeta: { pipeline: 'grading-error-guidance', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: { code } }
+  }
+}
+
+// 單題錯題引導 handler（orchestrator 在 routeKey=grading.error_guidance 時呼叫）。
+export async function runErrorGuidance({ apiKey, model, contents, payload = {}, routeHint = {}, internalContext = {} }) {
+  const submissionId = internalContext?.submissionId || payload?.submissionId || null
+  const questionId = ensureString(payload?.questionId, '').trim()
+  const studentConfusion = ensureString(payload?.studentConfusion, '').trim()
+  const domainHint = payload?.domain || internalContext?.domainHint || null
+  if (!submissionId || !questionId) return errorGuidanceFailure(400, 'MISSING_PARAMS', '缺少必要參數（submissionId / questionId）')
+  // server 端二次防濫用（client 已擋一層、這裡不可被繞過）
+  if (!isMeaningfulConfusion(studentConfusion)) {
+    return errorGuidanceFailure(400, 'INVALID_CONFUSION', '請具體說明你卡在哪裡（例如：這個步驟為什麼這樣算、哪個字看不懂），不要只填「不會 / 不知道」。')
+  }
+  const cached = await loadPhaseAState(submissionId)
+  const answerKey = cached?.live_answer_key
+  const q = Array.isArray(answerKey?.questions)
+    ? answerKey.questions.find((x) => ensureString(x?.id).trim() === questionId)
+    : null
+  if (!q) return errorGuidanceFailure(404, 'QUESTION_NOT_FOUND', '找不到該題（可能答案卷已變更）')
+  // 學生最終答案：優先 final_answers、fallback phase_a_state read1
+  const faArr = Array.isArray(cached?.final_answers) ? cached.final_answers : []
+  const fa = faArr.find((f) => ensureString(f?.questionId).trim() === questionId)
+  let studentAnswer = ensureString(fa?.finalStudentAnswer, '').trim()
+  if (!studentAnswer) {
+    const r1Arr = Array.isArray(cached?.phase_a_state?.readAnswer1) ? cached.phase_a_state.readAnswer1 : []
+    const r1 = r1Arr.find((r) => ensureString(r?.questionId).trim() === questionId)
+    studentAnswer = ensureString(r1?.answer, '').trim()
+  }
+  const answerSheetMode = payload?.answerSheetMode || internalContext?.answerSheetMode || 'with_questions'
+  const imageParts = Array.isArray(contents)
+    ? contents.flatMap((c) => (Array.isArray(c?.parts) ? c.parts.filter((p) => p?.inlineData) : []))
+    : []
+  const prompt = buildSingleGuidancePrompt({
+    question: q, studentAnswer, studentConfusion, domainHint, answerSheetMode, hasImage: imageParts.length > 0
+  })
+  const resp = await executeStage({
+    apiKey, model, payload, timeoutMs: 60000, routeHint,
+    routeKey: AI_ROUTE_KEYS.GRADING_ERROR_GUIDANCE,
+    stageContents: [{ role: 'user', parts: [{ text: prompt }, ...imageParts] }]
+  })
+  if (!resp?.ok) return errorGuidanceFailure(Number(resp?.status) || 503, 'AI_FAILED', '🙂 AI 剛剛有點忙、生成引導失敗，請再試一次。')
+  const parsed = parseCandidateJson(resp.data)
+  const guidance = ensureString(parsed?.studentGuidance, '').trim()
+  if (!guidance) return errorGuidanceFailure(502, 'EMPTY_GUIDANCE', 'AI 回覆為空，請再試一次。')
+  // 持久化：寫回該題目前 open 的訂正項 hint_text（survive reload、老師端也看得到）。best-effort、失敗不影響回傳。
+  try {
+    const supabase = getSupabaseAdmin()
+    const { data: sub } = await supabase
+      .from('submissions')
+      .select('student_id, assignment_id')
+      .eq('id', submissionId)
+      .maybeSingle()
+    if (sub?.student_id && sub?.assignment_id) {
+      await supabase
+        .from('correction_question_items')
+        .update({ hint_text: guidance, updated_at: new Date().toISOString() })
+        .eq('assignment_id', sub.assignment_id)
+        .eq('student_id', sub.student_id)
+        .eq('question_id', questionId)
+        .eq('status', 'open')
+    }
+  } catch (err) {
+    console.warn('[error_guidance] persist hint_text failed (non-fatal):', err?.message)
+  }
+  return {
+    status: 200,
+    data: { candidates: [{ content: { parts: [{ text: JSON.stringify({ questionId, studentGuidance: guidance, mistakeType: ensureString(parsed?.mistakeType, '').trim() || undefined }) }] } }] },
+    pipelineMeta: { pipeline: 'grading-error-guidance', prepareLatencyMs: 0, modelLatencyMs: Number(resp.modelLatencyMs) || 0, warnings: [], metrics: {} }
+  }
+}
+
 function buildFinalGradingResult({
   answerKey,
   readAnswerResult,
