@@ -8204,6 +8204,57 @@ export async function runStagedGradingPhaseA({
     }
   }
 
+  // ── 2026-06-30: AI2(校對) 整份/大量判空白偵測 → 重抽 read2 一次 ──────────────
+  //   現象：AI1 讀到答案、AI2 卻把整份/大半讀成空白（偶發 Gemini 失敗、非並發造成）→ read1≠read2 → NR 爆量。
+  //   偵測「AI1 非空、AI2 卻空白」的比例，過高（系統性失敗）就重抽一次 read2；重抽有改善才採用。
+  try {
+    const ansArrOf = (p) => (Array.isArray(p?.answers) ? p.answers : [])
+    const isBlankAns = (a) => {
+      const st = ensureString(a?.status, '').toLowerCase()
+      const txt = ensureString(a?.studentAnswer ?? a?.studentAnswerRaw ?? a?.answer, '').trim()
+      return st === 'blank' || st === 'unreadable' || !txt || txt === '未作答'
+    }
+    const ai1ByQid = new Map(ansArrOf(readAnswerParsed).map((a) => [ensureString(a?.questionId).trim(), a]))
+    const countAi2BlankWhereAi1Read = (parsed) => {
+      const a2ByQid = new Map(ansArrOf(parsed).map((a) => [ensureString(a?.questionId).trim(), a]))
+      let ai1NonBlank = 0, ai2Blank = 0
+      for (const [qid, a1] of ai1ByQid) {
+        if (isBlankAns(a1)) continue
+        ai1NonBlank++
+        const a2 = a2ByQid.get(qid)
+        if (!a2 || isBlankAns(a2)) ai2Blank++
+      }
+      return { ai1NonBlank, ai2Blank }
+    }
+    const { ai1NonBlank, ai2Blank } = countAi2BlankWhereAi1Read(reReadAnswerParsed)
+    // 系統性失敗門檻：AI1 至少讀到 8 題、且其中過半 AI2 判空白
+    if (ai1NonBlank >= 8 && ai2Blank / ai1NonBlank >= 0.5) {
+      logStaged(pipelineRunId, 'basic', `[A2] AI2 大量判空白(${ai2Blank}/${ai1NonBlank})→重抽 read2 一次`)
+      const retryResp = await executeStage({
+        apiKey, model: readModel, modelOverride: readModelOverride,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(), routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+        stageContents: [{ role: 'user', parts: ai2Parts }]
+      })
+      if (retryResp?.ok) {
+        const retryParsed = parseCandidateJson(retryResp.data)
+        if (retryParsed && typeof retryParsed === 'object') {
+          const retry = countAi2BlankWhereAi1Read(retryParsed)
+          if (retry.ai2Blank < ai2Blank) {
+            reReadAnswerParsed = retryParsed
+            stageResponses.push(retryResp)
+            logStaged(pipelineRunId, 'basic', `[A2] read2 重抽改善 空白 ${ai2Blank}→${retry.ai2Blank}、採用重抽`)
+          } else {
+            logStaged(pipelineRunId, 'basic', `[A2] read2 重抽未改善(${retry.ai2Blank})、保留原值`)
+          }
+        }
+      } else {
+        logStaged(pipelineRunId, 'basic', `[A2] read2 重抽 HTTP ${retryResp?.status}、保留原值`)
+      }
+    }
+  } catch (e) { logStaged(pipelineRunId, 'basic', '[A2] read2 空白偵測/重抽失敗(忽略)', { error: e?.message }) }
+
   // Log per-question read results for debugging
   const readAnswerLogMode = getReadAnswerLogMode()
   if (readAnswerLogMode !== 'off') {
