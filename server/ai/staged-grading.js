@@ -11136,46 +11136,35 @@ export async function runStagedGradingPhaseB({
       const nrQRs = phaseAResult.questionResults.filter((qr) => qr?.arbiterResult?.arbiterStatus === 'needs_review')
       if (nrQRs.length > 0) {
         const clozeOn = process.env.CLOZE_DETERMINISTIC_ENABLED !== 'false'
+        const normTxt = (t) => ensureString(t, '').trim().toLowerCase().replace(/\s+/g, ' ')
+        // read1 候選分數：① 與 read2 文字相同 → 直接沿用 read2(detail)分數（同字必同分、修「同答案不同分」）
+        //   ② 確定性可判(選擇/判斷/可接受答案/整句克漏字) → 用 grader ③ 其餘 → 留 null
+        //   （null 時末端審查若老師點 read1，finalize 會用 grading.grade_one 單題重批那一題、不會誤給 0）
         const read1ByQid = new Map()
-        const r1TextByQid = new Map()
-        const nonDetForAI = []
+        let detCount = 0, copyCount = 0, nullCount = 0
         for (const qr of nrQRs) {
           const qid = ensureString(qr?.questionId).trim()
           const q = akById.get(qid)
           if (!q) continue
+          const detail = detById.get(qid)
           const r1text = ensureString(qr.readAnswer1?.studentAnswer, '')
           const r1status = ensureString(qr.readAnswer1?.status, 'read') || 'read'
-          r1TextByQid.set(qid, r1text)
+          const r2text = ensureString(qr.readAnswer2?.studentAnswer, '')
+          // ① 同字 → 沿用 read2 分數
+          if (detail && normTxt(r1text) === normTxt(r2text)) {
+            read1ByQid.set(qid, { score: toFiniteNumber(detail.score) ?? 0, maxScore: toFiniteNumber(detail.maxScore) ?? 0, isCorrect: detail.isCorrect === true, studentAnswer: r1text })
+            copyCount++
+            continue
+          }
+          // ② 確定性可判
           let r1res = gradeObjectiveDeterministic(q, r1text, r1status)
           if (!r1res.gradable && clozeOn) r1res = gradeSentenceClozeDeterministic(q, r1text, r1status)
           if (r1res.gradable) {
             read1ByQid.set(qid, { score: r1res.score, maxScore: r1res.maxScore, isCorrect: r1res.isCorrect, studentAnswer: r1text })
+            detCount++
           } else {
-            nonDetForAI.push({ questionId: qid, studentAnswerRaw: r1text, status: r1status })
+            nullCount++  // 留 null：老師點 read1 時由 finalize 走 grade_one 單題重批
           }
-        }
-        if (nonDetForAI.length > 0) {
-          try {
-            const rar1 = { answers: nonDetForAI }
-            const prompt1 = buildAccessorPrompt(answerKey, rar1, internalContext?.domainHint, gradeBand)
-            const resp1 = await executeStage({
-              apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint,
-              routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
-              stageContents: [{ role: 'user', parts: buildAccessorParts(prompt1, nonDetForAI.map((a) => a.questionId), calcCropMap) }]
-            })
-            if (resp1?.ok) {
-              const res1 = normalizeAccessorResult(parseCandidateJson(resp1.data), answerKey, rar1.answers, internalContext?.domainHint)
-              for (const sc of (res1.scores || [])) {
-                const qid = ensureString(sc?.questionId).trim()
-                read1ByQid.set(qid, {
-                  score: toFiniteNumber(sc?.score) ?? 0,
-                  maxScore: toFiniteNumber(sc?.maxScore) ?? (toFiniteNumber(akById.get(qid)?.maxScore) ?? 0),
-                  isCorrect: sc?.isCorrect === true,
-                  studentAnswer: r1TextByQid.get(qid) ?? ''
-                })
-              }
-            }
-          } catch (e) { logStaged(pipelineRunId, 'basic', '[批兩候選] focused accessor 失敗(忽略)', { error: e?.message }) }
         }
         let attached = 0
         for (const qr of nrQRs) {
@@ -11191,7 +11180,7 @@ export async function runStagedGradingPhaseB({
           detail.reviewCandidates = { ai_read1: read1ByQid.get(qid) || null, ai_read2: read2 }
           attached++
         }
-        logStaged(pipelineRunId, 'basic', `[批兩候選] 附 ${attached} 題候選分數（read1 用 AI ${nonDetForAI.length} 題）`)
+        logStaged(pipelineRunId, 'basic', `[批兩候選] 附 ${attached} 題（read1：同字沿用 ${copyCount}、確定性 ${detCount}、留 null 待點選重批 ${nullCount}）`)
       }
     } catch (e) { logStaged(pipelineRunId, 'basic', '[批兩候選] 計算失敗(忽略)', { error: e?.message }) }
   }
