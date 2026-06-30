@@ -9145,6 +9145,7 @@ Return JSON:
             // Override AI2 with spelling verification result
             const prevAi2 = qr.readAnswer2.studentAnswer
             if (studentText.toLowerCase() !== prevAi2.toLowerCase()) {
+              qr._dbgOrigRead2 = prevAi2  // 2026-06-30 debug：保留拼字 override 前的原始 read2
               qr.readAnswer2 = { status: 'read', studentAnswer: studentText }
               // 拼寫驗證覆蓋後，強制 diff — 不讓 Jaccard 相似度判回 stable
               // （Jaccard 只看字元集，"dining" 和 "dinng" 有相同字元集但拼寫不同）
@@ -9634,7 +9635,13 @@ Return JSON:
         questionId: qr.questionId,
         arbiterStatus: qr.arbiterResult?.arbiterStatus,
         finalAnswer: qr.arbiterResult?.finalAnswer,
-        consistent: qr.arbiterResult?.consistent
+        consistent: qr.arbiterResult?.consistent,
+        // 2026-06-30 debug：查「兩讀相同卻 NR」真因（AI3 off 時走確定性判定）。確認後可移除。
+        _dbgConsistencyStatus: qr.consistencyStatus,
+        _dbgConsistencyReason: qr.consistencyReason,
+        _dbgSpellingOverride: qr.spellingOverride || undefined,
+        _dbgSpacingReview: qr.spacingReviewFlag || undefined,
+        _dbgOrigRead2: qr._dbgOrigRead2
       })),
       savedAt: new Date().toISOString()
     }
@@ -10073,7 +10080,13 @@ export async function runStagedGradingPhaseAArbiter({
         questionId: qr.questionId,
         arbiterStatus: qr.arbiterResult?.arbiterStatus,
         finalAnswer: qr.arbiterResult?.finalAnswer,
-        consistent: qr.arbiterResult?.consistent
+        consistent: qr.arbiterResult?.consistent,
+        // 2026-06-30 debug：查「兩讀相同卻 NR」真因（AI3 off 時走確定性判定）。確認後可移除。
+        _dbgConsistencyStatus: qr.consistencyStatus,
+        _dbgConsistencyReason: qr.consistencyReason,
+        _dbgSpellingOverride: qr.spellingOverride || undefined,
+        _dbgSpacingReview: qr.spacingReviewFlag || undefined,
+        _dbgOrigRead2: qr._dbgOrigRead2
       })),
       savedAt: new Date().toISOString()
     }
