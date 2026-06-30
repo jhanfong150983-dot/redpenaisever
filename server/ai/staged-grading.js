@@ -6652,6 +6652,57 @@ function buildFinalGradingResult({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Dewarp（學生照片卷整平）：呼叫獨立 Python/UVDoc 微服務，把彎曲/傾斜照片拉平，
+// 讓 classify 的矩形 bbox 跟得上文字行。
+// ⚠️ 只對「照片」（submissionSource ≠ teacher_scan）；PDF(teacher_scan) 一律不碰。
+// ⚠️ 全程 graceful：未開啟 / 無 URL / 服務失敗 / 逾時 → 回 null（呼叫端用原圖、絕不擋批改）。
+// ⚠️ UVDoc 確定性（同圖同輸出）→ 拆成兩個 HTTP call 時兩邊各自整平結果一致、bbox 與 crop 對得齊。
+// 回傳 { data, mimeType, pageBreaks }（整平後）或 null。
+async function dewarpPhotoSubmission({ inlineData, pageBreaks, submissionSource, answerSheetMode, pipelineRunId, stagedLogLevel }) {
+  const enabled = process.env.DEWARP_ENABLED === '1' || process.env.DEWARP_ENABLED === 'true'
+  const url = process.env.DEWARP_URL
+  if (!enabled || !url) return null
+  // 只照片：PDF(teacher_scan) 與來源不明（null）一律跳過（安全預設＝不整平）
+  if (!submissionSource || submissionSource === 'teacher_scan') return null
+  if (!inlineData?.data) return null
+  const timeoutMs = Number(process.env.DEWARP_TIMEOUT_MS) > 0 ? Number(process.env.DEWARP_TIMEOUT_MS) : 30000
+  const controller = new AbortController()
+  const handle = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const resp = await fetch(url.replace(/\/+$/, '') + '/dewarp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_base64: inlineData.data,
+        mime_type: inlineData.mimeType || 'image/webp',
+        page_breaks: Array.isArray(pageBreaks) && pageBreaks.length > 0 ? pageBreaks : null
+      }),
+      signal: controller.signal
+    })
+    if (!resp.ok) {
+      logStaged(pipelineRunId, 'basic', `[dewarp] 服務回 ${resp.status}、改用原圖`, { submissionSource, answerSheetMode })
+      return null
+    }
+    const j = await resp.json()
+    if (!j?.image_base64) {
+      logStaged(pipelineRunId, 'basic', '[dewarp] 回應無影像、改用原圖')
+      return null
+    }
+    logStaged(pipelineRunId, 'basic', '[dewarp] 整平完成', { ms: j.ms, pages: j.pages, newPageBreaks: j.page_breaks })
+    return {
+      data: j.image_base64,
+      mimeType: j.mime_type || 'image/webp',
+      pageBreaks: Array.isArray(j.page_breaks) ? j.page_breaks : (Array.isArray(pageBreaks) ? pageBreaks : [])
+    }
+  } catch (e) {
+    logStaged(pipelineRunId, 'basic', '[dewarp] 失敗、改用原圖（graceful）', { error: e?.name === 'AbortError' ? `timeout ${timeoutMs}ms` : e?.message })
+    return null
+  } finally {
+    clearTimeout(handle)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Phase A: 一致性預處理 (A1 Classify → A2 Crop → A3/A4 ReadAnswer×2 → A5 Consistency)
 // ─────────────────────────────────────────────────────────────────────────────
 export async function runStagedGradingPhaseA({
@@ -6965,6 +7016,26 @@ export async function runStagedGradingPhaseA({
       assignmentTotalPages
     })
   }
+  // ── Dewarp 整平（只照片、env-gated、graceful）──────────────────────────────
+  // 放在 pageBreaks 解析後、classify / precomputed 分支前 → call1(classify) 與 call2(crop+read)
+  // 都會跑到、且 UVDoc 確定性 → 兩 call 得到一致整平圖、classify bbox 與後續 crop 對得齊。
+  // 成功則「替換」inlineImages[0] 為整平圖、pageBreaks 改用整平後的新邊界；失敗回 null 用原圖。
+  // PDF(teacher_scan) 在 helper 內被擋掉、完全不影響 PDF 流程。
+  {
+    const _dw = await dewarpPhotoSubmission({
+      inlineData: inlineImages[0].inlineData,
+      pageBreaks,
+      submissionSource,
+      answerSheetMode,
+      pipelineRunId,
+      stagedLogLevel
+    })
+    if (_dw) {
+      inlineImages[0].inlineData = { data: _dw.data, mimeType: _dw.mimeType }
+      pageBreaks = _dw.pageBreaks
+    }
+  }
+
   const classifyCorrections = Array.isArray(payload?.classifyCorrections) ? payload.classifyCorrections : []
   if (classifyCorrections.length > 0) {
     logStaged(pipelineRunId, stagedLogLevel, 'classify corrections received', classifyCorrections)
