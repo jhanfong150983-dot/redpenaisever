@@ -1027,7 +1027,7 @@ function parseMistakesFromGradingResult(gradingResult) {
       questionId: questionId || questionText || `Q${mistakes.length + 1}`,
       questionText: questionText || questionId || '',
       reason: reason || '需要再次確認作答內容',
-      hintText: String(guidance || reason || ''),
+      hintText: '',  // 2026-06-30 錯題引導改 on-demand：派訂正不預填、學生卡住才按「需要引導」生成（reason 仍存 mistake_reason 給老師）
       studentAnswerRaw: (typeof linkedDetail?.studentAnswer === 'string' && linkedDetail.studentAnswer.trim()) || undefined,
       questionBbox: normalizeBbox(linkedDetail?.questionBbox),
       answerBbox: normalizeBbox(linkedDetail?.answerBbox)
@@ -1056,7 +1056,7 @@ function parseMistakesFromGradingResult(gradingResult) {
       questionId,
       questionText: questionId,
       reason,
-      hintText: String(guidance || reason || ''),
+      hintText: '',  // 2026-06-30 錯題引導改 on-demand：派訂正不預填、學生卡住才按「需要引導」生成（reason 仍存 mistake_reason 給老師）
       studentAnswerRaw: (typeof detail.studentAnswer === 'string' && detail.studentAnswer.trim()) || undefined,
       questionBbox: normalizeBbox(detail.questionBbox),
       answerBbox: normalizeBbox(detail.answerBbox)

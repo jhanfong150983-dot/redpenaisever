@@ -10165,6 +10165,9 @@ export async function runStagedGradingPhaseB({
   //   call 1 — grading.phase_b_accessor (payload.stopAfterAccessor=true): 跑 accessor、回 _phaseBAccessorContext
   //   call 2 — grading.phase_b (existing) 帶 _phaseBAccessorContext: 跳過 accessor、跑 explain + 最終 build
   const stopAfterAccessor = payload?.stopAfterAccessor === true
+  // 2026-06-30 錯題引導改 on-demand：skipExplain=true 時，Phase B 只跑 accessor + 組最終結果、不跑 explain AI call。
+  //   client 一律帶 skipExplain（accessor call 直接回最終 GradingResult、不再打第二支 explain）。可由 client 停送來回退。
+  const skipExplain = payload?.skipExplain === true
   const precomputedAccessorContext = payload?._phaseBAccessorContext || internalContext?._phaseBAccessorContext || null
   // 2026-05-21: model 分流移到 executeStage 內查 STAGE_MODEL[routeKey]
   // accessor / explain 都是純文字 → MODEL_FLASH；舊 STAGED_PHASE_B_MODEL_OVERRIDE 已拔
@@ -10929,7 +10932,8 @@ export async function runStagedGradingPhaseB({
   // 2026-05-18: stopAfterAccessor early-return（拆 explain 出獨立 HTTP call）
   // 走到這裡：accessor 跑完、explainQuestionIds 算好。
   // explain 改成第二支 endpoint（grading.phase_b_explain）跑、client loading UI 才能精準切換 stage。
-  if (stopAfterAccessor) {
+  // 2026-06-30 skipExplain：accessor call 不早退、繼續往下跳過 explain 直接組最終結果（單一 call 完成 Phase B）。
+  if (stopAfterAccessor && !skipExplain) {
     const stageLatencyMsSoFar = stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0)
     logStaged(pipelineRunId, 'basic', `[B] 早退（stopAfterAccessor）→ 等 client 打 phase_b_explain`, {
       pipelineRunId,
@@ -10955,8 +10959,10 @@ export async function runStagedGradingPhaseB({
   }
 
   // ── B2: EXPLAIN (僅限 isFullScore=false) ─────────────────────────────────
+  // 2026-06-30 錯題引導改 on-demand：skipExplain 時不跑 explain AI call、explainResult 留空
+  //   （buildFinalGradingResult 對空 explain 已可正常運作；mistakes 仍有 details fallback）。
   let explainResult = { details: [], mistakes: [], weaknesses: [], suggestions: [] }
-  if (explainQuestionIds.length > 0) {
+  if (!skipExplain && explainQuestionIds.length > 0) {
     const explainPrompt = buildExplainPrompt(
       answerKey,
       finalReadAnswerResult,
