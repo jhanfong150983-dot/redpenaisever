@@ -8,7 +8,8 @@ import {
   runStagedGradingPhaseA,
   runStagedGradingPhaseAArbiter,
   runStagedGradingPhaseB,
-  runErrorGuidance
+  runErrorGuidance,
+  runGradeOneQuestion
 } from './staged-grading.js'
 
 async function executeSinglePipelineCall({
@@ -111,6 +112,7 @@ export async function runAiPipeline({
   const isPhaseBAccessor = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B_ACCESSOR
   const isPhaseBExplain = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_PHASE_B_EXPLAIN
   const isErrorGuidance = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_ERROR_GUIDANCE
+  const isGradeOne = resolvedRouteKey === AI_ROUTE_KEYS.GRADING_GRADE_ONE
 
   // answer_sheet_mode 對 extract / classify / explain pipeline 的分支都重要，log 到 orchestrator 入口便於追蹤
   const dispatchedAnswerSheetMode = internalContext?.answerSheetMode || 'with_questions'
@@ -309,6 +311,23 @@ export async function runAiPipeline({
         status: 503,
         data: { error: error?.message || 'error guidance failed', code: 'ERROR_GUIDANCE_FAILED' },
         pipelineMeta: { pipeline: 'grading-error-guidance', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+      }
+    }
+  } else if (isGradeOne) {
+    // 2026-06-30 末端審查人工輸入：只重批那一題（server 抓答案卷、deterministic 或單題 accessor）
+    console.log(`${logPrefix} 進入 Grade One（人工輸入單題重批）`)
+    try {
+      pipelineResult = await runGradeOneQuestion({
+        apiKey,
+        model: resolveStageModel(AI_ROUTE_KEYS.GRADING_ACCESSOR),
+        contents, payload, routeHint, internalContext
+      })
+    } catch (error) {
+      console.warn(`${logPrefix} grade-one crashed`, error)
+      pipelineResult = {
+        status: 503,
+        data: { error: error?.message || 'grade one failed', code: 'GRADE_ONE_FAILED' },
+        pipelineMeta: { pipeline: 'grading-grade-one', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
       }
     }
   } else if (shouldRunStagedGrading) {

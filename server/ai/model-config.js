@@ -68,6 +68,7 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.GRADING_EXPLAIN]: MODEL_FLASH,            // Phase B2 錯題解釋
   [AI_ROUTE_KEYS.GRADING_PHASE_B_EXPLAIN]: MODEL_FLASH,    // 同 EXPLAIN
   [AI_ROUTE_KEYS.GRADING_ERROR_GUIDANCE]: MODEL_FLASH,     // 學生 on-demand 單題錯題引導（純文字）
+  [AI_ROUTE_KEYS.GRADING_GRADE_ONE]: MODEL_FLASH,          // 末端審查人工輸入單題重批（accessor）
   // 2026-06-22: FLASH(2.5-flash) 對「密集勾選題」讀不準——A大題 multi_check 整頁 3/5、
   //   常誤判成 single_check 只收一個答案、B1 題號 off-by-one 2/5。換 PRO(3.5-flash) 後整頁
   //   ① multi_check 5/5、② 題號 5/5（N=5 實證，local-only/eng_final_exam_2026-06-22）。

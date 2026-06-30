@@ -6238,6 +6238,61 @@ export async function runErrorGuidance({ apiKey, model, contents, payload = {}, 
   }
 }
 
+// 2026-06-30 末端審查「人工輸入」只重批那一題：給 submissionId + questionId + studentAnswer，
+//   server 端 live 抓答案卷、deterministic 可判就免 AI、否則單題 accessor。回 {score,maxScore,isCorrect,...}。
+function gradeOneFailure(status, code, message) {
+  return { status, data: { error: message, code }, pipelineMeta: { pipeline: 'grading-grade-one', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: { code } } }
+}
+
+export async function runGradeOneQuestion({ apiKey, model, payload = {}, routeHint = {}, internalContext = {} }) {
+  const submissionId = internalContext?.submissionId || payload?.submissionId || null
+  const questionId = ensureString(payload?.questionId, '').trim()
+  const studentAnswer = ensureString(payload?.studentAnswer, '')
+  const gradeBand = payload?.gradeBand === 'high' ? 'high' : 'k9'
+  const domainHint = payload?.domain || internalContext?.domainHint || null
+  if (!submissionId || !questionId) return gradeOneFailure(400, 'MISSING_PARAMS', '缺少必要參數（submissionId / questionId）')
+  const cached = await loadPhaseAState(submissionId)
+  const answerKey = cached?.live_answer_key
+  const q = Array.isArray(answerKey?.questions)
+    ? answerKey.questions.find((x) => ensureString(x?.id).trim() === questionId)
+    : null
+  if (!q) return gradeOneFailure(404, 'QUESTION_NOT_FOUND', '找不到該題（可能答案卷已變更）')
+  const status = studentAnswer.trim() ? 'read' : 'blank'
+  // 1) deterministic（選擇/判斷/可接受答案 + 整句克漏字）→ 免 AI
+  let res = gradeObjectiveDeterministic(q, studentAnswer, status)
+  if (!res.gradable && process.env.CLOZE_DETERMINISTIC_ENABLED !== 'false') {
+    res = gradeSentenceClozeDeterministic(q, studentAnswer, status)
+  }
+  let scoreObj
+  if (res.gradable) {
+    scoreObj = { questionId, score: res.score, maxScore: res.maxScore, isCorrect: res.isCorrect, errorType: res.errorType, scoringReason: res.scoringReason, studentAnswer }
+  } else {
+    // 2) 單題 accessor（短答/應用題等需 AI）
+    try {
+      const rar = { answers: [{ questionId, studentAnswerRaw: studentAnswer, status }] }
+      const prompt = buildAccessorPrompt(answerKey, rar, domainHint, gradeBand)
+      const resp = await executeStage({
+        apiKey, model, payload, timeoutMs: 60000, routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+        stageContents: [{ role: 'user', parts: [{ text: prompt }] }]
+      })
+      if (!resp?.ok) return gradeOneFailure(Number(resp?.status) || 503, 'AI_FAILED', '🙂 AI 剛剛有點忙、批改失敗，請再試一次。')
+      const r = normalizeAccessorResult(parseCandidateJson(resp.data), answerKey, rar.answers, domainHint)
+      const sc = (r.scores || []).find((s) => ensureString(s?.questionId).trim() === questionId)
+      if (!sc) return gradeOneFailure(502, 'EMPTY_RESULT', 'AI 回覆為空，請再試一次。')
+      const maxScore = toFiniteNumber(sc.maxScore) ?? (toFiniteNumber(q?.maxScore) ?? 0)
+      scoreObj = { questionId, score: toFiniteNumber(sc.score) ?? 0, maxScore, isCorrect: sc.isCorrect === true, errorType: ensureString(sc.errorType, '').trim() || undefined, scoringReason: ensureString(sc.scoringReason, '').trim() || undefined, studentAnswer }
+    } catch (e) {
+      return gradeOneFailure(503, 'GRADE_ONE_FAILED', e?.message || 'grade one failed')
+    }
+  }
+  return {
+    status: 200,
+    data: { candidates: [{ content: { parts: [{ text: JSON.stringify(scoreObj) }] } }] },
+    pipelineMeta: { pipeline: 'grading-grade-one', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
+  }
+}
+
 function buildFinalGradingResult({
   answerKey,
   readAnswerResult,
