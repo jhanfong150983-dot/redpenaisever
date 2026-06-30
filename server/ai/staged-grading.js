@@ -9144,7 +9144,10 @@ Return JSON:
             if (!qr) continue
             // Override AI2 with spelling verification result
             const prevAi2 = qr.readAnswer2.studentAnswer
-            if (studentText.toLowerCase() !== prevAi2.toLowerCase()) {
+            // 2026-06-30：拼字驗證只抓「字母(拼字)真的不同」。只差標點/空格/大小寫 ≠ 拼錯 → 不覆蓋、不強制送審。
+            //   修實證 bug：原始 read1==read2「No , he doesn't」、拼字 AI 回「No he doesn't」(少逗號) → 被當不一致強制 NR。
+            const lettersOnly = (t) => ensureString(t, '').toLowerCase().replace(/[^a-z0-9]/g, '')
+            if (lettersOnly(studentText) !== lettersOnly(prevAi2)) {
               qr._dbgOrigRead2 = prevAi2  // 2026-06-30 debug：保留拼字 override 前的原始 read2
               qr.readAnswer2 = { status: 'read', studentAnswer: studentText }
               // 拼寫驗證覆蓋後，強制 diff — 不讓 Jaccard 相似度判回 stable
