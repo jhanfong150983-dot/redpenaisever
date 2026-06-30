@@ -1334,6 +1334,16 @@ export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
   const a2 = normalizeAnswerForComparison(ensureString(read2?.studentAnswerRaw, ''))
   if (a1 === a2) return 'stable'
+  // 2026-06-30：兩讀只差「邊緣標點(句末 . ! ? 逗號)或標點周圍空格」→ 視為一致、不送審。
+  //   修實證冤枉 NR：「It is Class 512's idea.」vs「It is Class 512's idea」(差句點)、
+  //   「No , he doesn't」vs「No, he doesn't」(逗號旁空格) — 兩讀其實同一句、不該送審。
+  //   只去「標點周圍空格 + 字串結尾標點」；**內部小數點/數值不動**（"5.5" vs "55" 仍會被下方 numericValuesDiffer 擋）。
+  //   標點本身該不該扣分，仍由 accessor 的 englishRules 處理、與此無關。
+  const edgePunctNorm = (s) => s
+    .replace(/\s*([,.!?，。！？])\s*/g, '$1')  // 去掉標點兩側空格（"a , b"→"a,b"、"x ."→"x."）
+    .replace(/[,.!?，。！？]+$/, '')            // 去掉字串結尾的標點（"idea."→"idea"）
+    .trim()
+  if (edgePunctNorm(a1) === edgePunctNorm(a2)) return 'stable'
   // 2026-05-31: 兩讀值「數字（值）不同」一律 diff（送人工審查）。
   // 修真實 bug：「7倍」是「27倍」的子字串、「96280」與「6280」字元高度相似 → 被下方「包含關係 /
   // Jaccard 相似度」啟發式誤判為 stable、再由 getContainmentPreferredRaw 直接採用其中一個（截斷/多位）
