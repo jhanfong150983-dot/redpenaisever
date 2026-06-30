@@ -11068,6 +11068,79 @@ export async function runStagedGradingPhaseB({
   finalResult.needsReview = false
   finalResult.reviewReasons = []
 
+  // 2026-06-30 [批兩候選]：reviewAfterB provisional 趟（client 帶 withReviewCandidates）對每個待複核(NR)題
+  //   算 read1、read2 兩候選分數、附到 detail.reviewCandidates。末端審查老師點哪個就用哪個分數、
+  //   finalize 純前端加總、不跑第二趟 Phase B。read2＝主批改(provisional 用 read2)已在 detail；
+  //   read1：確定性題用 grader(免費)、非確定性題一次 focused accessor 補批（量少）。
+  if (payload?.withReviewCandidates === true && Array.isArray(phaseAResult?.questionResults)) {
+    try {
+      const akById = new Map((Array.isArray(answerKey?.questions) ? answerKey.questions : [])
+        .map((q) => [ensureString(q?.id).trim(), q]))
+      const detById = new Map((Array.isArray(finalResult.details) ? finalResult.details : [])
+        .map((d) => [ensureString(d?.questionId).trim(), d]))
+      const nrQRs = phaseAResult.questionResults.filter((qr) => qr?.arbiterResult?.arbiterStatus === 'needs_review')
+      if (nrQRs.length > 0) {
+        const clozeOn = process.env.CLOZE_DETERMINISTIC_ENABLED !== 'false'
+        const read1ByQid = new Map()
+        const r1TextByQid = new Map()
+        const nonDetForAI = []
+        for (const qr of nrQRs) {
+          const qid = ensureString(qr?.questionId).trim()
+          const q = akById.get(qid)
+          if (!q) continue
+          const r1text = ensureString(qr.readAnswer1?.studentAnswer, '')
+          const r1status = ensureString(qr.readAnswer1?.status, 'read') || 'read'
+          r1TextByQid.set(qid, r1text)
+          let r1res = gradeObjectiveDeterministic(q, r1text, r1status)
+          if (!r1res.gradable && clozeOn) r1res = gradeSentenceClozeDeterministic(q, r1text, r1status)
+          if (r1res.gradable) {
+            read1ByQid.set(qid, { score: r1res.score, maxScore: r1res.maxScore, isCorrect: r1res.isCorrect, studentAnswer: r1text })
+          } else {
+            nonDetForAI.push({ questionId: qid, studentAnswerRaw: r1text, status: r1status })
+          }
+        }
+        if (nonDetForAI.length > 0) {
+          try {
+            const rar1 = { answers: nonDetForAI }
+            const prompt1 = buildAccessorPrompt(answerKey, rar1, internalContext?.domainHint, gradeBand)
+            const resp1 = await executeStage({
+              apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint,
+              routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+              stageContents: [{ role: 'user', parts: buildAccessorParts(prompt1, nonDetForAI.map((a) => a.questionId), calcCropMap) }]
+            })
+            if (resp1?.ok) {
+              const res1 = normalizeAccessorResult(parseCandidateJson(resp1.data), answerKey, rar1.answers, internalContext?.domainHint)
+              for (const sc of (res1.scores || [])) {
+                const qid = ensureString(sc?.questionId).trim()
+                read1ByQid.set(qid, {
+                  score: toFiniteNumber(sc?.score) ?? 0,
+                  maxScore: toFiniteNumber(sc?.maxScore) ?? (toFiniteNumber(akById.get(qid)?.maxScore) ?? 0),
+                  isCorrect: sc?.isCorrect === true,
+                  studentAnswer: r1TextByQid.get(qid) ?? ''
+                })
+              }
+            }
+          } catch (e) { logStaged(pipelineRunId, 'basic', '[批兩候選] focused accessor 失敗(忽略)', { error: e?.message }) }
+        }
+        let attached = 0
+        for (const qr of nrQRs) {
+          const qid = ensureString(qr?.questionId).trim()
+          const detail = detById.get(qid)
+          if (!detail) continue
+          const read2 = {
+            score: toFiniteNumber(detail.score) ?? 0,
+            maxScore: toFiniteNumber(detail.maxScore) ?? 0,
+            isCorrect: detail.isCorrect === true,
+            studentAnswer: ensureString(qr.readAnswer2?.studentAnswer, '')
+          }
+          detail.reviewCandidates = { ai_read1: read1ByQid.get(qid) || null, ai_read2: read2 }
+          attached++
+        }
+        logStaged(pipelineRunId, 'basic', `[批兩候選] 附 ${attached} 題候選分數（read1 用 AI ${nonDetForAI.length} 題）`)
+      }
+    } catch (e) { logStaged(pipelineRunId, 'basic', '[批兩候選] 計算失敗(忽略)', { error: e?.message }) }
+  }
+
   logStaged(pipelineRunId, stagedLogLevel, 'PhaseB final summary', {
     totalScore: finalResult.totalScore,
     detailCount: Array.isArray(finalResult.details) ? finalResult.details.length : 0,
