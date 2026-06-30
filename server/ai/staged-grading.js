@@ -1844,6 +1844,11 @@ export function buildClassifyQuestionSpecs(questionIds, answerKeyQuestions, answ
       const ans = ensureString(question?.answer ?? question?.referenceAnswer, '').trim()
       if (ans) spec.expectedAnswer = ans
     }
+    // answerPos：fill_blank 作答位置（front=題號左側答案欄／inline=句中空格）→ classify 決定框左欄或句中。
+    // 由 answer_key extract 階段標記、是版面固定屬性。
+    if (expectedType === 'fill_blank' && (question?.answerPos === 'front' || question?.answerPos === 'inline')) {
+      spec.answerPos = question.answerPos
+    }
     // anchorHint 已完全停用：實證上 multi_fill 收到 anchorHint 後 bbox 中心會被 landmark
     // 文字拉走（同 row 兩個空格的 drift 差到 11x：multi_fill +0.044 vs fill_blank sub-q +0.004）。
     // 既然 single_choice / fill_blank sub-q 早就不送，multi_fill 也一併停掉。
@@ -2955,11 +2960,7 @@ const CLASSIFY_TYPE_RULES = {
     · 框學生畫記的選項列表 — 即使學生在 (A)(B)(C)(D) 選項上做記號，
       那也不是答案 cell。答案 cell 是題號後的「(   )」括號或「___」底線
     · 多答案 case 框只到印刷底線右端就停 — 會切掉延伸的後半個答案
-    · 「冒號後接空白」格式各題 h/Δy 完全相同 — 那是 lazy mode 外推，重做${process.env.EXP_ANTI_GRID === '1' ? `
-  🚨🚨 [反固定欄] single_choice/multi_choice/true_false 每題 bbox.x 必須各自貼合「該題行首學生實際手寫代號」的位置：
-    · 不同題的 x 會因學生書寫習慣、紙張擺放、拍照透視而**自然不同**（通常逐列略有偏移），這是正常的。
-    · ⛔ 嚴禁所有題輸出**幾乎相同的 x**（等距規則欄 / grid 外推）。若你的輸出裡 20 題的 x 都一樣 → 那是 lazy mode、沒有逐題看、錯的。
-    · 做法：**逐題**找該行行首學生寫的那個代號筆跡、bbox.x 對齊它本身；不要套用前一題的 x。` : ''}`,
+    · 「冒號後接空白」格式各題 h/Δy 完全相同 — 那是 lazy mode 外推，重做`,
 
   table_cell: `▸ table_cell
   答題區視覺形式: 整張表格（多列 × 多欄、清晰格線）
@@ -3351,6 +3352,18 @@ ${pageBoundarySection}
 ═══════════════ TYPE RULES (本批 spec 用到的，描述 bbox 框多大) ═══════════════
 
 ${typeRulesSection || '（本批無需動態 type rule）'}
+${(() => {
+  const frontIds = specs.filter((s) => s?.answerPos === 'front').map((s) => s.questionId)
+  if (frontIds.length === 0) return ''
+  return `
+═══════════════ 🚨 左側答案欄題（FRONT-COLUMN ANSWER，覆蓋該題 type rule）═══════════════
+下列 questionId 的答案**寫在題號左側、獨立的答案欄**（每列題號前有一條橫線/空格，學生在那寫整個答案），**不是**寫在右邊句子裡的空格：
+${JSON.stringify(frontIds)}
+→ 這些題的 answerBbox **只框該列最左側的答案欄**（題號左邊那一格手寫處），緊貼答案欄、**絕不要**把右邊的句子題幹框進來。
+→ 同一大題的 front 題**共用同一條左側答案欄的 x 左右緣**；各題只差 y（列）。先量最上面那題的左右緣，其餘沿用、只調 y。
+→ 自我檢查：若某題 bbox 右緣伸進句子（w 明顯比其他左欄題寬）→ 你框到句子了，縮回左欄。
+`
+})()}
 
 ═══════════════ SELF-CHECK (output 前必過) ═══════════════
 
@@ -7918,6 +7931,7 @@ export async function runStagedGradingPhaseA({
   const parallelResults = await Promise.all(parallelCalls)
   const readAnswerResponse = parallelResults[0]
   const reReadAnswerResponse = parallelResults[1]
+
   const finalAnswerOnlyResponse = finalAnswerOnlyIdx >= 0 ? parallelResults[finalAnswerOnlyIdx] : null
   const calcFinalAnswerResponse = calcFinalAnswerIdx >= 0 ? parallelResults[calcFinalAnswerIdx] : null
 
@@ -9959,9 +9973,29 @@ export async function runStagedGradingPhaseB({
     if (Array.isArray(cachedState.arbiterDecisions) && cachedState.arbiterDecisions.length > 0) {
       const faQids = new Set(finalAnswers.map((fa) => fa?.questionId).filter(Boolean))
       let filledFromArbiter = 0
+      // 2026-06-30 [REVIEW_AFTER_B 重構步驟1/server]：flag 開時，NR 題（arbiter 無 finalAnswer）改用 read2 補
+      //   provisional 答案，讓 Phase B 先批一個暫定分數（末端審查再讓老師確認/二選一）。flag 關＝現行（NR 不補、留審查）。
+      const reviewAfterB = process.env.REVIEW_AFTER_B === 'true'
+      const r2Prov = reviewAfterB
+        ? new Map((Array.isArray(cachedState.readAnswer2) ? cachedState.readAnswer2 : []).map((r) => [r.questionId, r]))
+        : null
       for (const d of cachedState.arbiterDecisions) {
         if (!d?.questionId || faQids.has(d.questionId)) continue
-        if (typeof d.finalAnswer !== 'string') continue  // needs_review 無 finalAnswer 的不補（保持缺）
+        if (typeof d.finalAnswer !== 'string') {
+          // needs_review 無 finalAnswer：現行不補（保持缺、留審查）；REVIEW_AFTER_B 開時用 read2 補 provisional。
+          if (r2Prov) {
+            const r2 = r2Prov.get(d.questionId)
+            if (r2 && r2.status === 'read' && typeof r2.answer === 'string' && r2.answer.trim()) {
+              finalAnswers.push({
+                questionId: d.questionId,
+                finalStudentAnswer: r2.answer,
+                finalAnswerSource: 'ai_read2_provisional'
+              })
+              filledFromArbiter++
+            }
+          }
+          continue
+        }
         finalAnswers.push({
           questionId: d.questionId,
           finalStudentAnswer: d.finalAnswer,
