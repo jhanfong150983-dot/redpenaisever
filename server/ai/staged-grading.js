@@ -10103,9 +10103,10 @@ export async function runStagedGradingPhaseB({
     if (Array.isArray(cachedState.arbiterDecisions) && cachedState.arbiterDecisions.length > 0) {
       const faQids = new Set(finalAnswers.map((fa) => fa?.questionId).filter(Boolean))
       let filledFromArbiter = 0
-      // 2026-06-30 [REVIEW_AFTER_B 重構步驟1/server]：flag 開時，NR 題（arbiter 無 finalAnswer）改用 read2 補
-      //   provisional 答案，讓 Phase B 先批一個暫定分數（末端審查再讓老師確認/二選一）。flag 關＝現行（NR 不補、留審查）。
-      const reviewAfterB = process.env.REVIEW_AFTER_B === 'true'
+      // 2026-06-30 [REVIEW_AFTER_B 重構步驟1/server]：NR 題（arbiter 無 finalAnswer）改用 read2 補
+      //   provisional 答案，讓 Phase B 先批一個暫定分數（末端審查再讓老師確認/二選一）。
+      //   2026-06-30 改為**預設開**（kill-switch：REVIEW_AFTER_B='false' 才回舊流程；須與 client VITE_REVIEW_AFTER_B 對齊）。
+      const reviewAfterB = process.env.REVIEW_AFTER_B !== 'false'
       const r2Prov = reviewAfterB
         ? new Map((Array.isArray(cachedState.readAnswer2) ? cachedState.readAnswer2 : []).map((r) => [r.questionId, r]))
         : null
