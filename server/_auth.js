@@ -306,7 +306,11 @@ export async function getAuthUser(req, res) {
     )
 
     if (!ok || !session || !user) {
-      clearAuthCookies(res, isSecureRequest(req), req)
+      // 2026-06-30: refresh 失敗時「不清 cookie」。避免併發 refresh-token rotation race 把整個 session 登出：
+      //   access token 過期那刻，多個併發請求拿同一 refresh token 同時換 → Supabase 單次輪轉只讓 1 個成功、
+      //   其餘失敗；若失敗就 clearAuthCookies，會把使用者整個登出（連坐、本批其餘卷全 401）。
+      //   改成只讓「本請求」失敗(401)、不動 cookie → client 重試時會用到贏家剛 Set-Cookie 的新 token。
+      //   代價：真正過期(30天)的 refresh 也不主動清；但 client 收到持續 401 會自行導去登入，可接受。
       return { user: null, accessToken: null }
     }
 

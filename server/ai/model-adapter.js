@@ -99,6 +99,15 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
         timeoutError.status = 504
         throw timeoutError
       }
+      // 2026-06-30: 網路層 "fetch failed"（ECONNRESET / socket hang up / 連線被斷）= 暫時性 → 比照 504 重試。
+      //   高併發時偶發連線斷掉，不重試會讓整份卷的 read 失敗(500)。耗盡 504 retry budget 才丟。
+      if (attempt < retryCount) {
+        const backoffMs = Math.min(baseBackoffMs * 2 ** attempt, 8000)
+        console.warn(`[ai-model-adapter] fetch failed model=${model} retry=${attempt + 1}/${retryCount} waitMs=${backoffMs} err=${error?.message || error}`)
+        if (timeoutHandle) clearTimeout(timeoutHandle)
+        await sleep(backoffMs)
+        continue
+      }
       throw error
     } finally {
       if (timeoutHandle) {
