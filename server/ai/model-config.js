@@ -22,8 +22,11 @@ import { AI_ROUTE_KEYS } from './routes.js'
 export const MODEL_PRO = process.env.MODEL_PRO || 'gemini-3.5-flash'
 export const MODEL_FLASH = process.env.MODEL_FLASH || 'gemini-2.5-flash'
 
-// 503 overload 自動 fallback 順序
-export const FALLBACK_CHAIN = [MODEL_FLASH, 'gemini-3-flash-preview']
+// 2026-06-30：移除降階換模型（FALLBACK_CHAIN 清空）。
+//   決策：批改要「跨次精準度一致」，降階到不同 model 會產生不同結果 → 違反目標。
+//   503/504/429/網路斷線一律「同模型退避重試」(model-adapter)，不切換到別的 model。
+//   （要恢復降階：填回 [MODEL_FLASH, 'gemini-3-flash-preview'] 之類。）
+export const FALLBACK_CHAIN = []
 
 /**
  * stage → model 對應表

@@ -118,9 +118,16 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
     const rawText = await response.text()
     const data = parseResponseBody(rawText)
 
-    // 503 = model overloaded — signal caller to switch to fallback model, don't retry same model.
-    if (Number(response.status) === 503) {
-      return { ok: false, status: 503, data, modelPath, url, is503: true }
+    // 503 = model overloaded — 2026-06-30：改成「同模型退避重試」，不降階換模型。
+    //   原因：降階到別的 model 會讓批改結果在不同 model 間不一致（違反「精準度跨次一致」目標）。
+    //   重試耗盡仍 503 → 下方回傳失敗（不切換 model）。
+    if (Number(response.status) === 503 && attempt < retryCount) {
+      const backoffMs = Math.min(baseBackoffMs * 2 ** attempt, 8000)
+      console.warn(
+        `[ai-model-adapter] response status=503 model=${model} retry=${attempt + 1}/${retryCount} waitMs=${backoffMs} (overload, same-model retry)`
+      )
+      await sleep(backoffMs)
+      continue
     }
 
     // 429 = rate limit — 優先依 Retry-After 精準等待；否則 jitter 退避（破解 thundering herd：併發下多 call 同時被擋，
