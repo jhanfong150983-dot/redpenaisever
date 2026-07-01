@@ -8030,13 +8030,13 @@ export async function runStagedGradingPhaseA({
   //   用輕量專用 prompt 分小批跑 read1(盲)+read2(校對,依設定給/不給答案)。實證：全域重 call 是社會卷 mass-blank/逾時元兇；
   //   同型輕量小批 3.5 幾乎不空白、ordering 一致率 97%。產出 read1/read2 格式與全域讀一致 → 下游全不動。
   //   model 原則：預設 FLASH(2.5)、只 ordering 已 A/B 驗過用 PRO；其餘逐型 A/B 後改設定表即可。
-  const useTypeSplit = process.env.TYPE_SPLIT_READ === '1'
+  const useTypeSplit = process.env.TYPE_SPLIT_READ !== '0'  // 2026-07-02 改預設開(user 直接上線測)；回退設 TYPE_SPLIT_READ=0
   const TYPE_READ_CONFIG = {
     ordering:                     { model: 'PRO',   batch: 1,  blindRead2: true,  family: 'ordering' },
     single_choice:                { model: 'FLASH', batch: 20, blindRead2: false, family: 'choice' },
     true_false:                   { model: 'FLASH', batch: 30, blindRead2: false, family: 'choice' },
-    single_check:                 { model: 'FLASH', batch: 15, blindRead2: false, family: 'check' },
-    multi_check:                  { model: 'FLASH', batch: 15, blindRead2: false, family: 'check' },
+    single_check:                 { model: 'PRO',   batch: 15, blindRead2: false, family: 'check' },
+    multi_check:                  { model: 'PRO',   batch: 15, blindRead2: false, family: 'check' },
     fill_blank:                   { model: 'FLASH', batch: 15, blindRead2: false, family: 'text' },
     short_answer:                 { model: 'FLASH', batch: 10, blindRead2: false, family: 'text' },
     compound_chain_table:         { model: 'FLASH', batch: 1,  blindRead2: false, family: 'compound' },
