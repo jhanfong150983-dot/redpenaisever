@@ -6679,13 +6679,15 @@ function buildFinalGradingResult({
 // Dewarp（學生照片卷整平）：呼叫獨立 Python/UVDoc 微服務，把彎曲/傾斜照片拉平，
 // 讓 classify 的矩形 bbox 跟得上文字行。
 // ⚠️ 只對「照片」（submissionSource ≠ teacher_scan）；PDF(teacher_scan) 一律不碰。
-// ⚠️ 全程 graceful：未開啟 / 無 URL / 服務失敗 / 逾時 → 回 null（呼叫端用原圖、絕不擋批改）。
+// ⚠️ 預設「開」：設好 DEWARP_URL 即生效；kill switch＝明確設 DEWARP_ENABLED=0/false 才關。
+// ⚠️ 全程 graceful：關閉 / 無 URL / 服務失敗 / 逾時 → 回 null（呼叫端用原圖、絕不擋批改）。
 // ⚠️ UVDoc 確定性（同圖同輸出）→ 拆成兩個 HTTP call 時兩邊各自整平結果一致、bbox 與 crop 對得齊。
 // 回傳 { data, mimeType, pageBreaks }（整平後）或 null。
 async function dewarpPhotoSubmission({ inlineData, pageBreaks, submissionSource, answerSheetMode, pipelineRunId, stagedLogLevel }) {
-  const enabled = process.env.DEWARP_ENABLED === '1' || process.env.DEWARP_ENABLED === 'true'
+  // 預設開；只有明確 DEWARP_ENABLED=0/false 才關（kill switch）
+  const enabled = process.env.DEWARP_ENABLED !== '0' && process.env.DEWARP_ENABLED !== 'false'
   const url = process.env.DEWARP_URL
-  if (!enabled || !url) return null
+  if (!enabled || !url) return null  // 仍需 DEWARP_URL；沒設 → graceful 跳過
   // 只照片：PDF(teacher_scan) 與來源不明（null）一律跳過（安全預設＝不整平）
   if (!submissionSource || submissionSource === 'teacher_scan') return null
   if (!inlineData?.data) return null
