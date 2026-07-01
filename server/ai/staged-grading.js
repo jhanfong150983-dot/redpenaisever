@@ -9589,6 +9589,7 @@ Return JSON:
         alignedQuestionsLite,
         ocrAssistedQids: ocrAssistedQidsList,
         isEnglishDomainForSpelling,
+        readMode: useTypeSplit ? 'type-split' : 'global',  // 2026-07-02 落地確認/debug 用：這份卷走哪條 read
         // stage_log 重建用（A3 寫最終 phase_a row）
         classifySummary,
         readAnswer1Mini,
@@ -9971,6 +9972,7 @@ Return JSON:
       pipelineRunId,
       stagedLogLevel,
       model,
+      readMode: useTypeSplit ? 'type-split' : 'global',  // 2026-07-02 落地確認/debug
       answerKey,
       questionIds,
       classifyResult: reconstructedClassifyResult,
@@ -10408,6 +10410,7 @@ export async function runStagedGradingPhaseAArbiter({
       pipelineRunId,
       stagedLogLevel,
       model,
+      readMode: phaseAReadContext?.readMode || 'global',  // 2026-07-02 落地確認/debug
       answerKey,
       questionIds,
       classifyResult: reconstructedClassifyResult,
