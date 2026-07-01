@@ -51,7 +51,11 @@ const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 // fallback models (e.g. gemini-2.5-flash) will have thinkingConfig stripped automatically.
 export const READ_ANSWER_GENERATION_CONFIG = {
   generationConfig: {
-    temperature: 0.3,
+    // 2026-06-30：read temp 預設改 0（治「每次批改不一致」）。
+    //   沙盒實證(seat 015c 重跑 3 次)：temp 0.3 → NR 數 10/2/6、翻盤題 11；temp 0 → NR 數 2/3/3、翻盤題僅 1(ordering)。
+    //   翻盤的假 NR 在 temp 0 消失 → 整班 NR 105→94 且跨次穩定。與 VJ grade(temp 0.3 有 ~1/5 變異、改 0 才穩)一致。
+    //   可由 env READ_TEMP 覆寫（回退設 READ_TEMP=0.3）。
+    temperature: Number.isFinite(Number(process.env.READ_TEMP)) ? Number(process.env.READ_TEMP) : 0,
     thinkingConfig: {
       thinking_level: 'MINIMAL'
     }
@@ -1282,6 +1286,19 @@ export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s2 = ensureString(read2?.status, '').toLowerCase()
   // 兩者皆空白 → 一致（都沒作答）
   if (s1 === 'blank' && s2 === 'blank') return 'stable'
+  // ① 2026-07-01：一方 blank、另一方 read → 以 read1(盲讀) 為準、不送審。**只限「長答案題型」**。
+  //   依據＋界線（老師人工核 GT）：
+  //     - fill_blank 等「整題自由書寫」：學生不會就整句留空 → read1 空白＝真空白（22/22 實測全對）、
+  //       read2 知答會幻覺整句 → 信 read1(判未作答)。
+  //     - ⛔ single_choice / 勾選等「短標記」：學生幾乎都會猜一個字母、極少真空白；read1 盲讀易漏看那個小筆跡
+  //       → read1 空白 ≠ 真空白（實測 seat12 2-D-3 學生寫 A 被 read1 判空白、8/8 都是有寫）→ **不可信 read1、仍送審**。
+  //   故只對長答案型套用；短標記型的一空一有維持 unstable 送審。kill-switch: BLANK_TRUST_READ1='false'。
+  const isLongAnswerType = questionType === 'fill_blank' || questionType === 'short_answer'
+    || questionType === 'word_problem' || questionType === 'calculation' || String(questionType).startsWith('compound_')
+  if (process.env.BLANK_TRUST_READ1 !== 'false' && isLongAnswerType) {
+    if (s1 === 'blank' && s2 === 'read') return 'stable'  // → finalAnswer 用 read1=空白=未作答
+    if (s1 === 'read' && s2 === 'blank') return 'stable'  // → finalAnswer 用 read1 的答案
+  }
   if (s1 !== 'read' || s2 !== 'read') return 'unstable'
 
   // 2026-05-28 pivot: map_fill 改走 Phase A 3-AI per-position pattern、
@@ -1563,7 +1580,7 @@ function isSentenceClozeAnswer(answer, maxScore) {
   const asciiWords = toks.filter((t) => /^[a-z0-9'-]+$/.test(t)).length
   return asciiWords / toks.length >= 0.8
 }
-function gradeSentenceClozeDeterministic(q, studentAnswerRaw, status) {
+export function gradeSentenceClozeDeterministic(q, studentAnswerRaw, status) {
   const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
   const key = ensureString(q?.answer, '').trim()
   if (status === 'unreadable') return { gradable: false }
@@ -5032,6 +5049,13 @@ STRICT RULES:
 - If the answer space is empty → status='blank', even if you know the correct answer.
 - The correct answer only helps you LOOK MORE CAREFULLY — it does NOT change what you report.
 
+⛔ 2026-07-01 反幻覺鐵則（最高優先、違反即嚴重錯誤）：
+- 「知道正確答案」絕對不代表「學生有寫」。**大量學生會整題留空沒作答。**
+- 如果該題答題處你看到的是「空白／只有印刷底線／只有印刷題目、沒有任何手寫筆跡」→ 一律 status='blank'、answer=''。
+  **即使你知道正確答案是什麼、即使這題理論上該寫一整句，也絕對不可以把正確答案（或任何看起來合理的句子）填進去。**
+- 自我檢查：在輸出任何非空答案前，先問自己「這些字我是真的在學生手寫筆跡裡『看到』的嗎？還是因為我知道答案而『腦補』的？」——只要有一絲是腦補，就回 blank。
+- 寧可漏報（blank）也不可幻覺（把沒寫的判成有寫）。把沒作答判成有答案，會讓學生不勞而獲、是本系統最嚴重的錯誤。
+
 ${AI2_ANTI_BIAS_FRAMEWORK}
 
 ${basePrompt}`
@@ -7997,73 +8021,142 @@ export async function runStagedGradingPhaseA({
       `[A2] 進場 切圖完成 共 ${allQuestionCropMap.size} 張 (約 ${cropMB}MB)、準備 AI1 + AI2 並行讀答`)
   }
 
-  // Build AI1 parts: text prompt + interleaved (label + crop) per question
-  const ai1IncludeIds = Array.from(allQuestionCropMap.keys())
-  const ai1TextPrompt = buildDetailReadPrompt(classifyResult, {
-    includeQuestionIds: ai1IncludeIds.length > 0 ? ai1IncludeIds : undefined,
-    answerKeyQuestions: answerKeyQuestions,
-    domainHint: internalContext?.domainHint
-  })
-  const ai1Parts = [{ text: ai1TextPrompt }]
-  for (const q of classifyAligned) {
-    if (!q.visible) continue
-    const crop = allQuestionCropMap.get(q.questionId)
-    if (!crop) continue
-    ai1Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}）---` })
-    ai1Parts.push({ inlineData: crop })
+  const akMapForAi2 = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
+  // 2026-06-30：ordering AI2 知答錨定 → 盲讀（僅全域讀路徑用；type-split 由設定表 blindRead2 控）。
+  const ORDERING_AI2_BLIND = process.env.ORDERING_AI2_BLIND !== '0'
+
+  // ── 2026-07-02: type-split read（TYPE_SPLIT_READ=1 開）──────────────────────
+  //   取代「全域 AI1/AI2 一支大混批 call」：所有 visible 題按 type 分組、每型查設定表(model/batch/blindRead2/family)、
+  //   用輕量專用 prompt 分小批跑 read1(盲)+read2(校對,依設定給/不給答案)。實證：全域重 call 是社會卷 mass-blank/逾時元兇；
+  //   同型輕量小批 3.5 幾乎不空白、ordering 一致率 97%。產出 read1/read2 格式與全域讀一致 → 下游全不動。
+  //   model 原則：預設 FLASH(2.5)、只 ordering 已 A/B 驗過用 PRO；其餘逐型 A/B 後改設定表即可。
+  const useTypeSplit = process.env.TYPE_SPLIT_READ === '1'
+  const TYPE_READ_CONFIG = {
+    ordering:                     { model: 'PRO',   batch: 1,  blindRead2: true,  family: 'ordering' },
+    single_choice:                { model: 'FLASH', batch: 20, blindRead2: false, family: 'choice' },
+    true_false:                   { model: 'FLASH', batch: 30, blindRead2: false, family: 'choice' },
+    single_check:                 { model: 'FLASH', batch: 15, blindRead2: false, family: 'check' },
+    multi_check:                  { model: 'FLASH', batch: 15, blindRead2: false, family: 'check' },
+    fill_blank:                   { model: 'FLASH', batch: 15, blindRead2: false, family: 'text' },
+    short_answer:                 { model: 'FLASH', batch: 10, blindRead2: false, family: 'text' },
+    compound_chain_table:         { model: 'FLASH', batch: 1,  blindRead2: false, family: 'compound' },
+    compound_circle_with_explain: { model: 'FLASH', batch: 4,  blindRead2: false, family: 'compound' },
+    compound_check_with_explain:  { model: 'FLASH', batch: 4,  blindRead2: false, family: 'compound' }
+  }
+  const TYPE_READ_DEFAULT = { model: 'FLASH', batch: 15, blindRead2: false, family: 'text' }
+  const TYPE_SPLIT_SKIP = new Set(['multi_fill', 'map_fill', 'diagram_color', 'diagram_draw', 'grid_geometry', 'map_symbol', 'circle_select_one', 'circle_select_many'])
+  const tsReadHead = (family, role) => {
+    // ordering：兩讀改用「不同策略」(blindRead2 已使兩讀皆盲)。沙盒實證 PA/PB @PRO 一致率 97%(vs 抄寫/校對變體僅~53%)。
+    if (family === 'ordering') {
+      const strat = role === 'review'
+        ? '先數清楚總共有幾格、再由左到右逐格讀出每格的手寫數字(格數要對得上框數)。'
+        : '由左到右、依序讀出每一格學生手寫的數字。'
+      return `這是「排序題」作答區的裁切放大圖：一排方框/括號、每格一個學生手寫數字。${strat}某格看不清→該格用 ?；整題空白→status="blank"。不要猜、不要管正確答案。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"n,n,n,...","status":"read|blank|unreadable"}]}`
+    }
+    const roleLine = role === 'review'
+      ? '你是校對員：每題標籤可能附正確答案，只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、看不到就 blank，絕不可把正確答案填進去。'
+      : '你是抄寫員：不知道正確答案，只忠實回報學生實際手寫的內容、不要猜。'
+    const rule = ({
+      ordering: '這些是「排序題」：一排方框、每格一個手寫數字。由左到右逐格讀出數字組成序列(如 1,6,5,2,3,4,8,7)。某格看不清→該格用 ?。',
+      choice: '這些是「選擇/是非題」：回報學生圈選或寫下的選項代號(字母或數字)。',
+      check: '這些是「勾選題」：回報學生實際打勾/圈選的項目(格號集合，如 1,3)。',
+      text: '這些是「填空/簡答題」：回報學生手寫的文字內容。',
+      compound: '這些是「複合表格題」：每題含多欄(如 人物／事件／影響)，回報學生各欄實際手寫內容、用「｜」分隔各欄。'
+    })[family] || '回報學生手寫的內容。'
+    return `以下是多張「同一題型」的作答區裁切放大圖，每張圖前有題號標籤。${roleLine}\n${rule}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+  }
+  const tsChunk = (arr, n) => { const o = []; const s = Math.max(1, n); for (let i = 0; i < arr.length; i += s) o.push(arr.slice(i, i + s)); return o }
+  const runTypeSplitRole = async (role) => {
+    const groups = new Map()
+    for (const q of classifyAligned) {
+      if (!q.visible || TYPE_SPLIT_SKIP.has(q.questionType) || !allQuestionCropMap.has(q.questionId)) continue
+      if (!groups.has(q.questionType)) groups.set(q.questionType, [])
+      groups.get(q.questionType).push(q)
+    }
+    const answers = []
+    const jobs = []
+    // env TYPE_SPLIT_PRO_TYPES=逗號分隔題型 → 強制那些型用 PRO（A/B 用、也是逐型調 model 的旋鈕、不必改碼）
+    const tsProTypes = new Set(ensureString(process.env.TYPE_SPLIT_PRO_TYPES, '').split(',').map((s) => s.trim()).filter(Boolean))
+    for (const [type, qs] of groups) {
+      const cfg = TYPE_READ_CONFIG[type] || TYPE_READ_DEFAULT
+      const model = (cfg.model === 'PRO' || tsProTypes.has(type)) ? MODEL_PRO : MODEL_FLASH
+      for (const batch of tsChunk(qs, cfg.batch)) {
+        jobs.push(async () => {
+          const parts = [{ text: tsReadHead(cfg.family, role) }]
+          for (const q of batch) {
+            // freshCrop：改用「單題緊框」重切(如 ordering)，不用 allQuestionCropMap 的 crop
+            //   (沙盒實證 ordering 用 tight 0.02 crop 兩讀一致 97%、用 pipeline 寬 crop 只 ~50%)
+            let crop = allQuestionCropMap.get(q.questionId)
+            if (cfg.freshCrop && q.answerBbox && inlineImages[0]) {
+              const fc = await cropInlineImageByBbox(inlineImages[0].inlineData.data, inlineImages[0].inlineData.mimeType, q.answerBbox, true, cfg.pad ?? 0.02)
+              if (fc) crop = fc
+            }
+            if (!crop) continue
+            const giveAns = role === 'review' && !cfg.blindRead2
+            const ak = akMapForAi2.get(q.questionId)
+            const ans = giveAns ? ensureString(ak?.answer || ak?.referenceAnswer, '').trim() : ''
+            parts.push({ text: `--- 題目 ${q.questionId}${ans ? `（正確答案：${ans}）` : ''} ---` })
+            parts.push({ inlineData: crop })
+          }
+          const resp = await executeStage({
+            apiKey, model, modelOverride: readModelOverride,
+            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+            timeoutMs: getRemainingBudget(), routeHint,
+            routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+            stageContents: [{ role: 'user', parts }]
+          })
+          const parsed = resp?.ok ? parseCandidateJson(resp.data) : null
+          const arr = Array.isArray(parsed?.answers) ? parsed.answers : []
+          const byQ = new Map(arr.map((a) => [ensureString(a?.questionId).trim(), a]))
+          for (const q of batch) answers.push(byQ.get(q.questionId) || { questionId: q.questionId, studentAnswerRaw: '', status: 'blank' })
+          if (!resp?.ok || arr.length === 0) logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空、補 blank`)
+        })
+      }
+    }
+    // 內部併發限制(小 call 別一次全轟)
+    const LIM = 6; let bi = 0
+    await Promise.all(Array.from({ length: Math.min(LIM, jobs.length) }, async () => { while (bi < jobs.length) { await jobs[bi++]() } }))
+    return { ok: true, warnings: [], _parsed: { answers } }
   }
 
-  // ── A3(AI1) + A4(AI2): Detail read + Global read IN PARALLEL ──
-  // AI2 now uses the same per-question crops as AI1 (instead of the full image).
-  // Reason: full-image reading caused AI2 to read the wrong row in table-style
-  // calculation questions (positional confusion in dense answer grids), and also
-  // caused single_check to output option text characters instead of symbol labels.
-  // AI2 uses buildReviewReadPrompt: same rules as AI1, but knows correct answers (review role).
-  // Labels include correct answer so AI2 can use it as a verification hint.
-  const akMapForAi2 = mapByQuestionId(answerKeyQuestions, (item) => item?.id)
-  const globalReadPrompt = buildReviewReadPrompt(classifyResult, {
-    answerKeyQuestions,
-    domainHint: internalContext?.domainHint
-  })
-  const ai2Parts = [{ text: globalReadPrompt }]
-  for (const q of classifyAligned) {
-    if (!q.visible) continue
-    const crop = allQuestionCropMap.get(q.questionId)
-    if (!crop) continue
-    const akQ = akMapForAi2.get(q.questionId)
-    const correctAnswer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
-    const answerLabel = correctAnswer ? `，正確答案：${correctAnswer}` : ''
-    ai2Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}${answerLabel}）---` })
-    ai2Parts.push({ inlineData: crop })
-  }
-  logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', {
-    ai1CropCount: ai1IncludeIds.length,
-    ai2CropCount: ai2Parts.filter((p) => p.inlineData).length
-  })
-  const parallelCalls = [
-    // AI1: detail read (crop images only) — 2026-05-18 用 readModel
-    executeStage({
-      apiKey,
-      model: readModel,
-      modelOverride: readModelOverride,
-      payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-      timeoutMs: getRemainingBudget(),
-      routeHint,
-      routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
-      stageContents: [{ role: 'user', parts: ai1Parts }]
-    }),
-    // AI2: review read (same crops as AI1, but knows correct answers — acts as reviewer)
-    executeStage({
-      apiKey,
-      model: readModel,
-      modelOverride: readModelOverride,
-      payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-      timeoutMs: getRemainingBudget(),
-      routeHint,
-      routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-      stageContents: [{ role: 'user', parts: ai2Parts }]
+  let parallelCalls
+  if (useTypeSplit) {
+    logStaged(pipelineRunId, 'basic', '[A2] type-split read 模式(TYPE_SPLIT_READ=1)、取代全域大 call')
+    parallelCalls = [runTypeSplitRole('detail'), runTypeSplitRole('review')]
+  } else {
+    // ── 現行全域讀（AI1 盲 + AI2 校對，各一支含全部題）──
+    const ai1IncludeIds = Array.from(allQuestionCropMap.keys())
+    const ai1TextPrompt = buildDetailReadPrompt(classifyResult, {
+      includeQuestionIds: ai1IncludeIds.length > 0 ? ai1IncludeIds : undefined,
+      answerKeyQuestions, domainHint: internalContext?.domainHint
     })
-  ]
+    const ai1Parts = [{ text: ai1TextPrompt }]
+    for (const q of classifyAligned) {
+      if (!q.visible) continue
+      const crop = allQuestionCropMap.get(q.questionId)
+      if (!crop) continue
+      ai1Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}）---` })
+      ai1Parts.push({ inlineData: crop })
+    }
+    const globalReadPrompt = buildReviewReadPrompt(classifyResult, { answerKeyQuestions, domainHint: internalContext?.domainHint })
+    const ai2Parts = [{ text: globalReadPrompt }]
+    for (const q of classifyAligned) {
+      if (!q.visible) continue
+      const crop = allQuestionCropMap.get(q.questionId)
+      if (!crop) continue
+      const akQ = akMapForAi2.get(q.questionId)
+      const correctAnswer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
+      const hideAnswer = ORDERING_AI2_BLIND && q.questionType === 'ordering'
+      const answerLabel = (correctAnswer && !hideAnswer) ? `，正確答案：${correctAnswer}` : ''
+      ai2Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}${answerLabel}）---` })
+      ai2Parts.push({ inlineData: crop })
+    }
+    logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', { ai1CropCount: ai1IncludeIds.length, ai2CropCount: ai2Parts.filter((p) => p.inlineData).length })
+    parallelCalls = [
+      executeStage({ apiKey, model: readModel, modelOverride: readModelOverride, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ, stageContents: [{ role: 'user', parts: ai1Parts }] }),
+      executeStage({ apiKey, model: readModel, modelOverride: readModelOverride, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER, stageContents: [{ role: 'user', parts: ai2Parts }] })
+    ]
+  }
   let finalAnswerOnlyIdx = -1
   let calcFinalAnswerIdx = -1
   if (wordProblemIds.length > 0) {
@@ -8264,10 +8357,11 @@ export async function runStagedGradingPhaseA({
   if (readAnswerResponse.warnings.length > 0) {
     stageWarnings.push(...readAnswerResponse.warnings.map((w) => `[ReadAnswer] ${w}`))
   }
-  let readAnswerParsed = parseCandidateJson(readAnswerResponse.data)
-  let reReadAnswerParsed = reReadAnswerResponse?.ok
+  // type-split 模式：response 直接帶 _parsed（{answers}）；否則從 Gemini candidate 解析
+  let readAnswerParsed = readAnswerResponse?._parsed ?? parseCandidateJson(readAnswerResponse.data)
+  let reReadAnswerParsed = reReadAnswerResponse?._parsed ?? (reReadAnswerResponse?.ok
     ? parseCandidateJson(reReadAnswerResponse.data)
-    : null
+    : null)
   // 2026-05-18: AI1 parse 失敗時的診斷 + fallback
   //   原本 AI1 parse 失敗就直接 throw、整個 phase-a crash、fallback 到 single-shot 回 400
   //   改成：先印 raw text 上 Vercel log 給診斷、然後若 AI2 parse 成功就用 AI2 當 AI1（讓 phase-a 還是能跑完）
@@ -8307,34 +8401,98 @@ export async function runStagedGradingPhaseA({
       }
       return { ai1NonBlank, ai2Blank }
     }
-    const { ai1NonBlank, ai2Blank } = countAi2BlankWhereAi1Read(reReadAnswerParsed)
-    // 系統性失敗門檻：AI1 至少讀到 8 題、且其中過半 AI2 判空白
-    if (ai1NonBlank >= 8 && ai2Blank / ai1NonBlank >= 0.5) {
-      logStaged(pipelineRunId, 'basic', `[A2] AI2 大量判空白(${ai2Blank}/${ai1NonBlank})→重抽 read2 一次`)
-      const retryResp = await executeStage({
-        apiKey, model: readModel, modelOverride: readModelOverride,
-        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-        timeoutMs: getRemainingBudget(), routeHint,
-        routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-        stageContents: [{ role: 'user', parts: ai2Parts }]
-      })
-      if (retryResp?.ok) {
-        const retryParsed = parseCandidateJson(retryResp.data)
-        if (retryParsed && typeof retryParsed === 'object') {
-          const retry = countAi2BlankWhereAi1Read(retryParsed)
-          if (retry.ai2Blank < ai2Blank) {
-            reReadAnswerParsed = retryParsed
-            stageResponses.push(retryResp)
-            logStaged(pipelineRunId, 'basic', `[A2] read2 重抽改善 空白 ${ai2Blank}→${retry.ai2Blank}、採用重抽`)
+    let { ai1NonBlank, ai2Blank } = countAi2BlankWhereAi1Read(reReadAnswerParsed)
+    // 系統性失敗門檻：AI1 至少讀到 8 題、且其中過半 AI2 判空白。
+    // 2026-06-30：mass-blank 多為「負載過高→read call 慢/降級→整批吐空白」(實證 AI2 call 48s、retry 同樣崩或 504)。
+    //   單次立即重抽常在高負載下又撞同一失敗 → 改「最多重抽 3 次、每次間隔 backoff」讓負載退去再讀；空白率掉到 <50% 即停。
+    if (!useTypeSplit && ai1NonBlank >= 8 && ai2Blank / ai1NonBlank >= 0.5) {
+      const MAX_RETRY = 3
+      for (let attempt = 1; attempt <= MAX_RETRY && ai2Blank / ai1NonBlank >= 0.5; attempt++) {
+        if (attempt > 1) await new Promise((r) => setTimeout(r, 1500 * attempt))  // backoff 讓負載退去
+        logStaged(pipelineRunId, 'basic', `[A2] AI2 大量判空白(${ai2Blank}/${ai1NonBlank})→重抽 read2 第 ${attempt}/${MAX_RETRY} 次`)
+        const retryResp = await executeStage({
+          apiKey, model: readModel, modelOverride: readModelOverride,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(), routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+          stageContents: [{ role: 'user', parts: ai2Parts }]
+        })
+        if (retryResp?.ok) {
+          const retryParsed = parseCandidateJson(retryResp.data)
+          if (retryParsed && typeof retryParsed === 'object') {
+            const retry = countAi2BlankWhereAi1Read(retryParsed)
+            if (retry.ai2Blank < ai2Blank) {
+              reReadAnswerParsed = retryParsed
+              stageResponses.push(retryResp)
+              ai2Blank = retry.ai2Blank
+              logStaged(pipelineRunId, 'basic', `[A2] read2 重抽改善 空白 →${retry.ai2Blank}、採用重抽`)
           } else {
             logStaged(pipelineRunId, 'basic', `[A2] read2 重抽未改善(${retry.ai2Blank})、保留原值`)
           }
         }
-      } else {
-        logStaged(pipelineRunId, 'basic', `[A2] read2 重抽 HTTP ${retryResp?.status}、保留原值`)
+        } else {
+          logStaged(pipelineRunId, 'basic', `[A2] read2 重抽 HTTP ${retryResp?.status}、保留原值`)
+        }
       }
     }
   } catch (e) { logStaged(pipelineRunId, 'basic', '[A2] read2 空白偵測/重抽失敗(忽略)', { error: e?.message }) }
+
+  // ── 2026-06-30: AI1(盲讀) 整份/大量判空白偵測 → 重抽 read1 一次（對稱於上面 read2 重抽）──
+  //   現象：AI2 讀到答案、AI1 卻把整片 fill_blank/排序讀成空白（偶發 Gemini 失敗）→ read1≠read2 → NR 爆量、
+  //   且跨次極不一致（同卷此次 4 題 NR、下次 17 題）。實證 seat 015c：AI1 對 ~8 題 fill_blank 整片判空白。
+  //   偵測「AI2 非空、AI1 卻空白」過半 → 重抽一次 AI1；重抽變好才採用。read1 須維持盲讀（用原 ai1Parts、不給答案）。
+  try {
+    const ansArrOf = (p) => (Array.isArray(p?.answers) ? p.answers : [])
+    const isBlankAns = (a) => {
+      const st = ensureString(a?.status, '').toLowerCase()
+      const txt = ensureString(a?.studentAnswer ?? a?.studentAnswerRaw ?? a?.answer, '').trim()
+      return st === 'blank' || st === 'unreadable' || !txt || txt === '未作答'
+    }
+    const ai2ByQid = new Map(ansArrOf(reReadAnswerParsed).map((a) => [ensureString(a?.questionId).trim(), a]))
+    const countAi1BlankWhereAi2Read = (parsed) => {
+      const a1ByQid = new Map(ansArrOf(parsed).map((a) => [ensureString(a?.questionId).trim(), a]))
+      let ai2NonBlank = 0, ai1Blank = 0
+      for (const [qid, a2] of ai2ByQid) {
+        if (isBlankAns(a2)) continue
+        ai2NonBlank++
+        const a1 = a1ByQid.get(qid)
+        if (!a1 || isBlankAns(a1)) ai1Blank++
+      }
+      return { ai2NonBlank, ai1Blank }
+    }
+    let { ai2NonBlank, ai1Blank } = countAi1BlankWhereAi2Read(readAnswerParsed)
+    // 同 read2：mass-blank 多為負載誘發、單次重抽常再撞 → 最多 3 次、backoff 讓負載退去、空白率 <50% 即停。
+    if (!useTypeSplit && ai2NonBlank >= 8 && ai1Blank / ai2NonBlank >= 0.5) {
+      const MAX_RETRY = 3
+      for (let attempt = 1; attempt <= MAX_RETRY && ai1Blank / ai2NonBlank >= 0.5; attempt++) {
+        if (attempt > 1) await new Promise((r) => setTimeout(r, 1500 * attempt))
+        logStaged(pipelineRunId, 'basic', `[A2] AI1 大量判空白(${ai1Blank}/${ai2NonBlank})→重抽 read1 第 ${attempt}/${MAX_RETRY} 次`)
+        const retryResp = await executeStage({
+          apiKey, model: readModel, modelOverride: readModelOverride,
+          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          timeoutMs: getRemainingBudget(), routeHint,
+          routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+          stageContents: [{ role: 'user', parts: ai1Parts }]
+        })
+        if (retryResp?.ok) {
+          const retryParsed = parseCandidateJson(retryResp.data)
+          if (retryParsed && typeof retryParsed === 'object') {
+            const retry = countAi1BlankWhereAi2Read(retryParsed)
+            if (retry.ai1Blank < ai1Blank) {
+              readAnswerParsed = retryParsed
+              stageResponses.push(retryResp)
+              ai1Blank = retry.ai1Blank
+              logStaged(pipelineRunId, 'basic', `[A2] read1 重抽改善 空白 →${retry.ai1Blank}、採用重抽`)
+            } else {
+              logStaged(pipelineRunId, 'basic', `[A2] read1 重抽未改善(${retry.ai1Blank})、保留原值`)
+            }
+          }
+        } else {
+          logStaged(pipelineRunId, 'basic', `[A2] read1 重抽 HTTP ${retryResp?.status}、保留原值`)
+        }
+      }
+    }
+  } catch (e) { logStaged(pipelineRunId, 'basic', '[A2] read1 空白偵測/重抽失敗(忽略)', { error: e?.message }) }
 
   // Log per-question read results for debugging
   const readAnswerLogMode = getReadAnswerLogMode()
@@ -8403,7 +8561,8 @@ export async function runStagedGradingPhaseA({
   }
 
   // ── A3c: Focused checkbox read (crop-based, context-reduced) ───────────────
-  if (focusedCheckboxCropMap.size > 0) {
+  // type-split 模式：single/multi_check 由框架設定表處理 → 跳過此舊 focused-checkbox pass（避免重複 PRO）。
+  if (!useTypeSplit && focusedCheckboxCropMap.size > 0) {
     logStaged(pipelineRunId, stagedLogLevel, 'focused-checkbox-read begin', {
       count: focusedCheckboxCropMap.size
     })
@@ -8515,6 +8674,95 @@ export async function runStagedGradingPhaseA({
         })
       }
     }
+  }
+
+  // ── 2026-07-02: ordering type-split 讀（type-split read 第一個試點）─────────────────────────
+  //   ordering(多格排序) 全域混批讀不穩：2.5 讀不動(沙盒兩讀一致 43%、半數整題空白)。
+  //   改「單題緊框 + 排序專用 prompt + MODEL_PRO(3.5)」：沙盒實證兩讀一致率 97%(vs 全域 21%)、幾乎不空白。
+  //   read1/read2 各用不同排序 prompt(皆盲讀、不給答案避免錨定) → 覆寫全域讀結果 → 下游一致性照舊。
+  //   kill-switch: TYPE_SPLIT_READ_ORDERING='false'。model 依「NR-driven」原則：ordering 已驗 3.5≫2.5 故用 PRO。
+  if (!useTypeSplit && process.env.TYPE_SPLIT_READ_ORDERING !== 'false' && inlineImages[0]) {
+    try {
+      const inlineImage = inlineImages[0]
+      const orderingQs = classifyAligned.filter((q) => q.visible && q.questionType === 'ordering' && q.answerBbox)
+      if (orderingQs.length > 0) {
+        logStaged(pipelineRunId, 'basic', `[type-split] ordering ${orderingQs.length} 題→專用讀(PRO)`)
+        const jsonTail = (qid) => `某格看不清→該格用?；整題空白→status="blank"。不要猜、不要管正確答案。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"n,n,n,...","status":"read|blank|unreadable"}]}`
+        const promptA = (qid) => `這是一題「排序題」作答區的裁切放大圖：一排方框/括號、每格一個學生手寫數字。由左到右、依序讀出每一格的數字組成序列。${jsonTail(qid)}`
+        const promptB = (qid) => `這是一題「排序題」作答區的裁切放大圖：一排方框/括號並排、每格一個學生手寫數字。先數清楚總共幾格、再由左到右逐格讀出每格數字(格數要對得上框數)。${jsonTail(qid)}`
+        const runOne = async (q, promptFn) => {
+          const crop = await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, true, 0.02)
+          if (!crop) return null
+          const resp = await executeStage({ apiKey, model: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER, stageContents: [{ role: 'user', parts: [{ text: promptFn(q.questionId) }, { inlineData: crop }] }] })
+          if (!resp.ok) return null
+          const parsed = parseCandidateJson(resp.data)
+          const a = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
+          return a ? { questionId: q.questionId, answer: a } : null
+        }
+        const [r1Results, r2Results] = await Promise.all([
+          Promise.all(orderingQs.map((q) => runOne(q, promptA))),
+          Promise.all(orderingQs.map((q) => runOne(q, promptB))),
+        ])
+        const map1 = new Map(), map2 = new Map()
+        for (const r of r1Results) if (r) map1.set(r.questionId, r.answer)
+        for (const r of r2Results) if (r) map2.set(r.questionId, r.answer)
+        if (map1.size > 0) readAnswerParsed = applyAnswerOverrides(readAnswerParsed, map1)
+        if (map2.size > 0) reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, map2)
+        logStaged(pipelineRunId, 'basic', `[type-split] ordering 覆寫 read1=${map1.size} read2=${map2.size}`)
+      }
+    } catch (e) { logStaged(pipelineRunId, 'basic', '[type-split] ordering 失敗(忽略)', { error: e?.message }) }
+  }
+
+  // ── 2026-07-01: single_choice tie-break（read1≠read2 → 單題緊框第三讀 → 三票多數決）──────────
+  //   背景：single_choice(選項字母) read1 盲讀常漏看小字母判空白、read2 讀對 → 一空一有整批送審；
+  //   ①「一空一有信 read1」對 single_choice 會誤殺(學生幾乎都有猜、實測 8/8 有寫)、故 single_choice 排除①。
+  //   改用第三讀破局：只對「read1≠read2 的 single_choice」多打一支單題緊框盲讀(輕、只在分歧才觸發)、
+  //   **只在「≥2 票同一個非空字母」時定案**(覆寫兩讀成該值→一致)；多數是空白 / 三票全不同 → 不定案、維持送審(不誤殺)。
+  //   實證(沙盒 tie-break)：single_choice 100% 可由第三讀定案。kill-switch: SINGLE_CHOICE_TIEBREAK='false'。
+  if (!useTypeSplit && process.env.SINGLE_CHOICE_TIEBREAK !== 'false' && inlineImages[0]) {
+    try {
+      const inlineImage = inlineImages[0]
+      const ansMap = (p) => new Map((Array.isArray(p?.answers) ? p.answers : []).map((a) => [ensureString(a?.questionId).trim(), a]))
+      const r1m = ansMap(readAnswerParsed), r2m = ansMap(reReadAnswerParsed)
+      const normSC = (a) => {
+        const st = ensureString(a?.status, '').toLowerCase()
+        if (st === 'blank' || st === 'unreadable') return ''
+        const raw = ensureString(a?.studentAnswerRaw ?? a?.studentAnswer, '')
+        const idx = canonicalOptionIndex(raw)
+        return idx != null ? String(idx) : raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+      }
+      const scDisagree = classifyAligned.filter((q) => q.visible && q.questionType === 'single_choice' && q.answerBbox)
+        .filter((q) => { const a = r1m.get(q.questionId), b = r2m.get(q.questionId); return a && b && normSC(a) !== normSC(b) })
+      if (scDisagree.length > 0) {
+        logStaged(pipelineRunId, 'basic', `[tie-break] single_choice 分歧 ${scDisagree.length} 題→第三讀`)
+        const results = await Promise.all(scDisagree.map(async (q) => {
+          const crop = await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, true, 0.03)
+          if (!crop) return null
+          const prompt = `這是一道單選題(single_choice)學生作答括號的裁切放大圖。只回報學生實際手寫的「一個選項字母」(A/B/C/D…)。沒寫→status="blank"；看不懂→status="unreadable"。不要猜、不要管正確答案。只輸出 JSON：{"answers":[{"questionId":"${q.questionId}","studentAnswerRaw":"X","status":"read|blank|unreadable"}]}`
+          const resp = await executeStage({ apiKey, model: readModel, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER, stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: crop }] }] })
+          if (!resp.ok) return null
+          const parsed = parseCandidateJson(resp.data)
+          const a3 = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
+          return a3 ? { questionId: q.questionId, a3 } : null
+        }))
+        const overrideMap = new Map()
+        for (const r of results) {
+          if (!r) continue
+          const a1 = r1m.get(r.questionId), a2 = r2m.get(r.questionId)
+          const v1 = normSC(a1), v2 = normSC(a2), v3 = normSC(r.a3)
+          // 只在「第三讀=某一讀的『非空字母』」時定案（多數同一字母）；v3 空白 / 三票全不同 → 不定案、維持送審
+          let winner = null
+          if (v3 && v3 === v1) winner = a1
+          else if (v3 && v3 === v2) winner = a2
+          if (winner) overrideMap.set(r.questionId, { questionId: r.questionId, studentAnswerRaw: ensureString(winner.studentAnswerRaw ?? winner.studentAnswer, ''), status: 'read' })
+        }
+        if (overrideMap.size > 0) {
+          readAnswerParsed = applyAnswerOverrides(readAnswerParsed, overrideMap)
+          reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, overrideMap)
+          logStaged(pipelineRunId, 'basic', `[tie-break] single_choice 多數決定案 ${overrideMap.size}/${scDisagree.length} 題（其餘維持送審）`)
+        }
+      }
+    } catch (e) { logStaged(pipelineRunId, 'basic', '[tie-break] single_choice 失敗(忽略)', { error: e?.message }) }
   }
 
   // ── A3d: Focused multi_fill dual-read (two focused calls per question, replacing AI1 + AI2) ────
@@ -8875,7 +9123,7 @@ export async function runStagedGradingPhaseA({
   // 14 嚴一華 case：AI2 整空 → 沒 retry → 25/25 默默送 review。
   // 新流程：FAIL → 重跑 AI1+AI2 → 再驗 QG → 第二次 FAIL 才整份失敗。
   let readRetryAttempted = false
-  if (readQG.severity === QG_SEVERITY.FAIL || classifyReadQG.severity === QG_SEVERITY.FAIL) {
+  if (!useTypeSplit && (readQG.severity === QG_SEVERITY.FAIL || classifyReadQG.severity === QG_SEVERITY.FAIL)) {
     readRetryAttempted = true
     logStaged(pipelineRunId, 'basic', '[A2] read QG FAIL → 自動重跑 AI1+AI2 一次再驗', {
       readQG: readQG.warnings, classifyReadQG: classifyReadQG.warnings
@@ -9229,14 +9477,19 @@ Return JSON:
             //   修實證 bug：原始 read1==read2「No , he doesn't」、拼字 AI 回「No he doesn't」(少逗號) → 被當不一致強制 NR。
             const lettersOnly = (t) => ensureString(t, '').toLowerCase().replace(/[^a-z0-9]/g, '')
             if (lettersOnly(studentText) !== lettersOnly(prevAi2)) {
-              qr._dbgOrigRead2 = prevAi2  // 2026-06-30 debug：保留拼字 override 前的原始 read2
               qr.readAnswer2 = { status: 'read', studentAnswer: studentText }
-              // 拼寫驗證覆蓋後，強制 diff — 不讓 Jaccard 相似度判回 stable
-              // （Jaccard 只看字元集，"dining" 和 "dinng" 有相同字元集但拼寫不同）
-              qr.consistencyStatus = 'diff'
+              // 2026-06-30：覆蓋後「重算」read1 vs 新 read2 的一致性，不再無條件 force diff。
+              //   原本 force diff 的目的是擋 Jaccard 把真拼錯（dining/dinng 字元集相同）判回 stable；
+              //   但 computeConsistencyStatus 對 fill_blank 本來就是「normalize 不等即 diff」（不走 Jaccard），
+              //   真拼錯仍會回 diff。問題出在無條件 force：拼字 AI 把 read2 修成「只差標點」於 read1 時
+              //   （"...plane" vs "...plane."、"Yes it is" vs "Yes, it is."）也被強制 NR → 標點冤枉送審。
+              //   改重算後：真拼錯→diff（送審）、只差標點/空格/大小寫→stable（不送審、標點由 accessor 扣分）。
+              const r1obj = { status: qr.readAnswer1?.status, studentAnswerRaw: qr.readAnswer1?.studentAnswer }
+              const r2obj = { status: 'read', studentAnswerRaw: studentText }
+              qr.consistencyStatus = computeConsistencyStatus(r1obj, r2obj, qr.questionType)
               qr.spellingOverride = true
               overrideCount.applied++
-              console.log(`[english-spelling-override] ${qId} AI2 "${prevAi2}" → "${studentText}" (forced diff)`)
+              console.log(`[english-spelling-override] ${qId} AI2 "${prevAi2}" → "${studentText}" (recomputed=${qr.consistencyStatus})`)
             } else {
               overrideCount.skipped++
             }
@@ -9250,7 +9503,13 @@ Return JSON:
   }
 
   // ── English spacing review: flag questions where any AI reads extra/missing spaces ──
-  if (isEnglishDomainForSpelling) {
+  // 2026-06-30：預設關閉「空格/大小寫差異強制送審」。
+  //   原設計把「read 去空格後=正確答案、但空格/大小寫不同」(如 "No , he doesn't." vs "No, he doesn't.")
+  //   強制 consistencyStatus='diff' → needs_review。但這違反「只差標點/空格/大小寫不該進 NR」的鐵則：
+  //   兩讀其實一致、學生答案明確、無人工判讀必要；空格/標點該不該扣分由 accessor englishRules 處理。
+  //   實證殘餘冤枉 NR（seat g633uo 2-B-3 等）即此路徑造成。回退：設 env ENGLISH_SPACING_REVIEW_NR=1。
+  const SPACING_REVIEW_NR_ENABLED = process.env.ENGLISH_SPACING_REVIEW_NR === '1'
+  if (isEnglishDomainForSpelling && SPACING_REVIEW_NR_ENABLED) {
     const akByQid2 = mapByQuestionId(answerKeyQuestions, (q) => q?.id)
     for (const qr of questionResultsRaw) {
       if (qr.questionType !== 'fill_blank') continue
@@ -9720,12 +9979,6 @@ Return JSON:
         arbiterStatus: qr.arbiterResult?.arbiterStatus,
         finalAnswer: qr.arbiterResult?.finalAnswer,
         consistent: qr.arbiterResult?.consistent,
-        // 2026-06-30 debug：查「兩讀相同卻 NR」真因（AI3 off 時走確定性判定）。確認後可移除。
-        _dbgConsistencyStatus: qr.consistencyStatus,
-        _dbgConsistencyReason: qr.consistencyReason,
-        _dbgSpellingOverride: qr.spellingOverride || undefined,
-        _dbgSpacingReview: qr.spacingReviewFlag || undefined,
-        _dbgOrigRead2: qr._dbgOrigRead2
       })),
       savedAt: new Date().toISOString()
     }
@@ -10165,12 +10418,6 @@ export async function runStagedGradingPhaseAArbiter({
         arbiterStatus: qr.arbiterResult?.arbiterStatus,
         finalAnswer: qr.arbiterResult?.finalAnswer,
         consistent: qr.arbiterResult?.consistent,
-        // 2026-06-30 debug：查「兩讀相同卻 NR」真因（AI3 off 時走確定性判定）。確認後可移除。
-        _dbgConsistencyStatus: qr.consistencyStatus,
-        _dbgConsistencyReason: qr.consistencyReason,
-        _dbgSpellingOverride: qr.spellingOverride || undefined,
-        _dbgSpacingReview: qr.spacingReviewFlag || undefined,
-        _dbgOrigRead2: qr._dbgOrigRead2
       })),
       savedAt: new Date().toISOString()
     }
