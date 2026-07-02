@@ -8077,6 +8077,7 @@ export async function runStagedGradingPhaseA({
     }
     const answers = []
     const jobs = []
+    const typeLat = {}  // 每型耗時/批次/模型(落地監控用)
     // env TYPE_SPLIT_PRO_TYPES=逗號分隔題型 → 強制那些型用 PRO（A/B 用、也是逐型調 model 的旋鈕、不必改碼）
     const tsProTypes = new Set(ensureString(process.env.TYPE_SPLIT_PRO_TYPES, '').split(',').map((s) => s.trim()).filter(Boolean))
     for (const [type, qs] of groups) {
@@ -8111,14 +8112,18 @@ export async function runStagedGradingPhaseA({
           const arr = Array.isArray(parsed?.answers) ? parsed.answers : []
           const byQ = new Map(arr.map((a) => [ensureString(a?.questionId).trim(), a]))
           for (const q of batch) answers.push(byQ.get(q.questionId) || { questionId: q.questionId, studentAnswerRaw: '', status: 'blank' })
-          if (!resp?.ok || arr.length === 0) logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空、補 blank`)
+          // 每型耗時/批次/模型記錄(供落地監控、調 batch/model)
+          const ms = Number(resp?.modelLatencyMs) || 0
+          const t = typeLat[type] || (typeLat[type] = { model: cfg.model, batches: 0, maxMs: 0, sumMs: 0, ok: 0, fail: 0 })
+          t.batches++; t.maxMs = Math.max(t.maxMs, ms); t.sumMs += ms
+          if (resp?.ok && arr.length > 0) t.ok++; else { t.fail++; logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空、補 blank`) }
         })
       }
     }
     // 內部併發限制(小 call 別一次全轟)
     const LIM = 6; let bi = 0
     await Promise.all(Array.from({ length: Math.min(LIM, jobs.length) }, async () => { while (bi < jobs.length) { await jobs[bi++]() } }))
-    return { ok: true, warnings: [], _parsed: { answers } }
+    return { ok: true, warnings: [], _parsed: { answers }, _typeLat: typeLat }
   }
 
   let parallelCalls
@@ -8292,6 +8297,17 @@ export async function runStagedGradingPhaseA({
   const parallelResults = await Promise.all(parallelCalls)
   const readAnswerResponse = parallelResults[0]
   const reReadAnswerResponse = parallelResults[1]
+  // type-split 每型耗時：合併 read1(detail)+read2(review)、每型取 maxMs/總批次/model/fail(落地監控用)
+  let typeSplitLatencies = null
+  if (useTypeSplit) {
+    typeSplitLatencies = {}
+    for (const src of [readAnswerResponse?._typeLat, reReadAnswerResponse?._typeLat]) {
+      for (const [type, v] of Object.entries(src || {})) {
+        const t = typeSplitLatencies[type] || (typeSplitLatencies[type] = { model: v.model, batches: 0, maxMs: 0, ok: 0, fail: 0 })
+        t.batches += v.batches; t.maxMs = Math.max(t.maxMs, v.maxMs); t.ok += v.ok; t.fail += v.fail
+      }
+    }
+  }
 
   const finalAnswerOnlyResponse = finalAnswerOnlyIdx >= 0 ? parallelResults[finalAnswerOnlyIdx] : null
   const calcFinalAnswerResponse = calcFinalAnswerIdx >= 0 ? parallelResults[calcFinalAnswerIdx] : null
@@ -9590,6 +9606,7 @@ Return JSON:
         ocrAssistedQids: ocrAssistedQidsList,
         isEnglishDomainForSpelling,
         readMode: useTypeSplit ? 'type-split' : 'global',  // 2026-07-02 落地確認/debug 用：這份卷走哪條 read
+        typeSplitLatencies,  // 每型耗時/批次/model/fail(type-split 時；監控用)
         // stage_log 重建用（A3 寫最終 phase_a row）
         classifySummary,
         readAnswer1Mini,
@@ -9973,6 +9990,7 @@ Return JSON:
       stagedLogLevel,
       model,
       readMode: useTypeSplit ? 'type-split' : 'global',  // 2026-07-02 落地確認/debug
+      typeSplitLatencies,
       answerKey,
       questionIds,
       classifyResult: reconstructedClassifyResult,
@@ -10411,6 +10429,7 @@ export async function runStagedGradingPhaseAArbiter({
       stagedLogLevel,
       model,
       readMode: phaseAReadContext?.readMode || 'global',  // 2026-07-02 落地確認/debug
+      typeSplitLatencies: phaseAReadContext?.typeSplitLatencies || null,
       answerKey,
       questionIds,
       classifyResult: reconstructedClassifyResult,
