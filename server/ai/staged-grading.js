@@ -1295,6 +1295,58 @@ function scaffoldClozeLongerRaw(read1Raw, read2Raw) {
   return null
 }
 
+// 2026-07-03: 鷹架克漏字「真分歧」的審查顯示重建——把 read1 的手寫字對齊回 read2 的鷹架全句、
+//   爭議字保留 read1 版本。回 { text, substCount } 或 null(對不齊/無爭議/爭議>3 → 照原樣)。
+//   對齊法：token 精確 LCS 當 anchor；anchor 之間 read1 的字用 bigram 相似度(≥0.5)依序配 read2 的字
+//   （skirt↔shirt 配得上、7↔27 配不上→bail）；配不到任何字或 read1 有字落在 read2 完全沒有的位置→bail。
+function scaffoldBigramSim(a, b) {
+  if (a === b) return 1
+  if (!a.length || !b.length) return 0
+  const grams = (s) => { const o = new Map(); for (let i = 0; i < s.length - 1; i++) { const k = s.slice(i, i + 2); o.set(k, (o.get(k) || 0) + 1) } return o }
+  const ga = grams(a); const gb = grams(b)
+  let inter = 0; let tot = 0
+  for (const [k, v] of ga) { tot += v; if (gb.has(k)) inter += Math.min(v, gb.get(k)) }
+  for (const v of gb.values()) tot += v
+  return tot ? 2 * inter / tot : 0
+}
+function reconstructScaffoldRead1(read1Raw, read2Raw) {
+  const w1 = String(read1Raw ?? '').split(/\s+/).filter(Boolean)
+  const w2 = String(read2Raw ?? '').split(/\s+/).filter(Boolean)
+  const norm = (w) => w.toLowerCase().replace(/[^a-z0-9']/g, '')
+  const t1 = w1.map(norm); const t2 = w2.map(norm)
+  if (t1.length < 1 || t2.length <= t1.length) return null
+  // token 精確 LCS → anchors
+  const dp = Array.from({ length: t1.length + 1 }, () => new Array(t2.length + 1).fill(0))
+  for (let i = t1.length - 1; i >= 0; i--) for (let j = t2.length - 1; j >= 0; j--)
+    dp[i][j] = t1[i] && t1[i] === t2[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
+  const anchors = []
+  { let i = 0; let j = 0
+    while (i < t1.length && j < t2.length) {
+      if (t1[i] && t1[i] === t2[j]) { anchors.push([i, j]); i++; j++ }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) i++; else j++
+    } }
+  // 逐 gap：read1 gap 空=鷹架(keep read2)；非空→依序 bigram≥0.5 配進 read2 gap、配不到 bail
+  const sub = new Map()  // read2 word idx → read1 word（爭議字替換）
+  let p1 = 0; let p2 = 0; let substCount = 0
+  for (const [a1, a2] of [...anchors, [t1.length, t2.length]]) {
+    const g1 = []; for (let x = p1; x < a1; x++) g1.push(x)
+    const g2 = []; for (let y = p2; y < a2; y++) g2.push(y)
+    if (g1.length > 0) {
+      if (g2.length === 0) return null
+      let yPtr = 0
+      for (const x of g1) {
+        let found = -1
+        for (let k = yPtr; k < g2.length; k++) { if (scaffoldBigramSim(t1[x], t2[g2[k]]) >= 0.5) { found = k; break } }
+        if (found < 0) return null
+        sub.set(g2[found], w1[x]); substCount++; yPtr = found + 1
+      }
+    }
+    p1 = a1 + 1; p2 = a2 + 1
+  }
+  if (substCount === 0 || substCount > 3) return null
+  return { text: w2.map((w, idx) => (sub.has(idx) ? sub.get(idx) : w)).join(' '), substCount }
+}
+
 export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s1 = ensureString(read1?.status, '').toLowerCase()
   const s2 = ensureString(read2?.status, '').toLowerCase()
@@ -9432,15 +9484,30 @@ export async function runStagedGradingPhaseA({
     const containmentPreferredRaw = consistencyStatus === 'stable' && read1 && read2
       ? getContainmentPreferredRaw(read1, read2, classifyRow?.questionType ?? 'other')
       : null
+    // 2026-07-03: 鷹架克漏字「真分歧」進審查時，把 read1(只有手寫字片段) 對齊回 read2 的鷹架、重建成全句
+    //   （爭議字保留 read1 讀到的版本）。否則老師看到「片段 vs 全句」：diff 黃底把印刷鷹架全標起來、
+    //   真正爭點被淹沒；且選 read1 片段當 finalAnswer 會讓逐詞克漏字把印刷字全算漏答。
+    //   重建後兩候選都是全句、黃底只剩真正不同的字、選哪個都能正確計分。bail(對不齊/爭議>3字)就照原樣顯示。
+    let read1DisplayOverride = null
+    let scaffoldReason
+    if (consistencyStatus !== 'stable'
+      && (classifyRow?.questionType === 'fill_blank' || classifyRow?.questionType === 'short_answer')
+      && read1?.status === 'read' && read2?.status === 'read') {
+      const recon = reconstructScaffoldRead1(read1?.studentAnswerRaw, read2?.studentAnswerRaw)
+      if (recon) {
+        read1DisplayOverride = recon.text
+        scaffoldReason = `印刷句+填空題：AI1 只讀手寫字、已對齊成全句顯示（${recon.substCount} 個字兩讀不同、請看原圖確認）`
+      }
+    }
     return {
       questionId,
       consistencyStatus,
       containmentPreferredRaw,
-      consistencyReason: efMergeReason,
+      consistencyReason: efMergeReason ?? scaffoldReason,
       questionType: classifyRow?.questionType ?? 'other',
       readAnswer1: {
         status: read1?.status ?? 'unreadable',
-        studentAnswer: read1?.studentAnswerRaw ?? '無法辨識'
+        studentAnswer: read1DisplayOverride ?? read1?.studentAnswerRaw ?? '無法辨識'
       },
       readAnswer2: {
         status: read2?.status ?? 'unreadable',
