@@ -1554,6 +1554,23 @@ function clozeNormToken(t) {
 function clozeTokenize(s) {
   return String(s || '').trim().split(/\s+/).map(clozeNormToken).filter(Boolean)
 }
+// ── 2026-07-02 硬編「可替換同義字典」──────────────────────────────────────────
+// 老師標準：意思等價的「詞彙/指代」可互換算對(He↔Doctor / plane↔airplane / T-shirt↔shirt)，
+//   但拼錯=錯、文法=錯、數字要精確。→ 只在「單字同義」放行，其餘維持逐詞嚴格比對。
+// 維護：老師反映新的可替換字 → 加進下方陣列即可(每組 = 互相可替換、單一 token、小寫)。
+// ⚠️ 指代型(he/doctor)是「context 可互換」非真同義：全域放行有極小誤收風險(某題答案真的是 he、學生寫 doctor 也會算對)；
+//    老師明確要求、且此類極少見，故收錄。若日後誤傷再把該組拆掉。
+const CLOZE_SYNONYM_GROUPS = [
+  ['he', 'doctor'],
+  ['plane', 'airplane', 'aeroplane'],
+  ['t-shirt', 'tshirt', 'shirt'],
+]
+const CLOZE_SYN_CANON = (() => {
+  const m = new Map()
+  for (const g of CLOZE_SYNONYM_GROUPS) { const canon = g[0]; for (const w of g) m.set(w, canon) }
+  return m
+})()
+function clozeSynCanon(t) { return CLOZE_SYN_CANON.get(t) || t }
 // 回傳「有對上的 model index 集合」（LCS backtrack）。
 function clozeLcsMatchedModelIdx(model, stu) {
   const n = model.length, m = stu.length
@@ -1588,10 +1605,11 @@ export function gradeSentenceClozeDeterministic(q, studentAnswerRaw, status) {
   const raw = ensureString(studentAnswerRaw, '').trim()
   if (!raw || !key || maxScore <= 0) return { gradable: false }
   if (!isSentenceClozeAnswer(key, maxScore)) return { gradable: false }
-  const model = clozeTokenize(key)
-  const stu = clozeTokenize(raw)
+  const modelOrig = clozeTokenize(key)
+  const model = modelOrig.map(clozeSynCanon)  // 同義正規化後比對(He↔Doctor 等)；拼錯/文法/數字不在字典→仍嚴
+  const stu = clozeTokenize(raw).map(clozeSynCanon)
   const matched = clozeLcsMatchedModelIdx(model, stu)
-  const wrongTokens = model.filter((_, idx) => !matched.has(idx))
+  const wrongTokens = modelOrig.filter((_, idx) => !matched.has(idx))
   const wrongCount = wrongTokens.length
   const score = Math.max(0, Math.min(maxScore, maxScore - wrongCount))
   return {
