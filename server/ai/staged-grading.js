@@ -8065,6 +8065,11 @@ export async function runStagedGradingPhaseA({
   }
   const TYPE_READ_DEFAULT = { model: 'FLASH', batch: 15, blindRead2: false, family: 'text' }
   const TYPE_SPLIT_SKIP = new Set(['multi_fill', 'map_fill', 'diagram_color', 'diagram_draw', 'grid_geometry', 'map_symbol', 'circle_select_one', 'circle_select_many'])
+  // 2026-07-02：英語 text family(fill_blank/short_answer) 的「盲讀 read1」在 2.5-flash 上讀不動英文手寫句
+  //   → 整批吐空(沙盒 24/24 全空)，被 ① BLANK_TRUST_READ1 當真空白 → 整班 fill_blank 誤判未作答。
+  //   實測 3.5-flash 盲讀讀得出 → 英語 text family 一律升 PRO。kill-switch: ENGLISH_TEXT_READ_PRO='false'。
+  const domainIsEnglish = ensureString(internalContext?.domainHint, '').includes('英語')
+  const englishTextReadPro = process.env.ENGLISH_TEXT_READ_PRO !== 'false' && domainIsEnglish
   const tsReadHead = (family, role) => {
     // ordering：兩讀改用「不同策略」(blindRead2 已使兩讀皆盲)。沙盒實證 PA/PB @PRO 一致率 97%(vs 抄寫/校對變體僅~53%)。
     if (family === 'ordering') {
@@ -8080,7 +8085,7 @@ export async function runStagedGradingPhaseA({
       ordering: '這些是「排序題」：一排方框、每格一個手寫數字。由左到右逐格讀出數字組成序列(如 1,6,5,2,3,4,8,7)。某格看不清→該格用 ?。',
       choice: '這些是「選擇/是非題」：回報學生圈選或寫下的選項代號(字母或數字)。',
       check: '這些是「勾選題」：回報學生實際打勾/圈選的項目(格號集合，如 1,3)。',
-      text: '這些是「填空/簡答題」：回報學生手寫的文字內容。',
+      text: '這些是「填空/簡答題」：回報學生手寫的文字內容。若學生寫的是句子或片語，請輸出「完整連續的一句」(照原樣、保留詞間空格)，不要拆成逗號分隔的單字碎片。',
       compound: '這些是「複合表格題」：每題含多欄(如 人物／事件／影響)，回報學生各欄實際手寫內容、用「｜」分隔各欄。'
     })[family] || '回報學生手寫的內容。'
     return `以下是多張「同一題型」的作答區裁切放大圖，每張圖前有題號標籤。${roleLine}\n${rule}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
@@ -8100,7 +8105,8 @@ export async function runStagedGradingPhaseA({
     const tsProTypes = new Set(ensureString(process.env.TYPE_SPLIT_PRO_TYPES, '').split(',').map((s) => s.trim()).filter(Boolean))
     for (const [type, qs] of groups) {
       const cfg = TYPE_READ_CONFIG[type] || TYPE_READ_DEFAULT
-      const model = (cfg.model === 'PRO' || tsProTypes.has(type)) ? MODEL_PRO : MODEL_FLASH
+      const upgradeForEnglish = englishTextReadPro && cfg.family === 'text'  // 英語填空/簡答盲讀升 3.5
+      const model = (cfg.model === 'PRO' || tsProTypes.has(type) || upgradeForEnglish) ? MODEL_PRO : MODEL_FLASH
       for (const batch of tsChunk(qs, cfg.batch)) {
         jobs.push(async () => {
           const parts = [{ text: tsReadHead(cfg.family, role) }]
