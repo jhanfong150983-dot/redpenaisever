@@ -1435,8 +1435,15 @@ export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   //   防幻覺：token 逐字相等才算——read2 若把學生寫錯的字幻覺成正解、read1 的真字對不上 → 照樣送審。
   //   置於 numericValuesDiffer 之前（印刷鷹架可含數字如 Class 512's；截斷數字「7倍vs27倍」token 不等、過不了）。
   //   token 只取 a-z0-9（中文字會被濾光 → 對中文答案自動不生效、範圍鎖拉丁文字）。
-  if ((questionType === 'fill_blank' || questionType === 'short_answer')
-    && scaffoldClozeLongerRaw(read1?.studentAnswerRaw, read2?.studentAnswerRaw)) return 'stable'
+  if (questionType === 'fill_blank' || questionType === 'short_answer') {
+    if (scaffoldClozeLongerRaw(read1?.studentAnswerRaw, read2?.studentAnswerRaw)) return 'stable'
+    // 2026-07-03: token 序列完全相等(只差標點/大小寫/空格，如「T-shirt, pants」vs「T-shirt pants」)→ 一致。
+    //   token 只留 a-z0-9'（中文自動不生效）；逐字精確相等、無模糊比對。
+    const tokEq = (s) => String(s ?? '').split(/\s+/).map((w) => w.toLowerCase().replace(/[^a-z0-9']/g, '')).filter(Boolean)
+    const e1 = tokEq(read1?.studentAnswerRaw)
+    const e2 = tokEq(read2?.studentAnswerRaw)
+    if (e1.length >= 1 && e1.length === e2.length && e1.every((w, i) => w === e2[i])) return 'stable'
+  }
   // 2026-05-31: 兩讀值「數字（值）不同」一律 diff（送人工審查）。
   // 修真實 bug：「7倍」是「27倍」的子字串、「96280」與「6280」字元高度相似 → 被下方「包含關係 /
   // Jaccard 相似度」啟發式誤判為 stable、再由 getContainmentPreferredRaw 直接採用其中一個（截斷/多位）
@@ -8175,7 +8182,12 @@ export async function runStagedGradingPhaseA({
       ordering: '這些是「排序題」：一排方框、每格一個手寫數字。由左到右逐格讀出數字組成序列(如 1,6,5,2,3,4,8,7)。某格看不清→該格用 ?。',
       choice: '這些是「選擇/是非題」：回報學生圈選或寫下的選項代號(字母或數字)。',
       check: '這些是「勾選題」：回報學生實際打勾/圈選的項目(格號集合，如 1,3)。',
-      text: '這些是「填空/簡答題」：回報學生手寫的文字內容。若學生寫的是句子或片語，請輸出「完整連續的一句」(照原樣、保留詞間空格)，不要拆成逗號分隔的單字碎片。',
+      // 2026-07-03 英語卷改「整行連印刷一起抄」(user 拍板)：鷹架克漏字「只抄手寫」不可靠——實測會漏抄手寫字
+      //   (座2 的 They)、還會把學生拼錯的字自動訂正(dollers→dollars)。改抄整行後兩讀範圍一致、
+      //   沙盒 5 runs×2 生×原圖/壓縮 bytes：座1 40/40 stable、無題幹污染、拼錯忠實保留。非英語維持原規則。
+      text: domainIsEnglish
+        ? '這些是「填空/簡答題」：每張圖找到「學生有手寫作答」的那一行，把該行完整抄出來——印刷字和學生手寫字合併成一個完整句子(照原樣、保留學生的拼字錯誤、不要幫學生訂正)。不要抄題目敘述、題號、配分、也不要抄其他行的印刷文字。該行只有印刷沒有任何手寫→status="blank"。'
+        : '這些是「填空/簡答題」：回報學生手寫的文字內容。若學生寫的是句子或片語，請輸出「完整連續的一句」(照原樣、保留詞間空格)，不要拆成逗號分隔的單字碎片。',
       compound: '這些是「複合表格題」：每題含多欄(如 人物／事件／影響)，回報學生各欄實際手寫內容、用「｜」分隔各欄。',
       draw: '這些是「圖表繪製題」(長條圖/圓餅圖等)：描述學生實際畫的內容、以「標籤-數值」對列出(如 香蕉23%、蘋果40%)。'
     })[family] || '回報學生手寫的內容。'
