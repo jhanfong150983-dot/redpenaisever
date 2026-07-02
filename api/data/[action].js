@@ -8372,6 +8372,10 @@ const log = document.getElementById('log');
     await handleAnnouncementActive(req, res)
     return
   }
+  if (action === 'pdf-classify-template') {
+    await handlePdfClassifyTemplate(req, res)
+    return
+  }
   res.status(404).json({ error: 'Not Found' })
 }
 
@@ -9387,6 +9391,62 @@ async function handleCorrectionHistory(req, res) {
 // handleUpsertAi3ForensicLog
 // POST /api/data/upsert-ai3-forensic-log
 // ─────────────────────────────────────────────────────────
+// handlePdfClassifyTemplate
+// POST /api/data/pdf-classify-template  { assignmentId, mode:'get'|'set', template? }
+// PDF(teacher_scan) 統一框(median x/y + P90 w/h)持久化：湊滿樣本後存、之後批改直接套省 classify。
+// 只讀寫 assignments.pdf_classify_template；不 bump updated_at(避免 sync churn，client on-demand 抓)。
+// ─────────────────────────────────────────────────────────
+async function handlePdfClassifyTemplate(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const assignmentId = ensureStr(body.assignmentId)
+  if (!assignmentId) {
+    res.status(400).json({ error: 'assignmentId is required' })
+    return
+  }
+  try {
+    const supabaseDb = getSupabaseAdmin()
+    if (body.mode === 'set') {
+      const { error } = await supabaseDb
+        .from('assignments')
+        .update({ pdf_classify_template: body.template ?? null })
+        .eq('id', assignmentId)
+        .eq('owner_id', user.id)
+      if (error) {
+        console.error('[pdf-classify-template][set] supabase error:', error)
+        res.status(500).json({ error: error.message })
+        return
+      }
+      res.status(200).json({ ok: true })
+      return
+    }
+    // default: get
+    const { data, error } = await supabaseDb
+      .from('assignments')
+      .select('pdf_classify_template')
+      .eq('id', assignmentId)
+      .eq('owner_id', user.id)
+      .maybeSingle()
+    if (error) {
+      console.error('[pdf-classify-template][get] supabase error:', error)
+      res.status(500).json({ error: error.message })
+      return
+    }
+    res.status(200).json({ template: data?.pdf_classify_template ?? null })
+  } catch (err) {
+    console.error('[pdf-classify-template] error:', err)
+    res.status(500).json({ error: String(err?.message || err) })
+  }
+}
+
 // handleQualityCheckLog
 // POST /api/data/quality-check-log
 // Frontend posts quality-check results after batch Phase A so they appear in Vercel logs.
