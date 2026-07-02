@@ -1281,6 +1281,20 @@ function normalizeTableCellForComparison(raw) {
 //   （同 X/O、英語首字母大小寫等價的作法）。回退：設 env AI3_ARBITER_ENABLED=1 即恢復 AI3（免改碼）。
 const AI3_ARBITER_ENABLED = process.env.AI3_ARBITER_ENABLED === '1'
 
+// 2026-07-02: 鷹架克漏字工具——兩讀一方為另一方的「有序 token 子序列」(嚴格較短)時回傳「較長」那讀的原文。
+//   場景：印刷句留空格、學生只寫空格字 → read1(只報手寫)="are three one twinty"、read2(全句)="They are three
+//   thousand one hundred and twinty dollars."。較長的全句才是計分（逐詞克漏字）需要的。
+//   token 化只留 a-z0-9'（中文被濾光→自動不生效）；token 需逐字相等 → read2 幻覺改字會對不上、不會被採用。
+function scaffoldClozeLongerRaw(read1Raw, read2Raw) {
+  const tok = (s) => String(s ?? '').split(/\s+/).map((w) => w.toLowerCase().replace(/[^a-z0-9']/g, '')).filter(Boolean)
+  const subseq = (a, b) => { let i = 0; for (const w of b) { if (i < a.length && a[i] === w) i++ } return i === a.length }
+  const t1 = tok(read1Raw)
+  const t2 = tok(read2Raw)
+  if (t1.length >= 1 && t2.length > t1.length && subseq(t1, t2)) return ensureString(read2Raw, '')
+  if (t2.length >= 1 && t1.length > t2.length && subseq(t2, t1)) return ensureString(read1Raw, '')
+  return null
+}
+
 export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s1 = ensureString(read1?.status, '').toLowerCase()
   const s2 = ensureString(read2?.status, '').toLowerCase()
@@ -1361,6 +1375,16 @@ export function computeConsistencyStatus(read1, read2, questionType = 'other') {
     .replace(/[,.!?，。！？]+$/, '')            // 去掉字串結尾的標點（"idea."→"idea"）
     .trim()
   if (edgePunctNorm(a1) === edgePunctNorm(a2)) return 'stable'
+  // 2026-07-02: 鷹架克漏字（印刷句留空格、學生只寫空格字）：read1 照指示只報「手寫字」、read2 報
+  //   「印刷+手寫的全句」→ 兩者都讀對、只是範圍不同（座1實卷確認：印刷 They _ _ thousand _ hundred and _ dollars.
+  //   手寫 are/three/one/twinty → r1="are three one twinty"、r2=全句）。字串比對必 diff → 整型假 NR。
+  //   規則：read1 的 token 是 read2 的「有序子序列」且嚴格較短 → 一致（finalAnswer 由
+  //   getContainmentPreferredRaw 換成較長的全句、計分需要）。
+  //   防幻覺：token 逐字相等才算——read2 若把學生寫錯的字幻覺成正解、read1 的真字對不上 → 照樣送審。
+  //   置於 numericValuesDiffer 之前（印刷鷹架可含數字如 Class 512's；截斷數字「7倍vs27倍」token 不等、過不了）。
+  //   token 只取 a-z0-9（中文字會被濾光 → 對中文答案自動不生效、範圍鎖拉丁文字）。
+  if ((questionType === 'fill_blank' || questionType === 'short_answer')
+    && scaffoldClozeLongerRaw(read1?.studentAnswerRaw, read2?.studentAnswerRaw)) return 'stable'
   // 2026-05-31: 兩讀值「數字（值）不同」一律 diff（送人工審查）。
   // 修真實 bug：「7倍」是「27倍」的子字串、「96280」與「6280」字元高度相似 → 被下方「包含關係 /
   // Jaccard 相似度」啟發式誤判為 stable、再由 getContainmentPreferredRaw 直接採用其中一個（截斷/多位）
@@ -1410,6 +1434,13 @@ function containmentDeltaLooksLikeAnswerSlot(longerA, shorterA) {
 // 若 AI2 較短，回傳 AI2 的原始答案，供 Phase A 結果建構時覆寫 finalAnswer。
 function getContainmentPreferredRaw(read1, read2, questionType) {
   if (CHECKBOX_EQUIVALENT_TYPES.has(questionType) || questionType === 'true_false') return null
+  // 2026-07-02: 鷹架克漏字——consistencyStatus 由 scaffold 子序列規則判 stable 時，finalAnswer 要用
+  //   「較長的全句」（預設用 read1 的手寫字片段會讓逐詞克漏字計分把印刷字全算漏答）。
+  //   較長方＝read1 時回 null（預設本來就用 read1、不需覆寫）。
+  if (questionType === 'fill_blank' || questionType === 'short_answer') {
+    const longer = scaffoldClozeLongerRaw(read1?.studentAnswerRaw, read2?.studentAnswerRaw)
+    if (longer) return longer === ensureString(read1?.studentAnswerRaw, '') ? null : longer
+  }
   const a1 = normalizeAnswerForComparison(ensureString(read1?.studentAnswerRaw, ''))
   const a2 = normalizeAnswerForComparison(ensureString(read2?.studentAnswerRaw, ''))
   if (!a1 || !a2 || a1 === a2) return null
