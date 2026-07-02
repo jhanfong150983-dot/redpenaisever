@@ -8126,7 +8126,10 @@ export async function runStagedGradingPhaseA({
             parts.push({ inlineData: crop })
           }
           const resp = await executeStage({
-            apiKey, model, modelOverride: readModelOverride,
+            // ⚠ executeStage 只認 modelOverride（否則走 resolveStageModel=FLASH），會忽略 model 參數。
+            //   per-type model 必須當 modelOverride 傳、否則 TYPE_READ_CONFIG 的 PRO/英語升級全失效(一直跑 2.5)。
+            //   國語卷 readModelOverride(整體 PRO) 優先，其餘用本型算出的 model。
+            apiKey, model, modelOverride: readModelOverride || model,
             payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
             timeoutMs: getRemainingBudget(), routeHint,
             routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
@@ -8138,7 +8141,8 @@ export async function runStagedGradingPhaseA({
           for (const q of batch) answers.push(byQ.get(q.questionId) || { questionId: q.questionId, studentAnswerRaw: '', status: 'blank' })
           // 每型耗時/批次/模型記錄(供落地監控、調 batch/model)
           const ms = Number(resp?.modelLatencyMs) || 0
-          const t = typeLat[type] || (typeLat[type] = { model: cfg.model, batches: 0, maxMs: 0, sumMs: 0, ok: 0, fail: 0 })
+          // model 記「實際生效」的 model id(readModelOverride||model)，非 cfg.model 設定值(會誤導落地驗證)。
+          const t = typeLat[type] || (typeLat[type] = { model: readModelOverride || model, cfgModel: cfg.model, batches: 0, maxMs: 0, sumMs: 0, ok: 0, fail: 0 })
           t.batches++; t.maxMs = Math.max(t.maxMs, ms); t.sumMs += ms
           if (resp?.ok && arr.length > 0) t.ok++; else { t.fail++; logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空、補 blank`) }
         })
