@@ -8061,10 +8061,17 @@ export async function runStagedGradingPhaseA({
     short_answer:                 { model: 'FLASH', batch: 10, blindRead2: false, family: 'text' },
     compound_chain_table:         { model: 'FLASH', batch: 1,  blindRead2: false, family: 'compound' },
     compound_circle_with_explain: { model: 'FLASH', batch: 4,  blindRead2: false, family: 'compound' },
-    compound_check_with_explain:  { model: 'FLASH', batch: 4,  blindRead2: false, family: 'compound' }
+    compound_check_with_explain:  { model: 'FLASH', batch: 4,  blindRead2: false, family: 'compound' },
+    // 2026-07-02 audit：circle_select/diagram_draw 原在 SKIP 名單→type-split 下沒人讀 read2(甚至兩讀皆缺)
+    //   →缺 entry 補 unreadable→「永遠 NR」。改回進 type-split(global 模式本來就由全域讀涵蓋這些型)：
+    //   circle_select AI1 仍由 bracket-read 覆寫(專用裁切較準)、AI2 由這裡的 choice 讀提供。
+    circle_select_one:            { model: 'FLASH', batch: 20, blindRead2: false, family: 'choice' },
+    circle_select_many:           { model: 'FLASH', batch: 20, blindRead2: false, family: 'choice' },
+    diagram_draw:                 { model: 'FLASH', batch: 4,  blindRead2: false, family: 'draw' }
   }
   const TYPE_READ_DEFAULT = { model: 'FLASH', batch: 15, blindRead2: false, family: 'text' }
-  const TYPE_SPLIT_SKIP = new Set(['multi_fill', 'map_fill', 'diagram_color', 'diagram_draw', 'grid_geometry', 'map_symbol', 'circle_select_one', 'circle_select_many'])
+  // SKIP＝「有自己完整讀取管線」的型：map_fill(map-fill-grader)、VJ 三型(visual judgment)、multi_fill(A3d 雙focused讀)。
+  const TYPE_SPLIT_SKIP = new Set(['multi_fill', 'map_fill', 'diagram_color', 'grid_geometry', 'map_symbol'])
   // 2026-07-02：英語 text family(fill_blank/short_answer) 的「盲讀 read1」在 2.5-flash 上讀不動英文手寫句
   //   → 整批吐空(沙盒 24/24 全空)，被 ① BLANK_TRUST_READ1 當真空白 → 整班 fill_blank 誤判未作答。
   //   實測 3.5-flash 盲讀讀得出 → 英語 text family 一律升 PRO。kill-switch: ENGLISH_TEXT_READ_PRO='false'。
@@ -8086,7 +8093,8 @@ export async function runStagedGradingPhaseA({
       choice: '這些是「選擇/是非題」：回報學生圈選或寫下的選項代號(字母或數字)。',
       check: '這些是「勾選題」：回報學生實際打勾/圈選的項目(格號集合，如 1,3)。',
       text: '這些是「填空/簡答題」：回報學生手寫的文字內容。若學生寫的是句子或片語，請輸出「完整連續的一句」(照原樣、保留詞間空格)，不要拆成逗號分隔的單字碎片。',
-      compound: '這些是「複合表格題」：每題含多欄(如 人物／事件／影響)，回報學生各欄實際手寫內容、用「｜」分隔各欄。'
+      compound: '這些是「複合表格題」：每題含多欄(如 人物／事件／影響)，回報學生各欄實際手寫內容、用「｜」分隔各欄。',
+      draw: '這些是「圖表繪製題」(長條圖/圓餅圖等)：描述學生實際畫的內容、以「標籤-數值」對列出(如 香蕉23%、蘋果40%)。'
     })[family] || '回報學生手寫的內容。'
     return `以下是多張「同一題型」的作答區裁切放大圖，每張圖前有題號標籤。${roleLine}\n${rule}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
   }
@@ -8125,26 +8133,41 @@ export async function runStagedGradingPhaseA({
             parts.push({ text: `--- 題目 ${q.questionId}${ans ? `（正確答案：${ans}）` : ''} ---` })
             parts.push({ inlineData: crop })
           }
-          const resp = await executeStage({
-            // ⚠ executeStage 只認 modelOverride（否則走 resolveStageModel=FLASH），會忽略 model 參數。
-            //   per-type model 必須當 modelOverride 傳、否則 TYPE_READ_CONFIG 的 PRO/英語升級全失效(一直跑 2.5)。
-            //   國語卷 readModelOverride(整體 PRO) 優先，其餘用本型算出的 model。
+          // ⚠ executeStage 只認 modelOverride（否則走 resolveStageModel=FLASH），會忽略 model 參數。
+          //   per-type model 必須當 modelOverride 傳、否則 TYPE_READ_CONFIG 的 PRO/英語升級全失效(一直跑 2.5)。
+          //   國語卷 readModelOverride(整體 PRO) 優先，其餘用本型算出的 model。
+          const runBatchCall = () => executeStage({
             apiKey, model, modelOverride: readModelOverride || model,
             payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
             timeoutMs: getRemainingBudget(), routeHint,
             routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
             stageContents: [{ role: 'user', parts }]
           })
-          const parsed = resp?.ok ? parseCandidateJson(resp.data) : null
-          const arr = Array.isArray(parsed?.answers) ? parsed.answers : []
+          let resp = await runBatchCall()
+          let parsed = resp?.ok ? parseCandidateJson(resp.data) : null
+          let arr = Array.isArray(parsed?.answers) ? parsed.answers : []
+          // 批次失敗/空回應 → 重試一次(暫時性 503/timeout 常見)。
+          if (!(resp?.ok && arr.length > 0)) {
+            logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空、重試一次`)
+            resp = await runBatchCall()
+            parsed = resp?.ok ? parseCandidateJson(resp.data) : null
+            arr = Array.isArray(parsed?.answers) ? parsed.answers : []
+          }
+          const callFailed = !(resp?.ok && arr.length > 0)
           const byQ = new Map(arr.map((a) => [ensureString(a?.questionId).trim(), a]))
-          for (const q of batch) answers.push(byQ.get(q.questionId) || { questionId: q.questionId, studentAnswerRaw: '', status: 'blank' })
+          // ⚠ 失敗批次不可補 status:'blank'——blank 會被 ① BLANK_TRUST_READ1 當「真空白」靜默判未作答(整批災難)。
+          //   改補 'unreadable' → computeConsistencyStatus 必為 unstable → 送審(符合「分歧只往多送審」鐵則)。
+          //   正常回應中缺席的題仍補 blank(模型明確沒讀到=空白、與全域路徑語意一致)。
+          const missingFill = callFailed
+            ? (qid) => ({ questionId: qid, studentAnswerRaw: '無法辨識', status: 'unreadable' })
+            : (qid) => ({ questionId: qid, studentAnswerRaw: '', status: 'blank' })
+          for (const q of batch) answers.push(byQ.get(q.questionId) || missingFill(q.questionId))
           // 每型耗時/批次/模型記錄(供落地監控、調 batch/model)
           const ms = Number(resp?.modelLatencyMs) || 0
           // model 記「實際生效」的 model id(readModelOverride||model)，非 cfg.model 設定值(會誤導落地驗證)。
           const t = typeLat[type] || (typeLat[type] = { model: readModelOverride || model, cfgModel: cfg.model, batches: 0, maxMs: 0, sumMs: 0, ok: 0, fail: 0 })
           t.batches++; t.maxMs = Math.max(t.maxMs, ms); t.sumMs += ms
-          if (resp?.ok && arr.length > 0) t.ok++; else { t.fail++; logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空、補 blank`) }
+          if (!callFailed) t.ok++; else { t.fail++; logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 重試後仍失敗、補 unreadable 送審`) }
         })
       }
     }
@@ -8624,7 +8647,9 @@ export async function runStagedGradingPhaseA({
           // 「判斷小小的 Yes/No 打勾在哪一欄」是視覺辨識題，MODEL_FLASH（2.5-flash）做不穩——
           // 同一張裁切 2.5-flash 讀錯欄(「2」)或無法辨識、3.5-flash 4/4 全對（student1 I 表實證）。
           // 盲讀 AI1 用弱 model 最常中 → 與知道答案的 AI2 不一致 → 整段送審。
+          // 2026-07-02 audit：executeStage 忽略 model 參數→補 modelOverride 才真的跑 PRO(之前默默跑 2.5)。
           model: MODEL_PRO,
+          modelOverride: MODEL_PRO,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
@@ -8739,7 +8764,8 @@ export async function runStagedGradingPhaseA({
         const runOne = async (q, promptFn) => {
           const crop = await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, true, 0.02)
           if (!crop) return null
-          const resp = await executeStage({ apiKey, model: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER, stageContents: [{ role: 'user', parts: [{ text: promptFn(q.questionId) }, { inlineData: crop }] }] })
+          // 2026-07-02 audit：executeStage 忽略 model 參數→補 modelOverride 才真的跑 PRO(之前默默跑 2.5)。
+          const resp = await executeStage({ apiKey, model: MODEL_PRO, modelOverride: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER, stageContents: [{ role: 'user', parts: [{ text: promptFn(q.questionId) }, { inlineData: crop }] }] })
           if (!resp.ok) return null
           const parsed = parseCandidateJson(resp.data)
           const a = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
@@ -8765,7 +8791,9 @@ export async function runStagedGradingPhaseA({
   //   改用第三讀破局：只對「read1≠read2 的 single_choice」多打一支單題緊框盲讀(輕、只在分歧才觸發)、
   //   **只在「≥2 票同一個非空字母」時定案**(覆寫兩讀成該值→一致)；多數是空白 / 三票全不同 → 不定案、維持送審(不誤殺)。
   //   實證(沙盒 tie-break)：single_choice 100% 可由第三讀定案。kill-switch: SINGLE_CHOICE_TIEBREAK='false'。
-  if (!useTypeSplit && process.env.SINGLE_CHOICE_TIEBREAK !== 'false' && inlineImages[0]) {
+  // 2026-07-02 audit：拿掉 !useTypeSplit gate——type-split 模式也要 tie-break（實測 13/28 卷 single_choice
+  //   真分歧 NR、global 模式本有第三讀定案）。只對分歧題觸發、成本小。
+  if (process.env.SINGLE_CHOICE_TIEBREAK !== 'false' && inlineImages[0]) {
     try {
       const inlineImage = inlineImages[0]
       const ansMap = (p) => new Map((Array.isArray(p?.answers) ? p.answers : []).map((a) => [ensureString(a?.questionId).trim(), a]))
@@ -8785,7 +8813,8 @@ export async function runStagedGradingPhaseA({
           const crop = await cropInlineImageByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, true, 0.03)
           if (!crop) return null
           const prompt = `這是一道單選題(single_choice)學生作答括號的裁切放大圖。只回報學生實際手寫的「一個選項字母」(A/B/C/D…)。沒寫→status="blank"；看不懂→status="unreadable"。不要猜、不要管正確答案。只輸出 JSON：{"answers":[{"questionId":"${q.questionId}","studentAnswerRaw":"X","status":"read|blank|unreadable"}]}`
-          const resp = await executeStage({ apiKey, model: readModel, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER, stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: crop }] }] })
+          // 2026-07-02 audit：第三讀升 PRO(modelOverride 才生效)——兩次 2.5 已分歧、再用 2.5 投票是相關錯誤。
+          const resp = await executeStage({ apiKey, model: readModel, modelOverride: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_READ_ANSWER, stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: crop }] }] })
           if (!resp.ok) return null
           const parsed = parseCandidateJson(resp.data)
           const a3 = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
@@ -8927,10 +8956,12 @@ export async function runStagedGradingPhaseA({
         answer: ensureString(akByQidDense.get(q.questionId)?.answer, '')
       }))
       const numToQid = new Map(items.map((it) => [String(it.num), it.qid]))
+      // 2026-07-02 audit：整段讀升 PRO——它會蓋掉 type-split check family(設計即 PRO)的結果，之前
+      //   modelOverride 只帶國語 override(其餘 undefined)→實際跑 2.5、與勾選型「2.5 讀不穩需 3.5」實證矛盾。
       const [r1, r2] = await Promise.all([
-        executeStage({ apiKey, model: readModel, modelOverride: readModelOverride, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+        executeStage({ apiKey, model: readModel, modelOverride: readModelOverride || MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
           stageContents: [{ role: 'user', parts: [{ text: buildSectionCheckboxReadPrompt(items, qtype, false) }, { inlineData: cropData }] }] }),
-        executeStage({ apiKey, model: readModel, modelOverride: readModelOverride, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+        executeStage({ apiKey, model: readModel, modelOverride: readModelOverride || MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
           stageContents: [{ role: 'user', parts: [{ text: buildSectionCheckboxReadPrompt(items, qtype, true) }, { inlineData: cropData }] }] })
       ])
       const applyRows = (res, map) => {
@@ -8963,7 +8994,10 @@ export async function runStagedGradingPhaseA({
   // ── ordering 排序題「focused read」（MODEL_PRO + 明確掃描順序、覆寫 read1+read2）──────
   // 主 read(2.5-flash) 對圖片角落小手寫序號常 未作答；3.5-flash 穩定。沙盒(B2)：2.5=1/3、3.5=3/3。
   // extract 與 read 用同一條掃描順序(由上而下、每列由左而右)才對得齊。預設開；要關設 ORDERING_FOCUSED_READ_ENABLED=false。
-  if (process.env.ORDERING_FOCUSED_READ_ENABLED !== 'false') {
+  // 2026-07-02 audit：加 !useTypeSplit gate——type-split 已在 runTypeSplitRole 用雙策略盲讀 PRO 處理 ordering，
+  //   這塊沒 gate 會在後面把 type-split 的結果整個蓋掉（且 model 參數被 executeStage 忽略、實際跑 2.5、
+  //   read2 還帶正確答案有錨定風險）。這正是 type-split 模式 ordering NR 偏高的真兇。
+  if (!useTypeSplit && process.env.ORDERING_FOCUSED_READ_ENABLED !== 'false') {
     const orderingCandidates = classifyAligned.filter((q) => q.visible && q.questionType === 'ordering' && q.answerBbox)
     if (orderingCandidates.length > 0 && inlineImages.length > 0) {
       const inlineImage = inlineImages[0]
@@ -8975,9 +9009,10 @@ export async function runStagedGradingPhaseA({
         if (!cropData) return
         const correct = ensureString(akByQidOrd.get(q.questionId)?.answer, '')
         const [r1, r2] = await Promise.all([
-          executeStage({ apiKey, model: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+          // 2026-07-02 audit：executeStage 忽略 model 參數→必須用 modelOverride 才真的跑 PRO(之前一直默默跑 2.5)。
+          executeStage({ apiKey, model: MODEL_PRO, modelOverride: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ,
             stageContents: [{ role: 'user', parts: [{ text: buildOrderingReadPrompt(q.questionId, correct, false) }, { inlineData: cropData }] }] }),
-          executeStage({ apiKey, model: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+          executeStage({ apiKey, model: MODEL_PRO, modelOverride: MODEL_PRO, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
             stageContents: [{ role: 'user', parts: [{ text: buildOrderingReadPrompt(q.questionId, correct, true) }, { inlineData: cropData }] }] })
         ])
         const pick = (res) => { if (!res?.ok) return null; const a = parseCandidateJson(res.data)?.answers; return Array.isArray(a) ? a[0] : null }
