@@ -9903,12 +9903,17 @@ Return JSON:
   }
 
   // ── Excessive blanks safety net: 未作答 > 3 整批翻 needs_review、可能 classify 飄掉 ──
+  // 2026-07-02：user 指示「兩個 read 都空白＝真空白、不要再進 NR」→ 預設關閉。
+  //   理由：classify 漂移已由 STAGE 2 peer-baseline + PDF 統一框在 read「之前」處理；
+  //   到 read 階段兩讀(獨立)皆空＝學生真的沒寫(弱生/英語填空常見大量留白)、翻 NR 是冤枉。
+  //   要恢復舊保險絲：設 env EXCESSIVE_BLANKS_REVIEW='1'。
   const EXCESSIVE_BLANKS_THRESHOLD = 3
+  const excessiveBlanksNetEnabled = process.env.EXCESSIVE_BLANKS_REVIEW === '1'
   const blankCount = questionResults.filter((qr) =>
     qr.arbiterResult?.arbiterStatus === 'arbitrated_agree' &&
     !ensureString(qr.arbiterResult?.finalAnswer, '').trim()
   ).length
-  if (blankCount > EXCESSIVE_BLANKS_THRESHOLD) {
+  if (excessiveBlanksNetEnabled && blankCount > EXCESSIVE_BLANKS_THRESHOLD) {
     const excessiveBlankFlipped = []
     for (const qr of questionResults) {
       const ar = qr.arbiterResult
@@ -10270,12 +10275,14 @@ export async function runStagedGradingPhaseAArbiter({
 
   // ── Excessive blanks safety net: 未作答 > 3 整批翻 needs_review、可能 classify 飄掉 ──
   // 放在 crop 之前、讓翻過去的 blank 自然進 needsReviewQids 拿到 crop
+  // 2026-07-02：user 指示「兩讀都空白＝真空白、不進 NR」→ 預設關(漂移已由 STAGE 2/PDF 統一框先處理)。恢復：EXCESSIVE_BLANKS_REVIEW='1'。
   const EXCESSIVE_BLANKS_THRESHOLD = 3
+  const excessiveBlanksNetEnabled = process.env.EXCESSIVE_BLANKS_REVIEW === '1'
   const blankCountPreCrop = questionResultsPreCrop.filter((qr) =>
     qr.arbiterResult?.arbiterStatus === 'arbitrated_agree' &&
     !ensureString(qr.arbiterResult?.finalAnswer, '').trim()
   ).length
-  if (blankCountPreCrop > EXCESSIVE_BLANKS_THRESHOLD) {
+  if (excessiveBlanksNetEnabled && blankCountPreCrop > EXCESSIVE_BLANKS_THRESHOLD) {
     const excessiveBlankFlipped = []
     for (const qr of questionResultsPreCrop) {
       const ar = qr.arbiterResult
