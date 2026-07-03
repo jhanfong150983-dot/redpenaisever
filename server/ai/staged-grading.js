@@ -8250,6 +8250,37 @@ export async function runStagedGradingPhaseA({
           }
           const callFailed = !(resp?.ok && arr.length > 0)
           const byQ = new Map(arr.map((a) => [ensureString(a?.questionId).trim(), a]))
+          // 2026-07-03：批次重試仍失敗 → 「逐題單獨重讀」兜底(批次 call 掛掉時、單題小 call 通常活得下來)。
+          //   實測災難：16號 fill_blank read1 批次連重試失敗 → 整批 8 題補 unreadable → 8 題全進審查。
+          //   逐題兜底把「整批送審」縮成「真讀不出的那幾題送審」。
+          if (callFailed) {
+            logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 重試仍失敗 → 逐題單獨重讀兜底`)
+            await Promise.all(batch.map(async (q) => {
+              if (byQ.has(q.questionId)) return
+              const crop = allQuestionCropMap.get(q.questionId)
+              if (!crop) return
+              try {
+                const giveAns = role === 'review' && !cfg.blindRead2
+                const ak = akMapForAi2.get(q.questionId)
+                const ans = giveAns ? ensureString(ak?.answer || ak?.referenceAnswer, '').trim() : ''
+                const singleParts = [
+                  { text: tsReadHead(cfg.family, role) },
+                  { text: `--- 題目 ${q.questionId}${ans ? `（正確答案：${ans}）` : ''} ---` },
+                  { inlineData: crop }
+                ]
+                const r = await executeStage({
+                  apiKey, model, modelOverride: readModelOverride || model,
+                  payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                  timeoutMs: getRemainingBudget(), routeHint,
+                  routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
+                  stageContents: [{ role: 'user', parts: singleParts }]
+                })
+                const p = r?.ok ? parseCandidateJson(r.data) : null
+                const a = Array.isArray(p?.answers) ? p.answers[0] : null
+                if (a) byQ.set(q.questionId, { ...a, questionId: q.questionId })
+              } catch { /* 單題兜底失敗 → 留給 missingFill 補 unreadable 送審 */ }
+            }))
+          }
           // ⚠ 失敗批次不可補 status:'blank'——blank 會被 ① BLANK_TRUST_READ1 當「真空白」靜默判未作答(整批災難)。
           //   改補 'unreadable' → computeConsistencyStatus 必為 unstable → 送審(符合「分歧只往多送審」鐵則)。
           //   正常回應中缺席的題仍補 blank(模型明確沒讀到=空白、與全域路徑語意一致)。
