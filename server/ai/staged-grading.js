@@ -9586,10 +9586,17 @@ export async function runStagedGradingPhaseA({
   const englishSpellingCandidates = isEnglishDomainForSpelling
     ? questionResultsRaw.filter((qr) => {
         const qt = qr.questionType
-        return (qt === 'fill_blank' || qt === 'short_answer') &&
+        if (!((qt === 'fill_blank' || qt === 'short_answer') &&
           qr.readAnswer1.status === 'read' &&
           qr.readAnswer1.studentAnswer &&
-          qr.readAnswer1.studentAnswer !== '未作答'
+          qr.readAnswer1.studentAnswer !== '未作答')) return false
+        // 2026-07-03：兩讀「字母層級已一致」→ 跳過拼字驗證、直接信雙讀。
+        //   實測災難(座1 2-D-4)：兩個 3.5 獨立盲讀都讀到 twinty(學生真跡、prompt 已強制保留拼錯)，
+        //   拼字驗證(prompt 附正解)卻 3/3 錨定回 twenty → 覆蓋 AI2 → 重算 diff → 假 NR，
+        //   且持久化存的是覆蓋前原文 → 審查畫面兩個選項一模一樣、老師無從選起。
+        //   驗證只留給「兩讀拼字真的不同」的原始用途(如 dollers vs dollars 仲裁、實證有效)。
+        const loSkip = (t) => ensureString(t, '').toLowerCase().replace(/[^a-z0-9]/g, '')
+        return loSkip(qr.readAnswer1.studentAnswer) !== loSkip(qr.readAnswer2?.studentAnswer)
       })
     : []
 
@@ -9645,7 +9652,9 @@ Return JSON:
       try {
         logStaged(pipelineRunId, stagedLogLevel, 'english-spelling-verify begin', { count: spellingItems.length })
         const spellingResponse = await executeStage({
-          apiKey, model: readModel,
+          // 2026-07-03：升 PRO(modelOverride 才生效——executeStage 忽略 model 參數、原本默默跑 2.5)。
+          //   字母層級辨識正是 3.5≫2.5 的實證領域；此 call 只在兩讀拼字分歧時觸發、量小。
+          apiKey, model: readModel, modelOverride: MODEL_PRO,
           payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
@@ -9656,6 +9665,9 @@ Return JSON:
           const spellingParsed = parseCandidateJson(spellingResponse.data)
           const results = Array.isArray(spellingParsed?.spellingResults) ? spellingParsed.spellingResults : []
           const overrideCount = { applied: 0, skipped: 0 }
+          // 2026-07-03：覆蓋也要同步回 reReadAnswerParsed/reReadAnswerResult——persist(phase_a_state.readAnswer2)
+          //   與 fromCache 重建的 details 都取自它們；不同步會存「覆蓋前」原文 → 續審畫面顯示與實際比對不符。
+          const spellSyncMap = new Map()
           for (const result of results) {
             const qId = ensureString(result?.questionId, '')
             const studentText = ensureString(result?.studentText, '').trim()
@@ -9679,11 +9691,16 @@ Return JSON:
               const r2obj = { status: 'read', studentAnswerRaw: studentText }
               qr.consistencyStatus = computeConsistencyStatus(r1obj, r2obj, qr.questionType)
               qr.spellingOverride = true
+              spellSyncMap.set(qId, { questionId: qId, studentAnswerRaw: studentText, status: 'read' })
               overrideCount.applied++
               console.log(`[english-spelling-override] ${qId} AI2 "${prevAi2}" → "${studentText}" (recomputed=${qr.consistencyStatus})`)
             } else {
               overrideCount.skipped++
             }
+          }
+          if (spellSyncMap.size > 0) {
+            reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, spellSyncMap)
+            reReadAnswerResult = applyAnswerOverrides(reReadAnswerResult, spellSyncMap)
           }
           logStaged(pipelineRunId, stagedLogLevel, 'english-spelling-verify result', overrideCount)
         }
