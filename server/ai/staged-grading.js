@@ -9699,6 +9699,8 @@ Return JSON:
           // 2026-07-03：覆蓋也要同步回 reReadAnswerParsed/reReadAnswerResult——persist(phase_a_state.readAnswer2)
           //   與 fromCache 重建的 details 都取自它們；不同步會存「覆蓋前」原文 → 續審畫面顯示與實際比對不符。
           const spellSyncMap = new Map()
+          const spellSyncMapR1 = new Map()
+          const spellCorrectByQid = new Map(spellingItems.map((i) => [i.questionId, i.correctAnswer]))
           for (const result of results) {
             const qId = ensureString(result?.questionId, '')
             const studentText = ensureString(result?.studentText, '').trim()
@@ -9710,6 +9712,27 @@ Return JSON:
             // 2026-06-30：拼字驗證只抓「字母(拼字)真的不同」。只差標點/空格/大小寫 ≠ 拼錯 → 不覆蓋、不強制送審。
             //   修實證 bug：原始 read1==read2「No , he doesn't」、拼字 AI 回「No he doesn't」(少逗號) → 被當不一致強制 NR。
             const lettersOnly = (t) => ensureString(t, '').toLowerCase().replace(/[^a-z0-9]/g, '')
+            const vL = lettersOnly(studentText)
+            const r1L = lettersOnly(qr.readAnswer1?.studentAnswer)
+            const correctL = lettersOnly(spellCorrectByQid.get(qId))
+            // 2026-07-03：反錨定 2:1 多數決——驗證(PRO)若站在「與正解不同」那邊(不可能是錨定出來的)，即可信：
+            //   ① v==read2 ≠ read1 → 2:1 推翻 read1(read1 又把拼錯自動訂正、如 doesen't→doesn't) → 覆蓋 read1、重算→一致。
+            //   ② v==read1 ≠ read2 → 走下方既有路徑覆蓋 read2(dollers 案例)。
+            //   ⚠ v==正解 → 可能是錨定、不可信 → 全部不動、維持送審讓老師裁決。
+            //   沙盒實證：學生寫 doesen't、read1 訂正成 doesn't、PRO 驗證 3/3 忠實回 doesen't(反錨定成立)。
+            if (vL === correctL) { overrideCount.skipped++; continue }
+            if (vL === lettersOnly(prevAi2) && vL !== r1L) {
+              const newR1 = qr.readAnswer2.studentAnswer  // 用 read2 顯示文字(與驗證字母一致、格式較完整)
+              qr.readAnswer1 = { status: 'read', studentAnswer: newR1 }
+              const r1obj2 = { status: 'read', studentAnswerRaw: newR1 }
+              const r2obj2 = { status: qr.readAnswer2?.status, studentAnswerRaw: qr.readAnswer2?.studentAnswer }
+              qr.consistencyStatus = computeConsistencyStatus(r1obj2, r2obj2, qr.questionType)
+              qr.spellingOverride = true
+              spellSyncMapR1.set(qId, { questionId: qId, studentAnswerRaw: newR1, status: 'read' })
+              overrideCount.applied++
+              console.log(`[english-spelling-override] ${qId} AI1 → "${newR1}" (2:1 反錨定、recomputed=${qr.consistencyStatus})`)
+              continue
+            }
             if (lettersOnly(studentText) !== lettersOnly(prevAi2)) {
               qr.readAnswer2 = { status: 'read', studentAnswer: studentText }
               // 2026-06-30：覆蓋後「重算」read1 vs 新 read2 的一致性，不再無條件 force diff。
@@ -9732,6 +9755,10 @@ Return JSON:
           if (spellSyncMap.size > 0) {
             reReadAnswerParsed = applyAnswerOverrides(reReadAnswerParsed, spellSyncMap)
             reReadAnswerResult = applyAnswerOverrides(reReadAnswerResult, spellSyncMap)
+          }
+          if (spellSyncMapR1.size > 0) {
+            readAnswerParsed = applyAnswerOverrides(readAnswerParsed, spellSyncMapR1)
+            readAnswerResult = applyAnswerOverrides(readAnswerResult, spellSyncMapR1)
           }
           logStaged(pipelineRunId, stagedLogLevel, 'english-spelling-verify result', overrideCount)
         }
