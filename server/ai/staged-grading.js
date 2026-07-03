@@ -8242,8 +8242,11 @@ export async function runStagedGradingPhaseA({
           let parsed = resp?.ok ? parseCandidateJson(resp.data) : null
           let arr = Array.isArray(parsed?.answers) ? parsed.answers : []
           // 批次失敗/空回應 → 重試一次(暫時性 503/timeout 常見)。
+          // 2026-07-03：重試前退避 3-7s——全班並行時失敗多為 rate-limit、立刻重打會撞同一個限流窗
+          //   (實測 16號 fill_blank read1 批連兩輪 fail、同 crop 沙盒單跑 3/3 成功=純載重問題)。
           if (!(resp?.ok && arr.length > 0)) {
-            logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空、重試一次`)
+            logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空(status=${resp?.status})、退避後重試一次`)
+            await new Promise((r) => setTimeout(r, 3000 + Math.random() * 4000))
             resp = await runBatchCall()
             parsed = resp?.ok ? parseCandidateJson(resp.data) : null
             arr = Array.isArray(parsed?.answers) ? parsed.answers : []
@@ -8260,6 +8263,8 @@ export async function runStagedGradingPhaseA({
               const crop = allQuestionCropMap.get(q.questionId)
               if (!crop) return
               try {
+                // 2026-07-03：錯開 0-5s——批次是被 rate-limit 打掛的話、8 個單題同時發會再一起被限。
+                await new Promise((r) => setTimeout(r, Math.random() * 5000))
                 const giveAns = role === 'review' && !cfg.blindRead2
                 const ak = akMapForAi2.get(q.questionId)
                 const ans = giveAns ? ensureString(ak?.answer || ak?.referenceAnswer, '').trim() : ''
@@ -8284,8 +8289,9 @@ export async function runStagedGradingPhaseA({
           // ⚠ 失敗批次不可補 status:'blank'——blank 會被 ① BLANK_TRUST_READ1 當「真空白」靜默判未作答(整批災難)。
           //   改補 'unreadable' → computeConsistencyStatus 必為 unstable → 送審(符合「分歧只往多送審」鐵則)。
           //   正常回應中缺席的題仍補 blank(模型明確沒讀到=空白、與全域路徑語意一致)。
+          // _callFailed 標記＝「call 失敗合成的 unreadable」(非模型判讀)，供下游「對讀說 blank → 採空白」規則辨識。
           const missingFill = callFailed
-            ? (qid) => ({ questionId: qid, studentAnswerRaw: '無法辨識', status: 'unreadable' })
+            ? (qid) => ({ questionId: qid, studentAnswerRaw: '無法辨識', status: 'unreadable', _callFailed: true })
             : (qid) => ({ questionId: qid, studentAnswerRaw: '', status: 'blank' })
           for (const q of batch) answers.push(byQ.get(q.questionId) || missingFill(q.questionId))
           // 每型耗時/批次/模型記錄(供落地監控、調 batch/model)
@@ -8557,6 +8563,27 @@ export async function runStagedGradingPhaseA({
   let reReadAnswerParsed = reReadAnswerResponse?._parsed ?? (reReadAnswerResponse?.ok
     ? parseCandidateJson(reReadAnswerResponse.data)
     : null)
+  // ── 2026-07-03：type-split「call 失敗補的 unreadable」×「另一讀說空白」→ 採空白 ──
+  //   一側批次+重試+逐題兜底全失敗(_callFailed 合成、非模型判讀)、另一側獨立讀說 blank：
+  //   「空白」是反錨定方向(知答的 read2 只會把空白幻覺成答案、不會反向)→可信、直接判未作答。
+  //   另一側是 read(有字) → 無法交叉驗證、維持 unreadable 送審。實測 16號整卷空白被 call 失敗
+  //   拖成 8 題 NR、read2 全說 blank——本規則自動清掉。
+  if (useTypeSplit) {
+    const adoptBlank = (failSide, otherSide, label) => {
+      const otherByQ = new Map((otherSide?.answers || []).map((a) => [ensureString(a?.questionId).trim(), a]))
+      let n = 0
+      for (const a of (failSide?.answers || [])) {
+        if (!a?._callFailed) continue
+        const o = otherByQ.get(ensureString(a?.questionId).trim())
+        if (o && ensureString(o.status, '').toLowerCase() === 'blank') {
+          a.status = 'blank'; a.studentAnswerRaw = ''; delete a._callFailed; n++
+        }
+      }
+      if (n > 0) logStaged(pipelineRunId, 'basic', `[type-split] ${label} call失敗×對讀blank → 採空白 ${n} 題`)
+    }
+    adoptBlank(readAnswerParsed, reReadAnswerParsed, 'read1')
+    adoptBlank(reReadAnswerParsed, readAnswerParsed, 'read2')
+  }
   // 2026-05-18: AI1 parse 失敗時的診斷 + fallback
   //   原本 AI1 parse 失敗就直接 throw、整個 phase-a crash、fallback 到 single-shot 回 400
   //   改成：先印 raw text 上 Vercel log 給診斷、然後若 AI2 parse 成功就用 AI2 當 AI1（讓 phase-a 還是能跑完）
