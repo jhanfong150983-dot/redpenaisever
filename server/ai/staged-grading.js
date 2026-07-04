@@ -598,6 +598,17 @@ const TYPE_PAD = {
   map_fill: { padX: 0, padY: 0 }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-07-05: 四模式 modeKey——answerSheetMode × submissionSource 的集中分枝點。
+//   wq_photo(一般+照片/書本作業) | wq_pdf(一般+PDF/國小考卷) | ao_photo(答案卷+照片/小考) | ao_pdf(答案卷+PDF/大考)
+// 用途：日後按各模式使用者回饋微調時，旋鈕統一掛在 modeKey 上、不再散落組合判斷。
+// 目前收進 modeKey 的旋鈕：crop pad（ao_pdf 全題型零 pad——user 拍板：答案卷要求寫在格內、
+//   格外屬學生責任；pad 反而有吃鄰格 read 錯的風險；PDF 框穩定性已由統一框 median+P90 保證）。
+// 其餘模式分歧（dewarp=只照片、統一框/peer檢查=PDF、extract prompt=按模式）各自閘門已明確、維持原位。
+function gradingModeKey(answerSheetMode, submissionSource) {
+  return `${answerSheetMode === 'answer_only' ? 'ao' : 'wq'}_${submissionSource === 'teacher_scan' ? 'pdf' : 'photo'}`
+}
+
 function inflateBboxForType(bbox, questionType) {
   if (!bbox) return bbox
   const pad = TYPE_PAD[questionType] || DEFAULT_TYPE_PAD
@@ -7959,7 +7970,10 @@ export async function runStagedGradingPhaseA({
   // For multi-page, divide by page count so each page still gets ~3% padding.
   const dynamicPad = +(0.03 / totalPages).toFixed(4)
   const dynamicPadWide = +(0.08 / totalPages).toFixed(4)
-  logStaged(pipelineRunId, stagedLogLevel, 'dynamic crop padding', { totalPages, pad: dynamicPad, padWide: dynamicPadWide })
+  // 2026-07-05: 四模式分枝（見 gradingModeKey 說明）。ao_pdf＝答案卷+PDF → 主 crop 全題型零 pad。
+  const modeKey = gradingModeKey(answerSheetMode, submissionSource)
+  const isAoPdf = modeKey === 'ao_pdf'
+  logStaged(pipelineRunId, stagedLogLevel, 'dynamic crop padding', { totalPages, pad: dynamicPad, padWide: dynamicPadWide, modeKey })
 
   // 2026-06-02: 密集選擇格（single_choice / multi_choice / true_false）用固定 0.03 pad 會把上下左右
   // 鄰格的字一起裁進來，盲讀的 AI1 無法判斷哪個才是本題答案而挑錯（畢業考閱讀題組實證：read1 連錯多題、
@@ -8037,7 +8051,8 @@ export async function runStagedGradingPhaseA({
           if (d > 1e-6 && d < _pitch) _pitch = d
         }
         const _pitchCap = Number.isFinite(_pitch) ? Math.max(0, (_pitch - (_b?.h || 0)) / 2) : Infinity
-        const checkboxPad = Math.min(dynamicPad, (q.answerBbox?.h || dynamicPad) * 0.25, _pitchCap)
+        // 2026-07-05: ao_pdf 零 pad（見 gradingModeKey）；其餘模式維持列距夾制小邊距。
+        const checkboxPad = isAoPdf ? 0 : Math.min(dynamicPad, (q.answerBbox?.h || dynamicPad) * 0.25, _pitchCap)
         const cropData = await cropInlineImageByBbox(
           inlineImage.inlineData.data,
           inlineImage.inlineData.mimeType,
@@ -8089,7 +8104,13 @@ export async function runStagedGradingPhaseA({
         // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再有「鄰格括號被切」風險
         // 2026-06-02：其餘選擇題類（含 true_false）維持 choiceAwareCropPad（隨格高縮放）、其他維持 dynamicPad
         let bboxToUse, cropPad
-        if (aoChoice) {
+        if (isAoPdf) {
+          // 2026-07-05: ao_pdf（答案卷+PDF）全題型零 pad——直接用 classify 原框、不 inflate。
+          //   選擇題零 pad 已實證（2026-06-02）；擴到全題型依 user 拍板：格外筆跡屬學生責任、
+          //   pad 吃鄰格（如培英題3 下方配分表）反而製造 read 雜訊。框穩定性由統一框 median+P90 保證。
+          bboxToUse = q.answerBbox
+          cropPad = 0
+        } else if (aoChoice) {
           bboxToUse = q.answerBbox
           cropPad = 0
         } else if (tightChoice) {
@@ -8448,12 +8469,13 @@ export async function runStagedGradingPhaseA({
     for (const akQ of vjAkQuestions) {
       const classifyRow = classifyAligned.find((r) => r.questionId === akQ.id)
       if (!classifyRow?.answerBbox) continue
+      // 2026-07-05: ao_pdf 零 pad（見 gradingModeKey）；VJ crop 同主 crop 政策。
       const crop = await cropInlineImageByBbox(
         inlineImage.inlineData.data,
         inlineImage.inlineData.mimeType,
-        inflateBboxForType(classifyRow.answerBbox, classifyRow.questionType),
+        isAoPdf ? classifyRow.answerBbox : inflateBboxForType(classifyRow.answerBbox, classifyRow.questionType),
         true,
-        dynamicPad
+        isAoPdf ? 0 : dynamicPad
       )
       if (!crop) continue
       const itemLabels = akQ.vjRubric.itemLabels
