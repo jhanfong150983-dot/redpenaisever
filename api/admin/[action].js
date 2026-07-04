@@ -3992,20 +3992,21 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
 
   // 只拉選中那一筆 Phase A 的大欄位
   // ⚠️ 必須 filter phase='phase_a'、因為 Phase A 跟 Phase B 共用同一個 pipeline_run_id
-  // 不加 phase filter 會撈到 2 筆 → maybeSingle 噴 "JSON object requested, multiple rows"
+  // ⚠️ 同一 pipeline_run_id 可能有多筆同 phase 的 log（失敗 log + 重試成功、timeout 重打重複 insert）
+  //   → phase_a / phase_b 都不可用 maybeSingle（多筆噴 "JSON object requested, multiple rows"）、
+  //     一律 order created_at desc + limit(1) 取最新一筆當現況。
   // Phase B 同 pipeline_run_id 的 accessor 一併拉、給每題的批改分數 + 理由用
   let log = null
   let phaseBLog = null
   if (targetRunId) {
     const [phaseARes, phaseBRes] = await Promise.all([
       db.from('grading_stage_logs')
-        .select('pipeline_run_id, classify, read_answer_1, read_answer_2, arbiter, needs_review_count')
+        .select('pipeline_run_id, classify, read_answer_1, read_answer_2, arbiter, needs_review_count, created_at')
         .eq('submission_id', submissionId)
         .eq('pipeline_run_id', targetRunId)
         .eq('phase', 'phase_a')
-        .maybeSingle(),
-      // ⚠️ 同一 phase_a run 可被多次重跑 Phase B（吃 cached phase_a）→ 同 pipeline_run_id 會有多筆 phase_b。
-      // 不能用 maybeSingle（多筆會噴 "multiple rows" error）→ 改抓「最新一筆」phase_b 當現況批改結果。
+        .order('created_at', { ascending: false })
+        .limit(1),
       db.from('grading_stage_logs')
         .select('pipeline_run_id, accessor, total_score, created_at')
         .eq('submission_id', submissionId)
@@ -4016,7 +4017,7 @@ async function qualitySubmissionDetail(db, submissionId, pipelineRunId = null) {
     ])
     if (phaseARes.error) throw new Error(phaseARes.error.message)
     if (phaseBRes.error) console.error('[admin/quality] phase_b log query error:', phaseBRes.error.message)
-    log = phaseARes.data || null
+    log = Array.isArray(phaseARes.data) ? (phaseARes.data[0] || null) : (phaseARes.data || null)
     phaseBLog = Array.isArray(phaseBRes.data) ? (phaseBRes.data[0] || null) : (phaseBRes.data || null)
   }
 
