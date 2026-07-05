@@ -883,6 +883,12 @@ export function normalizeAnswerForComparison(raw) {
   s = s.replace(/[≤≦]/gu, '<=').replace(/[≥≧]/gu, '>=')
   s = s.replace(/\*/gu, '×')   // 乘號：* 與 × 同義、統一成 ×
   s = s.replace(/÷/gu, '/')    // 除號：÷ 統一成 /（後面斜線一律去除、兩形式即一致）
+  // 2026-07-05b: 同形不同碼的隱形差異摺疊——user 實測「兩讀肉眼全同仍標分歧」：
+  //   乘法中點有多種 Unicode 寫法（U+00B7/U+22C5/U+2219/U+2027/U+30FB）、全形拉丁字母（Ｘ vs X）、
+  //   零寬字元——螢幕上看不出來、字串比對卻不等。
+  s = s.replace(/[​-‍⁠﻿]/gu, '')                                       // 零寬字元
+  s = s.replace(/[·⋅∙‧・]/gu, '×')                            // 中點類一律視為乘號 ×
+  s = s.replace(/[Ａ-Ｚａ-ｚ]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))  // 全形拉丁→半形
   // 乘號異體字統一（× ✕ ✖ → ×）— 保留 × 作為標準形式
   s = s.replace(/[✕✖]/gu, '×')
   // 圈圈數字 → 半形數字（①②③④⑤⑥⑦⑧⑨⑩ → 1~10）
@@ -10022,7 +10028,9 @@ Return JSON:
       return answers.map((a) => ({
         questionId: a.questionId,
         status: a.status,
-        answer: a.studentAnswerRaw || a.studentAnswer || ''
+        answer: a.studentAnswerRaw || a.studentAnswer || '',
+        // 2026-07-05: 合題逐空讀值保留（否則續審/重建時四小格退化、也無從稽核隱形字元差）
+        ...(Array.isArray(a.partValues) && a.partValues.length > 0 ? { partValues: a.partValues } : {})
       }))
     }
     const readAnswer1Mini = extractMin(readAnswerResult)
@@ -10414,7 +10422,9 @@ Return JSON:
       return answers.map((a) => ({
         questionId: a.questionId,
         status: a.status,
-        answer: a.studentAnswerRaw || a.studentAnswer || ''
+        answer: a.studentAnswerRaw || a.studentAnswer || '',
+        // 2026-07-05: 合題逐空讀值保留（否則續審/重建時四小格退化、也無從稽核隱形字元差）
+        ...(Array.isArray(a.partValues) && a.partValues.length > 0 ? { partValues: a.partValues } : {})
       }))
     }
     const readAnswer1MiniLegacy = extractMin(readAnswerParsed || readAnswerResult)
