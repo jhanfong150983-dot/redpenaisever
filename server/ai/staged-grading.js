@@ -928,6 +928,10 @@ export function normalizeAnswerForComparison(raw) {
   s = s.replace(/(?<=[A-Za-z])\.(?=[A-Za-z]|$)/gu, '')
   // 選項字母大小寫統一（A/a、B/b、C/c 等視為相同）
   s = s.toLowerCase()
+  // 2026-07-06: 「數字 x 數字」夾心的字母 x 視為乘號——手寫 × 與字母 x 同形，兩讀常一方抄 x
+  //   一方抄 *（user 實測「20000000 x 1/4」vs「20000000 * 1/4」誤送審）。只折「兩側都是數字/括號」
+  //   的 x（此時必為乘號）；變數 x（2x+3、x>=5）兩側非數字、一律不動。空白/斜線/括號已在上方去除。
+  s = s.replace(/(?<=\d)x(?=\d)/gu, '×')
   return s
 }
 
