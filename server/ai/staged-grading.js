@@ -8296,6 +8296,12 @@ export async function runStagedGradingPhaseA({
   //   實測 3.5-flash 盲讀讀得出 → 英語 text family 一律升 PRO。kill-switch: ENGLISH_TEXT_READ_PRO='false'。
   const domainIsEnglish = ensureString(internalContext?.domainHint, '').includes('英語')
   const englishTextReadPro = process.env.ENGLISH_TEXT_READ_PRO !== 'false' && domainIsEnglish
+  // 2026-07-05: 數學 text family read 升 PRO——A/B 實測（培英 round2 全班 89 題 NR 填充、老師確認正解當
+  //   ground truth）：read1 盲讀命中率 13%→65%、模擬 NR 64→24（-62%）、穩定題回歸僅 +2/59。
+  //   2.5 病灶＝手寫位數/分數誤讀（30/7↔50/7、23/11↔73/11、3600↔36000）→ 老師審查 77% 都在按 read2。
+  //   kill-switch: MATH_TEXT_READ_PRO='false'。實驗：local-only/exp-answeronly-drawing-2026-07-04/test-read35-ab.mjs
+  const mathTextReadPro = process.env.MATH_TEXT_READ_PRO !== 'false'
+    && ensureString(internalContext?.domainHint, '').includes('數學')
   const tsReadHead = (family, role) => {
     // ordering：兩讀改用「不同策略」(blindRead2 已使兩讀皆盲)。沙盒實證 PA/PB @PRO 一致率 97%(vs 抄寫/校對變體僅~53%)。
     if (family === 'ordering') {
@@ -8360,8 +8366,8 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     const tsProTypes = new Set(ensureString(process.env.TYPE_SPLIT_PRO_TYPES, '').split(',').map((s) => s.trim()).filter(Boolean))
     for (const [type, qs] of groups) {
       const cfg = TYPE_READ_CONFIG[type] || TYPE_READ_DEFAULT
-      const upgradeForEnglish = englishTextReadPro && cfg.family === 'text'  // 英語填空/簡答盲讀升 3.5
-      const model = (cfg.model === 'PRO' || tsProTypes.has(type) || upgradeForEnglish) ? MODEL_PRO : MODEL_FLASH
+      const upgradeForText = (englishTextReadPro || mathTextReadPro) && cfg.family === 'text'  // 英語/數學填空簡答讀升 3.5
+      const model = (cfg.model === 'PRO' || tsProTypes.has(type) || upgradeForText) ? MODEL_PRO : MODEL_FLASH
       for (const batch of tsChunk(qs, cfg.batch)) {
         jobs.push(async () => {
           const parts = [{ text: tsReadHead(cfg.family, role) }]
