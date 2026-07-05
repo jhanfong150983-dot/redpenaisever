@@ -527,7 +527,25 @@ export function validateReadAnswerQuality(readResult1, readResult2, expectedQues
   const readRate = readCount / visibleTotal
   metrics.readRate = +readRate.toFixed(3)
   if (visibleAnswers1.length >= 3 && readRate < 0.5) {
-    warnings.push(`FAIL:READ_LOW_READ_RATE(${readCount}/${visibleTotal})`)
+    // 2026-07-06: 「真空白卷」豁免——低分生大面積未作答（培英座17 只寫 7/30 題）每輪必撞此
+    //   FAIL、永遠 grading_failed。放行條件（兩者皆符才豁免）：
+    //   ① read1 說空白的格、read2 幾乎全數同意（≥80%）——讀壞時空白分佈不會兩讀高度一致；
+    //   ② 有寫的題確實讀得到（readCount ≥ 3）——crop/bbox 系統性壞掉時近乎整卷讀空、湊不出 3 題。
+    //   豁免後空白題照 blank 硬判 0 分、有寫的題正常批——低分卷完整出分、不再卡死。
+    const blank1Qids = visibleAnswers1.filter((a) => a.status !== 'read').map((a) => a.questionId)
+    const ans2ByQid = new Map(answers2.map((a) => [a.questionId, a]))
+    let blankAgree = 0
+    for (const qid of blank1Qids) {
+      const a2 = ans2ByQid.get(qid)
+      if (a2 && String(a2?.status || '').toLowerCase() !== 'read') blankAgree++
+    }
+    const blankAgreement = blank1Qids.length > 0 ? blankAgree / blank1Qids.length : 0
+    metrics.blankAgreement = +blankAgreement.toFixed(3)
+    if (blankAgreement >= 0.8 && readCount >= 3) {
+      warnings.push(`READ_LOW_READ_RATE_TRUE_BLANK(${readCount}/${visibleTotal},agree=${Math.round(blankAgreement * 100)}%)`)
+    } else {
+      warnings.push(`FAIL:READ_LOW_READ_RATE(${readCount}/${visibleTotal})`)
+    }
   }
 
   // ── Duplicate answer detection (≥3 non-trivial identical answers) ──
