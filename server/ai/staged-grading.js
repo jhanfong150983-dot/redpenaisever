@@ -2765,6 +2765,8 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
   // 2026-06-22: 英語領域 → 啟用大小寫等價確定性覆寫(兜底 B)
   const isEnglishForCase = ensureString(domainHint, '').includes('英語')
     || answerKey?.englishRules?.punctuationCheck?.enabled || answerKey?.englishRules?.wordOrderCheck?.enabled
+  // 2026-07-05: 數學領域 → 啟用「頭尾雜點」等價救回（見 dotForgivableEqual）
+  const isMathForDots = ensureString(domainHint, '').includes('數學')
 
   const scores = []
   let totalScore = 0
@@ -2810,7 +2812,33 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
         if (correct && caseForgivableEqual(ensureString(answer?.studentAnswerRaw, ''), correct)) { score = maxScore; caseRestoredWhole = true }
       }
     }
+    // 2026-07-05: code 兜底——數學 fill_blank「頭尾雜點」逐空格/整題救回（同英語大小寫救回的結構）。
+    //   AI 對「只差頭尾句點」的答案扣分時 code 在此推翻；只加分不減分、內部小數點不參與。
+    const dotRestoredSubIds = new Set()
+    let dotRestoredWhole = false
+    if (readStatus === 'read' && maxScore > 0 && isMathForDots && question?.questionCategory === 'fill_blank') {
+      const rawParts = Array.isArray(row?.partResults) ? row.partResults : null
+      const keyParts = Array.isArray(question?.parts) ? question.parts : null
+      if (rawParts && keyParts && keyParts.length > 0) {
+        const ansBySub = new Map(keyParts.map((p) => [String(p?.subId ?? '').trim(), ensureString(p?.answer, '')]))
+        const maxBySub = new Map(keyParts.map((p) => [String(p?.subId ?? '').trim(), Math.max(0, toFiniteNumber(p?.maxScore) ?? 0)]))
+        let restored = 0
+        for (const pr of rawParts) {
+          const sub = String(pr?.subId ?? '').trim()
+          if (!sub || pr?.correct === true) continue
+          if (dotForgivableEqual(ensureString(pr?.student, ''), ansBySub.get(sub) ?? ensureString(pr?.expected, ''))) {
+            dotRestoredSubIds.add(sub)
+            restored += (maxBySub.get(sub) ?? 0)
+          }
+        }
+        if (restored > 0) score = Math.min(maxScore, score + restored)
+      } else if (!(typeof row?.isCorrect === 'boolean' ? row.isCorrect : score >= maxScore)) {
+        const correct = ensureString(question?.answer || question?.referenceAnswer, '')
+        if (correct && dotForgivableEqual(ensureString(answer?.studentAnswerRaw, ''), correct)) { score = maxScore; dotRestoredWhole = true }
+      }
+    }
     const caseRestored = caseRestoredSubIds.size > 0 || caseRestoredWhole
+      || dotRestoredSubIds.size > 0 || dotRestoredWhole
 
     // Hard override: blank/unreadable always score=0 regardless of model output
     if (readStatus === 'blank' || readStatus === 'unreadable') score = 0
@@ -2866,13 +2894,18 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
           .filter((p) => p && typeof p.subId === 'string' && p.subId.trim())
           .map((p) => {
             const sub = String(p.subId).trim()
-            const restored = caseRestoredSubIds.has(sub)  // 大小寫救回 → 標記為對
+            const restoredCase = caseRestoredSubIds.has(sub)  // 大小寫救回 → 標記為對
+            const restoredDot = dotRestoredSubIds.has(sub)    // 數學頭尾雜點救回 → 標記為對
             return {
               subId: sub,
               student: ensureString(p.student, ''),
               expected: ensureString(p.expected, ''),
-              correct: p.correct === true || restored,
-              reason: restored ? '大小寫等價（普通字首字母／結尾標點），視為正確' : (typeof p.reason === 'string' ? p.reason : undefined)
+              correct: p.correct === true || restoredCase || restoredDot,
+              reason: restoredCase
+                ? '大小寫等價（普通字首字母／結尾標點），視為正確'
+                : restoredDot
+                  ? '頭尾雜點等價（數字前後的筆誤墨點），視為正確'
+                  : (typeof p.reason === 'string' ? p.reason : undefined)
             }
           })
       : undefined
@@ -2893,6 +2926,7 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
     }
     // 單一答案(無 parts)整體救回 → 用一致理由蓋掉 AI 矛盾的大小寫扣分說明(多空格題已由上方逐格 partResults 處理)
     if (caseRestoredWhole) finalScoringReason = '大小寫等價判定：學生作答與正解僅大小寫／結尾標點差異（專有名詞、全大寫縮寫除外），視為正確。'
+    if (dotRestoredWhole) finalScoringReason = '頭尾雜點等價判定：學生作答與正解僅差數字前後的筆誤墨點（內部小數點不受影響），視為正確。'
 
     const normalizedBase = {
       questionId,
@@ -5456,6 +5490,24 @@ function caseForgivableEqual(studentText, correctText) {
     if (caseFoldWord(sw[i], sig) !== caseFoldWord(cw[i], sig)) return false
   }
   return true
+}
+
+// 2026-07-05: 數學「頭尾雜點」等價（user 拍板：學生手寫常有筆誤墨點被讀成句點，
+//   「數字前和後的 . 去除掉、但數字中的 . 不行」——實例：培英 1-1-21 學生寫 640、
+//   格上有雜點 → read 忠實讀成 ".640" → accessor 判 .640≠640 冤枉扣分）。
+// 安全設計＝「正解錨定」：只去「字串頭尾」的句點（內部小數點 157.5 一律不動），
+//   去完剛好等於正解才翻案；「.5 vs 0.5」這類真小數等值本就該由數值比對判對、
+//   若 AI 已判對不會進到這裡，若判錯此規則也不會誤翻（"5"≠"0.5"）。
+function stripEdgeDots(text) {
+  return String(text ?? '').trim().replace(/^\.+/, '').replace(/\.+$/, '').trim()
+}
+export function dotForgivableEqual(studentText, correctText) {
+  const s = String(studentText ?? '').trim()
+  const c = String(correctText ?? '').trim()
+  if (!s || !c) return false
+  const ss = stripEdgeDots(s)
+  if (!ss || ss === s) return false  // 沒有頭尾點 → 不適用（真的答錯，交回原判）
+  return ss === c || ss === stripEdgeDots(c)
 }
 
 export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
