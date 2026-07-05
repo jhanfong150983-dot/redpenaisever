@@ -62,6 +62,15 @@ export const READ_ANSWER_GENERATION_CONFIG = {
   }
 }
 
+// 2026-07-05: accessor（計分）temp 預設 0——培英全班兩輪對照實測「同一答案跨輪判定翻盤」
+//   （1-1-5 等價式一輪判對一輪判錯、兩方向都出現）＝accessor 未設溫度（Gemini 預設 1.0）的隨機性。
+//   比照 read（2026-06-30 temp 0 治批改不一致）與 VJ grade（temp 0 治 1/5 變異）。回退：ACCESSOR_TEMP=1。
+export const ACCESSOR_GENERATION_CONFIG = {
+  generationConfig: {
+    temperature: Number.isFinite(Number(process.env.ACCESSOR_TEMP)) ? Number(process.env.ACCESSOR_TEMP) : 0
+  }
+}
+
 // 2026-05-30: VJ 視覺判斷題 grade 用 temp 0 — 實驗證實 borderline 柱(側稜 vs 底面高/半徑)在 temp 0.3
 // 有 ~1/5 變異、會把對的判錯；temp 0 決定性、落在主流(正確)答案。只給 VJ grade、不動其他 stage。
 export const VJ_GRADE_GENERATION_CONFIG = {
@@ -6524,7 +6533,7 @@ export async function runGradeOneQuestion({ apiKey, model, payload = {}, routeHi
       const rar = { answers: [{ questionId, studentAnswerRaw: studentAnswer, status }] }
       const prompt = buildAccessorPrompt(answerKey, rar, domainHint, gradeBand)
       const resp = await executeStage({
-        apiKey, model, payload, timeoutMs: 60000, routeHint,
+        apiKey, model, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG }, timeoutMs: 60000, routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
         stageContents: [{ role: 'user', parts: [{ text: prompt }] }]
       })
@@ -11646,8 +11655,8 @@ export async function runStagedGradingPhaseB({
     logStageStart(pipelineRunId, 'Accessor-p1')
     logStageStart(pipelineRunId, 'Accessor-p2')
     const [accessorResp1, accessorResp2] = await Promise.all([
-      executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] }),
-      executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
+      executeStage({ apiKey, model: phaseBModel, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] }),
+      executeStage({ apiKey, model: phaseBModel, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
     ])
     logStageEnd(pipelineRunId, 'Accessor-p1', accessorResp1)
     logStageEnd(pipelineRunId, 'Accessor-p2', accessorResp2)
@@ -11674,7 +11683,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed1 || typeof parsed1 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p1 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p1-retry')
-      const retryResp1 = await executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] })
+      const retryResp1 = await executeStage({ apiKey, model: phaseBModel, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak1, rar1, internalContext?.domainHint, gradeBand), [...p1Ids], calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-p1-retry', retryResp1)
       stageResponses.push(retryResp1)
       parsed1 = retryResp1.ok ? parseCandidateJson(retryResp1.data) : null
@@ -11696,7 +11705,7 @@ export async function runStagedGradingPhaseB({
     if (!parsed2 || typeof parsed2 !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor-p2 JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-p2-retry')
-      const retryResp2 = await executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
+      const retryResp2 = await executeStage({ apiKey, model: phaseBModel, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(ak2, rar2, internalContext?.domainHint, gradeBand), [...p2Ids], calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-p2-retry', retryResp2)
       stageResponses.push(retryResp2)
       parsed2 = retryResp2.ok ? parseCandidateJson(retryResp2.data) : null
@@ -11746,7 +11755,7 @@ export async function runStagedGradingPhaseB({
     if (!accessorParsed || typeof accessorParsed !== 'object') {
       console.warn(`[AI-5STAGE][${pipelineRunId}] Accessor JSON parse failed, retrying...`)
       logStageStart(pipelineRunId, 'Accessor-retry')
-      const retryResp = await executeStage({ apiKey, model: phaseBModel, payload, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(accessorPrompt, allAnswerIds, calcCropMap) }] })
+      const retryResp = await executeStage({ apiKey, model: phaseBModel, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(accessorPrompt, allAnswerIds, calcCropMap) }] })
       logStageEnd(pipelineRunId, 'Accessor-retry', retryResp)
       stageResponses.push(retryResp)
       accessorParsed = retryResp.ok ? parseCandidateJson(retryResp.data) : null
