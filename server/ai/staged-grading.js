@@ -9725,11 +9725,14 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       questionType: classifyRow?.questionType ?? 'other',
       readAnswer1: {
         status: read1?.status ?? 'unreadable',
-        studentAnswer: read1DisplayOverride ?? read1?.studentAnswerRaw ?? '無法辨識'
+        studentAnswer: read1DisplayOverride ?? read1?.studentAnswerRaw ?? '無法辨識',
+        // 2026-07-05: 合題逐空讀值傳給前端——審查卡「四小格」逐小題顯示/點選用
+        ...(Array.isArray(read1?.partValues) && read1.partValues.length > 0 ? { partValues: read1.partValues } : {})
       },
       readAnswer2: {
         status: read2?.status ?? 'unreadable',
-        studentAnswer: read2?.studentAnswerRaw ?? '無法辨識'
+        studentAnswer: read2?.studentAnswerRaw ?? '無法辨識',
+        ...(Array.isArray(read2?.partValues) && read2.partValues.length > 0 ? { partValues: read2.partValues } : {})
       },
       answerBbox: classifyRow?.answerBbox ?? null,
       bboxCorrected: classifyRow?.bboxCorrected || false,
