@@ -1391,6 +1391,40 @@ export function computeConsistencyStatus(read1, read2, questionType = 'other') {
     // 提取失敗或答案不完全相等 → 繼續走既有邏輯（Jaccard 相似度等）
   }
 
+  // 2026-07-05: fill_blank 合題（partValues）：逐空比對、忽略格內計算過程雜訊——同上方
+  //   calculation「只比最終答案」的哲學。實例（培英數學題3）：一格四小題、學生把計算過程
+  //   全寫在格內 → 兩讀的整串 studentAnswerRaw 因過程文字的讀取順序/雜訊永遠不等 → 題題送審。
+  //   兩讀的 partValues（每空最終答案）逐空相等＝讀取穩定 → stable；任一空不等 → diff 照樣
+  //   送審（不放過真分歧）。任一讀缺 partValues 或空數不合 → 保守 fall-through 走既有邏輯。
+  if (questionType === 'fill_blank') {
+    const pv1 = Array.isArray(read1?.partValues) ? read1.partValues : null
+    const pv2 = Array.isArray(read2?.partValues) ? read2.partValues : null
+    if (pv1 && pv2 && pv1.length >= 2 && pv2.length >= 2) {
+      // 每空比對用「數學符號摺疊」加強 normalize：兩讀常見 ≥/>=、×/*、全半形括號、空格、
+      //   括號掉尾（"1/4(6700000" vs "1/4(6700000)"）等純格式讀值差——內容同一、不該觸發送審。
+      //   只用於一致性比對、不影響計分（accessor 拿原值）。數字與順序全保留、不會把真分歧折成相等。
+      const foldMathForCompare = (s) => s
+        .replace(/≥/g, '>=').replace(/≤/g, '<=').replace(/×/g, '*').replace(/÷/g, '/')
+        .replace(/[()（）\[\]\s]/g, '')
+      const toSubMap = (pv) => {
+        const m = new Map()
+        for (const p of pv) {
+          const sub = ensureString(p?.subId, '').trim()
+          if (sub) m.set(sub, foldMathForCompare(normalizeAnswerForComparison(ensureString(p?.student, ''))))
+        }
+        return m
+      }
+      const m1 = toSubMap(pv1)
+      const m2 = toSubMap(pv2)
+      if (m1.size >= 2 && m1.size === m2.size) {
+        for (const [sub, val] of m1) {
+          if (!m2.has(sub) || m2.get(sub) !== val) return 'diff'
+        }
+        return 'stable'
+      }
+    }
+  }
+
   if (CHECKBOX_EQUIVALENT_TYPES.has(questionType)) {
     const c1 = normalizeSelectionAnswerForComparison(read1?.studentAnswerRaw, questionType)
     const c2 = normalizeSelectionAnswerForComparison(read2?.studentAnswerRaw, questionType)
@@ -2618,6 +2652,14 @@ export function normalizeReadAnswerResult(parsed, questionIds, mismatchIds = new
 
     const entry = { questionId, studentAnswerRaw, status }
     if (mismatchIds.has(questionId)) entry.calculationAnswerMismatch = true
+    // 2026-07-05: 保留 partValues（原本被丟掉）——合題一致性逐空比對(computeConsistencyStatus)
+    //   與 accessor 逐空計分都吃這個欄位；沒保留時只能退回整串 raw 比對（格內計算過程雜訊 → 必送審）。
+    if (Array.isArray(row?.partValues)) {
+      const pv = row.partValues
+        .filter((p) => p && typeof p.subId === 'string' && p.subId.trim())
+        .map((p) => ({ subId: String(p.subId).trim(), student: ensureString(p?.student, '').trim() }))
+      if (pv.length > 0) entry.partValues = pv
+    }
     answers.push(entry)
   }
 
@@ -8267,6 +8309,29 @@ export async function runStagedGradingPhaseA({
     return `以下是多張「同一題型」的作答區裁切放大圖，每張圖前有題號標籤。${roleLine}\n${rule}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
   }
   const tsChunk = (arr, n) => { const o = []; const s = Math.max(1, n); for (let i = 0; i < arr.length; i += s) o.push(arr.slice(i, i + s)); return o }
+  // 2026-07-05: type-split 的 fill_blank 合題支援——原本 text family 輸出 schema 只有 studentAnswerRaw、
+  //   read 不吐 partValues → 合題兩讀只能比整格傾倒文字（含學生寫在格內的計算過程）→ 雜訊使兩讀必不等
+  //   → 題題送審（培英題3 實測）。補 SPEC 讓兩讀輸出 partValues（每空只放最終答案、計算過程不進），
+  //   搭配 computeConsistencyStatus 的 partValues 逐空比對 → 過程雜訊不再觸發 NR、真分歧仍送審。
+  const tsPartsMeta = (q) => {
+    if (q?.questionType !== 'fill_blank') return null
+    const ak = akMapForAi2.get(q.questionId)
+    return (Array.isArray(ak?.parts) && ak.parts.length >= 2) ? ak.parts : null
+  }
+  const tsPartsRule = (qs) => `🆕 合題（一格多小題）：下列題目一格內含多個小題的答案，除 studentAnswerRaw 外**必須**另輸出 partValues 陣列：
+- 每題格式：{"questionId":"...","studentAnswerRaw":"...","status":"read","partValues":[{"subId":"a","student":"..."},{"subId":"b","student":"..."}]}
+- subId 依卷面小題標號順序對應：(1)／A1／① → a、(2)／A2／② → b、依此類推
+- 卷面若**沒有**小題標號：取「各自獨立成行的最終答案」由上到下、由左到右依序對應 a b c d…（有標號者優先按標號）
+- 每個 student 只放該小題的**最終答案**；格內的計算過程、演算草稿、比較的中間步驟**一律不要**放進 partValues
+- 小題空白 → student=""；有寫但看不清 → student="?"
+SPEC：
+${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.questionId}"：${ps.length} 空、subIds: ${ps.map((p) => `(${p.subId})`).join(' ')}` }).join('\n')}`
+  // review 角色的「正確答案」提示：合題答案在 parts[]（answer 欄位空）→ 逐空列出
+  const tsAnswerHint = (q, ak) => {
+    const ps = tsPartsMeta(q)
+    if (ps) return ps.map((p) => `${p.subId}=${ensureString(p?.answer, '')}`).join('；')
+    return ensureString(ak?.answer || ak?.referenceAnswer, '').trim()
+  }
   const runTypeSplitRole = async (role) => {
     const groups = new Map()
     for (const q of classifyAligned) {
@@ -8286,6 +8351,9 @@ export async function runStagedGradingPhaseA({
       for (const batch of tsChunk(qs, cfg.batch)) {
         jobs.push(async () => {
           const parts = [{ text: tsReadHead(cfg.family, role) }]
+          // 合題（partValues）SPEC：本批含合題才附加（見 tsPartsRule）
+          const partsQsInBatch = batch.filter((q) => tsPartsMeta(q))
+          if (partsQsInBatch.length > 0) parts.push({ text: tsPartsRule(partsQsInBatch) })
           for (const q of batch) {
             // freshCrop：改用「單題緊框」重切(如 ordering)，不用 allQuestionCropMap 的 crop
             //   (沙盒實證 ordering 用 tight 0.02 crop 兩讀一致 97%、用 pipeline 寬 crop 只 ~50%)
@@ -8297,7 +8365,7 @@ export async function runStagedGradingPhaseA({
             if (!crop) continue
             const giveAns = role === 'review' && !cfg.blindRead2
             const ak = akMapForAi2.get(q.questionId)
-            const ans = giveAns ? ensureString(ak?.answer || ak?.referenceAnswer, '').trim() : ''
+            const ans = giveAns ? tsAnswerHint(q, ak) : ''
             parts.push({ text: `--- 題目 ${q.questionId}${ans ? `（正確答案：${ans}）` : ''} ---` })
             parts.push({ inlineData: crop })
           }
@@ -8340,9 +8408,10 @@ export async function runStagedGradingPhaseA({
                 await new Promise((r) => setTimeout(r, Math.random() * 5000))
                 const giveAns = role === 'review' && !cfg.blindRead2
                 const ak = akMapForAi2.get(q.questionId)
-                const ans = giveAns ? ensureString(ak?.answer || ak?.referenceAnswer, '').trim() : ''
+                const ans = giveAns ? tsAnswerHint(q, ak) : ''
                 const singleParts = [
                   { text: tsReadHead(cfg.family, role) },
+                  ...(tsPartsMeta(q) ? [{ text: tsPartsRule([q]) }] : []),
                   { text: `--- 題目 ${q.questionId}${ans ? `（正確答案：${ans}）` : ''} ---` },
                   { inlineData: crop }
                 ]
