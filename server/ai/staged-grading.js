@@ -2841,7 +2841,7 @@ function applyLenientFocusOverride(normalized, question, answerKey, domainHint) 
   return normalized
 }
 
-function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
+export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
   const answersById = mapByQuestionId(answers, (item) => item?.questionId)
   const scoresRaw = Array.isArray(parsed?.scores) ? parsed.scores : []
   const byQuestionId = mapByQuestionId(scoresRaw, (item) => item?.questionId)
@@ -2946,15 +2946,35 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
         if (correct && mathNumericEquivalent(ensureString(answer?.studentAnswerRaw, ''), correct)) { score = maxScore; mathEqRestoredWhole = true }
       }
     }
-    const caseRestored = caseRestoredSubIds.size > 0 || caseRestoredWhole
+    // 2026-07-06: 數學列舉題「全寫策略」判錯（老師拍板：把所有可能答案都列出＝錯。
+    //   座15 列 15~27 被 AI 判對、座32 同型答案被判錯——同型不同判，改確定性規則統一）。
+    //   嚴格限定：標準答案為 ≥2 個純數值清單、學生也是純數值清單、且為標準的「真超集」→ 強制 0 分。
+    let enumSupersetWrong = false
+    if (readStatus === 'read' && isMathForDots && question?.questionCategory === 'fill_blank') {
+      const listVals = (t) => {
+        const str = ensureString(t, '').trim()
+        if (!str || !/^[-\d\s.,，、]+$/.test(str)) return null
+        const vals = str.split(/[,，、]+/).map((x) => x.trim()).filter(Boolean)
+        if (vals.length < 2 || vals.some((v) => !/^-?\d+(\.\d+)?$/.test(v))) return null
+        return vals.map(Number)
+      }
+      const kv = listVals(question?.answer)
+      const sv = listVals(ensureString(answer?.studentAnswerRaw, ''))
+      if (kv && sv && sv.length > kv.length && kv.every((v) => sv.includes(v))) {
+        enumSupersetWrong = true
+        score = 0
+      }
+    }
+
+    const caseRestored = !enumSupersetWrong && (caseRestoredSubIds.size > 0 || caseRestoredWhole
       || dotRestoredSubIds.size > 0 || dotRestoredWhole
-      || mathEqRestoredSubIds.size > 0 || mathEqRestoredWhole
+      || mathEqRestoredSubIds.size > 0 || mathEqRestoredWhole)
 
     // Hard override: blank/unreadable always score=0 regardless of model output
     if (readStatus === 'blank' || readStatus === 'unreadable') score = 0
 
     const isCorrect =
-      (readStatus === 'blank' || readStatus === 'unreadable')
+      (readStatus === 'blank' || readStatus === 'unreadable' || enumSupersetWrong)
         ? false
         : caseRestored
           ? maxScore > 0 && score >= maxScore
@@ -3041,6 +3061,7 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
     if (caseRestoredWhole) finalScoringReason = '大小寫等價判定：學生作答與正解僅大小寫／結尾標點差異（專有名詞、全大寫縮寫除外），視為正確。'
     if (dotRestoredWhole) finalScoringReason = '頭尾雜點等價判定：學生作答與正解僅差數字前後的筆誤墨點（內部小數點不受影響），視為正確。'
     if (mathEqRestoredWhole) finalScoringReason = '數學等價判定：學生作答經代入驗證與標準答案同解（移項／化簡／等價形），視為正確。'
+    if (enumSupersetWrong) finalScoringReason = `學生列出多於標準答案的數值（把可能的答案都寫上）——依評分標準「多列＝未確定答案」判錯。標準答案：${ensureString(question?.answer, '')}`
 
     const normalizedBase = {
       questionId,
