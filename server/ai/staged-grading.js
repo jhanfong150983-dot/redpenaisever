@@ -2643,6 +2643,24 @@ Return:
 `.trim()
 }
 
+// 2026-07-06: read 讀值 de-LaTeX——3.5 偶發整卷切換成 LaTeX 數學語法（\le、\ge、\frac{50}{7}），
+//   老師看是亂碼、且與另一讀的 plain 寫法字串不等 → 整卷假 NR（座21 實測 11 題）。
+//   在入庫點確定性轉回 plain（比對/顯示/accessor 輸入一次全修）；只轉列舉 token、其餘反斜線保留原樣。
+export function deLatexMathText(raw) {
+  let t = String(raw ?? '')
+  if (!t.includes('\\')) return t
+  t = t.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '$1/$2')
+  t = t.replace(/\\sqrt\s*\{([^{}]+)\}/g, '√$1')
+  t = t.replace(/\\(?:leq?|leqslant)\b/g, '<=')
+  t = t.replace(/\\(?:geq?|geqslant)\b/g, '>=')
+  t = t.replace(/\\lt\b/g, '<').replace(/\\gt\b/g, '>')
+  t = t.replace(/\\(?:times|cdot)\b/g, '×')
+  t = t.replace(/\\div\b/g, '÷')
+  t = t.replace(/\\%/g, '%')
+  t = t.replace(/\\(?:left|right)\b/g, '')
+  return t
+}
+
 export function normalizeReadAnswerResult(parsed, questionIds, mismatchIds = new Set()) {
   const answersRaw = Array.isArray(parsed?.answers) ? parsed.answers : []
   const byQuestionId = mapByQuestionId(answersRaw, (item) => item?.questionId)
@@ -2650,7 +2668,7 @@ export function normalizeReadAnswerResult(parsed, questionIds, mismatchIds = new
 
   for (const questionId of questionIds) {
     const row = byQuestionId.get(questionId)
-    let studentAnswerRaw = ensureString(row?.studentAnswerRaw, '').trim()
+    let studentAnswerRaw = deLatexMathText(ensureString(row?.studentAnswerRaw, '').trim())
     let status = ensureString(row?.status, '').trim().toLowerCase()
 
     // 2026-05-29: 合題（fill_blank parts）後備——AI 偶發正確回了 partValues
@@ -2681,7 +2699,7 @@ export function normalizeReadAnswerResult(parsed, questionIds, mismatchIds = new
     if (Array.isArray(row?.partValues)) {
       const pv = row.partValues
         .filter((p) => p && typeof p.subId === 'string' && p.subId.trim())
-        .map((p) => ({ subId: String(p.subId).trim(), student: ensureString(p?.student, '').trim() }))
+        .map((p) => ({ subId: String(p.subId).trim(), student: deLatexMathText(ensureString(p?.student, '').trim()) }))
       if (pv.length > 0) entry.partValues = pv
     }
     answers.push(entry)
