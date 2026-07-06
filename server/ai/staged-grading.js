@@ -2921,8 +2921,34 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
         if (correct && dotForgivableEqual(ensureString(answer?.studentAnswerRaw, ''), correct)) { score = maxScore; dotRestoredWhole = true }
       }
     }
+    // 2026-07-06: code 兜底——數學 fill_blank「數值代入等價」救回（方法1、老師拍板等價即給分）。
+    //   AI 對「移項/化簡/解出範圍」等等價形判錯時 code 推翻；只加分不減分、非純數學式不碰。
+    const mathEqRestoredSubIds = new Set()
+    let mathEqRestoredWhole = false
+    if (readStatus === 'read' && maxScore > 0 && isMathForDots && question?.questionCategory === 'fill_blank') {
+      const rawParts = Array.isArray(row?.partResults) ? row.partResults : null
+      const keyParts = Array.isArray(question?.parts) ? question.parts : null
+      if (rawParts && keyParts && keyParts.length > 0) {
+        const ansBySub = new Map(keyParts.map((p) => [String(p?.subId ?? '').trim(), ensureString(p?.answer, '')]))
+        const maxBySub = new Map(keyParts.map((p) => [String(p?.subId ?? '').trim(), Math.max(0, toFiniteNumber(p?.maxScore) ?? 0)]))
+        let restored = 0
+        for (const pr of rawParts) {
+          const sub = String(pr?.subId ?? '').trim()
+          if (!sub || pr?.correct === true || dotRestoredSubIds.has(sub)) continue
+          if (mathNumericEquivalent(ensureString(pr?.student, ''), ansBySub.get(sub) ?? ensureString(pr?.expected, ''))) {
+            mathEqRestoredSubIds.add(sub)
+            restored += (maxBySub.get(sub) ?? 0)
+          }
+        }
+        if (restored > 0) score = Math.min(maxScore, score + restored)
+      } else if (!dotRestoredWhole && !(typeof row?.isCorrect === 'boolean' ? row.isCorrect : score >= maxScore)) {
+        const correct = ensureString(question?.answer || question?.referenceAnswer, '')
+        if (correct && mathNumericEquivalent(ensureString(answer?.studentAnswerRaw, ''), correct)) { score = maxScore; mathEqRestoredWhole = true }
+      }
+    }
     const caseRestored = caseRestoredSubIds.size > 0 || caseRestoredWhole
       || dotRestoredSubIds.size > 0 || dotRestoredWhole
+      || mathEqRestoredSubIds.size > 0 || mathEqRestoredWhole
 
     // Hard override: blank/unreadable always score=0 regardless of model output
     if (readStatus === 'blank' || readStatus === 'unreadable') score = 0
@@ -2980,16 +3006,19 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
             const sub = String(p.subId).trim()
             const restoredCase = caseRestoredSubIds.has(sub)  // 大小寫救回 → 標記為對
             const restoredDot = dotRestoredSubIds.has(sub)    // 數學頭尾雜點救回 → 標記為對
+            const restoredMathEq = mathEqRestoredSubIds.has(sub)  // 數值代入等價救回 → 標記為對
             return {
               subId: sub,
               student: ensureString(p.student, ''),
               expected: ensureString(p.expected, ''),
-              correct: p.correct === true || restoredCase || restoredDot,
+              correct: p.correct === true || restoredCase || restoredDot || restoredMathEq,
               reason: restoredCase
                 ? '大小寫等價（普通字首字母／結尾標點），視為正確'
                 : restoredDot
                   ? '頭尾雜點等價（數字前後的筆誤墨點），視為正確'
-                  : (typeof p.reason === 'string' ? p.reason : undefined)
+                  : restoredMathEq
+                    ? '數學等價（代入驗證與標準答案同解），視為正確'
+                    : (typeof p.reason === 'string' ? p.reason : undefined)
             }
           })
       : undefined
@@ -3011,6 +3040,7 @@ function normalizeAccessorResult(parsed, answerKey, answers, domainHint) {
     // 單一答案(無 parts)整體救回 → 用一致理由蓋掉 AI 矛盾的大小寫扣分說明(多空格題已由上方逐格 partResults 處理)
     if (caseRestoredWhole) finalScoringReason = '大小寫等價判定：學生作答與正解僅大小寫／結尾標點差異（專有名詞、全大寫縮寫除外），視為正確。'
     if (dotRestoredWhole) finalScoringReason = '頭尾雜點等價判定：學生作答與正解僅差數字前後的筆誤墨點（內部小數點不受影響），視為正確。'
+    if (mathEqRestoredWhole) finalScoringReason = '數學等價判定：學生作答經代入驗證與標準答案同解（移項／化簡／等價形），視為正確。'
 
     const normalizedBase = {
       questionId,
@@ -5585,6 +5615,95 @@ function caseForgivableEqual(studentText, correctText) {
 function stripEdgeDots(text) {
   return String(text ?? '').trim().replace(/^\.+/, '').replace(/\.+$/, '').trim()
 }
+// ── 2026-07-06: 數學「數值代入等價」確定性覆核（方法1）─────────────────────────
+//   老師拍板：列式題等價即給分（含移項/化簡形、甚至直接解出的範圍）。原理＝多點代入比對
+//   真假指紋（多項式恆等檢定）：兩式不等價必在某測試點露餡；全過＝等價。純系統、零 AI call。
+//   守門：①只吃純數學式（數字/x/四則/括號/比較符），含中文/單位/逗號一律不碰、交回 AI 判定
+//        ②純分數 vs 純分數「值等但未化簡」不翻案（卷面明文「化為最簡分數才給分」）
+//        ③式子 vs 純值（x>=12000 vs 12000）比較符結構不同不混判
+function mneEval(expr, x) {
+  let t = expr
+    .replace(/(\d|\))x/g, '$1*x')      // 係數寫法 1.3x → 1.3*x、)x → )*x
+    .replace(/x(\d|\()/g, 'x*$1')      // x2 / x( → x*2 / x*(
+    .replace(/\)(\d|\()/g, ')*$1')     // )( 與 )2 隱式乘
+    .replace(/(\d)\(/g, '$1*(')        // 2( → 2*(（分配律寫法 2(x+3000)）
+    .replace(/x/g, '(' + x + ')')
+  if (!/^[-+*/().\d]+$/.test(t)) throw new Error('bad expr')
+  const v = Function('"use strict";return(' + t + ')')()
+  if (!Number.isFinite(v)) throw new Error('not finite')
+  return v
+}
+// 找出一串比較式的「分界點」（L−R 的根）：粗網格掃符號變化＋二分法收斂。
+// 兩式若不等價、真假必在某分界點附近不同——把兩邊所有分界點±ε 納入測試點、不靠運氣採樣。
+function mneBoundaries(parts) {
+  const roots = []
+  const GRID = []
+  for (let v = -100000; v <= 100000; v += 2000) GRID.push(v)
+  for (const v of [-1e6, -12345.6, -777, -50, -20, -7.3, -3, -1, -0.5, -0.1, 0, 0.1, 0.5, 1, 3, 7, 20, 50, 777, 12345.6, 1e6]) GRID.push(v)
+  GRID.sort((a, b) => a - b)
+  for (let i = 0; i + 2 < parts.length + 1 && i + 1 < parts.length; i += 2) {
+    const g = (x) => mneEval(parts[i], x) - mneEval(parts[i + 2], x)
+    for (let j = 1; j < GRID.length; j++) {
+      let a = GRID[j - 1], b = GRID[j]
+      let ga, gb
+      try { ga = g(a); gb = g(b) } catch { continue }
+      if (ga === 0) roots.push(a)
+      if (gb === 0) roots.push(b)
+      if (ga * gb < 0) {
+        for (let k = 0; k < 80; k++) { const m = (a + b) / 2; const gm = g(m); if (ga * gm <= 0) { b = m } else { a = m; ga = gm } }
+        roots.push((a + b) / 2)
+      }
+    }
+  }
+  return roots
+}
+export function mathNumericEquivalent(studentText, correctText) {
+  const prep = (t) => String(t ?? '').trim().toLowerCase()
+    .replace(/[≤≦]/g, '<=').replace(/[≥≧]/g, '>=')
+    .replace(/[×·⋅∙‧・]/g, '*').replace(/÷/g, '/')
+    .replace(/[−–—]/g, '-').replace(/（/g, '(').replace(/）/g, ')')
+    .replace(/[ｘＸ]/g, 'x').replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
+    .replace(/\s+/g, '')
+  const s = prep(studentText), k = prep(correctText)
+  if (!s || !k || s === k) return false  // 相等的不需要翻案（AI 已判對或另有原因）
+  const PURE = /^[0-9x+\-*/().<>=]+$/
+  if (!PURE.test(s) || !PURE.test(k)) return false
+  // 最簡分數守門：兩邊都是純分數、值等但寫法不同 → 不翻（卷面要求最簡）
+  const FRAC = /^-?\d+\/\d+$/
+  if (FRAC.test(s) && FRAC.test(k)) return false
+  const split = (t) => t.split(/(<=|>=|<|>|=)/).filter(Boolean)  // [expr, op, expr, op, ...] 支援鏈式 65<=x<90
+  const ps = split(s), pk = split(k)
+  const sHasCmp = ps.length > 1, kHasCmp = pk.length > 1
+  if (sHasCmp !== kHasCmp) return false
+  const truthChain = (p, x) => {
+    for (let i = 0; i + 2 < p.length + 1 && i + 1 < p.length; i += 2) {
+      const L = mneEval(p[i], x), op = p[i + 1], R = mneEval(p[i + 2], x)
+      const ok = op === '<=' ? L <= R : op === '>=' ? L >= R : op === '<' ? L < R : op === '>' ? L > R : Math.abs(L - R) < 1e-9
+      if (!ok) return false
+    }
+    return true
+  }
+  const POINTS = [-7.31, -1, 0, 0.5, 1, 3.77, 12.123, 99.9, 1234.5, 12000, 240000.25]
+  try {
+    if (!sHasCmp) {
+      // 無比較符：表達式/純值 → 逐點值相等（相對誤差 1e-9）
+      const sHasX = s.includes('x'), kHasX = k.includes('x')
+      if (sHasX !== kHasX) return false
+      const pts = sHasX ? POINTS : [0]
+      return pts.every((x) => {
+        const a = mneEval(s, x), b = mneEval(k, x)
+        return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b))
+      })
+    }
+    // 比較式：測試點＝固定點＋「兩式所有分界點±ε與分界點本身」——分界不同必露餡、
+    //   端點開閉不同（65<=x<=90 vs 65<=x<90）在分界點本身露餡。
+    const EPS = 1e-4
+    const pts = [...POINTS]
+    for (const r of [...mneBoundaries(ps), ...mneBoundaries(pk)]) pts.push(r - EPS, r, r + EPS)
+    return pts.every((x) => truthChain(ps, x) === truthChain(pk, x))
+  } catch { return false }
+}
+
 export function dotForgivableEqual(studentText, correctText) {
   const s = String(studentText ?? '').trim()
   const c = String(correctText ?? '').trim()
