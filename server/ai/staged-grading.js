@@ -8286,7 +8286,9 @@ export async function runStagedGradingPhaseA({
     true_false:                   { model: 'FLASH', batch: 30, blindRead2: false, family: 'choice' },
     single_check:                 { model: 'PRO',   batch: 15, blindRead2: false, family: 'check' },
     multi_check:                  { model: 'PRO',   batch: 15, blindRead2: false, family: 'check' },
-    fill_blank:                   { model: 'FLASH', batch: 15, blindRead2: false, family: 'text' },
+    // 2026-07-06: fill_blank batch 15→30（提速沙盒 E4）：3.5 有偶發 240-274s 拖尾 call、小批多 call 多曝險；
+    //   batch30 每卷 wall 23.6s(0錯) vs batch15 58.2s(含拖尾)、品質四種批次持平（exp-speedup REPORT.md）。
+    fill_blank:                   { model: 'FLASH', batch: 30, blindRead2: false, family: 'text' },
     short_answer:                 { model: 'FLASH', batch: 10, blindRead2: false, family: 'text' },
     compound_chain_table:         { model: 'FLASH', batch: 1,  blindRead2: false, family: 'compound' },
     compound_circle_with_explain: { model: 'FLASH', batch: 4,  blindRead2: false, family: 'compound' },
@@ -8402,10 +8404,14 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
           // ⚠ executeStage 只認 modelOverride（否則走 resolveStageModel=FLASH），會忽略 model 參數。
           //   per-type model 必須當 modelOverride 傳、否則 TYPE_READ_CONFIG 的 PRO/英語升級全失效(一直跑 2.5)。
           //   國語卷 readModelOverride(整體 PRO) 優先，其餘用本型算出的 model。
+          // 2026-07-06: 拖尾斷開（沙盒 E4）：3.5 偶發 240-274s straggler、最終都會成功——60s 斷開讓
+          //   既有「退避重試→逐題兜底」接手，把拖尾上限壓到 ~90s。回退：READ_CALL_TIMEOUT_MS=0（=不設限）。
+          const readCallCap = Number(process.env.READ_CALL_TIMEOUT_MS ?? 60000)
+          const readTimeout = () => readCallCap > 0 ? Math.min(getRemainingBudget(), readCallCap) : getRemainingBudget()
           const runBatchCall = () => executeStage({
             apiKey, model, modelOverride: readModelOverride || model,
             payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-            timeoutMs: getRemainingBudget(), routeHint,
+            timeoutMs: readTimeout(), routeHint,
             routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
             stageContents: [{ role: 'user', parts }]
           })
@@ -8448,7 +8454,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
                 const r = await executeStage({
                   apiKey, model, modelOverride: readModelOverride || model,
                   payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-                  timeoutMs: getRemainingBudget(), routeHint,
+                  timeoutMs: readTimeout(), routeHint,
                   routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
                   stageContents: [{ role: 'user', parts: singleParts }]
                 })
@@ -11664,6 +11670,68 @@ export async function runStagedGradingPhaseB({
     // 2026-05-20: 所有題都被 manualBypassIds 拿掉 → 不跑 Accessor、deterministic scores 完整覆蓋
     accessorResult = { scores: [] }
     logStaged(pipelineRunId, 'basic', `[B] 所有題目都是 manual-bypass、跳過 Accessor LLM`)
+  } else if (process.env.ACCESSOR_TYPE_SPLIT !== 'false' && allAnswerIds.length > 10) {
+    // ── 2026-07-06: accessor type-split 小批並行（提速沙盒 E2、exp-speedup REPORT.md）──
+    //   取代對半拆：按題型分組、chunk ≤10、卷內並行 6 → 每卷 accessor 40s→20s、分數一致 97.9%
+    //   （~2% 邊界等價題兩方向翻轉、無系統性偏鬆嚴）。單批失敗→重試一次→仍失敗 fallback 整卷單 call。
+    //   kill-switch: ACCESSOR_TYPE_SPLIT='false'（回到對半拆/單 call 舊路）。
+    const filterAkTs = (ids) => ({ ...answerKey, questions: (answerKey?.questions || []).filter((q) => ids.has(ensureString(q?.id).trim())) })
+    const filterRarTs = (ids) => ({ answers: finalReadAnswerResult.answers.filter((a) => ids.has(ensureString(a?.questionId).trim())) })
+    const akByIdTs = new Map((answerKey?.questions || []).map((q) => [ensureString(q?.id).trim(), q]))
+    const tsGroups = new Map()
+    for (const id of allAnswerIds) {
+      const t = ensureString(akByIdTs.get(id)?.questionCategory, 'other') || 'other'
+      if (!tsGroups.has(t)) tsGroups.set(t, [])
+      tsGroups.get(t).push(id)
+    }
+    const tsBatches = []
+    for (const [, ids] of tsGroups) for (let i = 0; i < ids.length; i += 10) tsBatches.push(ids.slice(i, i + 10))
+    logStageStart(pipelineRunId, 'Accessor-ts')
+    logStaged(pipelineRunId, 'basic', `[B1] accessor type-split：${tsBatches.length} 批（${[...tsGroups.entries()].map(([t, ids]) => `${t}×${ids.length}`).join('、')}）`)
+    const runTsBatch = async (ids) => {
+      const idSet = new Set(ids)
+      const call = () => executeStage({ apiKey, model: phaseBModel, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(filterAkTs(idSet), filterRarTs(idSet), internalContext?.domainHint, gradeBand), ids, calcCropMap) }] })
+      let resp = await call()
+      let parsed = resp?.ok ? parseCandidateJson(resp.data) : null
+      if (!parsed || typeof parsed !== 'object') { resp = await call(); parsed = resp?.ok ? parseCandidateJson(resp.data) : null }
+      stageResponses.push(resp)
+      if (resp?.warnings?.length > 0) stageWarnings.push(...resp.warnings.map((w) => `[Accessor-ts] ${w}`))
+      if (!parsed || typeof parsed !== 'object') return null
+      return normalizeAccessorResult(parsed, filterAkTs(idSet), filterRarTs(idSet).answers, internalContext?.domainHint)
+    }
+    const tsOuts = []
+    {
+      const TS_LIM = 6; let tsi = 0
+      await Promise.all(Array.from({ length: Math.min(TS_LIM, tsBatches.length) }, async () => {
+        while (tsi < tsBatches.length) { const b = tsBatches[tsi++]; tsOuts.push({ ids: b, res: await runTsBatch(b) }) }
+      }))
+    }
+    logStageEnd(pipelineRunId, 'Accessor-ts', { ok: tsOuts.every((o) => o.res), status: 200 })
+    if (tsOuts.every((o) => o.res)) {
+      accessorResult = { scores: tsOuts.flatMap((o) => o.res.scores || []) }
+    } else {
+      // fallback：整卷單 call（同舊單一路徑；再失敗回 503、行為與舊版一致）
+      logStaged(pipelineRunId, 'basic', `[B1] accessor type-split ${tsOuts.filter((o) => !o.res).length} 批失敗 → fallback 整卷單 call`)
+      const fbPrompt = buildAccessorPrompt(accessorAnswerKey, accessorReadAnswerResult, internalContext?.domainHint, gradeBand)
+      const fbResp = await executeStage({ apiKey, model: phaseBModel, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR, stageContents: [{ role: 'user', parts: buildAccessorParts(fbPrompt, allAnswerIds, calcCropMap) }] })
+      stageResponses.push(fbResp)
+      const fbParsed = fbResp?.ok ? parseCandidateJson(fbResp.data) : null
+      if (!fbParsed || typeof fbParsed !== 'object') {
+        return {
+          status: 503,
+          data: JSON.stringify({ error: 'PhaseB accessor type-split + fallback failed', code: 'ACCESSOR_PARSE_FAILED' }),
+          pipelineMeta: {
+            pipeline: STAGED_PIPELINE_NAME,
+            prepareLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.prepareLatencyMs) || 0), 0),
+            modelLatencyMs: stageResponses.reduce((s, r) => s + (Number(r.modelLatencyMs) || 0), 0),
+            warnings: [...stageWarnings, 'GRADING_ACCESSOR_TS_FALLBACK_FAILED'],
+            metrics: { stage: 'accessor-ts-fallback' }
+          }
+        }
+      }
+      accessorResult = normalizeAccessorResult(fbParsed, accessorAnswerKey, accessorReadAnswerResult.answers, internalContext?.domainHint)
+      accessorResult = { scores: accessorResult.scores || [] }
+    }
   } else if (canSplitAccessor) {
     const p1Ids = new Set([...otherAnswerIds, ...page1AnswerIds])
     const p2Ids = new Set(page2AnswerIds)
