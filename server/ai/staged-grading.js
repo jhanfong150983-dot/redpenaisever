@@ -12094,18 +12094,31 @@ export async function runStagedGradingPhaseB({
           if (resp) stageResponses.push(resp)
           if (!resp?.ok) continue
           const parsed = parseCandidateJson(resp.data)
-          if (ensureString(parsed?.verdict, '') !== 'different') continue
+          const gVerdict = ensureString(parsed?.verdict, '')
           const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
-          deterministicScores.push({
-            questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
-            scoringReason: `字形錯誤：${ensureString(parsed?.reason, '').slice(0, 40) || '與標準筆畫結構不符'}（標準「${t.key}」、視覺覆核）`,
-            scoreConfidence: 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
-            _vjBypass: true, _glyphJudge: true,
-            // 逐部件分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
-            glyphAnalysis: ensureString(parsed?.analysis, '').slice(0, 200)
-          })
-          vjBypassIds.add(t.qid)
-          glyphFlipped++
+          if (gVerdict === 'different') {
+            deterministicScores.push({
+              questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
+              scoringReason: `字形錯誤：${ensureString(parsed?.reason, '').slice(0, 40) || '與標準筆畫結構不符'}（標準「${t.key}」、視覺覆核）`,
+              scoreConfidence: 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
+              _vjBypass: true, _glyphJudge: true,
+              // 逐部件分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
+              glyphAnalysis: ensureString(parsed?.analysis, '').slice(0, 200)
+            })
+            vjBypassIds.add(t.qid)
+            glyphFlipped++
+          } else if (gVerdict === 'same') {
+            // 2026-07-12 字形終審=國字題終點（user 指出 same 還會白搭 accessor）：
+            //   讀出=正解（fold 相等）＋字形視覺驗證通過 → 確定性給滿分、bypass accessor
+            //   （accessor 文字比對已無資訊增量、留著反而多一次誤判機會）。error/no_ref 仍 fail-open 進 accessor。
+            deterministicScores.push({
+              questionId: t.qid, isCorrect: true, score: gMax, maxScore: gMax, errorType: 'none',
+              scoringReason: `答案正確（字形視覺覆核通過、標準「${t.key}」）`,
+              scoreConfidence: 100, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
+              _vjBypass: true, _glyphJudge: true
+            })
+            vjBypassIds.add(t.qid)
+          }
         }
         logStaged(pipelineRunId, 'basic', `[B-Glyph] 字形終審 ${glyphTargets.length} 格 → 攔下 ${glyphFlipped} 格`)
       }
