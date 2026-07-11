@@ -9431,7 +9431,7 @@ async function handlePdfClassifyTemplate(req, res) {
     // default: get
     const { data, error } = await supabaseDb
       .from('assignments')
-      .select('pdf_classify_template')
+      .select('pdf_classify_template, answer_key_template_id')
       .eq('id', assignmentId)
       .eq('owner_id', user.id)
       .maybeSingle()
@@ -9440,7 +9440,35 @@ async function handlePdfClassifyTemplate(req, res) {
       res.status(500).json({ error: error.message })
       return
     }
-    res.status(200).json({ template: data?.pdf_classify_template ?? null })
+    if (data?.pdf_classify_template) {
+      res.status(200).json({ template: data.pdf_classify_template })
+      return
+    }
+    // 2026-07-11 跨作業共用（user 拍板）：本作業還沒有範本時，找「同 owner＋同答案卷 template」
+    // 的兄弟作業借——同一份答案卷印出來的 PDF 版面相同、統一框可跨班共用，後面的班整段
+    // classify 全省（改越多班省越多）。失效保護不變：client 端 isPdfTemplateValid 仍驗
+    // qids＋頁數、對不上就作廢重抽，與單作業路徑同一套 fail-safe。
+    if (data?.answer_key_template_id) {
+      const { data: sibs, error: sibErr } = await supabaseDb
+        .from('assignments')
+        .select('id, pdf_classify_template')
+        .eq('owner_id', user.id)
+        .eq('answer_key_template_id', data.answer_key_template_id)
+        .neq('id', assignmentId)
+        .not('pdf_classify_template', 'is', null)
+        .limit(5)
+      if (!sibErr && Array.isArray(sibs) && sibs.length > 0) {
+        // 取 savedAt 最新的一份（範本 JSON 內帶 savedAt、缺就當 0）
+        const best = sibs.reduce((a, b) =>
+          (Number(b?.pdf_classify_template?.savedAt) || 0) > (Number(a?.pdf_classify_template?.savedAt) || 0) ? b : a)
+        if (best?.pdf_classify_template) {
+          console.log(`[pdf-classify-template][get] ${assignmentId} 無範本、借用兄弟作業 ${best.id}（同 template ${data.answer_key_template_id}）`)
+          res.status(200).json({ template: best.pdf_classify_template, borrowedFrom: best.id })
+          return
+        }
+      }
+    }
+    res.status(200).json({ template: null })
   } catch (err) {
     console.error('[pdf-classify-template] error:', err)
     res.status(500).json({ error: String(err?.message || err) })
