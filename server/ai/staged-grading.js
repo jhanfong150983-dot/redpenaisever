@@ -12003,6 +12003,112 @@ export async function runStagedGradingPhaseB({
     }
   }
 
+  // ── 🆕 2026-07-11 字形終審（glyph judge、user 拍板）────────────────────────────
+  // 背景：寫國字題學生「造字/寫錯字」時、轉錄層必然投射成最接近的真字（輸出字庫沒有那個字）
+  //   → 「讀出值=正解」在寫國字題不可信（國語卷實測 14+ 格放水、老師終審確認）。
+  // 沙盒（e-glyph-judge、5輪×兩臂）：造字/形近攔截 100%（31/31 含老師翻案 10 格）、真誤殺 0
+  //   （5 模糊格老師裁定歸學生責任＋申訴）；聲調/注音判不動、排除範圍。
+  // 設計：只對「fill_blank × 正解為 1~2 個中文字 × 讀出值=正解」跑視覺是非題（不辨認、只校對筆畫）：
+  //   學生 crop＋答案卷老師手寫參考圖（缺圖退純文字指定），different → 0 分＋字形錯誤理由；
+  //   same/任何失敗 → fail-open 交 accessor 照常。kill switch GLYPH_JUDGE='0'。
+  // 只跑國語卷（domain 閘門）：字形嚴格度是國語的評分軸；數學的「無解」等中文答案不管字形、不可誤掃。
+  const glyphDomainOk = ensureString(payload?.domain ?? internalContext?.domainHint, '').includes('國')
+  if (process.env.GLYPH_JUDGE !== '0' && glyphDomainOk && inlineImages.length > 0) {
+    try {
+      const cjk12 = (s) => /^[一-鿿]{1,2}$/u.test(s)
+      const classifyArrForGlyph = Array.isArray(classifyResult)
+        ? classifyResult
+        : (classifyResult?.alignedQuestions || classifyResult?.questions || [])
+      const studentImgG = inlineImages[0]?.inlineData
+      const glyphTargets = []
+      for (const ans of finalReadAnswerResult.answers) {
+        if (ans.status !== 'read' || manualBypassIds.has(ans.questionId) || vjBypassIds.has(ans.questionId)) continue
+        const q = akQById.get(ans.questionId)
+        if (!q || q.questionCategory !== 'fill_blank') continue
+        const key = ensureString(q.answer, '').trim()
+        if (!cjk12(key)) continue
+        if (normalizeAnswerForComparison(ensureString(ans.studentAnswerRaw, '')) !== normalizeAnswerForComparison(key)) continue
+        glyphTargets.push({ qid: ans.questionId, key, q, student: ans.studentAnswerRaw })
+      }
+      if (glyphTargets.length > 0 && studentImgG?.data) {
+        // 參考圖：答案卷（template）老師手寫正解、lazy 下載＋快取
+        let tplPaths = null
+        const refBufCache = new Map()
+        const loadTplPaths = async () => {
+          if (tplPaths !== null) return tplPaths
+          tplPaths = []
+          try {
+            const supabase = getSupabaseAdmin()
+            const aid = ensureString(payload?.assignmentId, '')
+            if (aid) {
+              const { data: arow } = await supabase.from('assignments').select('answer_key_template_id').eq('id', aid).maybeSingle()
+              if (arow?.answer_key_template_id) {
+                const { data: trow } = await supabase.from('answer_key_templates').select('answer_sheet_image_paths').eq('id', arow.answer_key_template_id).maybeSingle()
+                const p = trow?.answer_sheet_image_paths
+                tplPaths = Array.isArray(p) ? p : (typeof p === 'string' ? (JSON.parse(p) ?? []) : [])
+              }
+            }
+          } catch { tplPaths = [] }
+          return tplPaths
+        }
+        const refCropOf = async (q) => {
+          try {
+            const paths = await loadTplPaths()
+            const path = paths[Number(q.pageIndex) || 0]
+            if (!path || !q.answerBbox) return null
+            if (!refBufCache.has(path)) {
+              const supabase = getSupabaseAdmin()
+              const { data: blob } = await supabase.storage.from('homework-images').download(path)
+              refBufCache.set(path, blob ? Buffer.from(await blob.arrayBuffer()) : null)
+            }
+            const buf = refBufCache.get(path)
+            if (!buf) return null
+            const mime = path.endsWith('.webp') ? 'image/webp' : 'image/jpeg'
+            return await cropInlineImageByBbox(buf.toString('base64'), mime, q.answerBbox, true, 0.005)
+          } catch { return null }
+        }
+        let glyphFlipped = 0
+        for (const t of glyphTargets) {
+          const cRow = classifyArrForGlyph.find((r) => (r.questionId || r.id) === t.qid)
+          if (!cRow?.answerBbox) continue
+          const stuCrop = await cropInlineImageByBbox(studentImgG.data, studentImgG.mimeType, inflateBboxForType(cRow.answerBbox, cRow.questionType || 'fill_blank'), true, 0.005)
+          if (!stuCrop) continue
+          const ref = await refCropOf(t.q)
+          const promptTxt = `這是學生手寫的一個國字${ref ? '（第一張圖）。第二張圖是老師手寫的標準答案' : ''}。標準答案是「${t.key}」。
+你的任務不是辨認、是校對筆畫結構：逐部件比對學生寫的字與標準「${t.key}」是否為同一個字。
+- 部件錯誤（部首不同、內部構件寫成別的）、多筆少筆改變結構、寫成形近字或不存在的字 → "different"
+- 部件結構完全正確、只是筆跡潦草 → "same"（潦草不是錯）
+只輸出 JSON：{"verdict":"same|different","reason":"20字內筆畫證據"}`
+          const parts = [{ text: promptTxt }, { inlineData: stuCrop }]
+          if (ref) parts.push({ inlineData: ref })
+          const resp = await executeStage({
+            apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+            timeoutMs: getRemainingBudget(), routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+            stageContents: [{ role: 'user', parts }]
+          })
+          if (resp) stageResponses.push(resp)
+          if (!resp?.ok) continue
+          const parsed = parseCandidateJson(resp.data)
+          if (ensureString(parsed?.verdict, '') !== 'different') continue
+          const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
+          deterministicScores.push({
+            questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
+            scoringReason: `字形錯誤：學生書寫與標準「${t.key}」筆畫結構不符（${ensureString(parsed?.reason, '').slice(0, 40) || '視覺覆核'}）`,
+            scoreConfidence: 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
+            _vjBypass: true, _glyphJudge: true
+          })
+          vjBypassIds.add(t.qid)
+          glyphFlipped++
+        }
+        logStaged(pipelineRunId, 'basic', `[B-Glyph] 字形終審 ${glyphTargets.length} 格 → 攔下 ${glyphFlipped} 格`)
+      }
+    } catch (e) {
+      logStaged(pipelineRunId, 'basic', `[B-Glyph] 失敗(fail-open 交 accessor)：${e?.message}`)
+    }
+  }
+
   // Phase 2：找出 final ≠ expected 的 word_problem/calculation 題 (不含 manualBypass)
   const finalMismatchIds = new Set()
   for (const ans of finalReadAnswerResult.answers) {
