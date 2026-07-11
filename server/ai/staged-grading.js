@@ -12073,7 +12073,20 @@ export async function runStagedGradingPhaseB({
           } catch { return null }
         }
         let glyphFlipped = 0
-        for (const t of glyphTargets) {
+        // 2026-07-12 事故修（07-11 國語卷 503×8）：三道預算防護——
+        //   ①進場守門：剩餘預算 <90s 直接跳過整段（accessor 的份不可被吃）
+        //   ②stage 硬上限：字形終審整段最多用 60s、到點中止剩餘格（fail-open 交 accessor）
+        //   ③並行 3（原串行 14 call＝慢尾連鎖的溫床）
+        if (getRemainingBudget() < 90_000) {
+          logStaged(pipelineRunId, 'basic', `[B-Glyph] 剩餘預算不足（${Math.round(getRemainingBudget() / 1000)}s）→ 跳過字形終審（fail-open）`)
+          glyphTargets.length = 0
+        }
+        const glyphDeadline = Date.now() + 60_000
+        let gIdx = 0
+        await Promise.all(Array.from({ length: Math.min(3, glyphTargets.length) }, async () => {
+          while (gIdx < glyphTargets.length) {
+            if (Date.now() > glyphDeadline) return  // stage 到點、剩餘格 fail-open
+            const t = glyphTargets[gIdx++]
           const cRow = classifyArrForGlyph.find((r) => (r.questionId || r.id) === t.qid)
           if (!cRow?.answerBbox) continue
           const stuCrop = await cropInlineImageByBbox(studentImgG.data, studentImgG.mimeType, inflateBboxForType(cRow.answerBbox, cRow.questionType || 'fill_blank'), true, 0.005)
@@ -12105,7 +12118,9 @@ export async function runStagedGradingPhaseB({
             const resp = await executeStage({
               apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
               payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-              timeoutMs: getRemainingBudget(), routeHint,
+              // 2026-07-12 事故修：單 call 上限 20s——3.5 慢尾（240s+ 前科）不可吃掉 Phase B 共用預算
+              //  （07-11 國語卷實測：串行 14 call 無上限 → 一個慢尾 → accessor 零預算 → 503×8）
+              timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
               routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
               stageContents: [{ role: 'user', parts }]
             })
@@ -12149,8 +12164,9 @@ export async function runStagedGradingPhaseB({
             })
             vjBypassIds.add(t.qid)
           }
-        }
-        logStaged(pipelineRunId, 'basic', `[B-Glyph] 字形終審 ${glyphTargets.length} 格 → 攔下 ${glyphFlipped} 格`)
+          }
+        }))
+        logStaged(pipelineRunId, 'basic', `[B-Glyph] 字形終審 ${glyphTargets.length} 格 → 攔下 ${glyphFlipped} 格（剩餘預算 ${Math.round(getRemainingBudget() / 1000)}s）`)
       }
     } catch (e) {
       logStaged(pipelineRunId, 'basic', `[B-Glyph] 失敗(fail-open 交 accessor)：${e?.message}`)
