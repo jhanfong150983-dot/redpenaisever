@@ -1407,6 +1407,12 @@ export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
     return fold(d) === fold(key) || mathNumericEquivalent(d, key) === true
   }
   if (same(r1p, r2p)) return { adopted: r1p, level: 'L2', illegible: false }
+  // 2026-07-11 L2x 交叉對：一盲一知答「跨輪」一致（新盲×舊知答 / 舊盲×新知答）——與 L1/L2' 同等
+  // 證據等級（含盲票背書、無幻覺方向風險）。典型場景：一支重讀 call 失敗、另一支與對向舊讀一致
+  // （round8 座11 Q4 實測：r2' 失敗、r1'=r2=21 卻掉 tail 白掛標記）。
+  // 註：若 r1p≈r2 且 r2≈r2p 則 fold 傳遞 r1p≈r2p、已被 L2' 攔——L2x 不會弱化 L3a 幻覺防護。
+  if (same(r1p, r2)) return { adopted: r1p, level: 'L2x', illegible: false }
+  if (same(r1, r2p)) return { adopted: r2p, level: 'L2x', illegible: false }
   if (same(r2, r2p)) {
     if (keyEq(r2p)) {
       if (keyEq(r1) || keyEq(r1p)) return { adopted: r2p, level: 'L3a', illegible: false }
