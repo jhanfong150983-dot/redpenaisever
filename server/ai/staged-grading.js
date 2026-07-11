@@ -7019,6 +7019,11 @@ function buildFinalGradingResult({
           t = t.replace(/[０-９]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
           // 剝除外層括號：(C) → C、（甲）→ 甲、(2) → 2
           t = t.replace(/^[（(]\s*(.+?)\s*[）)]$/, '$1')
+          // 2026-07-11: 與 normalizeAnswerForComparison 同步的兩條等價（⚠等價規則兩處要一起改）：
+          // ①列舉分隔符——「36.76.96」=「36,76,96」（「數字.數字」鏈 ≥2 個點才折、小數 22.7 不動；round6 座10 實測冤枉）
+          t = t.replace(/\d+(?:\.\d+){2,}/gu, (m) => m.replace(/\./gu, ','))
+          // ②角度符號剝除——「640°」=「640」（培英 Q21 型）
+          t = t.replace(/[°º˚]/gu, '')
           return t.toLowerCase()
         }
         // 是非題：用 normalizeTrueFalseAnswer 正規化（O→○、X→✗ 等），處理完直接跳過通用比對
