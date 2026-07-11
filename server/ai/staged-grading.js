@@ -1419,14 +1419,20 @@ export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
 
 // 層級鏈執行器（兩個 Phase A 入口共用：runStagedGradingPhaseA 單體路徑＋runStagedGradingPhaseAArbiter split 路徑）。
 // 就地改寫 questionResults 的 arbiterResult；任何失敗 fail-open 維持 needs_review。
-// env ESCALATION_CHAIN：'1'=套用、'shadow'=只跑＋記錄不套用（影子模式）、其他=關（預設關）。
+// env ESCALATION_CHAIN：未設/'1'=套用（**預設開**、2026-07-11 user 拍板）、'shadow'=只跑＋記錄不套用、'0'/'false'/'off'=關。
+// 回傳 audit 物件（mode/totalMs/records 完整輸入輸出）供呼叫端持久化到 phase_a_state.escalationChain——
+// 觀測三件套：費用=executeStage 內建 recordTokenUsage(ink_session_usage per call)、時間=records[].r1pMs/r2pMs+totalMs、
+// 輸入輸出=records[] 全文不截斷（r1/r2/r1p/r2p/key/adopted/level）。
 export async function applyEscalationChain({
   questionResults, cropMap, akMap, pipelineRunId,
   apiKey, model, payload, routeHint, getRemainingBudget
 }) {
-  const mode = ensureString(process.env.ESCALATION_CHAIN, '').trim()
-  if (mode !== '1' && mode !== 'shadow') return
-  if (!questionResults?.some((q) => q.arbiterResult?.arbiterStatus === 'needs_review')) return
+  const modeRaw = ensureString(process.env.ESCALATION_CHAIN, '').trim().toLowerCase()
+  const mode = (modeRaw === '0' || modeRaw === 'false' || modeRaw === 'off') ? 'off'
+    : modeRaw === 'shadow' ? 'shadow' : '1'
+  if (mode === 'off') return null
+  if (!questionResults?.some((q) => q.arbiterResult?.arbiterStatus === 'needs_review')) return null
+  const chainStartedAt = Date.now()
   try {
     // readAnswer → 候選值：blank='', unreadable/缺=null（null 不參與任何一致性判定）
     const ecVal = (ra) => {
@@ -1449,13 +1455,14 @@ export async function applyEscalationChain({
       && cropMap?.has?.(qr.questionId)
       && keyFor(qr.questionId)
     )
-    if (targets.length === 0) return
+    if (targets.length === 0) return null
     logStaged(pipelineRunId, 'basic', `[escalation-chain] mode=${mode} NR 候選 ${targets.length} 題 → 重抽盲+知答單圖對`)
     const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
     const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
     const readOnce = async (qr, prompt) => {
       const crop = cropMap.get(qr.questionId)
-      if (!crop) return null
+      if (!crop) return { value: null, ms: 0, status: 'no_crop' }
+      const startedAt = Date.now()
       const resp = await executeStage({
         apiKey, model, modelOverride: MODEL_PRO,
         payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
@@ -1463,10 +1470,11 @@ export async function applyEscalationChain({
         routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
         stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: crop }] }]
       })
-      if (!resp?.ok) return null
+      const ms = Date.now() - startedAt
+      if (!resp?.ok) return { value: null, ms, status: `call_fail_${resp?.status ?? '?'}` }
       const parsed = parseCandidateJson(resp.data)
       const a = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
-      return a ? ecVal({ status: a.status, studentAnswerRaw: a.studentAnswerRaw }) : null
+      return { value: a ? ecVal({ status: a.status, studentAnswerRaw: a.studentAnswerRaw }) : null, ms, status: a?.status ?? 'parse_fail' }
     }
     // 併行上限 6（同 type-split LIM、避免 rate-limit 連鎖）
     const results = []
@@ -1475,26 +1483,33 @@ export async function applyEscalationChain({
       while (idx < targets.length) {
         const qr = targets[idx++]
         const key = keyFor(qr.questionId)
-        const [r1p, r2p] = await Promise.all([
+        const [rd1, rd2] = await Promise.all([
           readOnce(qr, blindPrompt(qr.questionId)),
           readOnce(qr, informedPrompt(qr.questionId, key))
         ])
+        const r1p = rd1.value, r2p = rd2.value
+        const meta = { r1p, r2p, r1pMs: rd1.ms, r2pMs: rd2.ms, r1pStatus: rd1.status, r2pStatus: rd2.status, key }
         // 兩支重讀全失敗＝「升級嘗試失敗」非「四票發散」→ fail-open 維持送審（不 tail）
-        if (r1p == null && r2p == null) { results.push({ qr, adopted: null, level: 'read_fail', illegible: false, r1p, r2p }); continue }
+        if (r1p == null && r2p == null) { results.push({ qr, adopted: null, level: 'read_fail', illegible: false, ...meta }); continue }
         const decision = computeEscalationDecision({ r1: ecVal(qr.readAnswer1), r2: ecVal(qr.readAnswer2), r1p, r2p, key })
-        results.push({ qr, ...decision, r1p, r2p })
+        results.push({ qr, ...decision, ...meta })
       }
     }))
     const summary = {}
     for (const r of results) summary[r.level ?? 'unresolved'] = (summary[r.level ?? 'unresolved'] || 0) + 1
-    logStaged(pipelineRunId, 'basic', `[escalation-chain] 結果 mode=${mode}`, {
-      summary,
-      detail: results.map((r) => ({
-        questionId: r.qr.questionId, level: r.level, illegible: r.illegible,
-        adopted: ensureString(r.adopted, '(null)').slice(0, 40),
-        r1p: ensureString(r.r1p, '(null)').slice(0, 40), r2p: ensureString(r.r2p, '(null)').slice(0, 40)
+    const totalMs = Date.now() - chainStartedAt
+    // audit 記錄（全文不截斷）→ 呼叫端持久化到 phase_a_state.escalationChain 供事後逐題檢視
+    const audit = {
+      mode, totalMs, targetCount: targets.length, summary,
+      records: results.map((r) => ({
+        questionId: r.qr.questionId,
+        level: r.level, illegible: r.illegible, applied: mode === '1' && r.adopted != null && r.level !== 'read_fail',
+        r1: ecVal(r.qr.readAnswer1), r2: ecVal(r.qr.readAnswer2),
+        r1p: r.r1p, r2p: r.r2p, key: r.key, adopted: r.adopted,
+        r1pMs: r.r1pMs, r2pMs: r.r2pMs, r1pStatus: r.r1pStatus, r2pStatus: r.r2pStatus
       }))
-    })
+    }
+    logStaged(pipelineRunId, 'basic', `[escalation-chain] 結果 mode=${mode} totalMs=${totalMs}`, { summary })
     if (mode === '1') {
       for (const r of results) {
         if (r.adopted == null || r.level == null || r.level === 'read_fail') continue  // fail-open 維持送審
@@ -1506,8 +1521,10 @@ export async function applyEscalationChain({
         }
       }
     }
+    return audit
   } catch (e) {
     logStaged(pipelineRunId, 'basic', '[escalation-chain] 失敗(fail-open 維持送審)', { error: e?.message })
+    return { mode, totalMs: Date.now() - chainStartedAt, error: ensureString(e?.message, 'unknown'), records: [] }
   }
 }
 
@@ -10673,7 +10690,7 @@ Return JSON:
   // 範圍：fill_blank/short_answer、非合題(partValues)、非 spacing/excessiveBlanks 特殊旗標、有 crop 有正解
   //   （僅此範圍經 harness 驗證；其他題型維持送審）。任何失敗 fail-open 維持 needs_review。
   // env ESCALATION_CHAIN：'1'=套用、'shadow'=只跑＋記錄不套用（影子模式）、其他=關（預設關）
-  await applyEscalationChain({
+  const escalationChainAudit = await applyEscalationChain({
     questionResults, cropMap: allQuestionCropMap, akMap: akByIdForLog,
     pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
   })
@@ -10774,6 +10791,9 @@ Return JSON:
         ...(qr.arbiterResult?.chainLevel ? { chainLevel: qr.arbiterResult.chainLevel } : {}),
         ...(qr.arbiterResult?.chainIllegible ? { chainIllegible: true } : {}),
       })),
+      // 2026-07-11 層級鏈 audit：完整輸入輸出（r1/r2/r1'/r2'/key/adopted 全文）＋逐 call 時間，
+      // 供事後直接檢視（不用從結果反推）；費用另在 ink_session_usage（routeKey=grading.re_read_answer）
+      ...(escalationChainAudit ? { escalationChain: escalationChainAudit } : {}),
       savedAt: new Date().toISOString()
     }
     await persistPhaseAState(submissionIdForPersist, phaseAStateToPersist)
@@ -11122,7 +11142,7 @@ export async function runStagedGradingPhaseAArbiter({
   }
 
   // ── 🆕 2026-07-11 層級鏈（split 路徑入口、與單體路徑同一 helper）──
-  await applyEscalationChain({
+  const escalationChainAudit = await applyEscalationChain({
     questionResults, cropMap: cropByQuestionId,
     akMap: mapByQuestionId(Array.isArray(answerKey?.questions) ? answerKey.questions : [], (q) => q?.id),
     pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
@@ -11227,6 +11247,9 @@ export async function runStagedGradingPhaseAArbiter({
         ...(qr.arbiterResult?.chainLevel ? { chainLevel: qr.arbiterResult.chainLevel } : {}),
         ...(qr.arbiterResult?.chainIllegible ? { chainIllegible: true } : {}),
       })),
+      // 2026-07-11 層級鏈 audit：完整輸入輸出（r1/r2/r1'/r2'/key/adopted 全文）＋逐 call 時間，
+      // 供事後直接檢視（不用從結果反推）；費用另在 ink_session_usage（routeKey=grading.re_read_answer）
+      ...(escalationChainAudit ? { escalationChain: escalationChainAudit } : {}),
       savedAt: new Date().toISOString()
     }
     await persistPhaseAState(submissionIdForPersist, phaseAStateToPersist)
