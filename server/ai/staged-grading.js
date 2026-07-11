@@ -878,6 +878,9 @@ export function normalizeAnswerForComparison(raw) {
   s = s.replace(/^\(([A-Za-z])\)$/u, '$1').trim()
   // 減號/破折號異體字統一（− – — → -）
   s = s.replace(/[−–—]/gu, '-')
+  // 2026-07-11: 角度符號等價——學生寫「330°≤x≤350°」、答案卷「330<=x<=350」（培英 Q18 實測冤枉）。
+  //   數學語境 45°=45 同義；只剝符號（° º ˚）、不碰中文「度」字（溫度/角度等詞會被撕裂）。
+  s = s.replace(/[°º˚]/gu, '')
   // 2026-07-05: 數學比較/運算符 unicode↔ASCII 摺疊——兩讀常一方吐 ≤ 一方吐 <=（同義、
   //   純輸出格式差），全班實測是 1-1-5/1-1-14 型假 NR 元兇（「-3<x≤5」vs「-3 < x <= 5」送審）。
   s = s.replace(/[≤≦]/gu, '<=').replace(/[≥≧]/gu, '>=')
@@ -918,6 +921,11 @@ export function normalizeAnswerForComparison(raw) {
   // 省略號去除（……、...）— AI 讀到的格式提示文字
   s = s.replace(/[…]+/gu, '')
   s = s.replace(/\.{2,}/gu, '')
+  // 2026-07-11: 列舉分隔符等價——「15.16.17」=「15,16,17」=「15、16、17」（培英 Q17 實測：
+  //   學生用句點當列舉分隔、兩讀一方抄 . 一方抄 , → 假 NR/假放水）。
+  //   只折「數字.數字」連續出現 ≥2 次的鏈（合法小數只有一個點，22.7/157.5 不受影響；
+  //   兩段式 36.56 有小數歧義、不折）。折成逗號後由下行分隔符剝除統一。
+  s = s.replace(/\d+(?:\.\d+){2,}/gu, (m) => m.replace(/\./gu, ','))
   // 去除分隔符號（逗號、頓號、換行）— 比對內容本身，不比對格式
   s = s.replace(/[,、\n\r]/gu, '')
   // 去除所有空白（避免有無空白造成誤判）
@@ -1380,6 +1388,127 @@ function reconstructScaffoldRead1(read1Raw, read2Raw) {
   }
   if (substCount === 0 || substCount > 3) return null
   return { text: w2.map((w, idx) => (sub.has(idx) ? sub.get(idx) : w)).join(' '), substCount }
+}
+
+// ── 層級鏈決策（2026-07-11、純函數、可測）───────────────────────────────────
+// 輸入：r1/r2=production 兩讀值、r1p/r2p=重抽的盲/知答單圖讀值（blank=''、失敗=null）、key=標準答案
+// 方向不對稱：幻覺只朝正解偏 → 盲票只在「知答共識=正解」時有否決權（L3a）；
+// 知答共識≠正解（L3b）＝頂著偏置都讀不出正解、直接可信；分數交 Phase B（帶分數等價/部分分）。
+// 實證：培英 136 NR × 5 輪 harness 放水 0；詳 memory escalation-chain-zero-review。
+export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
+  const fold = (x) => normalizeAnswerForComparison(deLatexMathText(ensureString(x, '')))
+  const same = (a, b) => a != null && b != null && fold(a) === fold(b)
+  const keyEq = (t) => {
+    if (t == null || !key) return false
+    const d = deLatexMathText(ensureString(t, ''))
+    return fold(d) === fold(key) || mathNumericEquivalent(d, key) === true
+  }
+  if (same(r1p, r2p)) return { adopted: r1p, level: 'L2', illegible: false }
+  if (same(r2, r2p)) {
+    if (keyEq(r2p)) {
+      if (keyEq(r1) || keyEq(r1p)) return { adopted: r2p, level: 'L3a', illegible: false }
+      if (r1p != null || r1 != null) return { adopted: r1p ?? r1, level: 'L3a_blindguard', illegible: true }
+      return { adopted: null, level: null, illegible: false }
+    }
+    return { adopted: r2p, level: 'L3b', illegible: false }
+  }
+  if (same(r1, r1p)) return { adopted: r1p, level: 'L3c', illegible: false }
+  if (r2p != null || r2 != null) return { adopted: r2p ?? r2, level: 'tail', illegible: true }
+  return { adopted: null, level: null, illegible: false }
+}
+
+// 層級鏈執行器（兩個 Phase A 入口共用：runStagedGradingPhaseA 單體路徑＋runStagedGradingPhaseAArbiter split 路徑）。
+// 就地改寫 questionResults 的 arbiterResult；任何失敗 fail-open 維持 needs_review。
+// env ESCALATION_CHAIN：'1'=套用、'shadow'=只跑＋記錄不套用（影子模式）、其他=關（預設關）。
+export async function applyEscalationChain({
+  questionResults, cropMap, akMap, pipelineRunId,
+  apiKey, model, payload, routeHint, getRemainingBudget
+}) {
+  const mode = ensureString(process.env.ESCALATION_CHAIN, '').trim()
+  if (mode !== '1' && mode !== 'shadow') return
+  if (!questionResults?.some((q) => q.arbiterResult?.arbiterStatus === 'needs_review')) return
+  try {
+    // readAnswer → 候選值：blank='', unreadable/缺=null（null 不參與任何一致性判定）
+    const ecVal = (ra) => {
+      const st = ensureString(ra?.status, '')
+      if (st === 'blank') return ''
+      if (st === 'unreadable' || !ra) return null
+      const v = ensureString(ra?.studentAnswer ?? ra?.studentAnswerRaw, '')
+      return v || null
+    }
+    const keyFor = (qid) => {
+      const akQ = akMap?.get?.(qid)
+      return ensureString(akQ?.answer ?? akQ?.referenceAnswer, '').trim()
+    }
+    const targets = questionResults.filter((qr) =>
+      qr.arbiterResult?.arbiterStatus === 'needs_review'
+      && (qr.questionType === 'fill_blank' || qr.questionType === 'short_answer')
+      && !qr.arbiterResult?.spacingReviewFlag && !qr.arbiterResult?.excessiveBlanksFlag
+      && !(Array.isArray(qr.readAnswer1?.partValues) && qr.readAnswer1.partValues.length > 0)
+      && !(Array.isArray(qr.readAnswer2?.partValues) && qr.readAnswer2.partValues.length > 0)
+      && cropMap?.has?.(qr.questionId)
+      && keyFor(qr.questionId)
+    )
+    if (targets.length === 0) return
+    logStaged(pipelineRunId, 'basic', `[escalation-chain] mode=${mode} NR 候選 ${targets.length} 題 → 重抽盲+知答單圖對`)
+    const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    const readOnce = async (qr, prompt) => {
+      const crop = cropMap.get(qr.questionId)
+      if (!crop) return null
+      const resp = await executeStage({
+        apiKey, model, modelOverride: MODEL_PRO,
+        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        timeoutMs: Math.min(getRemainingBudget(), 45000), routeHint,
+        routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+        stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: crop }] }]
+      })
+      if (!resp?.ok) return null
+      const parsed = parseCandidateJson(resp.data)
+      const a = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
+      return a ? ecVal({ status: a.status, studentAnswerRaw: a.studentAnswerRaw }) : null
+    }
+    // 併行上限 6（同 type-split LIM、避免 rate-limit 連鎖）
+    const results = []
+    let idx = 0
+    await Promise.all(Array.from({ length: Math.min(6, targets.length) }, async () => {
+      while (idx < targets.length) {
+        const qr = targets[idx++]
+        const key = keyFor(qr.questionId)
+        const [r1p, r2p] = await Promise.all([
+          readOnce(qr, blindPrompt(qr.questionId)),
+          readOnce(qr, informedPrompt(qr.questionId, key))
+        ])
+        // 兩支重讀全失敗＝「升級嘗試失敗」非「四票發散」→ fail-open 維持送審（不 tail）
+        if (r1p == null && r2p == null) { results.push({ qr, adopted: null, level: 'read_fail', illegible: false, r1p, r2p }); continue }
+        const decision = computeEscalationDecision({ r1: ecVal(qr.readAnswer1), r2: ecVal(qr.readAnswer2), r1p, r2p, key })
+        results.push({ qr, ...decision, r1p, r2p })
+      }
+    }))
+    const summary = {}
+    for (const r of results) summary[r.level ?? 'unresolved'] = (summary[r.level ?? 'unresolved'] || 0) + 1
+    logStaged(pipelineRunId, 'basic', `[escalation-chain] 結果 mode=${mode}`, {
+      summary,
+      detail: results.map((r) => ({
+        questionId: r.qr.questionId, level: r.level, illegible: r.illegible,
+        adopted: ensureString(r.adopted, '(null)').slice(0, 40),
+        r1p: ensureString(r.r1p, '(null)').slice(0, 40), r2p: ensureString(r.r2p, '(null)').slice(0, 40)
+      }))
+    })
+    if (mode === '1') {
+      for (const r of results) {
+        if (r.adopted == null || r.level == null || r.level === 'read_fail') continue  // fail-open 維持送審
+        r.qr.arbiterResult = {
+          arbiterStatus: 'arbitrated_agree',
+          finalAnswer: r.adopted,
+          chainLevel: r.level,
+          chainIllegible: r.illegible
+        }
+      }
+    }
+  } catch (e) {
+    logStaged(pipelineRunId, 'basic', '[escalation-chain] 失敗(fail-open 維持送審)', { error: e?.message })
+  }
 }
 
 export function computeConsistencyStatus(read1, read2, questionType = 'other') {
@@ -10533,6 +10662,22 @@ Return JSON:
     }
   }
 
+  // ── 🆕 2026-07-11 層級鏈（escalation chain、0人工審查）────────────────────────
+  // 設計+實證：memory escalation-chain-zero-review（培英數學卷 136 NR × 5 輪 harness：放水 0、冤枉 7-8）。
+  // NR 題重抽「盲(r1')＋知答(r2')」單圖讀對，方向不對稱仲裁（幻覺只朝正解偏，盲票只在「讀出=正解」時有否決權）：
+  //   L2'  r1'≈r2' → 採之
+  //   L3a  r2≈r2' 且=正解（幻覺區）→ 任一盲票也=正解才採；否則採盲讀值＋illegible 標記（座30 型、寧可誤殺）
+  //   L3b  r2≈r2' 且≠正解 → 採之（知答頂著朝正解的偏置都讀不出正解=可信非正解；帶分數/部分分交 Phase B 判）
+  //   L3c  r1≈r1' → 採之
+  //   tail 四票無共識 → 採 r2'（實測最準單票）＋illegible 標記（GCSE 先例：窮盡辨識後歸學生責任、申訴兜底）
+  // 範圍：fill_blank/short_answer、非合題(partValues)、非 spacing/excessiveBlanks 特殊旗標、有 crop 有正解
+  //   （僅此範圍經 harness 驗證；其他題型維持送審）。任何失敗 fail-open 維持 needs_review。
+  // env ESCALATION_CHAIN：'1'=套用、'shadow'=只跑＋記錄不套用（影子模式）、其他=關（預設關）
+  await applyEscalationChain({
+    questionResults, cropMap: allQuestionCropMap, akMap: akByIdForLog,
+    pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
+  })
+
   const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
   const diffCount = 0  // no longer used (legacy compat: kept at 0)
   const unstableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus === 'needs_review').length
@@ -10625,6 +10770,9 @@ Return JSON:
         arbiterStatus: qr.arbiterResult?.arbiterStatus,
         finalAnswer: qr.arbiterResult?.finalAnswer,
         consistent: qr.arbiterResult?.consistent,
+        // 2026-07-11 層級鏈：來源層級＋「筆跡難辨」標記（前端 badge/申訴入口用）
+        ...(qr.arbiterResult?.chainLevel ? { chainLevel: qr.arbiterResult.chainLevel } : {}),
+        ...(qr.arbiterResult?.chainIllegible ? { chainIllegible: true } : {}),
       })),
       savedAt: new Date().toISOString()
     }
@@ -10973,6 +11121,13 @@ export async function runStagedGradingPhaseAArbiter({
     logStaged(pipelineRunId, stagedLogLevel, '[A3] english spacing flagged', spacingReviewFlagged)
   }
 
+  // ── 🆕 2026-07-11 層級鏈（split 路徑入口、與單體路徑同一 helper）──
+  await applyEscalationChain({
+    questionResults, cropMap: cropByQuestionId,
+    akMap: mapByQuestionId(Array.isArray(answerKey?.questions) ? answerKey.questions : [], (q) => q?.id),
+    pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
+  })
+
   // ── Per-question summary log ──
   const perQuestionLog = questionResults
     .filter((qr) => qr.visible !== false)
@@ -11068,6 +11223,9 @@ export async function runStagedGradingPhaseAArbiter({
         arbiterStatus: qr.arbiterResult?.arbiterStatus,
         finalAnswer: qr.arbiterResult?.finalAnswer,
         consistent: qr.arbiterResult?.consistent,
+        // 2026-07-11 層級鏈：來源層級＋「筆跡難辨」標記（前端 badge/申訴入口用）
+        ...(qr.arbiterResult?.chainLevel ? { chainLevel: qr.arbiterResult.chainLevel } : {}),
+        ...(qr.arbiterResult?.chainIllegible ? { chainIllegible: true } : {}),
       })),
       savedAt: new Date().toISOString()
     }
