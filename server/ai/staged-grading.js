@@ -12074,11 +12074,14 @@ export async function runStagedGradingPhaseB({
           const stuCrop = await cropInlineImageByBbox(studentImgG.data, studentImgG.mimeType, inflateBboxForType(cRow.answerBbox, cRow.questionType || 'fill_blank'), true, 0.005)
           if (!stuCrop) continue
           const ref = await refCropOf(t.q)
+          // 2026-07-12 詳細推理版（user 拍板換版）：先逐部件分析、後結論——沙盒 5 輪：攔截不失守
+          //   （造字20/20＋合成40/40）、救回 3 格「潦草但部件齊全」、理由具體到部件級（漏四點灬/簡體马/革漏口）
+          //   ——申訴顯示的證據品質大升。堤型潦草判 different＝學生責任＋申訴（user 裁定）。
           const promptTxt = `這是學生手寫的一個國字${ref ? '（第一張圖）。第二張圖是老師手寫的標準答案' : ''}。標準答案是「${t.key}」。
-你的任務不是辨認、是校對筆畫結構：逐部件比對學生寫的字與標準「${t.key}」是否為同一個字。
-- 部件錯誤（部首不同、內部構件寫成別的）、多筆少筆改變結構、寫成形近字或不存在的字 → "different"
-- 部件結構完全正確、只是筆跡潦草 → "same"（潦草不是錯）
-只輸出 JSON：{"verdict":"same|different","reason":"20字內筆畫證據"}`
+你的任務不是辨認、是校對筆畫結構。請先做逐部件分析、再下結論：
+1. analysis：把標準「${t.key}」拆成部件（上下/左右結構各是什麼），逐一對照學生所寫：每個部件寫了什麼、哪裡一致、哪裡不同
+2. verdict：部件結構完全正確（潦草不算錯）→ "same"；部件錯誤/多筆少筆改變結構/形近字/不存在的字 → "different"
+只輸出 JSON：{"analysis":"逐部件分析（80字內）","verdict":"same|different","reason":"20字內結論"}`
           const parts = [{ text: promptTxt }, { inlineData: stuCrop }]
           if (ref) parts.push({ inlineData: ref })
           const resp = await executeStage({
@@ -12095,9 +12098,11 @@ export async function runStagedGradingPhaseB({
           const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
           deterministicScores.push({
             questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
-            scoringReason: `字形錯誤：學生書寫與標準「${t.key}」筆畫結構不符（${ensureString(parsed?.reason, '').slice(0, 40) || '視覺覆核'}）`,
+            scoringReason: `字形錯誤：${ensureString(parsed?.reason, '').slice(0, 40) || '與標準筆畫結構不符'}（標準「${t.key}」、視覺覆核）`,
             scoreConfidence: 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
-            _vjBypass: true, _glyphJudge: true
+            _vjBypass: true, _glyphJudge: true,
+            // 逐部件分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
+            glyphAnalysis: ensureString(parsed?.analysis, '').slice(0, 200)
           })
           vjBypassIds.add(t.qid)
           glyphFlipped++
