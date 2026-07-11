@@ -12038,6 +12038,7 @@ export async function runStagedGradingPhaseB({
       if (glyphTargets.length > 0 && studentImgG?.data) {
         // 參考圖：答案卷（template）老師手寫正解、lazy 下載＋快取
         let tplPaths = null
+        let tplIdForRef = null
         const refBufCache = new Map()
         const loadTplPaths = async () => {
           if (tplPaths !== null) return tplPaths
@@ -12048,6 +12049,7 @@ export async function runStagedGradingPhaseB({
             if (aid) {
               const { data: arow } = await supabase.from('assignments').select('answer_key_template_id').eq('id', aid).maybeSingle()
               if (arow?.answer_key_template_id) {
+                tplIdForRef = arow.answer_key_template_id
                 const { data: trow } = await supabase.from('answer_key_templates').select('answer_sheet_image_paths').eq('id', arow.answer_key_template_id).maybeSingle()
                 const p = trow?.answer_sheet_image_paths
                 tplPaths = Array.isArray(p) ? p : (typeof p === 'string' ? (JSON.parse(p) ?? []) : [])
@@ -12059,7 +12061,12 @@ export async function runStagedGradingPhaseB({
         const refCropOf = async (q) => {
           try {
             const paths = await loadTplPaths()
-            const path = paths[Number(q.pageIndex) || 0]
+            // 2026-07-12 破口修：舊 template（5/15 前）的 answer_sheet_image_paths 欄位=null、
+            //   但 storage 檔案其實存在（慣例路徑）→ ref 永遠 null → 雙判官從未執行、
+            //   一路退回單判官記憶版（國語卷 60 攔那輪實測=全程無參考圖）。
+            //   欄位空 → 直接按慣例路徑 template-answer-sheets/{tid}/page-{n}.webp 撈（下載失敗照樣 fail-open）。
+            const pageIdx = Number(q.pageIndex) || 0
+            const path = paths[pageIdx] ?? (tplIdForRef ? `template-answer-sheets/${tplIdForRef}/page-${pageIdx}.webp` : null)
             if (!path || !q.answerBbox) return null
             if (!refBufCache.has(path)) {
               const supabase = getSupabaseAdmin()
