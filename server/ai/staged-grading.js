@@ -12128,6 +12128,17 @@ export async function runStagedGradingPhaseB({
             if (!resp?.ok) return null
             return parseCandidateJson(resp.data)
           }
+          // 2026-07-12 國字也改雙判官 AND（老師終審重定 ground truth 後拍板）：記憶版的誤殺根因＝
+          //   模型對標準字的「結構記憶」錯誤（幻想羈有戈、喚有罒、奐下是廾）——圖像錨定版
+          //   （唯一標準=老師手寫參考圖、禁用字形記憶）幻覺去相關 → AND 共識：誤殺 8→1、放水 0
+          //   （沙盒＋老師逐格終審）。殘留地板：冂內兩點等「聲調級」微小筆畫低於判官解析度。
+          const glyphPromptGrounded = `兩張圖：第一張是學生手寫的一個國字、第二張是老師手寫的標準答案「${t.key}」。
+⚠ 唯一的比對標準是第二張圖的實際筆跡——不要依賴你記憶中「${t.key}」應該的結構、你的字形記憶可能是錯的。
+步驟：
+1. standard：只看第二張圖，描述它實際畫了哪些部件（位置＋形狀）
+2. student：只看第一張圖，同樣描述
+3. verdict：兩邊部件逐一對得上（潦草不算錯）→ "same"；學生缺件/多件/部件形狀是別的東西 → "different"
+只輸出 JSON：{"analysis":"標準圖與學生圖的部件對照（80字內）","verdict":"same|different","reason":"20字內結論"}`
           let parsed, gVerdict
           if (t.kind === 'zhuyin') {
             const [pa, pb] = await Promise.all([callJudge(zhuyinPromptA), callJudge(zhuyinPromptB)])
@@ -12135,7 +12146,15 @@ export async function runStagedGradingPhaseB({
             if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
             else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
+          } else if (ref) {
+            // 國字雙判官：記憶版 ∧ 圖像錨定版（有參考圖才可雙判；理由採錨定版——它描述的是圖上實況）
+            const [pm, pg] = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPromptGrounded)])
+            const vm = ensureString(pm?.verdict, ''), vg = ensureString(pg?.verdict, '')
+            if (vm === 'different' && vg === 'different') { gVerdict = 'different'; parsed = pg }
+            else if (vm === 'same' && vg === 'same') { gVerdict = 'same'; parsed = pg }
+            else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor
           } else {
+            // 無參考圖（答案卷影像缺）→ 退單判官記憶版（舊行為）
             parsed = await callJudge(glyphPrompt)
             if (!parsed) continue
             gVerdict = ensureString(parsed?.verdict, '')
