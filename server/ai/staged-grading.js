@@ -1528,6 +1528,32 @@ export async function applyEscalationChain({
   }
 }
 
+// ── 雙 unreadable → 0 分（2026-07-11 user 拍板：兩讀皆「真讀不出」＝學生書寫責任、直接判 0）──
+// 只吃「模型真判讀的 unreadable」；call 失敗合成/read 缺失（syntheticUnreadable）維持送審
+// （否則批次 call 爆掉＝整批 0 分災難）。放在層級鏈之後跑：鏈的重抽讀有機會先救回真的有字的題。
+// finalAnswer='無法辨識' → Phase B 判錯 0 分；chainIllegible 標記 → 前端 badge＋學生申訴兜底。
+// kill switch：DOUBLE_UNREADABLE_ZERO='0'
+export function applyDoubleUnreadableZero(questionResults, pipelineRunId) {
+  if (process.env.DOUBLE_UNREADABLE_ZERO === '0') return
+  const flipped = []
+  for (const qr of questionResults || []) {
+    if (qr.arbiterResult?.arbiterStatus !== 'needs_review') continue
+    const ra1 = qr.readAnswer1, ra2 = qr.readAnswer2
+    if (ra1?.status !== 'unreadable' || ra2?.status !== 'unreadable') continue
+    if (ra1?.syntheticUnreadable || ra2?.syntheticUnreadable) continue
+    qr.arbiterResult = {
+      arbiterStatus: 'arbitrated_agree',
+      finalAnswer: '無法辨識',
+      chainLevel: 'double_unreadable_zero',
+      chainIllegible: true
+    }
+    flipped.push(qr.questionId)
+  }
+  if (flipped.length > 0) {
+    logStaged(pipelineRunId, 'basic', `[double-unreadable] 兩讀皆真 unreadable → 0 分＋筆跡難辨標記 ${flipped.length} 題`, flipped)
+  }
+}
+
 export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s1 = ensureString(read1?.status, '').toLowerCase()
   const s2 = ensureString(read2?.status, '').toLowerCase()
@@ -10062,12 +10088,16 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
         status: read1?.status ?? 'unreadable',
         studentAnswer: read1DisplayOverride ?? read1?.studentAnswerRaw ?? '無法辨識',
         // 2026-07-05: 合題逐空讀值傳給前端——審查卡「四小格」逐小題顯示/點選用
-        ...(Array.isArray(read1?.partValues) && read1.partValues.length > 0 ? { partValues: read1.partValues } : {})
+        ...(Array.isArray(read1?.partValues) && read1.partValues.length > 0 ? { partValues: read1.partValues } : {}),
+        // 2026-07-11: 合成 unreadable 標記（call 失敗補的/read 整個缺失、非模型判讀）——
+        // 「雙 unreadable→0分」政策必須排除合成型（否則 call 爆掉=整批 0 分災難）
+        ...(read1?._callFailed || !read1 ? { syntheticUnreadable: true } : {})
       },
       readAnswer2: {
         status: read2?.status ?? 'unreadable',
         studentAnswer: read2?.studentAnswerRaw ?? '無法辨識',
-        ...(Array.isArray(read2?.partValues) && read2.partValues.length > 0 ? { partValues: read2.partValues } : {})
+        ...(Array.isArray(read2?.partValues) && read2.partValues.length > 0 ? { partValues: read2.partValues } : {}),
+        ...(read2?._callFailed || !read2 ? { syntheticUnreadable: true } : {})
       },
       answerBbox: classifyRow?.answerBbox ?? null,
       bboxCorrected: classifyRow?.bboxCorrected || false,
@@ -10694,6 +10724,7 @@ Return JSON:
     questionResults, cropMap: allQuestionCropMap, akMap: akByIdForLog,
     pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
   })
+  applyDoubleUnreadableZero(questionResults, pipelineRunId)
 
   const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
   const diffCount = 0  // no longer used (legacy compat: kept at 0)
@@ -11147,6 +11178,7 @@ export async function runStagedGradingPhaseAArbiter({
     akMap: mapByQuestionId(Array.isArray(answerKey?.questions) ? answerKey.questions : [], (q) => q?.id),
     pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
   })
+  applyDoubleUnreadableZero(questionResults, pipelineRunId)
 
   // ── Per-question summary log ──
   const perQuestionLog = questionResults
