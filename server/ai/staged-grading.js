@@ -12016,6 +12016,10 @@ export async function runStagedGradingPhaseB({
   if (process.env.GLYPH_JUDGE !== '0' && glyphDomainOk && inlineImages.length > 0) {
     try {
       const cjk12 = (s) => /^[一-鿿]{1,2}$/u.test(s)
+      // 2026-07-12 注音納入（user 拍板、雙判官 AND 共識）：符號層穩（ㄓㄜˋ→ㄗㄜˋ 投射放水實測抓到）、
+      //   聲調層單判官各有 1/10 幻覺格且兩版 prompt 幻覺落在不同格 → 兩版都判 different 才攔
+      //   （沙盒：誤殺 0/10、符號照抓、聲調靈敏度 90%）。
+      const zhuyin5 = (s) => /^[ㄅ-ㄩˊˇˋ˙]{1,5}$/u.test(s)
       const classifyArrForGlyph = Array.isArray(classifyResult)
         ? classifyResult
         : (classifyResult?.alignedQuestions || classifyResult?.questions || [])
@@ -12026,9 +12030,10 @@ export async function runStagedGradingPhaseB({
         const q = akQById.get(ans.questionId)
         if (!q || q.questionCategory !== 'fill_blank') continue
         const key = ensureString(q.answer, '').trim()
-        if (!cjk12(key)) continue
+        const kind = cjk12(key) ? 'glyph' : zhuyin5(key) ? 'zhuyin' : null
+        if (!kind) continue
         if (normalizeAnswerForComparison(ensureString(ans.studentAnswerRaw, '')) !== normalizeAnswerForComparison(key)) continue
-        glyphTargets.push({ qid: ans.questionId, key, q, student: ans.studentAnswerRaw })
+        glyphTargets.push({ qid: ans.questionId, key, q, student: ans.studentAnswerRaw, kind })
       }
       if (glyphTargets.length > 0 && studentImgG?.data) {
         // 參考圖：答案卷（template）老師手寫正解、lazy 下載＋快取
@@ -12077,24 +12082,49 @@ export async function runStagedGradingPhaseB({
           // 2026-07-12 詳細推理版（user 拍板換版）：先逐部件分析、後結論——沙盒 5 輪：攔截不失守
           //   （造字20/20＋合成40/40）、救回 3 格「潦草但部件齊全」、理由具體到部件級（漏四點灬/簡體马/革漏口）
           //   ——申訴顯示的證據品質大升。堤型潦草判 different＝學生責任＋申訴（user 裁定）。
-          const promptTxt = `這是學生手寫的一個國字${ref ? '（第一張圖）。第二張圖是老師手寫的標準答案' : ''}。標準答案是「${t.key}」。
+          const glyphPrompt = `這是學生手寫的一個國字${ref ? '（第一張圖）。第二張圖是老師手寫的標準答案' : ''}。標準答案是「${t.key}」。
 你的任務不是辨認、是校對筆畫結構。請先做逐部件分析、再下結論：
 1. analysis：把標準「${t.key}」拆成部件（上下/左右結構各是什麼），逐一對照學生所寫：每個部件寫了什麼、哪裡一致、哪裡不同
 2. verdict：部件結構完全正確（潦草不算錯）→ "same"；部件錯誤/多筆少筆改變結構/形近字/不存在的字 → "different"
 只輸出 JSON：{"analysis":"逐部件分析（80字內）","verdict":"same|different","reason":"20字內結論"}`
-          const parts = [{ text: promptTxt }, { inlineData: stuCrop }]
-          if (ref) parts.push({ inlineData: ref })
-          const resp = await executeStage({
-            apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
-            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-            timeoutMs: getRemainingBudget(), routeHint,
-            routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
-            stageContents: [{ role: 'user', parts }]
-          })
-          if (resp) stageResponses.push(resp)
-          if (!resp?.ok) continue
-          const parsed = parseCandidateJson(resp.data)
-          const gVerdict = ensureString(parsed?.verdict, '')
+          // 注音雙判官（兩版 prompt 幻覺去相關、AND 共識才攔）
+          const zhuyinPromptA = `這是學生手寫的注音答案。標準答案是「${t.key}」。
+你的任務不是辨認、是校對。請先逐符號分析、再下結論：
+1. analysis：把標準「${t.key}」拆成注音符號＋聲調記號（一聲=無記號、二聲ˊ、三聲ˇ、四聲ˋ、輕聲˙），逐一對照學生所寫
+2. verdict：符號與聲調記號完全一致 → "same"；符號不同、或聲調記號多寫/少寫/寫錯 → "different"
+⚠ 特別檢查聲調：一聲的標準「沒有任何記號」——學生若寫了 ˊˇˋ˙ 任何一個就是 different。
+只輸出 JSON：{"analysis":"逐符號分析（60字內）","verdict":"same|different","reason":"20字內結論"}`
+          const zhuyinPromptB = `這是學生手寫的注音答案。標準答案是「${t.key}」。
+你的任務不是辨認、是校對。請先逐符號分析、再下結論：
+1. analysis：由上而下列出學生實際寫的每一個注音符號；然後檢查聲調記號——**先定位**：符號右側或上方有沒有一筆「獨立的短斜筆/勾/點」？有→寫出位置與形狀再認定調號；沒有→一聲。⚠不可把注音符號自身筆畫或雜點當成調號。
+2. verdict：符號序列與聲調記號都一致 → "same"；任一符號或聲調（含有無）不同 → "different"
+只輸出 JSON：{"analysis":"符號清單＋調號定位（60字內）","verdict":"same|different","reason":"20字內結論"}`
+          const callJudge = async (txt) => {
+            const parts = [{ text: txt }, { inlineData: stuCrop }]
+            if (ref) parts.push({ inlineData: ref })
+            const resp = await executeStage({
+              apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+              payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+              timeoutMs: getRemainingBudget(), routeHint,
+              routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+              stageContents: [{ role: 'user', parts }]
+            })
+            if (resp) stageResponses.push(resp)
+            if (!resp?.ok) return null
+            return parseCandidateJson(resp.data)
+          }
+          let parsed, gVerdict
+          if (t.kind === 'zhuyin') {
+            const [pa, pb] = await Promise.all([callJudge(zhuyinPromptA), callJudge(zhuyinPromptB)])
+            const va = ensureString(pa?.verdict, ''), vb = ensureString(pb?.verdict, '')
+            if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
+            else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
+            else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
+          } else {
+            parsed = await callJudge(glyphPrompt)
+            if (!parsed) continue
+            gVerdict = ensureString(parsed?.verdict, '')
+          }
           const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
           if (gVerdict === 'different') {
             deterministicScores.push({
