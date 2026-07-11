@@ -925,7 +925,10 @@ export function normalizeAnswerForComparison(raw) {
   //   學生用句點當列舉分隔、兩讀一方抄 . 一方抄 , → 假 NR/假放水）。
   //   只折「數字.數字」連續出現 ≥2 次的鏈（合法小數只有一個點，22.7/157.5 不受影響；
   //   兩段式 36.56 有小數歧義、不折）。折成逗號後由下行分隔符剝除統一。
-  s = s.replace(/\d+(?:\.\d+){2,}/gu, (m) => m.replace(/\./gu, ','))
+  //   2026-07-11b: 容忍點旁空白——「36. 76. 96」也要折（round7 座29 實測漏接）
+  s = s.replace(/\d+(?:\s*\.\s*\d+){2,}/gu, (m) => m.replace(/\s*\.\s*/gu, ','))
+  // 2026-07-11b: 空白語彙統一——「未作答」「(空白)」視為空字串（兩輪 finalize 寫法不一致的表示法噪聲）
+  if (/^[（(]?(?:未作答|空白)[)）]?$/u.test(s)) return ''
   // 去除分隔符號（逗號、頓號、換行）— 比對內容本身，不比對格式
   s = s.replace(/[,、\n\r]/gu, '')
   // 去除所有空白（避免有無空白造成誤判）
@@ -1474,7 +1477,9 @@ export async function applyEscalationChain({
       if (!resp?.ok) return { value: null, ms, status: `call_fail_${resp?.status ?? '?'}` }
       const parsed = parseCandidateJson(resp.data)
       const a = Array.isArray(parsed?.answers) ? parsed.answers[0] : null
-      return { value: a ? ecVal({ status: a.status, studentAnswerRaw: a.studentAnswerRaw }) : null, ms, status: a?.status ?? 'parse_fail' }
+      // 2026-07-11: 重讀值過 deLatex——production read 有 normalizeReadAnswerResult 統一折、
+      //   鏈的單題讀漏了 → 採用值帶「\le132」進 Phase B 被判錯（round7 座3 實測）
+      return { value: a ? ecVal({ status: a.status, studentAnswerRaw: deLatexMathText(ensureString(a.studentAnswerRaw, '')) }) : null, ms, status: a?.status ?? 'parse_fail' }
     }
     // 併行上限 6（同 type-split LIM、避免 rate-limit 連鎖）
     const results = []
@@ -2823,8 +2828,10 @@ export function deLatexMathText(raw) {
   if (!t.includes('\\')) return t
   t = t.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '$1/$2')
   t = t.replace(/\\sqrt\s*\{([^{}]+)\}/g, '√$1')
-  t = t.replace(/\\(?:leq?|leqslant)\b/g, '<=')
-  t = t.replace(/\\(?:geq?|geqslant)\b/g, '>=')
+  // 2026-07-11: \b 改負向前瞻——「\le132」（後接數字）\b 不成立永遠折不到（round7 座3 實測判錯）；
+  //   (?![a-z]) 擋 \left（le+字母）誤傷、允許後接數字/符號/結尾
+  t = t.replace(/\\(?:leqslant|leq|le)(?![a-z])/g, '<=')
+  t = t.replace(/\\(?:geqslant|geq|ge)(?![a-z])/g, '>=')
   t = t.replace(/\\lt\b/g, '<').replace(/\\gt\b/g, '>')
   t = t.replace(/\\(?:times|cdot)\b/g, '×')
   t = t.replace(/\\div\b/g, '÷')
