@@ -1559,6 +1559,36 @@ export function applyDoubleUnreadableZero(questionResults, pipelineRunId) {
   }
 }
 
+// ── 0 審查兜底（2026-07-11 user 拍板：任何殘餘 needs_review 一律出分、不進人工）──
+// 跑在 層級鏈＋雙unreadable 之後、是絕對的最後一道：採 read2（次選 read1、再次 '無法辨識'）＋
+// chainIllegible 標記（學生端 badge＋申訴兜底）。涵蓋：合題、spacing 旗標、read_fail、其他零星來源。
+// kill switch：ZERO_REVIEW_TAIL='0'（關掉即回復殘餘題送審）
+export function applyZeroReviewTail(questionResults, pipelineRunId) {
+  if (process.env.ZERO_REVIEW_TAIL === '0') return
+  const val = (ra) => {
+    const st = ensureString(ra?.status, '')
+    if (st === 'blank') return ''
+    if (st === 'unreadable' || !ra) return null
+    const v = ensureString(ra?.studentAnswer ?? ra?.studentAnswerRaw, '')
+    return v || null
+  }
+  const flipped = []
+  for (const qr of questionResults || []) {
+    if (qr.arbiterResult?.arbiterStatus !== 'needs_review') continue
+    const adopted = val(qr.readAnswer2) ?? val(qr.readAnswer1) ?? '無法辨識'
+    qr.arbiterResult = {
+      arbiterStatus: 'arbitrated_agree',
+      finalAnswer: adopted,
+      chainLevel: 'tail_zero_review',
+      chainIllegible: true
+    }
+    flipped.push(qr.questionId)
+  }
+  if (flipped.length > 0) {
+    logStaged(pipelineRunId, 'basic', `[zero-review-tail] 殘餘 ${flipped.length} 題採讀值出分＋標記（0 審查兜底）`, flipped)
+  }
+}
+
 export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   const s1 = ensureString(read1?.status, '').toLowerCase()
   const s2 = ensureString(read2?.status, '').toLowerCase()
@@ -9974,14 +10004,19 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
         }
       }
       const { perItem, anyReview } = classifyVjBlank(vjData.itemLabels, vjData.blankRead)
-      const consistencyStatus = anyReview ? 'diff' : 'stable'
+      // 2026-07-11 user 拍板 0 審查：VJ 空白項不再送老師確認、信 PRO blank reader（實測 5 輪 88/88 全對）。
+      //   空白項＝未作答 0 分（學生責任）；Phase B 對非空白項照常 rubric 評分。kill switch VJ_BLANK_AUTO='0'。
+      const vjBlankAuto = process.env.VJ_BLANK_AUTO !== '0'
+      const consistencyStatus = (anyReview && !vjBlankAuto) ? 'diff' : 'stable'
       const summary = perItem.map((p) => `${p.label}:${p.hasMark === 'yes' ? '有畫' : '空白'}`).join('、')
       return {
         questionId,
         consistencyStatus,
         containmentPreferredRaw: null,
         consistencyReason: anyReview
-          ? `${perItem.filter((p) => p.status !== 'auto_not_blank').length} 項需確認是否作答`
+          ? (vjBlankAuto
+            ? `${perItem.filter((p) => p.status !== 'auto_not_blank').length} 項空白由 AI 認定未作答（0 審查模式）`
+            : `${perItem.filter((p) => p.status !== 'auto_not_blank').length} 項需確認是否作答`)
           : undefined,
         questionType: classifyRow?.questionType,
         readAnswer1: { status: 'read', studentAnswer: summary },
@@ -10737,6 +10772,7 @@ Return JSON:
     pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
   })
   applyDoubleUnreadableZero(questionResults, pipelineRunId)
+  applyZeroReviewTail(questionResults, pipelineRunId)
 
   const stableCount = questionResults.filter((q) => q.arbiterResult?.arbiterStatus !== 'needs_review').length
   const diffCount = 0  // no longer used (legacy compat: kept at 0)
@@ -11191,6 +11227,7 @@ export async function runStagedGradingPhaseAArbiter({
     pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
   })
   applyDoubleUnreadableZero(questionResults, pipelineRunId)
+  applyZeroReviewTail(questionResults, pipelineRunId)
 
   // ── Per-question summary log ──
   const perQuestionLog = questionResults
