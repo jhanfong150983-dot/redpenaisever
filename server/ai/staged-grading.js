@@ -1082,13 +1082,23 @@ function normalizeSelectionAnswerToDisplay(raw, questionType) {
 }
 
 // 對 readAnswerResult 中的位置型勾選題套用顯示正規化
-function applySelectionDisplayNormalization(readResult, answerKey) {
+export function applySelectionDisplayNormalization(readResult, answerKey) {
   const typeByQuestionId = new Map(
     (answerKey?.questions ?? []).map(q => [
       ensureString(q?.id, '').trim(),
       ensureString(q?.questionCategory, '').trim()
     ])
   )
+  // 2026-07-11: single_choice 合法值域改「從答案卷動態推導」——固定 A-E 白名單在配對型選擇
+  //   （正解 E~J、國語卷實測）會把全班合法作答改判 unreadable；0 審查制下再被「雙 unreadable→0分」
+  //   接手＝全班 5 題自動誤殺 156 格。值域上限=全卷 single_choice 正解的最大代號序（至少 5、留 D+1 餘裕）；
+  //   一般卷（正解至 D）維持舊嚴格度、「O 圈誤讀」守門在兩種卷都成立（O=15 超界）。
+  let scMaxIdx = 5
+  for (const q of answerKey?.questions ?? []) {
+    if (ensureString(q?.questionCategory, '').trim() !== 'single_choice') continue
+    const idx = canonicalOptionIndex(ensureString(q?.answer, '').trim())
+    if (idx != null && idx > scMaxIdx) scMaxIdx = idx
+  }
   return {
     ...readResult,
     answers: readResult.answers.map(answer => {
@@ -1103,13 +1113,18 @@ function applySelectionDisplayNormalization(readResult, answerKey) {
       //   只改 read 值、不改判分；還原後仍走 read1/read2 雙讀一致性，另一讀真不同(如 b)仍走 arbiter/複核、不盲信。
       if (qType === 'single_choice') {
         const core = ensureString(a.studentAnswerRaw, '').replace(/[()（）\[\]【】.,，。、\s]/g, '')
-        if (core === 'L') return { ...a, studentAnswerRaw: 'C' }
-        if (core === 'l') return { ...a, studentAnswerRaw: 'c' }
-        // 2026-06-21 值域驗證:single_choice 合法只有 A-E / 甲乙丙丁戊 / 1-5 / ①-⑤。
-        //   非法值(座5 圈讀成「O」、座11 讀成整句選項長文)→ 送人工審查(unreadable)、不靜默吃下當 0 分。
-        //   (O 不亂等價成某選項——不知圈哪個、硬猜不安全;一律送審讓老師定。)
-        if (core && !/^[A-Ea-e1-5甲乙丙丁戊]$/u.test(core) && !/^[①②③④⑤]$/u.test(core)) {
-          return { ...a, status: 'unreadable', studentAnswerRaw: '無法辨識' }
+        // L→C 字跡兜底只在「L 不是合法選項」的卷適用（L=第12序；配對卷值域含 L 時不可改）
+        if (scMaxIdx < 12) {
+          if (core === 'L') return { ...a, studentAnswerRaw: 'C' }
+          if (core === 'l') return { ...a, studentAnswerRaw: 'c' }
+        }
+        // 2026-06-21 值域驗證＋2026-07-11 動態上限：合法=可化成選項序號且 ≤ 本卷正解最大序（至少5）。
+        //   非法值(座5 圈讀成「O」、座11 讀成整句選項長文)→ unreadable 送後續處理、不靜默吃下當 0 分。
+        if (core) {
+          const idx = canonicalOptionIndex(core)
+          if (idx == null || idx > scMaxIdx) {
+            return { ...a, status: 'unreadable', studentAnswerRaw: '無法辨識' }
+          }
         }
         return a
       }
