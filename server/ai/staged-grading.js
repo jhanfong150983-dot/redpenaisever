@@ -22,6 +22,7 @@ import { buildOcrHintsSection } from './bbox-anchor-match.js'
 // 新原則：bbox 來源只有兩條——OCR (row/sub_cell full replace) 或 AI (raw classify)、不再混用。
 import { applyRowAnchorOverride } from './bbox-row-anchor-match.js'
 import { applyMathEqBlankOverride } from './bbox-math-eq-blank.js'
+import { decomposeGlyph } from './glyph-decomp.js'
 import {
   buildStageAPrompt,
   parseStageAResult,
@@ -12060,8 +12061,18 @@ export async function runStagedGradingPhaseB({
           // 2026-07-12 V1 粗部件版（user 提案「只拆 2~3 個大部件」、沙盒定版）：判準粒度=大塊級、
           //   微筆畫（多一點/少一橫/內部細節）明示放行——誤殺 0/48（喚家族全救回）且該放格跨 100+ 票零 D 雜音。
           //   細看版（V2/V3）實測會把潦草字命名成錯的形近字（革→車/口→玉 5/5 固化）→ 否決。
-          //   已知地板：塊內骨架變形（羊型革、漏外框堰）~2 格/班、所有版本共同盲點、user 拍板接受。
-          const glyphPrompt = `這是學生手寫的一個國字。標準答案是「${t.key}」。
+          // 2026-07-12 方案C（user 拍板）：注入 IDS 權威部件拆解（decomposeGlyph、確定性查表）——
+          //   判官照表操課不靠記憶 → 戈/丱/羽型知識幻覺失去土壤；production crop 實測（V5 沙盒）
+          //   誤殺 6→2、放水 2→1。查表拆不了（幾/學型）→ 退無拆解版（原 V1 行為）。
+          //   已知地板（user 拍板接受）：羊型革（塊內骨架變形）~1 格/班、全配置共同盲點；
+          //   王/奧型感知誤讀 ~2 格/班（特定字跡穩定看錯、申訴兜底）。
+          const glyphDecomp = decomposeGlyph(t.key)
+          const glyphPrompt = glyphDecomp ? `這是學生手寫的一個國字。標準答案是「${t.key}」。
+「${t.key}」的標準部件拆解（權威資料、請照這個拆解逐塊檢查、不要自行拆解）：${JSON.stringify(glyphDecomp)}
+逐塊回答：學生在該位置寫的，大致上是這個部件嗎？
+判準（老師改考卷的標準）：字醜、潦草、微小筆畫差異（多一點/少一橫/內部細節模糊）都算 same。
+只有「某一大塊寫成別的東西」「缺了一整塊」「整個字是另一個字或自創字」才是 different。
+只輸出 JSON：{"blocks":"逐塊對照（60字內）","verdict":"same|different","reason":"20字內結論"}` : `這是學生手寫的一個國字。標準答案是「${t.key}」。
 你的任務：判斷學生寫的是不是「${t.key}」這個字。用「大部件」層級比對、不要逐筆畫檢查：
 1. blocks：把「${t.key}」拆成最多 2~3 個大部件（左右或上下大塊），逐塊回答——學生在這個位置寫的，大致上是同一個東西嗎？
 2. 判準（老師改考卷的標準）：字醜、潦草、微小筆畫差異（多一點/少一橫/內部細節模糊）都算 same。
