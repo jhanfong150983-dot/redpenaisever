@@ -12119,7 +12119,7 @@ export async function runStagedGradingPhaseB({
             if (!resp?.ok) return null
             return parseCandidateJson(resp.data)
           }
-          let parsed, gVerdict, glyphVotes = null
+          let parsed, gVerdict, glyphVotes = null, glyphBorderline = false
           if (t.kind === 'zhuyin') {
             const [pa, pb] = await Promise.all([callJudge(zhuyinPromptA), callJudge(zhuyinPromptB)])
             const va = ensureString(pa?.verdict, ''), vb = ensureString(pb?.verdict, '')
@@ -12128,16 +12128,20 @@ export async function runStagedGradingPhaseB({
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
             else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
           } else {
-            // 國字：V1 粗部件 ×3 重抽、兩票 different 才攔（majority、2026-07-12 V7 修正）。
-            //   一票就攔的樂透效應實測：每輪隨機 3~4 格偶發感知誤讀中獎（免/氵/焉↔王/玉/奧輪替）。
-            //   V7 沙盒：有 IDS 拆解後真錯誤格全票 DDDDD 穩定 → 兩票規則零漏攔、偶發 1/3 票全數擋掉。
+            // 國字：V1 粗部件 ×3 重抽、**一票 different 就攔＋非全票掛「邊界判定」標記**
+            //   （user 拍板 2026-07-12：放水零容忍 > churn 誤殺；V11 全量票型重建實測：真錯誤全部
+            //   住 DDD、混票區 2/106 格全是誤殺候選——一票殺的代價=偶發誤殺回歸、由標記＋申訴兜底，
+            //   換到的是混票區理論上的抖動型真錯誤零漏放）。
             const votes = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPrompt), callJudge(glyphPrompt)])
             const valid = votes.filter((v) => v?.verdict === 'same' || v?.verdict === 'different')
             // 2026-07-12 觀測補洞（user 問「三抽都有理由嗎」）：三票各有完整 blocks+reason、
             //   之前只存被採用那票 → 全票持久化（S/D + 理由摘要），事後稽核看得到票型（如 SSD 邊界格）
             glyphVotes = votes.map((v, i) => `${i + 1}:${ensureString(v?.verdict, '?')[0] ?? '?'}:${ensureString(v?.reason, '').slice(0, 30)}`)
             const dVotes = valid.filter((v) => v.verdict === 'different')
-            if (dVotes.length >= 2) { gVerdict = 'different'; parsed = dVotes[0] }
+            if (dVotes.length >= 1) {
+              gVerdict = 'different'; parsed = dVotes[0]
+              glyphBorderline = dVotes.length < valid.length // 非全票=邊界判定（DDD 才算共識殺）
+            }
             else if (valid.length >= 2) { gVerdict = 'same'; parsed = valid.find((v) => v.verdict === 'same') ?? valid[0] }
             else { gVerdict = ''; parsed = null } // 有效票 <2 → fail-open 交 accessor
           }
@@ -12145,12 +12149,14 @@ export async function runStagedGradingPhaseB({
           if (gVerdict === 'different') {
             deterministicScores.push({
               questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
-              scoringReason: `字形錯誤：${ensureString(parsed?.reason, '').slice(0, 40) || '與標準筆畫結構不符'}（標準「${t.key}」、視覺覆核）`,
-              scoreConfidence: 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
+              scoringReason: `字形錯誤：${ensureString(parsed?.reason, '').slice(0, 40) || '與標準筆畫結構不符'}（標準「${t.key}」、視覺覆核${glyphBorderline ? '、邊界判定' : ''}）`,
+              scoreConfidence: glyphBorderline ? 70 : 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
               _vjBypass: true, _glyphJudge: true,
               // 逐塊分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
               glyphAnalysis: ensureString(parsed?.analysis ?? parsed?.blocks, '').slice(0, 200),
-              glyphVotes
+              glyphVotes,
+              // 邊界判定標記（user 拍板：一票殺+標記）——非全票攔截、申訴/老師端可據此識別
+              glyphBorderline
             })
             vjBypassIds.add(t.qid)
             glyphFlipped++
