@@ -12036,49 +12036,8 @@ export async function runStagedGradingPhaseB({
         glyphTargets.push({ qid: ans.questionId, key, q, student: ans.studentAnswerRaw, kind })
       }
       if (glyphTargets.length > 0 && studentImgG?.data) {
-        // 參考圖：答案卷（template）老師手寫正解、lazy 下載＋快取
-        let tplPaths = null
-        let tplIdForRef = null
-        const refBufCache = new Map()
-        const loadTplPaths = async () => {
-          if (tplPaths !== null) return tplPaths
-          tplPaths = []
-          try {
-            const supabase = getSupabaseAdmin()
-            const aid = ensureString(payload?.assignmentId, '')
-            if (aid) {
-              const { data: arow } = await supabase.from('assignments').select('answer_key_template_id').eq('id', aid).maybeSingle()
-              if (arow?.answer_key_template_id) {
-                tplIdForRef = arow.answer_key_template_id
-                const { data: trow } = await supabase.from('answer_key_templates').select('answer_sheet_image_paths').eq('id', arow.answer_key_template_id).maybeSingle()
-                const p = trow?.answer_sheet_image_paths
-                tplPaths = Array.isArray(p) ? p : (typeof p === 'string' ? (JSON.parse(p) ?? []) : [])
-              }
-            }
-          } catch { tplPaths = [] }
-          return tplPaths
-        }
-        const refCropOf = async (q) => {
-          try {
-            const paths = await loadTplPaths()
-            // 2026-07-12 破口修：舊 template（5/15 前）的 answer_sheet_image_paths 欄位=null、
-            //   但 storage 檔案其實存在（慣例路徑）→ ref 永遠 null → 雙判官從未執行、
-            //   一路退回單判官記憶版（國語卷 60 攔那輪實測=全程無參考圖）。
-            //   欄位空 → 直接按慣例路徑 template-answer-sheets/{tid}/page-{n}.webp 撈（下載失敗照樣 fail-open）。
-            const pageIdx = Number(q.pageIndex) || 0
-            const path = paths[pageIdx] ?? (tplIdForRef ? `template-answer-sheets/${tplIdForRef}/page-${pageIdx}.webp` : null)
-            if (!path || !q.answerBbox) return null
-            if (!refBufCache.has(path)) {
-              const supabase = getSupabaseAdmin()
-              const { data: blob } = await supabase.storage.from('homework-images').download(path)
-              refBufCache.set(path, blob ? Buffer.from(await blob.arrayBuffer()) : null)
-            }
-            const buf = refBufCache.get(path)
-            if (!buf) return null
-            const mime = path.endsWith('.webp') ? 'image/webp' : 'image/jpeg'
-            return await cropInlineImageByBbox(buf.toString('base64'), mime, q.answerBbox, true, 0.005)
-          } catch { return null }
-        }
+        // 2026-07-12 參考圖管線整個拔除：V1 粗部件沙盒 A1(有參考圖) vs A2(無) 逐格逐輪完全相同
+        //   ＝粗粒度下參考圖零增量；且參考圖（老師手寫）曾是誤殺源（逐像素比對兩份手寫的挑剔）。
         let glyphFlipped = 0
         // 2026-07-12 事故修（07-11 國語卷 503×8）：三道預算防護——
         //   ①進場守門：剩餘預算 <90s 直接跳過整段（accessor 的份不可被吃）
@@ -12098,15 +12057,16 @@ export async function runStagedGradingPhaseB({
           if (!cRow?.answerBbox) continue
           const stuCrop = await cropInlineImageByBbox(studentImgG.data, studentImgG.mimeType, inflateBboxForType(cRow.answerBbox, cRow.questionType || 'fill_blank'), true, 0.005)
           if (!stuCrop) continue
-          const ref = await refCropOf(t.q)
-          // 2026-07-12 詳細推理版（user 拍板換版）：先逐部件分析、後結論——沙盒 5 輪：攔截不失守
-          //   （造字20/20＋合成40/40）、救回 3 格「潦草但部件齊全」、理由具體到部件級（漏四點灬/簡體马/革漏口）
-          //   ——申訴顯示的證據品質大升。堤型潦草判 different＝學生責任＋申訴（user 裁定）。
-          const glyphPrompt = `這是學生手寫的一個國字${ref ? '（第一張圖）。第二張圖是老師手寫的標準答案' : ''}。標準答案是「${t.key}」。
-你的任務不是辨認、是校對筆畫結構。請先做逐部件分析、再下結論：
-1. analysis：把標準「${t.key}」拆成部件（上下/左右結構各是什麼），逐一對照學生所寫：每個部件寫了什麼、哪裡一致、哪裡不同
-2. verdict：部件結構完全正確（潦草不算錯）→ "same"；部件錯誤/多筆少筆改變結構/形近字/不存在的字 → "different"
-只輸出 JSON：{"analysis":"逐部件分析（80字內）","verdict":"same|different","reason":"20字內結論"}`
+          // 2026-07-12 V1 粗部件版（user 提案「只拆 2~3 個大部件」、沙盒定版）：判準粒度=大塊級、
+          //   微筆畫（多一點/少一橫/內部細節）明示放行——誤殺 0/48（喚家族全救回）且該放格跨 100+ 票零 D 雜音。
+          //   細看版（V2/V3）實測會把潦草字命名成錯的形近字（革→車/口→玉 5/5 固化）→ 否決。
+          //   已知地板：塊內骨架變形（羊型革、漏外框堰）~2 格/班、所有版本共同盲點、user 拍板接受。
+          const glyphPrompt = `這是學生手寫的一個國字。標準答案是「${t.key}」。
+你的任務：判斷學生寫的是不是「${t.key}」這個字。用「大部件」層級比對、不要逐筆畫檢查：
+1. blocks：把「${t.key}」拆成最多 2~3 個大部件（左右或上下大塊），逐塊回答——學生在這個位置寫的，大致上是同一個東西嗎？
+2. 判準（老師改考卷的標準）：字醜、潦草、微小筆畫差異（多一點/少一橫/內部細節模糊）都算 same。
+   只有「某一大塊寫成別的東西」「缺了一整塊」「整個字是另一個字或自創字」才是 different。
+只輸出 JSON：{"blocks":"逐塊對照（60字內）","verdict":"same|different","reason":"20字內結論"}`
           // 注音雙判官（兩版 prompt 幻覺去相關、AND 共識才攔）
           const zhuyinPromptA = `這是學生手寫的注音答案。標準答案是「${t.key}」。
 你的任務不是辨認、是校對。請先逐符號分析、再下結論：
@@ -12121,7 +12081,6 @@ export async function runStagedGradingPhaseB({
 只輸出 JSON：{"analysis":"符號清單＋調號定位（60字內）","verdict":"same|different","reason":"20字內結論"}`
           const callJudge = async (txt) => {
             const parts = [{ text: txt }, { inlineData: stuCrop }]
-            if (ref) parts.push({ inlineData: ref })
             const resp = await executeStage({
               apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
               payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
@@ -12135,17 +12094,6 @@ export async function runStagedGradingPhaseB({
             if (!resp?.ok) return null
             return parseCandidateJson(resp.data)
           }
-          // 2026-07-12 國字也改雙判官 AND（老師終審重定 ground truth 後拍板）：記憶版的誤殺根因＝
-          //   模型對標準字的「結構記憶」錯誤（幻想羈有戈、喚有罒、奐下是廾）——圖像錨定版
-          //   （唯一標準=老師手寫參考圖、禁用字形記憶）幻覺去相關 → AND 共識：誤殺 8→1、放水 0
-          //   （沙盒＋老師逐格終審）。殘留地板：冂內兩點等「聲調級」微小筆畫低於判官解析度。
-          const glyphPromptGrounded = `兩張圖：第一張是學生手寫的一個國字、第二張是老師手寫的標準答案「${t.key}」。
-⚠ 唯一的比對標準是第二張圖的實際筆跡——不要依賴你記憶中「${t.key}」應該的結構、你的字形記憶可能是錯的。
-步驟：
-1. standard：只看第二張圖，描述它實際畫了哪些部件（位置＋形狀）
-2. student：只看第一張圖，同樣描述
-3. verdict：兩邊部件逐一對得上（潦草不算錯）→ "same"；學生缺件/多件/部件形狀是別的東西 → "different"
-只輸出 JSON：{"analysis":"標準圖與學生圖的部件對照（80字內）","verdict":"same|different","reason":"20字內結論"}`
           let parsed, gVerdict
           if (t.kind === 'zhuyin') {
             const [pa, pb] = await Promise.all([callJudge(zhuyinPromptA), callJudge(zhuyinPromptB)])
@@ -12153,18 +12101,16 @@ export async function runStagedGradingPhaseB({
             if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
             else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
-          } else if (ref) {
-            // 國字雙判官：記憶版 ∧ 圖像錨定版（有參考圖才可雙判；理由採錨定版——它描述的是圖上實況）
-            const [pm, pg] = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPromptGrounded)])
-            const vm = ensureString(pm?.verdict, ''), vg = ensureString(pg?.verdict, '')
-            if (vm === 'different' && vg === 'different') { gVerdict = 'different'; parsed = pg }
-            else if (vm === 'same' && vg === 'same') { gVerdict = 'same'; parsed = pg }
-            else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor
           } else {
-            // 無參考圖（答案卷影像缺）→ 退單判官記憶版（舊行為）
-            parsed = await callJudge(glyphPrompt)
-            if (!parsed) continue
-            gVerdict = ensureString(parsed?.verdict, '')
+            // 國字：V1 粗部件 ×3 重抽、一票 different 就攔（OR-block、user 拍板 2026-07-12）。
+            //   依據=實測不對稱：該放格跨 100+ 票零 D（一票就攔不誤傷）、真錯誤格的 D 票會抖動
+            //   （馬→禺只有 1/3 輪看得出）→ 重抽收割隨機捕獲、把單發運氣拿掉。
+            const votes = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPrompt), callJudge(glyphPrompt)])
+            const valid = votes.filter((v) => v?.verdict === 'same' || v?.verdict === 'different')
+            const dHit = valid.find((v) => v.verdict === 'different')
+            if (dHit) { gVerdict = 'different'; parsed = dHit }
+            else if (valid.length >= 2) { gVerdict = 'same'; parsed = valid[0] }
+            else { gVerdict = ''; parsed = null } // 有效票 <2 → fail-open 交 accessor
           }
           const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
           if (gVerdict === 'different') {
@@ -12173,8 +12119,8 @@ export async function runStagedGradingPhaseB({
               scoringReason: `字形錯誤：${ensureString(parsed?.reason, '').slice(0, 40) || '與標準筆畫結構不符'}（標準「${t.key}」、視覺覆核）`,
               scoreConfidence: 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
               _vjBypass: true, _glyphJudge: true,
-              // 逐部件分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
-              glyphAnalysis: ensureString(parsed?.analysis, '').slice(0, 200)
+              // 逐塊分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
+              glyphAnalysis: ensureString(parsed?.analysis ?? parsed?.blocks, '').slice(0, 200)
             })
             vjBypassIds.add(t.qid)
             glyphFlipped++
