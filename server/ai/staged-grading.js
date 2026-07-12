@@ -12058,17 +12058,20 @@ export async function runStagedGradingPhaseB({
           if (!cRow?.answerBbox) continue
           let stuCrop = await cropInlineImageByBbox(studentImgG.data, studentImgG.mimeType, inflateBboxForType(cRow.answerBbox, cRow.questionType || 'fill_blank'), true, 0.005)
           if (!stuCrop) continue
-          // 2026-07-12 V8：crop 放大 ×3（≤600px）——系統性感知誤讀的實測解（免 5/5誤殺→0、
-          //   奧全票→1/3 偶發、五個必攔格 3/3 全保住）。小 crop 是感知幻覺的放大器。
-          try {
-            const { default: sharp } = await import('sharp')
-            const buf = Buffer.from(stuCrop.data, 'base64')
-            const meta = await sharp(buf).metadata()
-            if (meta?.width && meta.width < 600) {
-              const up = await sharp(buf).resize({ width: Math.min(600, meta.width * 3) }).jpeg({ quality: 92 }).toBuffer()
-              stuCrop = { data: up.toString('base64'), mimeType: 'image/jpeg' }
-            }
-          } catch { /* 放大失敗 → 用原 crop、不擋流程 */ }
+          // 2026-07-12 V8：crop 放大 ×3（≤600px）——**只限國字判官**。國字實測解系統性感知誤讀
+          //   （免 5/5誤殺→0、奧全票→1/3、必攔格全保）；⛔注音不可放大——post5 實測放大讓注音判官
+          //   放走「缺調號」真錯誤（座31 ㄎㄢˋ、老師終審坐實放水）＝注音軸只在原尺寸圖上驗證過。
+          if (t.kind !== 'zhuyin') {
+            try {
+              const { default: sharp } = await import('sharp')
+              const buf = Buffer.from(stuCrop.data, 'base64')
+              const meta = await sharp(buf).metadata()
+              if (meta?.width && meta.width < 600) {
+                const up = await sharp(buf).resize({ width: Math.min(600, meta.width * 3) }).jpeg({ quality: 92 }).toBuffer()
+                stuCrop = { data: up.toString('base64'), mimeType: 'image/jpeg' }
+              }
+            } catch { /* 放大失敗 → 用原 crop、不擋流程 */ }
+          }
           // 2026-07-12 V1 粗部件版（user 提案「只拆 2~3 個大部件」、沙盒定版）：判準粒度=大塊級、
           //   微筆畫（多一點/少一橫/內部細節）明示放行——誤殺 0/48（喚家族全救回）且該放格跨 100+ 票零 D 雜音。
           //   細看版（V2/V3）實測會把潦草字命名成錯的形近字（革→車/口→玉 5/5 固化）→ 否決。
