@@ -12056,8 +12056,19 @@ export async function runStagedGradingPhaseB({
             const t = glyphTargets[gIdx++]
           const cRow = classifyArrForGlyph.find((r) => (r.questionId || r.id) === t.qid)
           if (!cRow?.answerBbox) continue
-          const stuCrop = await cropInlineImageByBbox(studentImgG.data, studentImgG.mimeType, inflateBboxForType(cRow.answerBbox, cRow.questionType || 'fill_blank'), true, 0.005)
+          let stuCrop = await cropInlineImageByBbox(studentImgG.data, studentImgG.mimeType, inflateBboxForType(cRow.answerBbox, cRow.questionType || 'fill_blank'), true, 0.005)
           if (!stuCrop) continue
+          // 2026-07-12 V8：crop 放大 ×3（≤600px）——系統性感知誤讀的實測解（免 5/5誤殺→0、
+          //   奧全票→1/3 偶發、五個必攔格 3/3 全保住）。小 crop 是感知幻覺的放大器。
+          try {
+            const { default: sharp } = await import('sharp')
+            const buf = Buffer.from(stuCrop.data, 'base64')
+            const meta = await sharp(buf).metadata()
+            if (meta?.width && meta.width < 600) {
+              const up = await sharp(buf).resize({ width: Math.min(600, meta.width * 3) }).jpeg({ quality: 92 }).toBuffer()
+              stuCrop = { data: up.toString('base64'), mimeType: 'image/jpeg' }
+            }
+          } catch { /* 放大失敗 → 用原 crop、不擋流程 */ }
           // 2026-07-12 V1 粗部件版（user 提案「只拆 2~3 個大部件」、沙盒定版）：判準粒度=大塊級、
           //   微筆畫（多一點/少一橫/內部細節）明示放行——誤殺 0/48（喚家族全救回）且該放格跨 100+ 票零 D 雜音。
           //   細看版（V2/V3）實測會把潦草字命名成錯的形近字（革→車/口→玉 5/5 固化）→ 否決。
@@ -12113,14 +12124,14 @@ export async function runStagedGradingPhaseB({
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
             else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
           } else {
-            // 國字：V1 粗部件 ×3 重抽、一票 different 就攔（OR-block、user 拍板 2026-07-12）。
-            //   依據=實測不對稱：該放格跨 100+ 票零 D（一票就攔不誤傷）、真錯誤格的 D 票會抖動
-            //   （馬→禺只有 1/3 輪看得出）→ 重抽收割隨機捕獲、把單發運氣拿掉。
+            // 國字：V1 粗部件 ×3 重抽、兩票 different 才攔（majority、2026-07-12 V7 修正）。
+            //   一票就攔的樂透效應實測：每輪隨機 3~4 格偶發感知誤讀中獎（免/氵/焉↔王/玉/奧輪替）。
+            //   V7 沙盒：有 IDS 拆解後真錯誤格全票 DDDDD 穩定 → 兩票規則零漏攔、偶發 1/3 票全數擋掉。
             const votes = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPrompt), callJudge(glyphPrompt)])
             const valid = votes.filter((v) => v?.verdict === 'same' || v?.verdict === 'different')
-            const dHit = valid.find((v) => v.verdict === 'different')
-            if (dHit) { gVerdict = 'different'; parsed = dHit }
-            else if (valid.length >= 2) { gVerdict = 'same'; parsed = valid[0] }
+            const dVotes = valid.filter((v) => v.verdict === 'different')
+            if (dVotes.length >= 2) { gVerdict = 'different'; parsed = dVotes[0] }
+            else if (valid.length >= 2) { gVerdict = 'same'; parsed = valid.find((v) => v.verdict === 'same') ?? valid[0] }
             else { gVerdict = ''; parsed = null } // 有效票 <2 → fail-open 交 accessor
           }
           const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
