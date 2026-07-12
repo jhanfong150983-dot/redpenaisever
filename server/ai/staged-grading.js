@@ -7038,7 +7038,11 @@ function buildFinalGradingResult({
       // map_fill 的 per-position 細節（給前端 detail modal 顯示用）
       mapFillResults: Array.isArray(score?.mapFillResults) ? score.mapFillResults : undefined,
       // VJ 的逐柱結果（給前端 detail 顯示逐柱 + 老師逐柱改有畫/沒畫）
-      vjItemResults: Array.isArray(score?.vjItemResults) ? score.vjItemResults : undefined
+      vjItemResults: Array.isArray(score?.vjItemResults) ? score.vjItemResults : undefined,
+      // 字形終審 audit（2026-07-12 補洞：white-list 剝掉了 9530eeb 加的欄位——B班首跑 votes 全 null 實測）
+      glyphVotes: Array.isArray(score?.glyphVotes) ? score.glyphVotes : undefined,
+      glyphAnalysis: ensureString(score?.glyphAnalysis, '').trim() || undefined,
+      glyphBorderline: score?.glyphBorderline === true || undefined
     }
 
     // ── 程式化覆核：數字/符號答案的 fill_blank 不信任 accessor ──
