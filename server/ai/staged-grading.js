@@ -12119,10 +12119,11 @@ export async function runStagedGradingPhaseB({
             if (!resp?.ok) return null
             return parseCandidateJson(resp.data)
           }
-          let parsed, gVerdict
+          let parsed, gVerdict, glyphVotes = null
           if (t.kind === 'zhuyin') {
             const [pa, pb] = await Promise.all([callJudge(zhuyinPromptA), callJudge(zhuyinPromptB)])
             const va = ensureString(pa?.verdict, ''), vb = ensureString(pb?.verdict, '')
+            glyphVotes = [pa, pb].map((v, i) => `${i === 0 ? 'A' : 'B'}:${ensureString(v?.verdict, '?')[0] ?? '?'}:${ensureString(v?.reason, '').slice(0, 30)}`)
             if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
             else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
@@ -12132,6 +12133,9 @@ export async function runStagedGradingPhaseB({
             //   V7 沙盒：有 IDS 拆解後真錯誤格全票 DDDDD 穩定 → 兩票規則零漏攔、偶發 1/3 票全數擋掉。
             const votes = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPrompt), callJudge(glyphPrompt)])
             const valid = votes.filter((v) => v?.verdict === 'same' || v?.verdict === 'different')
+            // 2026-07-12 觀測補洞（user 問「三抽都有理由嗎」）：三票各有完整 blocks+reason、
+            //   之前只存被採用那票 → 全票持久化（S/D + 理由摘要），事後稽核看得到票型（如 SSD 邊界格）
+            glyphVotes = votes.map((v, i) => `${i + 1}:${ensureString(v?.verdict, '?')[0] ?? '?'}:${ensureString(v?.reason, '').slice(0, 30)}`)
             const dVotes = valid.filter((v) => v.verdict === 'different')
             if (dVotes.length >= 2) { gVerdict = 'different'; parsed = dVotes[0] }
             else if (valid.length >= 2) { gVerdict = 'same'; parsed = valid.find((v) => v.verdict === 'same') ?? valid[0] }
@@ -12145,7 +12149,8 @@ export async function runStagedGradingPhaseB({
               scoreConfidence: 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
               _vjBypass: true, _glyphJudge: true,
               // 逐塊分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
-              glyphAnalysis: ensureString(parsed?.analysis ?? parsed?.blocks, '').slice(0, 200)
+              glyphAnalysis: ensureString(parsed?.analysis ?? parsed?.blocks, '').slice(0, 200),
+              glyphVotes
             })
             vjBypassIds.add(t.qid)
             glyphFlipped++
@@ -12157,7 +12162,8 @@ export async function runStagedGradingPhaseB({
               questionId: t.qid, isCorrect: true, score: gMax, maxScore: gMax, errorType: 'none',
               scoringReason: `答案正確（字形視覺覆核通過、標準「${t.key}」）`,
               scoreConfidence: 100, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
-              _vjBypass: true, _glyphJudge: true
+              _vjBypass: true, _glyphJudge: true,
+              glyphVotes
             })
             vjBypassIds.add(t.qid)
           }
