@@ -12290,6 +12290,101 @@ export async function runStagedGradingPhaseB({
     }
   }
 
+  // ── 🆕 2026-07-13 單選值域救援（user 拍板：「選擇題不該出現無法辨識」）────────────
+  // 背景：座12 型簡筆數字（|=1、Z=2、\=1）雙讀皆 unreadable → 歸零。但單選值域極小、
+  //   資訊論上必然是合法選項之一或空白——盲讀（不知正解、防向 key 投射）＋值域約束 prompt
+  //   即可解（沙盒 6 格 ×3 抽全穩：e-sc-domain-rescue.mjs）。
+  // 設計：雙無法辨識的 single_choice → 值域救援讀 ×2、兩抽一致才採納（含 blank=未作答）、
+  //   不一致維持無法辨識歸零。值域動態推導（user 指出可能 1~5/6 或 ABCDE）：
+  //   該題 options 長度優先、否則全卷單選正解最大序號、下限 4。kill switch SC_RESCUE='0'。
+  if (process.env.SC_RESCUE !== '0' && inlineImages.length > 0) {
+    try {
+      const scRescueTargets = []
+      for (const ans of finalReadAnswerResult.answers) {
+        if (ans.status === 'read' || manualBypassIds.has(ans.questionId) || vjBypassIds.has(ans.questionId)) continue
+        if (ensureString(ans.studentAnswerRaw, '').trim() !== '無法辨識' && ans.status !== 'unreadable') continue
+        const q = akQById.get(ans.questionId)
+        if (!q || q.questionCategory !== 'single_choice') continue
+        scRescueTargets.push({ qid: ans.questionId, q })
+      }
+      if (scRescueTargets.length > 0) {
+        // 值域上限：全卷單選正解最大序號（同 applySelectionDisplayNormalization 精神）、下限 4
+        let domainMax = 4
+        for (const q of akQuestions) {
+          if (q?.questionCategory !== 'single_choice') continue
+          const oc = Array.isArray(q?.options) ? q.options.length : 0
+          const ki = canonicalOptionIndex(ensureString(q?.answer, '').trim()) ?? 0
+          domainMax = Math.max(domainMax, oc, ki)
+        }
+        domainMax = Math.min(domainMax, 10)
+        const classifyArrSc = Array.isArray(classifyResult) ? classifyResult : (classifyResult?.alignedQuestions || classifyResult?.questions || [])
+        const imgSc = inlineImages[0]?.inlineData
+        const letters = 'ABCDEFGHIJ'.slice(0, domainMax).split('').join('、')
+        const digits = Array.from({ length: domainMax }, (_, i) => i + 1).join('、')
+        let rescued = 0
+        for (const t of scRescueTargets) {
+          if (getRemainingBudget() < 45_000) break
+          const cRow = classifyArrSc.find((r) => (r.questionId || r.id) === t.qid)
+          if (!cRow?.answerBbox || !imgSc?.data) continue
+          let crop = await cropInlineImageByBbox(imgSc.data, imgSc.mimeType, inflateBboxForType(cRow.answerBbox, 'single_choice'), true, 0.005)
+          if (!crop) continue
+          try {
+            const { default: sharp } = await import('sharp')
+            const cb = Buffer.from(crop.data, 'base64')
+            const cm = await sharp(cb).metadata()
+            if (cm?.width && cm.width < 500) {
+              crop = { data: (await sharp(cb).resize({ width: Math.min(500, cm.width * 3) }).jpeg({ quality: 92 }).toBuffer()).toString('base64'), mimeType: 'image/jpeg' }
+            }
+          } catch { /* 用原 crop */ }
+          const scPrompt = `這是一格「單選題」的手寫作答區。學生的答案**必然是 ${digits}（或字母 ${letters}）其中之一、或空白**——不存在其他可能。
+學生常用速記筆畫：一豎或一撇通常是 1、「Z」形是 2、平頂彎底是 3、十字型是 4。
+即使潦草，也請對應到最接近的合法選項；真正完全沒有墨水才是 blank。
+只輸出 JSON：{"choice":"選項代號或blank","seen":"看到的筆畫（15字內）"}`
+          const callSc = async () => {
+            const resp = await executeStage({
+              apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+              payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+              timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
+              routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+              stageContents: [{ role: 'user', parts: [{ text: scPrompt }, { inlineData: crop }] }]
+            })
+            if (resp) stageResponses.push(resp)
+            if (!resp?.ok) return null
+            const j = parseCandidateJson(resp.data)
+            const c = ensureString(j?.choice, '').trim().toUpperCase()
+            if (c === 'BLANK') return 'blank'
+            const idx = canonicalOptionIndex(c)
+            return (idx != null && idx >= 1 && idx <= domainMax) ? String(idx) : null
+          }
+          const [v1, v2] = await Promise.all([callSc(), callSc()])
+          if (v1 === null || v2 === null || v1 !== v2) continue // 兩抽不一致 → 維持無法辨識歸零
+          const gMaxSc = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
+          if (v1 === 'blank') {
+            deterministicScores.push({
+              questionId: t.qid, isCorrect: false, score: 0, maxScore: gMaxSc, errorType: 'blank',
+              scoringReason: '學生未作答（值域覆核：格內無墨水）', scoreConfidence: 90,
+              studentFinalAnswer: '未作答', needExplain: false, _vjBypass: true, _scRescue: true
+            })
+          } else {
+            const res = gradeObjectiveDeterministic(t.q, v1, 'read')
+            if (!res.gradable) continue
+            deterministicScores.push({
+              questionId: t.qid, isCorrect: res.isCorrect, score: res.score, maxScore: res.maxScore,
+              errorType: res.errorType, scoringReason: `${res.scoringReason}（速記筆跡、值域覆核判讀）`,
+              scoreConfidence: 90, studentFinalAnswer: v1, needExplain: !res.isCorrect,
+              _vjBypass: true, _scRescue: true
+            })
+          }
+          vjBypassIds.add(t.qid)
+          rescued++
+        }
+        logStaged(pipelineRunId, 'basic', `[B-ScRescue] 單選值域救援 ${scRescueTargets.length} 格 → 救回 ${rescued} 格（值域 1~${domainMax}）`)
+      }
+    } catch (e) {
+      logStaged(pipelineRunId, 'basic', `[B-ScRescue] 失敗(fail-open 維持歸零)：${e?.message}`)
+    }
+  }
+
   // Phase 2：找出 final ≠ expected 的 word_problem/calculation 題 (不含 manualBypass)
   const finalMismatchIds = new Set()
   for (const ans of finalReadAnswerResult.answers) {
