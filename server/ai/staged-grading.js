@@ -1423,6 +1423,10 @@ export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
     const d = deLatexMathText(ensureString(t, ''))
     return fold(d) === fold(key) || mathNumericEquivalent(d, key) === true
   }
+  // 2026-07-13 空白衝突特例（user 拍板 chain-native 設計）：兩張盲票都說空白 →「有字」的採納
+  //   失去盲票背書 → 判空白＋標記（情境B/C 零放水、情境D 誤殺+標記走申訴）。
+  //   有字內容要被採納、至少一張盲票要看得到字（L2/L2x/L3c 天然滿足）。
+  const blindBlankConsensus = r1 === '' && r1p === ''
   if (same(r1p, r2p)) return { adopted: r1p, level: 'L2', illegible: false }
   // 2026-07-11 L2x 交叉對：一盲一知答「跨輪」一致（新盲×舊知答 / 舊盲×新知答）——與 L1/L2' 同等
   // 證據等級（含盲票背書、無幻覺方向風險）。典型場景：一支重讀 call 失敗、另一支與對向舊讀一致
@@ -1436,8 +1440,11 @@ export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
       if (r1p != null || r1 != null) return { adopted: r1p ?? r1, level: 'L3a_blindguard', illegible: true }
       return { adopted: null, level: null, illegible: false }
     }
+    if (blindBlankConsensus) return { adopted: '', level: 'L3b_blankguard', illegible: true }
     return { adopted: r2p, level: 'L3b', illegible: false }
   }
+  // 註：盲雙空白（r1=r1p=''）若知答未成共識、會被此 L3c 接住（same('','')=true）→ 採空白、
+  //   天然滿足空白特例；tail 不需另設 guard。
   if (same(r1, r1p)) return { adopted: r1p, level: 'L3c', illegible: false }
   if (r2p != null || r2 != null) return { adopted: r2p ?? r2, level: 'tail', illegible: true }
   return { adopted: null, level: null, illegible: false }
@@ -1474,7 +1481,9 @@ export async function applyEscalationChain({
     }
     const targets = questionResults.filter((qr) =>
       qr.arbiterResult?.arbiterStatus === 'needs_review'
-      && (qr.questionType === 'fill_blank' || qr.questionType === 'short_answer')
+      // 2026-07-13: compound_* 納入鏈守備範圍（空白衝突 chain-native 改版：社會卷圈選+理由題
+      //   一空一有翻 NR 後、要由鏈加賽裁決而非掉 tail 兜底）
+      && (qr.questionType === 'fill_blank' || qr.questionType === 'short_answer' || String(qr.questionType).startsWith('compound_'))
       && !qr.arbiterResult?.spacingReviewFlag && !qr.arbiterResult?.excessiveBlanksFlag
       && !(Array.isArray(qr.readAnswer1?.partValues) && qr.readAnswer1.partValues.length > 0)
       && !(Array.isArray(qr.readAnswer2?.partValues) && qr.readAnswer2.partValues.length > 0)
@@ -1624,11 +1633,22 @@ export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   //     - ⛔ single_choice / 勾選等「短標記」：學生幾乎都會猜一個字母、極少真空白；read1 盲讀易漏看那個小筆跡
   //       → read1 空白 ≠ 真空白（實測 seat12 2-D-3 學生寫 A 被 read1 判空白、8/8 都是有寫）→ **不可信 read1、仍送審**。
   //   故只對長答案型套用；短標記型的一空一有維持 unstable 送審。kill-switch: BLANK_TRUST_READ1='false'。
+  // ② 2026-07-13 chain-native 改版（user 拍板：0 審查架構下處理）：blank-trust 是前鏈時代捷徑、
+  //   在意見長文題（社會卷 compound/short_answer 實證）誤殺真跡——r1 偶發漏看長文、r2 讀到的是
+  //   學生散文（意見題無標準答案可抄、非幻覺；跨輪讀出同段文字鐵證）→ 這些型改判 unstable 送鏈：
+  //   鏈加賽盲讀背書內容（情境A 採納）、幻覺簽名由 L3a/blankguard 擋（情境B 判空白+標記）。
+  //   word_problem/calculation 維持信空白捷徑（數學 r2 幻覺朝 key、GT 在數學卷）。
+  //   BLANK_TRUST_READ1='legacy' 可整體退回舊行為。
   const isLongAnswerType = questionType === 'fill_blank' || questionType === 'short_answer'
     || questionType === 'word_problem' || questionType === 'calculation' || String(questionType).startsWith('compound_')
   if (process.env.BLANK_TRUST_READ1 !== 'false' && isLongAnswerType) {
-    if (s1 === 'blank' && s2 === 'read') return 'stable'  // → finalAnswer 用 read1=空白=未作答
-    if (s1 === 'read' && s2 === 'blank') return 'stable'  // → finalAnswer 用 read1 的答案
+    if (s1 === 'read' && s2 === 'blank') return 'stable'  // → finalAnswer 用 read1 的答案（盲讀有字=已背書）
+    if (s1 === 'blank' && s2 === 'read') {
+      const keepTrust = process.env.BLANK_TRUST_READ1 === 'legacy'
+        || questionType === 'word_problem' || questionType === 'calculation'
+      if (keepTrust) return 'stable'  // → finalAnswer 用 read1=空白=未作答
+      return 'unstable'  // → NR 送層級鏈（空白衝突由鏈裁決）
+    }
   }
   if (s1 !== 'read' || s2 !== 'read') return 'unstable'
 
