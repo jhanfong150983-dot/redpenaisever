@@ -7261,6 +7261,7 @@ function buildFinalGradingResult({
           else { base = 80; journey = '注音符號攔' }
         } else { base = 80; journey = '字形全票攔' }
       }
+      else if (score?._scRescue) { base = 90; journey = '單選值域救援' }
       else if (score?._vjBypass) { base = 90; journey = 'VJ視覺判斷' }
       // A 段修正（只對走過讀取的格子）
       const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷'])
