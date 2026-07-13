@@ -23,6 +23,7 @@ import { buildOcrHintsSection } from './bbox-anchor-match.js'
 import { applyRowAnchorOverride } from './bbox-row-anchor-match.js'
 import { applyMathEqBlankOverride } from './bbox-math-eq-blank.js'
 import { decomposeGlyph } from './glyph-decomp.js'
+import { ZY_ANCHOR_NOTONE, ZY_ANCHOR_TONE } from './zy-anchors.js'
 import {
   buildStageAPrompt,
   parseStageAResult,
@@ -12123,7 +12124,7 @@ export async function runStagedGradingPhaseB({
             if (!resp?.ok) return null
             return parseCandidateJson(resp.data)
           }
-          let parsed, gVerdict, glyphVotes = null, glyphBorderline = false
+          let parsed, gVerdict, glyphVotes = null, glyphBorderline = false, toneReviewReleased = false
           if (t.kind === 'zhuyin') {
             const [pa, pb] = await Promise.all([callJudge(zhuyinPromptA), callJudge(zhuyinPromptB)])
             const va = ensureString(pa?.verdict, ''), vb = ensureString(pb?.verdict, '')
@@ -12131,6 +12132,49 @@ export async function runStagedGradingPhaseB({
             if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
             else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
+            // ── 2026-07-13 調號覆核否決（user 拍板、few-shot 沙盒 11/12）────────────
+            //   根因：語言先驗讓判官把符號自身筆畫（ㄔ斜撇/ㄩ右豎收勾）認領為期待中的調號、
+            //   雙判官會一致幻覺（ㄑㄩ 近乎確定性誤殺、read 層同病＝視覺層才能修）。
+            //   解法：範例錨 few-shot＋音節致盲（畫面只有錨與待判、prompt 不提音節）→ 先驗斷糧。
+            //   觸發窄門：標準無調號（一聲）×攔截理由=調號類（排除「聲母」等符號類指控）。
+            //   三抽多數「無調號」→ 否決攔截放行＋標記；多數「有」（B座4 型離群墨）→ 維持攔截。
+            //   實測：誤殺 8 格全救（跨兩班）、真調號 3/3 不誤傷、零觀察到漏放。kill switch ZY_TONE_REVIEW='0'。
+            const toneClaim = /調號|聲調|[一二三四輕]聲/.test(ensureString(parsed?.reason, '') + ensureString(pa?.reason, ''))
+            if (process.env.ZY_TONE_REVIEW !== '0' && gVerdict === 'different' && !/[ˊˇˋ˙]/.test(t.key) && toneClaim) {
+              const toneReviewParts = [
+                { text: `你要判斷學生手寫注音「有沒有寫聲調記號」。先看兩張範例：
+【範例一】這位學生「沒有寫聲調記號」——注意：注音符號自身的筆畫（例如 ㄔ 的斜撇、ㄑ 的斜鉤、ㄩ 的收筆）看起來像小斜線，但它們是符號的一部分、不是調號：` },
+                { inlineData: { mimeType: 'image/jpeg', data: ZY_ANCHOR_NOTONE } },
+                { text: `【範例二】這位學生「有寫聲調記號」——真正的調號是脫離符號、獨立寫在符號右側的一小筆：` },
+                { inlineData: { mimeType: 'image/jpeg', data: ZY_ANCHOR_TONE } },
+                { text: `⚠特別注意：「ㄩ」這個符號的右側豎筆常常向上凸出、或收筆帶一個小勾——那是 ㄩ 自己的筆畫、不是調號。調號必須是「完全脫離所有符號的獨立一筆」，跟任何符號的筆畫相連或屬於符號一部分的都不算。
+【待判】下圖學生寫的注音（音節不重要、只判斷調號有無）。對照兩張範例的差別後回答。
+只輸出 JSON：{"hasTone":true|false,"where":"若有：位置與形狀（15字內）；若無：空字串"}` },
+                { inlineData: stuCrop },
+              ]
+              const callToneReview = async () => {
+                const resp = await executeStage({
+                  apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+                  payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                  timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
+                  routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+                  stageContents: [{ role: 'user', parts: toneReviewParts }]
+                })
+                if (resp) stageResponses.push(resp)
+                if (!resp?.ok) return null
+                const j = parseCandidateJson(resp.data)
+                return (j?.hasTone === true || j?.hasTone === false) ? j : null
+              }
+              const trVotes = await Promise.all([callToneReview(), callToneReview(), callToneReview()])
+              const trValid = trVotes.filter((v) => v !== null)
+              const noToneN = trValid.filter((v) => v.hasTone === false).length
+              if (glyphVotes) glyphVotes.push(...trVotes.map((v, i) => `覆核${i + 1}:${v === null ? '?' : v.hasTone ? '有' : '無'}`))
+              if (trValid.length >= 2 && noToneN >= 2) {
+                gVerdict = 'same'
+                toneReviewReleased = true
+                parsed = { reason: '調號覆核：無獨立調號筆畫' }
+              }
+            }
           } else {
             // 國字：V1 粗部件 ×3 重抽、**一票 different 就攔＋非全票掛「邊界判定」標記**
             //   （user 拍板 2026-07-12：放水零容忍 > churn 誤殺；V11 全量票型重建實測：真錯誤全部
@@ -12170,7 +12214,7 @@ export async function runStagedGradingPhaseB({
             //   （accessor 文字比對已無資訊增量、留著反而多一次誤判機會）。error/no_ref 仍 fail-open 進 accessor。
             deterministicScores.push({
               questionId: t.qid, isCorrect: true, score: gMax, maxScore: gMax, errorType: 'none',
-              scoringReason: `答案正確（字形視覺覆核通過、標準「${t.key}」）`,
+              scoringReason: `答案正確（字形視覺覆核通過、標準「${t.key}」${toneReviewReleased ? '、調號覆核放行' : ''}）`,
               scoreConfidence: 100, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
               _vjBypass: true, _glyphJudge: true,
               glyphVotes
