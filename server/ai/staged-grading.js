@@ -12238,11 +12238,27 @@ export async function runStagedGradingPhaseB({
             else { gVerdict = ''; parsed = null } // 有效票 <2 → fail-open 交 accessor
           }
           const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
+          // 2026-07-13 學生答案欄與視覺覆核對齊（user 回報：欄位顯示「ㄎㄢˋ」、理由卻說漏寫調號）——
+          //   read 層調號雙向不可靠（幻覺補全/吃掉）、「學生答案」欄來自 read＝可能與判官視覺真相矛盾。
+          //   判官攔調號類錯誤時，把顯示值校正成視覺所見：漏寫→去調、多寫X聲→補上該調號。只動顯示、不動計分。
+          let displayStudent = ensureString(t.student, '')
+          if (t.kind === 'zhuyin' && gVerdict === 'different') {
+            const rsn = ensureString(parsed?.reason, '')
+            if (/漏寫|缺少|未寫/.test(rsn) && /調號|[一二三四輕]聲|聲調/.test(rsn)) {
+              displayStudent = displayStudent.replace(/[ˊˇˋ˙]/g, '')
+            } else {
+              const mTone = rsn.match(/(?:多寫|寫成|寫了)[^，。]*?([二三四輕])聲/)
+              if (mTone && !/[ˊˇˋ˙]/.test(displayStudent)) {
+                const mark = { '二': 'ˊ', '三': 'ˇ', '四': 'ˋ', '輕': '˙' }[mTone[1]]
+                if (mark) displayStudent = displayStudent + mark
+              }
+            }
+          }
           if (gVerdict === 'different') {
             deterministicScores.push({
               questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
               scoringReason: `字形錯誤：${ensureString(parsed?.reason, '').slice(0, 40) || '與標準筆畫結構不符'}（標準「${t.key}」、視覺覆核${glyphBorderline ? '、邊界判定' : ''}）`,
-              scoreConfidence: glyphBorderline ? 70 : 95, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
+              scoreConfidence: glyphBorderline ? 70 : 95, studentFinalAnswer: displayStudent, needExplain: false,
               _vjBypass: true, _glyphJudge: true,
               // 逐塊分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
               glyphAnalysis: ensureString(parsed?.analysis ?? parsed?.blocks, '').slice(0, 200),
