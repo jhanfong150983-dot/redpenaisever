@@ -7236,6 +7236,43 @@ function buildFinalGradingResult({
       if (consistency.finalAnswerSource) row.finalAnswerSource = consistency.finalAnswerSource
       if (consistency.framingReason) row.framingReason = consistency.framingReason
     }
+
+    // ── 2026-07-13 系統信心指數（user 拍板：純系統查表、零 AI）─────────────────
+    //   每題信心＝「這格走過的旅程」的歷史正確率（校準 v1：A/B 班老師終審實測、暫定）。
+    //   B 段（判定路徑）給基準分、A 段（轉錄路徑）扣修正、clamp 40~100。
+    //   整卷=平均 → paperConfidence（前端學生卡片左上角顯示）。
+    {
+      const rTxt = ensureString(row.reason, '')
+      let base = 88, journey = 'accessor語意'
+      if (row.finalAnswerSource === 'manual') { base = 100; journey = '人工輸入直判' }
+      else if (row.studentAnswer === '無法辨識' && row.score === 0) { base = 65; journey = '雙無法辨識歸零' }
+      else if (score?._objectiveBypass) { base = 99; journey = '選擇題code直判' }
+      else if (score?._clozeBypass) { base = 99; journey = '克漏字code直判' }
+      else if (score?._mapFillBypass) { base = 88; journey = 'map_fill確定性' }
+      else if (score?._glyphJudge) {
+        const isZy = /[ㄅ-ㄩ]/.test(ensureString(question?.answer, ''))
+        if (row.isCorrect) {
+          if (rTxt.includes('調號覆核放行')) { base = 95; journey = '調號覆核放行' }
+          else { base = 97; journey = isZy ? '注音判官放行' : '字形判官全票放行' }
+        } else if (score?.glyphBorderline) { base = 55; journey = '字形邊界攔' }
+        else if (isZy) {
+          const toneKept = Array.isArray(score?.glyphVotes) && score.glyphVotes.some((v) => String(v).startsWith('覆核'))
+          if (toneKept) { base = 70; journey = '注音調號攔(覆核維持)' }
+          else { base = 80; journey = '注音符號攔' }
+        } else { base = 80; journey = '字形全票攔' }
+      }
+      else if (score?._vjBypass) { base = 90; journey = 'VJ視覺判斷' }
+      // A 段修正（只對走過讀取的格子）
+      const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷'])
+      let aTag = ''
+      if (!skipA.has(journey)) {
+        if (row.consistencyStatus === 'stable') aTag = '兩讀一致'
+        else if (row.consistencyStatus) { base -= 8; aTag = '兩讀分歧經鏈' }
+        else aTag = ''
+      }
+      row.systemConfidence = Math.max(40, Math.min(100, Math.round(base)))
+      row.confidenceJourney = aTag ? `${aTag}→${journey}` : journey
+    }
     // Classify 推理摘要（v4.0 新增）— 即使沒走 phaseA 也要保留
     if (!row.framingReason && classify?.framingReason) {
       row.framingReason = classify.framingReason
@@ -7300,6 +7337,12 @@ function buildFinalGradingResult({
   }
   // stageWarnings 僅記錄於 log，不推送給老師
 
+  // 2026-07-13 整卷系統信心＝每題信心平均（user 拍板：不加權、不做清單、卡片左上角顯示）
+  const confVals = details.map((d) => d.systemConfidence).filter((v) => Number.isFinite(v))
+  const paperConfidence = confVals.length > 0
+    ? Math.round(confVals.reduce((a, b) => a + b, 0) / confVals.length)
+    : undefined
+
   return {
     totalScore,
     details,
@@ -7307,7 +7350,8 @@ function buildFinalGradingResult({
     weaknesses: explainResult.weaknesses,
     suggestions: explainResult.suggestions,
     needsReview: reviewReasons.length > 0,
-    reviewReasons
+    reviewReasons,
+    paperConfidence
   }
 }
 
