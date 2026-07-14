@@ -3195,6 +3195,26 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
     if (score < 0) score = 0
     if (score > maxScore) score = maxScore
 
+    // 2026-07-14 rubric 維度確定性加總（user 拍板 A/B/C 穩定化）：有 rubricsDimensions 的題、
+    //   總分改由 code 依 rubricScores 逐維 clamp 加總——維度判定是小裁量（穩）、加總是確定性（零晃動），
+    //   取代 holistic 總分。維度數不齊/缺值/配分不合 → fail-open 用原總分。
+    const qDims = Array.isArray(question?.rubricsDimensions) ? question.rubricsDimensions : null
+    let rubricAggregated = false
+    if (readStatus === 'read' && qDims && qDims.length >= 2
+        && Array.isArray(row?.rubricScores) && row.rubricScores.length === qDims.length) {
+      const dimMax = qDims.map((d) => Math.max(0, toFiniteNumber(d?.maxScore) ?? 0))
+      const sumMax = dimMax.reduce((a, b) => a + b, 0)
+      if (sumMax > 0 && Math.abs(sumMax - maxScore) < 0.01) {
+        let sum = 0, allValid = true
+        for (let i = 0; i < qDims.length; i++) {
+          const ds = toFiniteNumber(row.rubricScores[i]?.score)
+          if (ds === null) { allValid = false; break }
+          sum += Math.max(0, Math.min(dimMax[i], ds))
+        }
+        if (allValid) { score = sum; rubricAggregated = true }
+      }
+    }
+
     // 2026-06-22: code 兜底——英語 fill_blank/short_answer「大小寫誤扣」逐空格救回(依答案卷專有名詞規則)。
     //   AI 對「只差可赦免大小寫/結尾標點」的 blank 扣分時，code 在此推翻、把那格的分加回(逐格、部分給分也保護)。
     //   只加分不減分；專有名詞(Indonesia)/全大寫(USA)仍由 AI 扣、不救。
@@ -3303,7 +3323,7 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
     const isCorrect =
       (readStatus === 'blank' || readStatus === 'unreadable' || enumSupersetWrong)
         ? false
-        : caseRestored
+        : (caseRestored || rubricAggregated)  // rubric 加總後 isCorrect 跟著 code 算的分數走、不信模型布林
           ? maxScore > 0 && score >= maxScore
           : typeof row?.isCorrect === 'boolean'
             ? row.isCorrect
@@ -6376,6 +6396,18 @@ ${isHighSchool
       - e.g. "為了增進感情" ✓, "讓人增進感情" ✓, "可以加強彼此感情" ✓, "增進彼此的感情" ✓ (>4字 with 的)
     This rule does NOT apply to fill_blank, multi_fill, or calculation questions.
     This rule does NOT apply to 國語/English/其他 domains — only 社會 and 自然.
+- 🔒 RUBRIC 穩定性鐵則（Domain 社會/自然、適用所有帶 rubricsDimensions 的題型；與個別題型規則衝突時以本節為準）：
+  1. 【表達不扣分】錯字、缺字、注音代字、語句不通順一律不扣分——能理解學生想表達的意思就照概念評分。
+     唯有「完全無法理解在說什麼」才判該維度不成立。🚨 禁止以「語句表達不夠通順/清楚/完整/流暢」作為扣分理由。
+     （MINIMUM EXPRESSION STANDARD 的 ≤4 字裸詞片段上限仍適用——那是「內容太少」不是「表達不順」。）
+  2. 【範例非清單】referenceAnswer 是「範例答案」、不是必要覆蓋清單。評分唯一錨點是各維度的 criteria；
+     學生不需覆蓋範例答案的所有論點、深度或字數。
+  3. 【人物事蹟等價】維度要求「人物＋其相關事蹟/事件/影響」時：人物正確、且所述為該人物真實事蹟即滿足——
+     不要求與 referenceAnswer 列舉的事蹟相同（例：馬偕「創立淡水女學堂」與「醫治牙痛」同樣成立）。
+  4. 【理由成立標準】理由/說明維度＝學生的理由能支持所選選項且屬相關概念即成立；
+     不得額外要求「明確因果句式」「合理類比」「更完整的說明」——除非該維度 criteria 明文要求。
+  5. 【輸出強制】帶 rubricsDimensions 的題必須回傳 rubricScores（與 rubricsDimensions 同順序、
+     每維 {dimension, score, maxScore}）。總分由系統依維度加總；scoringReason 逐維度說明給分/扣分。
 - diagram_color: studentAnswerRaw is a description of the student's coloring (e.g. "塗色：第1個圓完整，第2個圓左側2/3，第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
   - 塗色位置: check if the colored region is the correct side/area (e.g. left vs right, which cells). Position must match referenceAnswer.
