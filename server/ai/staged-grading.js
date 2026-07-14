@@ -12500,7 +12500,13 @@ export async function runStagedGradingPhaseB({
       const scRescueTargets = []
       for (const ans of finalReadAnswerResult.answers) {
         if (ans.status === 'read' || manualBypassIds.has(ans.questionId) || vjBypassIds.has(ans.questionId)) continue
-        if (ensureString(ans.studentAnswerRaw, '').trim() !== '無法辨識' && ans.status !== 'unreadable') continue
+        // 2026-07-15 守備範圍擴到雙 blank（座12 5-6-3 屍檢）：速記一撇被兩讀當空白 →
+        //   連「無法辨識」都撈不到、救援漏接。雙 blank 也進救援：真空白兩抽一致回 blank
+        //   （維持未作答、只多 2 call）、有速記筆畫的被撈回。
+        const raw = ensureString(ans.studentAnswerRaw, '').trim()
+        const isUnrec = raw === '無法辨識' || ans.status === 'unreadable'
+        const isBlank = ans.status === 'blank' || raw === '未作答' || raw === ''
+        if (!isUnrec && !isBlank) continue
         const q = akQById.get(ans.questionId)
         if (!q || q.questionCategory !== 'single_choice') continue
         scRescueTargets.push({ qid: ans.questionId, q })
