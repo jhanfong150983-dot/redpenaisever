@@ -1415,6 +1415,74 @@ function reconstructScaffoldRead1(read1Raw, read2Raw) {
 // 方向不對稱：幻覺只朝正解偏 → 盲票只在「知答共識=正解」時有否決權（L3a）；
 // 知答共識≠正解（L3b）＝頂著偏置都讀不出正解、直接可信；分數交 Phase B（帶分數等價/部分分）。
 // 實證：培英 136 NR × 5 輪 harness 放水 0；詳 memory escalation-chain-zero-review。
+// ── 多子格無序配對（2026-07-14、user 拍板）────────────────────────────────────
+// 病：compound 母題拆多個並列子格（4-5-5-1/2 人物題、6-7-8-1/2 建設題），學生兩個答案
+//   都寫對、但 read 在輪與輪間把答案分配到不同子格（順序洗牌）→ 錯位的那格被冤（r4/r5 各 ~20 格翻動主力）。
+// 解：批改前對同母題子格做「最佳配對」——學生答案 × 標準答案的相似度矩陣、取總相似度最高的
+//   排列；僅在明顯優於原序（×1.15＋0.05 邊際）才交換——真按序寫的不會被動、寫錯的換了也不會更差。
+// 純確定性、零 AI call。kill switch SIBLING_ALIGN='0'。
+function siblingBigramSim(a, b) {
+  const fa = normalizeAnswerForComparison(ensureString(a, ''))
+  const fb = normalizeAnswerForComparison(ensureString(b, ''))
+  if (!fa || !fb) return 0
+  const grams = (s) => { const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) ?? 0) + 1) } return m }
+  const ga = grams(fa), gb = grams(fb)
+  if (ga.size === 0 || gb.size === 0) return fa === fb ? 1 : 0
+  let inter = 0, tot = 0
+  for (const [k, v] of ga) { tot += v; if (gb.has(k)) inter += Math.min(v, gb.get(k)) }
+  for (const v of gb.values()) tot += v
+  return tot ? 2 * inter / tot : 0
+}
+export function alignSiblingCompoundAnswers(answers, akQuestions) {
+  const akById = new Map((akQuestions || []).map((q) => [ensureString(q?.id).trim(), q]))
+  // 分組：①顯式 unorderedGroupId（extract 標記的無序組、任何題型）優先
+  //      ②fallback 啟發式：id=<parent>-<n>、parent 本身不是題目、全組 compound_*
+  const groups = new Map()
+  for (const q of (akQuestions || [])) {
+    const qid = ensureString(q?.id).trim()
+    const explicitGid = ensureString(q?.unorderedGroupId, '').trim()
+    if (explicitGid) {
+      if (!groups.has(explicitGid)) groups.set(explicitGid, [])
+      groups.get(explicitGid).push(qid)
+      continue
+    }
+    const m = qid.match(/^(.+)-(\d+)$/)
+    if (!m || akById.has(m[1])) continue
+    if (!String(q?.questionCategory ?? '').startsWith('compound_')) continue
+    if (!groups.has(m[1])) groups.set(m[1], [])
+    groups.get(m[1]).push(qid)
+  }
+  const ansById = new Map((answers || []).map((a) => [ensureString(a?.questionId).trim(), a]))
+  const swappedGroups = []
+  for (const [base, qids] of groups) {
+    if (qids.length < 2 || qids.length > 3) continue
+    const rows = qids.map((qid) => ({ qid, ans: ansById.get(qid), ref: ensureString(akById.get(qid)?.answer ?? akById.get(qid)?.referenceAnswer, '') }))
+    if (rows.some((r) => !r.ans || r.ans.status !== 'read' || !ensureString(r.ans.studentAnswerRaw, '').trim() || !r.ref)) continue
+    // 相似度矩陣＋全排列（≤3! = 6）
+    const n = rows.length
+    const sim = rows.map((r) => rows.map((c) => siblingBigramSim(r.ans.studentAnswerRaw, c.ref)))
+    const perms = n === 2 ? [[0, 1], [1, 0]] : [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]
+    let best = perms[0], bestScore = -1, identityScore = 0
+    for (const p of perms) {
+      let s = 0
+      for (let i = 0; i < n; i++) s += sim[i][p[i]]  // 學生答案 i 配到子格 p[i] 的標準
+      if (p.every((v, i) => v === i)) identityScore = s
+      if (s > bestScore) { bestScore = s; best = p }
+    }
+    const isIdentity = best.every((v, i) => v === i)
+    if (isIdentity || bestScore <= identityScore * 1.15 + 0.05) continue
+    // 套用交換：學生答案 i 移到子格 best[i]
+    const rawByTarget = new Map()
+    for (let i = 0; i < n; i++) rawByTarget.set(rows[best[i]].qid, { raw: rows[i].ans.studentAnswerRaw, status: rows[i].ans.status })
+    for (const r of rows) {
+      const moved = rawByTarget.get(r.qid)
+      if (moved) { r.ans.studentAnswerRaw = moved.raw; r.ans.status = moved.status; r.ans._siblingAligned = true }
+    }
+    swappedGroups.push(base)
+  }
+  return swappedGroups
+}
+
 export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
   const fold = (x) => normalizeAnswerForComparison(deLatexMathText(ensureString(x, '')))
   const same = (a, b) => a != null && b != null && fold(a) === fold(b)
@@ -11672,6 +11740,20 @@ export async function runStagedGradingPhaseB({
   const cropTypesForAccessor = new Set([...calcTypes])
   const akQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const akQById = new Map(akQuestions.map((q) => [ensureString(q?.id).trim(), q]))
+
+  // ── 2026-07-14 多子格無序配對（user 拍板、跑在所有評分邏輯之前）──────────────
+  //   同母題並列子格（4-5-5 人物列 / 6-7-8 unorderedGroupId）read 輪間洗牌 → 最佳配對
+  //   對齊參考答案；只在明顯優於原序時交換（r5 離線驗證：座6 交叉修正、28 卷零誤動）。
+  if (process.env.SIBLING_ALIGN !== '0') {
+    try {
+      const alignedGroups = alignSiblingCompoundAnswers(finalReadAnswerResult.answers, Array.isArray(answerKey?.questions) ? answerKey.questions : [])
+      if (alignedGroups.length > 0) {
+        logStaged(pipelineRunId, 'basic', `[B-SiblingAlign] 多子格無序配對交換 ${alignedGroups.length} 組`, alignedGroups)
+      }
+    } catch (e) {
+      logStaged(pipelineRunId, 'basic', `[B-SiblingAlign] 失敗(略過)：${e?.message}`)
+    }
+  }
 
   // Phase 0：找出 manual-edited word_problem/calculation 題
   const manualBypassIds = new Set()
