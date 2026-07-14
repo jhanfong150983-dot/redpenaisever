@@ -8917,7 +8917,9 @@ export async function runStagedGradingPhaseA({
     && ensureString(internalContext?.domainHint, '').includes('數學')
   // 2026-07-14 wq_pdf set-of-mark：crop 已畫紅框標本題 → prompt 提示只讀框內（兩者必須成對、缺一退化）
   const wqPdfMarkRead = modeKey === 'wq_pdf' && process.env.WQPDF_MARK_READ !== '0'
-  const markLine = wqPdfMarkRead ? '每張圖中的「紅色方框」標示該題的作答區——只讀紅框內的內容、紅框外（其他列/其他題）一律忽略。' : ''
+  // 2026-07-15 r8 回歸修：措辭必須保留「只報手寫」——「只讀紅框內的內容」被解讀成連印刷模板一起抄
+  //   （3-4-4/2-3-6 整批抄出「我（同意/不同意），」引導文字、蓋掉學生手寫、12 格誤殺）。
+  const markLine = wqPdfMarkRead ? '每張圖中的「紅色方框」標示該題的作答區——只讀紅框內、紅框外（其他列/其他題）一律忽略。紅框內仍然只回報「學生手寫」的內容：印刷的題目文字、引導模板（如「我（同意/不同意），因為」）、選項文字都不要抄，只抄學生自己寫上去的字。' : ''
   const tsReadHead = (family, role) => {
     // ordering：兩讀改用「不同策略」(blindRead2 已使兩讀皆盲)。沙盒實證 PA/PB @PRO 一致率 97%(vs 抄寫/校對變體僅~53%)。
     if (family === 'ordering') {
