@@ -639,6 +639,34 @@ function inflateBboxForType(bbox, questionType) {
   }
 }
 
+// 2026-07-14 set-of-mark 裁圖（wq_pdf read 用）：寬 pad 保上下文＋紅框標本題作答區。
+//   沙盒（e-wqpdf-setofmark、8 疑點格×3 抽）：撈錯列/off-by-one/切字/黏字四病同治、全穩——
+//   幾何緊框是蹺蹺板（治撈錯列但切字）、注意力錨定兩全。
+export async function cropWithMarkByBbox(imageBase64, mimeType, bbox, padX = 0.012, padY = 0.008) {
+  if (!bbox || !imageBase64) return null
+  try {
+    const { default: sharp } = await import('sharp')
+    const buf = Buffer.from(imageBase64, 'base64')
+    const meta = await sharp(buf).metadata()
+    if (!meta?.width || !meta?.height) return null
+    const cx = Math.round(Math.max(0, bbox.x - padX) * meta.width)
+    const cy = Math.round(Math.max(0, bbox.y - padY) * meta.height)
+    const cw = Math.min(meta.width - cx, Math.max(1, Math.round((Math.min(1, bbox.x + bbox.w + padX) - Math.max(0, bbox.x - padX)) * meta.width)))
+    const ch = Math.min(meta.height - cy, Math.max(1, Math.round((Math.min(1, bbox.y + bbox.h + padY) - Math.max(0, bbox.y - padY)) * meta.height)))
+    if (cw <= 0 || ch <= 0) return null
+    const rx = Math.round(bbox.x * meta.width) - cx - 3
+    const ry = Math.round(bbox.y * meta.height) - cy - 3
+    const rw = Math.round(bbox.w * meta.width) + 6
+    const rh = Math.round(bbox.h * meta.height) + 6
+    const svg = Buffer.from(`<svg width="${cw}" height="${ch}"><rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" fill="none" stroke="red" stroke-width="4"/></svg>`)
+    const out = await sharp(buf).extract({ left: cx, top: cy, width: cw, height: ch }).composite([{ input: svg }]).jpeg({ quality: 90 }).toBuffer()
+    return { data: out.toString('base64'), mimeType: 'image/jpeg' }
+  } catch (err) {
+    console.warn('[staged-grading] cropWithMarkByBbox failed:', err?.message)
+    return null
+  }
+}
+
 export async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
   if (!bbox || !imageBase64) return null
   try {
@@ -1435,22 +1463,16 @@ function siblingBigramSim(a, b) {
 }
 export function alignSiblingCompoundAnswers(answers, akQuestions) {
   const akById = new Map((akQuestions || []).map((q) => [ensureString(q?.id).trim(), q]))
-  // 分組：①顯式 unorderedGroupId（extract 標記的無序組、任何題型）優先
-  //      ②fallback 啟發式：id=<parent>-<n>、parent 本身不是題目、全組 compound_*
+  // 分組：只吃「顯式 unorderedGroupId」（extract 標記的無序組、如 6-7-8 orderMode=unordered）。
+  // 2026-07-14 user 裁定拔除 compound_* 啟發式：4-5-5 型的列有語意（-1=經濟發展、-2=社會福利）
+  //   **不可交換**——read 撈錯列的病根由 wq_pdf set-of-mark 紅框讀從源頭治、不可事後換位掩蓋學生真實作答。
   const groups = new Map()
   for (const q of (akQuestions || [])) {
     const qid = ensureString(q?.id).trim()
     const explicitGid = ensureString(q?.unorderedGroupId, '').trim()
-    if (explicitGid) {
-      if (!groups.has(explicitGid)) groups.set(explicitGid, [])
-      groups.get(explicitGid).push(qid)
-      continue
-    }
-    const m = qid.match(/^(.+)-(\d+)$/)
-    if (!m || akById.has(m[1])) continue
-    if (!String(q?.questionCategory ?? '').startsWith('compound_')) continue
-    if (!groups.has(m[1])) groups.set(m[1], [])
-    groups.get(m[1]).push(qid)
+    if (!explicitGid) continue
+    if (!groups.has(explicitGid)) groups.set(explicitGid, [])
+    groups.get(explicitGid).push(qid)
   }
   const ansById = new Map((answers || []).map((a) => [ensureString(a?.questionId).trim(), a]))
   const swappedGroups = []
@@ -8792,6 +8814,14 @@ export async function runStagedGradingPhaseA({
           && q.questionType === 'single_choice'
         // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再有「鄰格括號被切」風險
         // 2026-06-02：其餘選擇題類（含 true_false）維持 choiceAwareCropPad（隨格高縮放）、其他維持 dynamicPad
+        // 2026-07-14 wq_pdf set-of-mark（user 三疑點戰役定版）：一般模式+PDF 是四模式中唯一
+        //   沒吃到緊框修法的（前兩役只修 ao 與 wq_photo）→ 密集列 crop 蓋 1.5 列 → off-by-one/
+        //   撈錯列/切字。改用寬 pad＋紅框標本題（沙盒 8 疑點格全治、幾何緊框反而切字）。
+        //   kill switch WQPDF_MARK_READ='0'。
+        if (modeKey === 'wq_pdf' && process.env.WQPDF_MARK_READ !== '0') {
+          const marked = await cropWithMarkByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, 0.012, +(0.048 / totalPages).toFixed(4))
+          if (marked) return { questionId: q.questionId, cropData: marked }
+        }
         let bboxToUse, cropPad
         if (isAoPdf) {
           // 2026-07-05: ao_pdf（答案卷+PDF）全題型零 pad——直接用 classify 原框、不 inflate。
@@ -8885,13 +8915,16 @@ export async function runStagedGradingPhaseA({
   //   kill-switch: MATH_TEXT_READ_PRO='false'。實驗：local-only/exp-answeronly-drawing-2026-07-04/test-read35-ab.mjs
   const mathTextReadPro = process.env.MATH_TEXT_READ_PRO !== 'false'
     && ensureString(internalContext?.domainHint, '').includes('數學')
+  // 2026-07-14 wq_pdf set-of-mark：crop 已畫紅框標本題 → prompt 提示只讀框內（兩者必須成對、缺一退化）
+  const wqPdfMarkRead = modeKey === 'wq_pdf' && process.env.WQPDF_MARK_READ !== '0'
+  const markLine = wqPdfMarkRead ? '每張圖中的「紅色方框」標示該題的作答區——只讀紅框內的內容、紅框外（其他列/其他題）一律忽略。' : ''
   const tsReadHead = (family, role) => {
     // ordering：兩讀改用「不同策略」(blindRead2 已使兩讀皆盲)。沙盒實證 PA/PB @PRO 一致率 97%(vs 抄寫/校對變體僅~53%)。
     if (family === 'ordering') {
       const strat = role === 'review'
         ? '先數清楚總共有幾格、再由左到右逐格讀出每格的手寫數字(格數要對得上框數)。'
         : '由左到右、依序讀出每一格學生手寫的數字。'
-      return `這是「排序題」作答區的裁切放大圖：一排方框/括號、每格一個學生手寫數字。${strat}某格看不清→該格用 ?；整題空白→status="blank"。不要猜、不要管正確答案。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"n,n,n,...","status":"read|blank|unreadable"}]}`
+      return `這是「排序題」作答區的裁切放大圖：一排方框/括號、每格一個學生手寫數字。${markLine}${strat}某格看不清→該格用 ?；整題空白→status="blank"。不要猜、不要管正確答案。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"n,n,n,...","status":"read|blank|unreadable"}]}`
     }
     const roleLine = role === 'review'
       ? '你是校對員：每題標籤可能附正確答案，只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、看不到就 blank，絕不可把正確答案填進去。'
@@ -8909,7 +8942,7 @@ export async function runStagedGradingPhaseA({
       compound: '這些是「複合表格題」：每題含多欄(如 人物／事件／影響)，回報學生各欄實際手寫內容、用「｜」分隔各欄。',
       draw: '這些是「圖表繪製題」(長條圖/圓餅圖等)：描述學生實際畫的內容、以「標籤-數值」對列出(如 香蕉23%、蘋果40%)。'
     })[family] || '回報學生手寫的內容。'
-    return `以下是多張「同一題型」的作答區裁切放大圖，每張圖前有題號標籤。${roleLine}\n${rule}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    return `以下是多張「同一題型」的作答區裁切放大圖，每張圖前有題號標籤。${roleLine}\n${markLine}${rule}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
   }
   const tsChunk = (arr, n) => { const o = []; const s = Math.max(1, n); for (let i = 0; i < arr.length; i += s) o.push(arr.slice(i, i + s)); return o }
   // 2026-07-05: type-split 的 fill_blank 合題支援——原本 text family 輸出 schema 只有 studentAnswerRaw、
