@@ -1494,7 +1494,11 @@ export async function applyEscalationChain({
     logStaged(pipelineRunId, 'basic', `[escalation-chain] mode=${mode} NR 候選 ${targets.length} 題 → 重抽盲+知答單圖對`)
     // 2026-07-14 多行條款（user 抽查發現：換行就斷抄/長文偷懶——tail 採殘片害 accessor 誤扣。
     //   沙盒 e-chain-multiline：座3 人物題 現行版抄出 3 字殘片、多行版 2/2 完整 38 字；8 格全數持平或更好）
-    const MULTILINE_CLAUSE = `\n⚠ 答案可能寫成「多行」或內容較長：必須把所有行、所有字逐字抄完——不可只抄第一行、不可中途省略、不可摘要，一直抄到作答區最後一個字為止（換行用空格連接輸出成一串）。`
+    const MULTILINE_CLAUSE = `\n⚠ 答案可能寫成「多行」或內容較長：必須把所有行、所有字逐字抄完——不可只抄第一行、不可中途省略、不可摘要，一直抄到作答區最後一個字為止（換行用空格連接輸出成一串）。
+⚠ 若作答區內有「圈選/勾選的選項」或開頭先寫的「立場詞」（例：支持、反對、同意、不同意、或圈起來的名詞），必須把它抄在輸出的最前面、再接理由——不可只抄理由漏掉立場；印刷選項被學生圈選/打勾也算學生的作答、要抄出該選項文字。`
+    // ↑ 2026-07-14 立場條款（user r4 對照：立場詞抄錄不穩=主要翻動軸——反對/民變/經濟發展等
+    //   前綴有時被丟、accessor 判未表態誤扣。沙盒 e-chain-stance：6 格×2 抽 12/12 全中、
+    //   現行版漏 5/6；含印刷選項圈選型（[V]經濟發展/勾選電燈））
     const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。${MULTILINE_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
     const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。${MULTILINE_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
     const readOnce = async (qr, prompt) => {
