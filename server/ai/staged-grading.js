@@ -1492,8 +1492,11 @@ export async function applyEscalationChain({
     )
     if (targets.length === 0) return null
     logStaged(pipelineRunId, 'basic', `[escalation-chain] mode=${mode} NR 候選 ${targets.length} 題 → 重抽盲+知答單圖對`)
-    const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
-    const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    // 2026-07-14 多行條款（user 抽查發現：換行就斷抄/長文偷懶——tail 採殘片害 accessor 誤扣。
+    //   沙盒 e-chain-multiline：座3 人物題 現行版抄出 3 字殘片、多行版 2/2 完整 38 字；8 格全數持平或更好）
+    const MULTILINE_CLAUSE = `\n⚠ 答案可能寫成「多行」或內容較長：必須把所有行、所有字逐字抄完——不可只抄第一行、不可中途省略、不可摘要，一直抄到作答區最後一個字為止（換行用空格連接輸出成一串）。`
+    const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。${MULTILINE_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。${MULTILINE_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
     const readOnce = async (qr, prompt) => {
       const crop = cropMap.get(qr.questionId)
       if (!crop) return { value: null, ms: 0, status: 'no_crop' }
