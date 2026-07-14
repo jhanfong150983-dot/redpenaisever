@@ -11741,6 +11741,25 @@ export async function runStagedGradingPhaseB({
   const akQuestions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const akQById = new Map(akQuestions.map((q) => [ensureString(q?.id).trim(), q]))
 
+  // ── 2026-07-14 立場分隔符正規化（user 拍板）────────────────────────────────
+  //   同一格兩輪轉錄「支持｜理由」vs「支持 理由」vs「支持 | 理由」格式微差 → accessor 解析
+  //   落點不同 → 同文異判（座10/20 實例）。統一成「｜」再送評分。只動長答案型
+  //   （fill_blank/short_answer/compound_*）——數學型不碰（|x| 絕對值會被誤傷）。
+  {
+    const sepNormalize = (t) => ensureString(t, '')
+      .replace(/\s*[|｜丨]\s*/g, '｜')
+      .replace(/^(支持|反對|同意|不同意)[\s，,、:：]+/, '$1｜')
+    const akQByIdEarly = new Map((Array.isArray(answerKey?.questions) ? answerKey.questions : []).map((q) => [ensureString(q?.id).trim(), q]))
+    for (const ans of finalReadAnswerResult.answers) {
+      if (ans?.status !== 'read') continue
+      const cat = String(akQByIdEarly.get(ensureString(ans?.questionId).trim())?.questionCategory ?? '')
+      if (cat === 'fill_blank' || cat === 'short_answer' || cat.startsWith('compound_')) {
+        const norm = sepNormalize(ans.studentAnswerRaw)
+        if (norm !== ans.studentAnswerRaw) ans.studentAnswerRaw = norm
+      }
+    }
+  }
+
   // ── 2026-07-14 多子格無序配對（user 拍板、跑在所有評分邏輯之前）──────────────
   //   同母題並列子格（4-5-5 人物列 / 6-7-8 unorderedGroupId）read 輪間洗牌 → 最佳配對
   //   對齊參考答案；只在明顯優於原序時交換（r5 離線驗證：座6 交叉修正、28 卷零誤動）。
