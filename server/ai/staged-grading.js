@@ -12642,7 +12642,12 @@ export async function runStagedGradingPhaseB({
             return (idx != null && idx >= 1 && idx <= domainMax) ? String(idx) : null
           }
           const [v1, v2] = await Promise.all([callSc(), callSc()])
-          if (v1 === null || v2 === null || v1 !== v2) continue // 兩抽不一致 → 維持無法辨識歸零
+          if (v1 === null || v2 === null || v1 !== v2) continue // 兩抽不一致 → 維持原判（未作答/無法辨識）歸零
+          // 2026-07-15 r12 驗證抓到：雙 blank 格 Phase 0b 已先塞一筆「未作答」直判項目，救援的第二筆
+          //   同題項目在下游取首筆時被蓋掉（8 格簽名全是無法辨識出身、blank 出身 0 格的鐵證）。
+          //   採納前先移除同題舊項目、救援結果才落地。
+          const prevIdx = deterministicScores.findIndex((d) => d.questionId === t.qid)
+          if (prevIdx >= 0) deterministicScores.splice(prevIdx, 1)
           const gMaxSc = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
           if (v1 === 'blank') {
             deterministicScores.push({
