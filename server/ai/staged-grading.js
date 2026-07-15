@@ -2018,6 +2018,64 @@ function canonicalOptionIndex(raw) {
   return null
 }
 
+// 2026-07-15 部件拆寫重組比對（user 拍板：學生不可能寫「舟孟甲」、AI 要能理解＝艋舺）。
+// 病：read 對難字忠實抄「部件序列」（艋舺→舟孟甲）、下游比對不會重組 → 同格分數輪間 2↔0 擺。
+// 規則（IDS 查表、確定性零幻覺）：正解逐字消耗學生字串——每字可用「字本身」或「部件序列」
+//   （1 層、不行再展開一層）對；部件唯一允許省略的條件＝同部件先前已出現過（AI 拆寫會去重：
+//   舟孟[舟]甲 掉第二個舟；獨寫一個「甲」沒有前置「舟」→ 不會誤判成舺、不放水）。
+// 另容忍「正解純中文」時學生字串尾端 ≤2 字的數字/拉丁殘渣（鄰題題號被抄進來：「…艋舺 3」）。
+// 學生字串必須被完整消耗（中段多字≠等價）。回傳重組後正解字串、不等價回 null。
+export function composeEquivalentToKey(rawText, keyText) {
+  const key = ensureString(keyText, '').replace(/\s+/g, '')
+  const kChars = [...key]
+  if (!kChars.length || kChars.length > 10) return null
+  if (!kChars.every((c) => /\p{Script=Han}/u.test(c))) return null
+  let stu = ensureString(rawText, '').replace(/[\s,，、.。．:：;；|]+/g, '')
+  const tail = stu.match(/[0-9A-Za-z]{1,2}$/)
+  const tailJunk = tail ? tail[0] : ''
+  if (tailJunk) stu = stu.slice(0, -tailJunk.length)
+  const sChars = [...stu]
+  if (!sChars.length) return null
+  const comps = (ch) => {
+    const d = decomposeGlyph(ch)
+    return d ? d.map((x) => x.split('=').pop()) : null
+  }
+  const seen = new Set()
+  let i = 0
+  let usedCompose = false
+  const tryConsumeSeq = (seq) => {
+    let j = i
+    let consumedAny = false
+    for (const c of seq) {
+      if (sChars[j] === c) { j++; consumedAny = true }
+      else if (seen.has(c)) continue
+      else return null
+    }
+    return consumedAny ? j : null
+  }
+  for (const k of kChars) {
+    if (sChars[i] === k) { seen.add(k); i++; continue }
+    let advanced = null
+    const c1 = comps(k)
+    if (c1) {
+      advanced = tryConsumeSeq(c1)
+      if (advanced !== null) c1.forEach((c) => seen.add(c))
+      else {
+        const c2 = c1.flatMap((c) => comps(c) ?? [c])
+        advanced = tryConsumeSeq(c2)
+        if (advanced !== null) c2.forEach((c) => seen.add(c))
+      }
+    }
+    if (advanced === null) return null
+    i = advanced
+    usedCompose = true
+    seen.add(k)
+  }
+  if (i !== sChars.length) return null
+  if (!usedCompose && !tailJunk) return null  // 純相等走原路即可、此路不搶
+  return key
+}
+
 // 2026-07-15 多選字母題（multi_fill、正解=逗號分隔單字母清單）確定性計分。
 // r10/r11 同碼基準揭露 accessor 對分隔符裁量不穩（座3「C、F.G」6→2、座6 6→0 同文異判、全班最大單格擺幅）。
 // user 拍板（國中小慣例）：對一個字母給該字母配分（maxScore/正解字母數）、寫錯一個扣 1 分（去重不重複扣）、
@@ -7431,6 +7489,7 @@ function buildFinalGradingResult({
       else if (row.studentAnswer === '無法辨識' && row.score === 0) { base = 65; journey = '雙無法辨識歸零' }
       else if (score?._objectiveBypass) { base = 99; journey = '選擇題code直判' }
       else if (score?._clozeBypass) { base = 99; journey = '克漏字code直判' }
+      else if (score?._glyphCompose) { base = 95; journey = '部件重組code直判' }
       else if (score?._mapFillBypass) { base = 88; journey = 'map_fill確定性' }
       else if (score?._glyphJudge) {
         const isZy = /[ㄅ-ㄩ]/.test(ensureString(question?.answer, ''))
@@ -12038,6 +12097,50 @@ export async function runStagedGradingPhaseB({
     }
   }
 
+  // ── Phase 0d (2026-07-15)：部件拆寫重組等價、不送 Accessor ─────────────
+  //   read 忠實抄部件（艋舺→舟孟甲）→ 重組後與正解相符＝滿分（見 composeEquivalentToKey）。
+  //   只收「無 parts、無 rubricsDimensions、正解純中文 ≤10 字」的 fill_blank/short_answer。
+  //   kill switch: GLYPH_COMPOSE_ENABLED='false'。
+  const glyphComposeIds = new Set()
+  if (process.env.GLYPH_COMPOSE_ENABLED !== 'false') {
+    for (const ans of finalReadAnswerResult.answers) {
+      const qid = ensureString(ans?.questionId).trim()
+      if (!qid || ans.status !== 'read') continue
+      if (manualBypassIds.has(qid) || objectiveBypassIds.has(qid) || clozeBypassIds.has(qid)) continue
+      const q = akQById.get(qid)
+      if (!q || (q.questionCategory !== 'fill_blank' && q.questionCategory !== 'short_answer')) continue
+      if (Array.isArray(q?.parts) && q.parts.length >= 2) continue
+      if (Array.isArray(q?.rubricsDimensions) && q.rubricsDimensions.length > 0) continue
+      const key = ensureString(q?.answer, '').trim()
+      if (!key) continue
+      const raw = ensureString(ans.studentAnswerRaw, '').trim()
+      if (raw === key) continue  // 純相等走原路（accessor/其他 bypass 本來就會對）
+      const composed = composeEquivalentToKey(raw, key)
+      if (!composed) continue
+      glyphComposeIds.add(qid)
+      const gMax = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+      deterministicScores.push({
+        questionId: qid,
+        isCorrect: true,
+        score: gMax,
+        maxScore: gMax,
+        errorType: 'none',
+        reason: `學生手寫「${composed}」（AI 節錄為部件拆寫「${raw}」、重組後與正解相符）`,
+        scoringReason: `學生手寫「${composed}」（AI 節錄為部件拆寫「${raw}」、重組後與正解相符）`,
+        confidence: 100,
+        scoreConfidence: 100,
+        studentFinalAnswer: composed,
+        needExplain: false,
+        _glyphCompose: true
+      })
+    }
+    if (glyphComposeIds.size > 0) {
+      logStaged(pipelineRunId, 'basic', `[B-Phase0d] 部件重組等價 code-bypass（不送 Accessor）`, {
+        count: glyphComposeIds.size, questionIds: [...glyphComposeIds]
+      })
+    }
+  }
+
   // ── Phase 1: map_fill 評分 ─────────────────────────────────────────────
   // 2026-05-28 pivot: 優先用 Phase A confirmed readings + deterministic match（不跑 AI）
   // 如果 finalAnswer 沒帶 per-position readings（舊資料）→ fallback 跑 Stage A+B（map-fill-grader）
@@ -12757,7 +12860,7 @@ export async function runStagedGradingPhaseB({
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
   // 2026-05-28: 也排除 mapFillBypassIds（map_fill 走 Direction Y、Accessor 不看）
-  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id) || clozeBypassIds.has(id)
+  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id) || clozeBypassIds.has(id) || glyphComposeIds.has(id)
   const allAnswerIds = finalReadAnswerResult.answers
     .map((a) => ensureString(a?.questionId).trim())
     .filter((id) => id && !isBypassed(id))
@@ -12766,7 +12869,7 @@ export async function runStagedGradingPhaseB({
   const otherAnswerIds = allAnswerIds.filter((id) => !id.startsWith('1-') && !id.startsWith('2-'))
   const canSplitAccessor = page1AnswerIds.length > 0 && page2AnswerIds.length > 0
   // 給 Accessor 的 readAnswerResult / answerKey 都要剔除所有 bypass 的題（manual + map_fill + VJ）
-  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0 || vjBypassIds.size > 0 || objectiveBypassIds.size > 0 || clozeBypassIds.size > 0
+  const hasBypass = manualBypassIds.size > 0 || mapFillBypassIds.size > 0 || vjBypassIds.size > 0 || objectiveBypassIds.size > 0 || clozeBypassIds.size > 0 || glyphComposeIds.size > 0
   const accessorReadAnswerResult = hasBypass
     ? { answers: finalReadAnswerResult.answers.filter((a) => !isBypassed(a.questionId)) }
     : finalReadAnswerResult
