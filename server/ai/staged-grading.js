@@ -2076,6 +2076,40 @@ export function composeEquivalentToKey(rawText, keyText) {
   return key
 }
 
+// 2026-07-15 同格多空擷取比對（數學期中 1-3 節實測：同一格兩個空、read 把整列一起抄 →
+//   「12% 24」對 key「12%」被判錯、全班 20+ 格集體誤殺）。
+// 規則：學生文字切 token（空白/｜），其中一個 token ＝本題正解、且其餘 token **全部**能對上
+//   「同母題兄弟題」的正解 → 視為本題答對。兄弟驗證擋放水：亂寫的多餘內容對不上兄弟正解就不救。
+export function siblingTokenAnswerMatch(question, rawStudentText, keyQuestions) {
+  const key = ensureString(question?.answer, '').trim()
+  const raw = ensureString(rawStudentText, '').trim()
+  if (!key || !raw) return false
+  const nrm = (s) => ensureString(s, '').trim().replace(/[，,。.．、;；]+$/u, '').toLowerCase()
+  if (nrm(raw) === nrm(key)) return false
+  const tokens = raw.split(/[\s｜|]+/u).filter(Boolean)
+  if (tokens.length < 2 || tokens.length > 4) return false
+  const eq = (a, b) => nrm(a) === nrm(b)
+  if (!tokens.some((t) => eq(t, key))) return false
+  const qid = ensureString(question?.id ?? question?.questionId, '').trim()
+  if (!qid.includes('-')) return false
+  const parent = qid.slice(0, qid.lastIndexOf('-'))
+  const sibKeys = (keyQuestions || [])
+    .filter((q2) => {
+      const id2 = ensureString(q2?.id ?? q2?.questionId, '').trim()
+      return id2 !== qid && id2.startsWith(parent + '-') && !id2.slice(parent.length + 1).includes('-')
+    })
+    .map((q2) => ensureString(q2?.answer, '').trim())
+    .filter(Boolean)
+  if (!sibKeys.length) return false
+  let keyUsed = false
+  const rest = []
+  for (const t of tokens) {
+    if (!keyUsed && eq(t, key)) { keyUsed = true; continue }
+    rest.push(t)
+  }
+  return rest.length > 0 && rest.every((t) => sibKeys.some((k2) => eq(t, k2)))
+}
+
 // 2026-07-15 排序題確定性計分（user 拍板：全對才給分）。
 // 病：ordering 無確定性規則、accessor 每輪自由心證——英語期末 1-B2-1 同一答案兩輪 6↔0/0↔5 亂跳、
 //   還有「明知兩格錯卻給滿分」的放水。規則：token 序列完全一致→滿分、否則 0；
@@ -3456,9 +3490,20 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
       }
     }
 
+    // 2026-07-15 同格多空擷取救回（見 siblingTokenAnswerMatch）：accessor 判錯但 token 歸位後正確 → 滿分
+    let siblingTokenRestored = false
+    if (readStatus === 'read' && maxScore > 0 && question?.questionCategory === 'fill_blank'
+        && !enumSupersetWrong
+        && !(typeof row?.isCorrect === 'boolean' ? row.isCorrect : score >= maxScore)
+        && siblingTokenAnswerMatch(question, ensureString(answer?.studentAnswerRaw, ''), keyQuestions)) {
+      score = maxScore
+      siblingTokenRestored = true
+    }
+
     const caseRestored = !enumSupersetWrong && (caseRestoredSubIds.size > 0 || caseRestoredWhole
       || dotRestoredSubIds.size > 0 || dotRestoredWhole
-      || mathEqRestoredSubIds.size > 0 || mathEqRestoredWhole)
+      || mathEqRestoredSubIds.size > 0 || mathEqRestoredWhole
+      || siblingTokenRestored)
 
     // Hard override: blank/unreadable always score=0 regardless of model output
     if (readStatus === 'blank' || readStatus === 'unreadable') score = 0
@@ -3562,6 +3607,7 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
       finalScoringReason = dimLines.join('\n')
     }
     // 單一答案(無 parts)整體救回 → 用一致理由蓋掉 AI 矛盾的大小寫扣分說明(多空格題已由上方逐格 partResults 處理)
+    if (siblingTokenRestored) finalScoringReason = '同格多空判定：本空的正解出現在學生此格作答中、其餘內容為同格鄰空的答案（AI 將整格一併節錄、已各自歸位比對），視為正確。'
     if (caseRestoredWhole) finalScoringReason = '大小寫等價判定：學生作答與正解僅大小寫／結尾標點差異（專有名詞、全大寫縮寫除外），視為正確。'
     if (dotRestoredWhole) finalScoringReason = '頭尾雜點等價判定：學生作答與正解僅差數字前後的筆誤墨點（內部小數點不受影響），視為正確。'
     if (mathEqRestoredWhole) finalScoringReason = '數學等價判定：學生作答經代入驗證與標準答案同解（移項／化簡／等價形），視為正確。'
@@ -7438,6 +7484,11 @@ function buildFinalGradingResult({
           const kIdx = canonicalOptionIndex(refAnswer)
           const sIdx = canonicalOptionIndex(studentAns)
           if (kIdx != null && sIdx != null && kIdx === sIdx) programMatch = true
+        }
+        // 2026-07-15 同格多空擷取（數學期中 1-3 節）：read 把同格兄弟空一併抄入（「12% 24」vs
+        //   key「12%」）→ token 歸位比對、兄弟正解驗證通過才算對（見 siblingTokenAnswerMatch）
+        if (!programMatch && qCategory === 'fill_blank' && siblingTokenAnswerMatch(question, studentAns, keyQuestions)) {
+          programMatch = true
         }
         if (programMatch !== row.isCorrect) {
           const prevCorrect = row.isCorrect
