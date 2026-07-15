@@ -3433,6 +3433,76 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       }))
     }
 
+    // ── 單位經濟：單份批改成本 × 模式/領域/頁數 2026-07-15 新增 ──
+    // 原子單位＝每份 submission 在區間內的批改類成本；屬性（answer_sheet_mode/source/domain/total_pages）
+    // 查詢時 JOIN 現算、可回溯全歷史。無 submission_id 的用量（extract/報告等）不進這裡。
+    const subCostMap = {}  // { submission_id: { twd, calls, assignment_id } }
+    for (const r of usageRows) {
+      if (!r.submission_id) continue
+      if (routeToCategory(r.route_key) !== '批改') continue
+      if (!subCostMap[r.submission_id]) subCostMap[r.submission_id] = { twd: 0, calls: 0, assignment_id: r.assignment_id || null }
+      subCostMap[r.submission_id].twd += rowCostTwd(r)
+      subCostMap[r.submission_id].calls += 1
+    }
+    const unitSubIds = Object.keys(subCostMap)
+    let unitEcon = null
+    if (unitSubIds.length > 0) {
+      const subMetaMap = {}
+      for (let i = 0; i < unitSubIds.length; i += 200) {  // .in() 大量 ID 需 chunk
+        const chunk = unitSubIds.slice(i, i + 200)
+        const { data: subs } = await supabaseAdmin
+          .from('submissions').select('id, source, assignment_id').in('id', chunk)
+        for (const s of (subs || [])) subMetaMap[s.id] = s
+      }
+      const unitAids = Array.from(new Set(
+        unitSubIds.map(sid => subMetaMap[sid]?.assignment_id || subCostMap[sid].assignment_id).filter(Boolean)
+      ))
+      const aAttrMap = {}
+      for (let i = 0; i < unitAids.length; i += 200) {
+        const chunk = unitAids.slice(i, i + 200)
+        const { data: rows } = await supabaseAdmin
+          .from('assignments').select('id, answer_sheet_mode, domain, total_pages').in('id', chunk)
+        for (const a of (rows || [])) aAttrMap[a.id] = a
+      }
+      const unitGroups = { mode: {}, domain: {}, pages: {} }
+      const pushUnit = (dim, key, u) => {
+        if (!unitGroups[dim][key]) unitGroups[dim][key] = { key, twds: [], calls: 0, twd: 0 }
+        const g = unitGroups[dim][key]
+        g.twds.push(u.twd); g.calls += u.calls; g.twd += u.twd
+      }
+      for (const sid of unitSubIds) {
+        const u = subCostMap[sid]
+        const sub = subMetaMap[sid]
+        const asg = aAttrMap[sub?.assignment_id || u.assignment_id]
+        // submission 或 assignment 已刪 → 歸「(未分類)」不硬塞
+        const modeKey = (sub && asg)
+          ? `${asg.answer_sheet_mode === 'answer_only' ? 'ao' : 'wq'}_${sub.source === 'teacher_scan' ? 'pdf' : 'photo'}`
+          : '(未分類)'
+        pushUnit('mode', modeKey, u)
+        pushUnit('domain', asg ? (asg.domain || '(未填領域)') : '(未分類)', u)
+        pushUnit('pages', asg ? (asg.total_pages ? `${asg.total_pages} 頁` : '(未填頁數)') : '(未分類)', u)
+      }
+      const summarizeUnits = (dim) => Object.values(unitGroups[dim]).map(g => {
+        const sorted = g.twds.slice().sort((a, b) => a - b)
+        const mid = sorted.length >> 1
+        const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+        return {
+          key: g.key,
+          count: g.twds.length,
+          twd: +g.twd.toFixed(2),
+          avg: +(g.twd / g.twds.length).toFixed(2),
+          median: +median.toFixed(2),
+          avgCalls: +(g.calls / g.twds.length).toFixed(1)
+        }
+      }).sort((a, b) => b.count - a.count)
+      unitEcon = {
+        byMode: summarizeUnits('mode'),
+        byDomain: summarizeUnits('domain'),
+        // 頁數表按頁數排、非按份數排
+        byPages: summarizeUnits('pages').sort((a, b) => (parseInt(a.key) || 999) - (parseInt(b.key) || 999))
+      }
+    }
+
     // ── 額外統計：admin 測試的用量比例 ──
     const adminCalls = usageRows.filter(r => r.is_admin_test).length
     const realCalls = usageRows.length - adminCalls
@@ -3445,6 +3515,7 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       byCategory,
       categoryDaily,
       byAssignment,
+      unitEcon,
       timeSeries,
       teachers: teachers.map(t => ({ id: t.id, name: t.name, email: t.email })),
       adminTestCount: adminCalls,
