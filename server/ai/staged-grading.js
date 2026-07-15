@@ -7366,6 +7366,9 @@ function buildFinalGradingResult({
           t = t.replace(/\d+(?:\.\d+){2,}/gu, (m) => m.replace(/\./gu, ','))
           // ②角度符號剝除——「640°」=「640」（培英 Q21 型）
           t = t.replace(/[°º˚]/gu, '')
+          // ③2026-07-15 結尾句讀剝除——英語短句答案（「Yes, it is.」）被 isSimpleAnswer 收進簡單答案
+          //   通道、學生沒寫句點被判 0（英語期末 3-E-7 座25/27 實測誤殺；英語赦免規則本就含結尾標點）
+          t = t.replace(/[.。!！?？]+$/u, '')
           return t.toLowerCase()
         }
         // 是非題：用 normalizeTrueFalseAnswer 正規化（O→○、X→✗ 等），處理完直接跳過通用比對
