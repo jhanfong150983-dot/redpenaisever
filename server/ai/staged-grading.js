@@ -3518,6 +3518,20 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
       })
       finalScoringReason = `學生作答內容如下：\n${lines.join('\n')}`
     }
+    // 2026-07-15 rubric 維度理由 code 格式化（user 回報前端理由出現原始 JSON「rubricScores: [...]」——
+    //   model 偶爾把陣列傾倒進 scoringReason）：rubricScores 有效時一律由 code 組逐維度可讀清單、
+    //   不再信 model 的自由拼湊版本。
+    if (Array.isArray(row?.rubricScores) && row.rubricScores.length > 0
+        && row.rubricScores.every((d) => d && typeof d === 'object' && ensureString(d.dimension, '').trim())) {
+      const dimLines = row.rubricScores.map((d) => {
+        const ds = toFiniteNumber(d.score) ?? 0
+        const dm = toFiniteNumber(d.maxScore)
+        const head = `${ensureString(d.dimension, '').trim()}（${ds}${dm !== null ? `/${dm}` : ''}分）`
+        const r = ensureString(d.reason, '').trim()
+        return r ? `${head}：${r}` : head
+      })
+      finalScoringReason = dimLines.join('\n')
+    }
     // 單一答案(無 parts)整體救回 → 用一致理由蓋掉 AI 矛盾的大小寫扣分說明(多空格題已由上方逐格 partResults 處理)
     if (caseRestoredWhole) finalScoringReason = '大小寫等價判定：學生作答與正解僅大小寫／結尾標點差異（專有名詞、全大寫縮寫除外），視為正確。'
     if (dotRestoredWhole) finalScoringReason = '頭尾雜點等價判定：學生作答與正解僅差數字前後的筆誤墨點（內部小數點不受影響），視為正確。'
@@ -6521,7 +6535,18 @@ ${isHighSchool
   4. 【理由成立標準】理由/說明維度＝學生的理由能支持所選選項且屬相關概念即成立；
      不得額外要求「明確因果句式」「合理類比」「更完整的說明」——除非該維度 criteria 明文要求。
   5. 【輸出強制】帶 rubricsDimensions 的題必須回傳 rubricScores（與 rubricsDimensions 同順序、
-     每維 {dimension, score, maxScore}）。總分由系統依維度加總；scoringReason 逐維度說明給分/扣分。
+     每維 {dimension, score, maxScore, reason}）。總分由系統依維度加總；scoringReason 逐維度說明給分/扣分。
+  6. 【維度獨立不連坐】每個維度只依自己的 criteria 獨立判分——一個維度錯（如人物名稱錯誤）
+     只扣該維度，其他維度（事件/影響/理由）仍按各自標準判。🚨 禁止寫「因○○錯誤，此項不給分」。
+  7. 【通順＝小學生標準】即使維度 criteria 明文含「語句通順」，也以小學生程度為標準：
+     意思可辨識即算通順（注音代字、少數錯字、口語化、句式簡短都不算不通順）；
+     唯有「完全無法理解在說什麼」才判 0。
+  8. 【因果維度判準】「含因果關係」類維度＝理由需有可辨識的因果連結（「因為/所以/才能/就會/導致」
+     等連結詞、或前後句構成明確的原因→結果）；僅描述結果或現象、沒有說出原因 → 該維度 0。
+  9. 【理由必須扣題】理由/說明維度的底線＝內容必須連結到該維度 criteria 明文要求的目標面向
+     （例：criteria 要求「說明如何為做生意帶來便利」，學生只泛泛說明所選項目本身的好處、
+     完全沒連結到目標面向 → 該維度 0，不得腦補連結）。此為第 4 條的下限：不要求超出 criteria、
+     但 criteria 明文要求的面向必須有。
 - diagram_color: studentAnswerRaw is a description of the student's coloring (e.g. "塗色：第1個圓完整，第2個圓左側2/3，第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
   - 塗色位置: check if the colored region is the correct side/area (e.g. left vs right, which cells). Position must match referenceAnswer.
