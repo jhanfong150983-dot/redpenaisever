@@ -3436,13 +3436,30 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     // ── 單位經濟：單份批改成本 × 模式/領域/頁數 2026-07-15 新增 ──
     // 原子單位＝每份 submission 在區間內的批改類成本；屬性（answer_sheet_mode/source/domain/total_pages）
     // 查詢時 JOIN 現算、可回溯全歷史。無 submission_id 的用量（extract/報告等）不進這裡。
-    const subCostMap = {}  // { submission_id: { twd, calls, assignment_id } }
+    const subCostMap = {}  // { submission_id: { twd, calls, assignment_id, events } }
     for (const r of usageRows) {
       if (!r.submission_id) continue
       if (routeToCategory(r.route_key) !== '批改') continue
-      if (!subCostMap[r.submission_id]) subCostMap[r.submission_id] = { twd: 0, calls: 0, assignment_id: r.assignment_id || null }
+      if (!subCostMap[r.submission_id]) subCostMap[r.submission_id] = { twd: 0, calls: 0, assignment_id: r.assignment_id || null, events: [] }
       subCostMap[r.submission_id].twd += rowCostTwd(r)
       subCostMap[r.submission_id].calls += 1
+      subCostMap[r.submission_id].events.push({ t: +new Date(r.created_at), twd: rowCostTwd(r) })
+    }
+    // 2026-07-15: 時間聚類拆「輪次」——同卷 call 間隔 >30min 視為新一輪批改。
+    // 一輪橫跨多 HTTP request（A 拆 3 call + B 獨立），無現成 run id 可用；
+    // 聚類可回溯全歷史、實測與人工認定輪次一致。<5 call 的微小輪（單題手改重批）不列入單次成本。
+    const RUN_GAP_MS = 30 * 60 * 1000
+    const RUN_MIN_CALLS = 5
+    for (const u of Object.values(subCostMap)) {
+      u.events.sort((a, b) => a.t - b.t)
+      const runs = []
+      let cur = null
+      for (const ev of u.events) {
+        if (!cur || ev.t - cur.last > RUN_GAP_MS) { cur = { twd: 0, calls: 0, last: ev.t }; runs.push(cur) }
+        cur.twd += ev.twd; cur.calls += 1; cur.last = ev.t
+      }
+      u.runTwds = runs.filter(x => x.calls >= RUN_MIN_CALLS).map(x => x.twd)
+      delete u.events
     }
     const unitSubIds = Object.keys(subCostMap)
     let unitEcon = null
@@ -3466,9 +3483,9 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       }
       const unitGroups = { mode: {}, domain: {}, pages: {} }
       const pushUnit = (dim, key, u) => {
-        if (!unitGroups[dim][key]) unitGroups[dim][key] = { key, twds: [], calls: 0, twd: 0 }
+        if (!unitGroups[dim][key]) unitGroups[dim][key] = { key, twds: [], runTwds: [], calls: 0, twd: 0 }
         const g = unitGroups[dim][key]
-        g.twds.push(u.twd); g.calls += u.calls; g.twd += u.twd
+        g.twds.push(u.twd); g.runTwds.push(...(u.runTwds || [])); g.calls += u.calls; g.twd += u.twd
       }
       for (const sid of unitSubIds) {
         const u = subCostMap[sid]
@@ -3482,19 +3499,24 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
         pushUnit('domain', asg ? (asg.domain || '(未填領域)') : '(未分類)', u)
         pushUnit('pages', asg ? (asg.total_pages ? `${asg.total_pages} 頁` : '(未填頁數)') : '(未分類)', u)
       }
-      const summarizeUnits = (dim) => Object.values(unitGroups[dim]).map(g => {
-        const sorted = g.twds.slice().sort((a, b) => a - b)
+      const medianOf = (arr) => {
+        if (!arr.length) return 0
+        const sorted = arr.slice().sort((a, b) => a - b)
         const mid = sorted.length >> 1
-        const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
-        return {
-          key: g.key,
-          count: g.twds.length,
-          twd: +g.twd.toFixed(2),
-          avg: +(g.twd / g.twds.length).toFixed(2),
-          median: +median.toFixed(2),
-          avgCalls: +(g.calls / g.twds.length).toFixed(1)
-        }
-      }).sort((a, b) => b.count - a.count)
+        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+      }
+      const summarizeUnits = (dim) => Object.values(unitGroups[dim]).map(g => ({
+        key: g.key,
+        count: g.twds.length,
+        twd: +g.twd.toFixed(2),
+        avg: +(g.twd / g.twds.length).toFixed(2),
+        median: +medianOf(g.twds).toFixed(2),
+        avgCalls: +(g.calls / g.twds.length).toFixed(1),
+        // 單次批改（時間聚類拆輪、只算完整輪）：中位數＋每份平均輪數
+        runMedian: +medianOf(g.runTwds).toFixed(2),
+        runCount: g.runTwds.length,
+        runsPerSub: +(g.runTwds.length / g.twds.length).toFixed(1)
+      })).sort((a, b) => b.count - a.count)
       unitEcon = {
         byMode: summarizeUnits('mode'),
         byDomain: summarizeUnits('domain'),
