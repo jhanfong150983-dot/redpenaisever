@@ -6226,6 +6226,16 @@ export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gra
 - short_answer when Domain is "社會" or "自然": prioritize 核心結論. If core conclusion is semantically correct, allow full score even when supporting evidence is brief.
 - This policy must NOT be applied when strictness is strict/standard.`
       : ''
+  // 2026-07-15 嚴格模式 rubric 偏移（user 拍板三級設計：標準是唯一穩定性主戰場、
+  //   嚴格＝標準＋極少量明確偏移條款）：S1 專有名詞不容忍、S2 因果需明確連結。
+  const strictRubricClause = strictness === 'strict'
+    ? `
+  🔴 嚴格模式（本作業 strictness=strict、以下覆寫上方對應條款）：
+  S1.【專有名詞必須正確】人名/地名/專有術語寫錯字＝該維度不給分（覆寫第 1 條的錯字容忍、僅限專有名詞；
+      例：人物維度學生寫「其欣豪」、正解「斯文豪」→ 人物維度 0）。非專有名詞的錯字仍照第 1 條容忍。
+  S2.【因果需明確連結】「含因果關係」類維度改採：需有可辨識的因果連結（「因為/所以/才能/就會/導致」
+      等連結詞、或前後句構成明確的原因→結果）；僅描述結果、沒有說出原因 → 該維度 0（覆寫第 8 條寬待）。`
+    : ''
 
   // 英語領域專屬規則（直接從 answerKey 讀，不依賴 domainHint）
   const englishRules = answerKey?.englishRules
@@ -6541,12 +6551,14 @@ ${isHighSchool
   7. 【通順＝小學生標準】即使維度 criteria 明文含「語句通順」，也以小學生程度為標準：
      意思可辨識即算通順（注音代字、少數錯字、口語化、句式簡短都不算不通順）；
      唯有「完全無法理解在說什麼」才判 0。
-  8. 【因果維度判準】「含因果關係」類維度＝理由需有可辨識的因果連結（「因為/所以/才能/就會/導致」
-     等連結詞、或前後句構成明確的原因→結果）；僅描述結果或現象、沒有說出原因 → 該維度 0。
+  8. 【因果維度寬待】「含因果關係」類維度：不得要求「因為/所以」等連接詞或特定因果句式——
+     語文能力較弱的學生寫不出連接詞（2026-07-15 user 裁定）。學生的說明只要內容上能作為
+     所選答案的原因/解釋（隱含因果）即成立；唯有內容與所選完全無關、或只是重抄題目/選項文字
+     → 該維度 0。
   9. 【理由必須扣題】理由/說明維度的底線＝內容必須連結到該維度 criteria 明文要求的目標面向
      （例：criteria 要求「說明如何為做生意帶來便利」，學生只泛泛說明所選項目本身的好處、
      完全沒連結到目標面向 → 該維度 0，不得腦補連結）。此為第 4 條的下限：不要求超出 criteria、
-     但 criteria 明文要求的面向必須有。
+     但 criteria 明文要求的面向必須有。${strictRubricClause}
 - diagram_color: studentAnswerRaw is a description of the student's coloring (e.g. "塗色：第1個圓完整，第2個圓左側2/3，第3個圓未塗"). referenceAnswer describes what should be colored. Grade using rubricsDimensions:
   - 塗色比例: compare the student's described colored proportion to the required fraction. Allow ±5% tolerance (e.g. 2/3 ≈ 0.667 ± 0.033). If proportion is correct → full marks for that dimension.
   - 塗色位置: check if the colored region is the correct side/area (e.g. left vs right, which cells). Position must match referenceAnswer.
