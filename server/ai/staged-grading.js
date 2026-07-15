@@ -1548,7 +1548,8 @@ export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
 // 輸入輸出=records[] 全文不截斷（r1/r2/r1p/r2p/key/adopted/level）。
 export async function applyEscalationChain({
   questionResults, cropMap, akMap, pipelineRunId,
-  apiKey, model, payload, routeHint, getRemainingBudget
+  apiKey, model, payload, routeHint, getRemainingBudget,
+  markRead = false  // 2026-07-15：wq_pdf set-of-mark——crop 有紅框時 prompt 必須帶紅框條款（成對）
 }) {
   const modeRaw = ensureString(process.env.ESCALATION_CHAIN, '').trim().toLowerCase()
   const mode = (modeRaw === '0' || modeRaw === 'false' || modeRaw === 'off') ? 'off'
@@ -1586,11 +1587,15 @@ export async function applyEscalationChain({
     //   沙盒 e-chain-multiline：座3 人物題 現行版抄出 3 字殘片、多行版 2/2 完整 38 字；8 格全數持平或更好）
     const MULTILINE_CLAUSE = `\n⚠ 答案可能寫成「多行」或內容較長：必須把所有行、所有字逐字抄完——不可只抄第一行、不可中途省略、不可摘要，一直抄到作答區最後一個字為止（換行用空格連接輸出成一串）。
 ⚠ 若作答區內有「圈選/勾選的選項」或開頭先寫的「立場詞」（例：支持、反對、同意、不同意、或圈起來的名詞），必須把它抄在輸出的最前面、再接理由——不可只抄理由漏掉立場；印刷選項被學生圈選/打勾也算學生的作答、要抄出該選項文字。`
+    // 2026-07-15 紅框條款（r10↔r11 同碼基準揭露）：wq_pdf 的 crop 已畫紅框，但鏈 prompt 沒有紅框指示
+    //   ＋多行條款「抄到最後一個字」→ 鏈重讀把鄰列/整組表格全抄進一格（6-7-8 兩列混抄、4-5-5 跨列
+    //   撈到別列人物假給分）。crop+prompt 必須成對（r8 教訓）——補上並定義「作答區=紅框內」。
+    const CHAIN_MARK_CLAUSE = markRead ? `\n⚠ 圖中的「紅色方框」標示本題的作答區——只讀紅框內、紅框外（其他列/其他題）一律忽略；「抄到最後一個字」指紅框內的最後一個字。紅框內仍然只回報「學生手寫」的內容：印刷的題目文字、引導模板、選項文字都不要抄（學生有圈選/勾選的印刷選項除外）。` : ''
     // ↑ 2026-07-14 立場條款（user r4 對照：立場詞抄錄不穩=主要翻動軸——反對/民變/經濟發展等
     //   前綴有時被丟、accessor 判未表態誤扣。沙盒 e-chain-stance：6 格×2 抽 12/12 全中、
     //   現行版漏 5/6；含印刷選項圈選型（[V]經濟發展/勾選電燈））
-    const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。${MULTILINE_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
-    const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。${MULTILINE_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。${MULTILINE_CLAUSE}${CHAIN_MARK_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。${MULTILINE_CLAUSE}${CHAIN_MARK_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
     const readOnce = async (qr, prompt) => {
       const crop = cropMap.get(qr.questionId)
       if (!crop) return { value: null, ms: 0, status: 'no_crop' }
@@ -2011,6 +2016,35 @@ function canonicalOptionIndex(raw) {
   const code = s.charCodeAt(0); if (code >= 0x2460 && code <= 0x2473) return code - 0x2460 + 1  // ①-⑳
   if (/^[0-9]$/.test(s)) return Number(s)
   return null
+}
+
+// 2026-07-15 多選字母題（multi_fill、正解=逗號分隔單字母清單）確定性計分。
+// r10/r11 同碼基準揭露 accessor 對分隔符裁量不穩（座3「C、F.G」6→2、座6 6→0 同文異判、全班最大單格擺幅）。
+// user 拍板（國中小慣例）：對一個字母給該字母配分（maxScore/正解字母數）、寫錯一個扣 1 分（去重不重複扣）、
+// 下限 0。學生作答須「純字母＋分隔符」才收編；含中文/單詞（英語 multi_fill 填單字）→ 不收、仍交 accessor。
+export function gradeMultiFillLetterSet(q, studentAnswerRaw, status) {
+  const cat = q?.questionCategory ?? q?.questionType
+  if (cat !== 'multi_fill') return { gradable: false }
+  const keyTokens = ensureString(q?.answer, '').toUpperCase().split(/[^A-Z]+/).filter(Boolean)
+  if (keyTokens.length < 2 || !keyTokens.every((t) => t.length === 1)) return { gradable: false }
+  const keySet = new Set(keyTokens)
+  const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+  if (!maxScore) return { gradable: false }
+  if (status === 'blank') return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'blank', scoringReason: '學生未作答' }
+  if (status === 'unreadable') return { gradable: false }
+  const stripped = ensureString(studentAnswerRaw, '').toUpperCase().replace(/[\s,，、.。．:：;；|/\\()（）*·・]+/g, '')
+  if (!stripped || !/^[A-Z]+$/.test(stripped) || stripped.length > 10) return { gradable: false }
+  const stuTokens = [...new Set([...stripped])]
+  const hits = stuTokens.filter((t) => keySet.has(t))
+  const wrongs = stuTokens.filter((t) => !keySet.has(t))
+  const per = maxScore / keySet.size
+  const score = Math.max(0, Math.min(maxScore, hits.length * per - wrongs.length))
+  const isCorrect = hits.length === keySet.size && wrongs.length === 0
+  return {
+    gradable: true, isCorrect, score, maxScore,
+    errorType: isCorrect ? 'none' : 'calculation',
+    scoringReason: `學生填「${stuTokens.join(',')}」，正解「${keyTokens.join(',')}」：答對 ${hits.length} 個（+${hits.length * per} 分）${wrongs.length ? `、寫錯 ${wrongs.length} 個（−${wrongs.length} 分）` : ''}→ ${score} 分`
+  }
 }
 
 export function gradeObjectiveDeterministic(q, studentAnswerRaw, status) {
@@ -10691,7 +10725,10 @@ Return JSON:
         stageLatencyMsSoFar: stageLatencySoFar,
         // backward compat：A3 完跑完才合成完整 _internal（含 cropByQuestionId、由 A3 重切）
         answerKey,
-        questionIds
+        questionIds,
+        // 2026-07-15：wq_pdf set-of-mark 傳到 A3——重切 crop 要畫紅框、鏈 prompt 要帶紅框條款（成對）
+        wqPdfMarkRead,
+        ecTotalPages: totalPages
       }
     }
   }
@@ -11005,7 +11042,8 @@ Return JSON:
   // env ESCALATION_CHAIN：'1'=套用、'shadow'=只跑＋記錄不套用（影子模式）、其他=關（預設關）
   const escalationChainAudit = await applyEscalationChain({
     questionResults, cropMap: allQuestionCropMap, akMap: akByIdForLog,
-    pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
+    pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget,
+    markRead: wqPdfMarkRead
   })
   applyDoubleUnreadableZero(questionResults, pipelineRunId)
   applyZeroReviewTail(questionResults, pipelineRunId)
@@ -11172,7 +11210,9 @@ export async function runStagedGradingPhaseAArbiter({
     ocrAssistMeta,
     stageLatencyMsSoFar,
     answerKey,
-    questionIds
+    questionIds,
+    wqPdfMarkRead = false,
+    ecTotalPages = 1
   } = phaseAReadContext
   const stagedLogLevel = ctxLogLevel || getStagedLogLevel()
 
@@ -11402,6 +11442,12 @@ export async function runStagedGradingPhaseAArbiter({
       cropQids.map(async (qid) => {
         const aq = alignedById.get(qid)
         if (!aq?.answerBbox) return { qid, cropData: null }
+        // 2026-07-15 wq_pdf set-of-mark：重切也走紅框版（同主 read crop 政策）——inflate 寬 crop
+        //   在密集列/表格會蓋鄰列、鏈重讀整組混抄（r10↔r11 基準：6-7-8/4-5-5 假給分放水源頭）
+        if (wqPdfMarkRead) {
+          const marked = await cropWithMarkByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, aq.answerBbox, 0.012, +(0.048 / Math.max(1, ecTotalPages)).toFixed(4))
+          if (marked) return { qid, cropData: marked }
+        }
         // 2026-05-26：fill_blank 改 wide bbox 後、子題 bbox 已涵蓋整題幹、不再給小 cropPad 防鄰格
         const cropPad = 0.005
         const cropData = await cropInlineImageByBbox(
@@ -11460,7 +11506,8 @@ export async function runStagedGradingPhaseAArbiter({
   const escalationChainAudit = await applyEscalationChain({
     questionResults, cropMap: cropByQuestionId,
     akMap: mapByQuestionId(Array.isArray(answerKey?.questions) ? answerKey.questions : [], (q) => q?.id),
-    pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget
+    pipelineRunId, apiKey, model: readModel, payload, routeHint, getRemainingBudget,
+    markRead: wqPdfMarkRead
   })
   applyDoubleUnreadableZero(questionResults, pipelineRunId)
   applyZeroReviewTail(questionResults, pipelineRunId)
@@ -11917,6 +11964,40 @@ export async function runStagedGradingPhaseB({
     logStaged(pipelineRunId, 'basic', `[B-Phase0b] single_choice code-bypass（不送 Accessor）`, {
       count: objectiveBypassIds.size
     })
+  }
+
+  // Phase 0b-2 (2026-07-15)：多選字母題（multi_fill 字母清單型）code 直判、不送 Accessor。
+  //   gate 全在 gradeMultiFillLetterSet 內（key 須 ≥2 個單字母、學生作答須純字母），
+  //   英語 multi_fill 填單字型不符 gate、照舊走 accessor。kill switch: MULTIFILL_LETTERSET_ENABLED='false'。
+  if (process.env.MULTIFILL_LETTERSET_ENABLED !== 'false') {
+    let mfCount = 0
+    for (const ans of finalReadAnswerResult.answers) {
+      const qid = ensureString(ans?.questionId).trim()
+      if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
+      const q = akQById.get(qid)
+      if (!q) continue
+      const res = gradeMultiFillLetterSet(q, ans.studentAnswerRaw, ans.status)
+      if (!res.gradable) continue
+      objectiveBypassIds.add(qid)
+      mfCount++
+      deterministicScores.push({
+        questionId: qid,
+        isCorrect: res.isCorrect,
+        score: res.score,
+        maxScore: res.maxScore,
+        errorType: res.errorType,
+        reason: res.scoringReason,
+        scoringReason: res.scoringReason,
+        confidence: 100,
+        scoreConfidence: 100,
+        studentFinalAnswer: ensureString(ans.studentAnswerRaw, ''),
+        needExplain: !res.isCorrect && res.errorType !== 'blank',
+        _objectiveBypass: true
+      })
+    }
+    if (mfCount > 0) {
+      logStaged(pipelineRunId, 'basic', `[B-Phase0b2] multi_fill 字母集合 code-bypass（不送 Accessor）`, { count: mfCount })
+    }
   }
 
   // ── Phase 0c：句子克漏字（fill_blank 單一整句）確定性批改、不送 Accessor ─────────
