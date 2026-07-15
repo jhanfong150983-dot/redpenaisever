@@ -1983,6 +1983,24 @@ function canonicalizeUnits(s) {
   return r
 }
 
+// 2026-07-15 unitErrorRule（作業層級設定、user 拍板留給老師選）用：
+//   比對「數值＋單位」——數值相同（含單位等價正規化）：單位也同 → 'equal'（其實答對）；
+//   單位錯/缺 → 'unit_diff'（half 規則給一半）；數值不同或無法解析 → null（照原判）。
+export function unitOnlyMismatch(studentText, refText) {
+  const stripApprox = (t) => String(t ?? '').replace(/(?:大約為|約為|大約|約|≈)\s*(?=[0-9])/g, '')
+  const clean = (t) => canonicalizeUnits(stripApprox(String(t ?? '').trim())).replace(/[\s,]+/g, '')
+  const parse = (t) => {
+    const m = clean(t).match(/^(-?[\d./]+)(.*)$/u)
+    if (!m || !/\d/.test(m[1])) return null
+    return { num: m[1], unit: ensureString(m[2], '').trim() }
+  }
+  const s = parse(studentText), r = parse(refText)
+  if (!s || !r || !r.unit) return null
+  const numEq = s.num === r.num || mathNumericEquivalent(s.num, r.num)
+  if (!numEq) return null
+  return s.unit === r.unit ? 'equal' : 'unit_diff'
+}
+
 // Deterministic match：老師人工編輯 final 跟 expected 比對、normalize + 單位等價
 function manualEditDeterministicMatch(studentText, expectedText) {
   // 2026-06-02: 去掉「緊貼數字的約/大約/約為/≈」等近似詞，避免答案卷寫「約 257.04 立方公分」
@@ -6301,6 +6319,12 @@ export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gra
 - short_answer when Domain is "社會" or "自然": prioritize 核心結論. If core conclusion is semantically correct, allow full score even when supporting evidence is brief.
 - This policy must NOT be applied when strictness is strict/standard.`
       : ''
+  // 2026-07-15 單位錯誤計分規則（作業層級設定、user 拍板留給老師選；預設 zero=現行全有全無）
+  const unitErrorHalfClause = ensureString(answerKey?.unitErrorRule, 'zero') === 'half'
+    ? `
+  🔧 UNIT ERROR SCORING（本作業設定＝給一半）: 數值正確、但單位錯誤或缺單位 → score = maxScore 的一半
+     （覆寫各題型「單位錯 score=0」規則）、errorType='unit'、isCorrect=false。數值錯誤仍為 0。`
+    : ''
   // 2026-07-15 嚴格模式 rubric 偏移（user 拍板三級設計：標準是唯一穩定性主戰場、
   //   嚴格＝標準＋極少量明確偏移條款）：S1 專有名詞不容忍、S2 因果需明確連結。
   const strictRubricClause = strictness === 'strict'
@@ -6466,7 +6490,7 @@ UNIT EQUIVALENCE TABLE — these pairs are ALWAYS treated as identical regardles
   Note: Same-name pairs above (e.g. cm³ ↔ 立方公分, m² ↔ 平方公尺) ARE identical.
   Note: Different units (e.g. 公尺 vs 公分, kg vs g) are still WRONG even if both appear in this table.
   🚨 DIMENSION RULE: 長度(m/公尺/cm) ≠ 面積(m²/平方公尺/cm²) ≠ 體積(m³/立方公尺/cm³) are DIFFERENT dimensions.
-     Same number with a wrong dimension is a UNIT ERROR (errorType='unit', score 0), e.g. "408.2 m³" vs answer "408.2 平方公尺" → WRONG (體積 vs 面積).
+     Same number with a wrong dimension is a UNIT ERROR (errorType='unit', score 0), e.g. "408.2 m³" vs answer "408.2 平方公尺" → WRONG (體積 vs 面積).${unitErrorHalfClause}
 
 Rules:
 - score must be 0..maxScore.
@@ -7490,7 +7514,23 @@ function buildFinalGradingResult({
         if (!programMatch && qCategory === 'fill_blank' && siblingTokenAnswerMatch(question, studentAns, keyQuestions)) {
           programMatch = true
         }
-        if (programMatch !== row.isCorrect) {
+        // 2026-07-15 unitErrorRule（作業設定）：數值＋單位等價正規化後全同 → 其實答對（治 15cm vs 15公分
+        //   被 norm 誤殺的潛在案）；數值對、只錯/缺單位且本作業設定 half → 給一半分數。
+        let unitHalfApplied = false
+        if (!programMatch && qCategory === 'fill_blank') {
+          const um = unitOnlyMismatch(studentAns, refAnswer)
+          if (um === 'equal') programMatch = true
+          else if (um === 'unit_diff' && ensureString(answerKey?.unitErrorRule, 'zero') === 'half') unitHalfApplied = true
+        }
+        if (unitHalfApplied) {
+          const qMax = toFiniteNumber(question?.maxScore) ?? row.maxScore
+          row.isCorrect = false
+          row.score = qMax / 2
+          row.errorType = 'unit'
+          row.reason = `數值正確但單位錯誤（本作業規則：給一半分數）：學生 "${studentAns}"、標準 "${refAnswer}"`
+          row.confidence = 100
+          console.log(`[programmatic-override] ${questionId} unit-half ref="${refAnswer}" student="${studentAns}"`)
+        } else if (programMatch !== row.isCorrect) {
           const prevCorrect = row.isCorrect
           row.isCorrect = programMatch
           row.score = programMatch ? (toFiniteNumber(question?.maxScore) ?? row.maxScore) : 0
@@ -7546,6 +7586,24 @@ function buildFinalGradingResult({
           row.confidence = 100
           console.log(`[programmatic-override] ${questionId} final-answer-match + blank-steps → 0`)
         } else if (!finalMatch) {
+          // 2026-07-15 unitErrorRule（作業設定）：數值＋單位等價後全同 → 視同答對；
+          //   數值對、只錯/缺單位且設定 half → 給一半（不論步驟）。其餘照 binary 歸零。
+          const um = unitOnlyMismatch(stuFinal, refFinal)
+          if (um === 'equal' && hasSteps) {
+            row.isCorrect = true
+            row.score = qMaxScore
+            row.needExplain = false
+            row.reason = `答案正確（程式比對覆核、單位等價）`
+            row.confidence = 100
+          } else if (um === 'unit_diff' && ensureString(answerKey?.unitErrorRule, 'zero') === 'half') {
+            row.isCorrect = false
+            row.score = qMaxScore / 2
+            row.needExplain = true
+            row.errorType = 'unit'
+            row.reason = `數值正確但單位錯誤（本作業規則：給一半分數）：學生 "${stuFinal}"、標準 "${refFinal}"`
+            row.confidence = 100
+            console.log(`[programmatic-override] ${questionId} unit-half (${stuFinal} vs ${refFinal})`)
+          } else {
           // 最終答案錯 → 0分（binary：不論是否有步驟、不論 accessor 給多少 partial）
           const prevScore = row.score
           row.isCorrect = false
@@ -7556,6 +7614,7 @@ function buildFinalGradingResult({
             : `答案錯誤且未列出計算過程`
           row.confidence = 100
           console.log(`[programmatic-override] ${questionId} final-answer-mismatch → 0 (hasSteps=${hasSteps}, prevScore=${prevScore})`)
+          }
         }
       }
     }
