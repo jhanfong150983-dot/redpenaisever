@@ -2020,6 +2020,26 @@ export function unitErrorRuleLabel(answerKey) {
   return '整題 0 分'
 }
 
+// 2026-07-16 processCreditRule（應用題過程分、作業層級設定、user 拍板三段）：
+//   none=不給分(預設=現行)/half=一半/deduct=扣固定 processCreditDeduction 分（下限 0）。
+//   適用「最終答案錯、但 accessor 看 crop 判定列式與過程正確到最後一步（correct_until_final）」的格。
+export function processCreditScoreFor(maxScore, answerKey) {
+  const rule = ensureString(answerKey?.processCreditRule, 'none')
+  const max = Math.max(0, toFiniteNumber(maxScore) ?? 0)
+  if (rule === 'half') return max / 2
+  if (rule === 'deduct') {
+    const d = toFiniteNumber(answerKey?.processCreditDeduction)
+    if (d !== null && d > 0) return Math.max(0, max - d)
+  }
+  return 0
+}
+export function processCreditRuleLabel(answerKey) {
+  const rule = ensureString(answerKey?.processCreditRule, 'none')
+  if (rule === 'half') return '給一半分數'
+  if (rule === 'deduct') return `扣 ${toFiniteNumber(answerKey?.processCreditDeduction) ?? 1} 分`
+  return '不給分'
+}
+
 // Deterministic match：老師人工編輯 final 跟 expected 比對、normalize + 單位等價
 function manualEditDeterministicMatch(studentText, expectedText) {
   // 2026-06-02: 去掉「緊貼數字的約/大約/約為/≈」等近似詞，避免答案卷寫「約 257.04 立方公分」
@@ -3667,6 +3687,8 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
           ? row.matchingDetails
           : undefined,
       rubricScores: Array.isArray(row?.rubricScores) ? row.rubricScores : undefined,
+      // 2026-07-16 應用題過程窄判定（processCreditRule 用、binary 覆核讀）
+      processVerdict: ensureString(row?.processVerdict, '').trim() || undefined,
       cellResults,
       partResults
     }
@@ -6347,6 +6369,17 @@ export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gra
      score = ${unitErrorRuleVal === 'half' ? 'maxScore 的一半' : `max(0, maxScore − ${toFiniteNumber(answerKey?.unitErrorDeduction) ?? 1})`}
      （覆寫各題型「單位錯 score=0」規則）、errorType='unit'、isCorrect=false。數值錯誤仍為 0。`
     : ''
+  // 2026-07-16 應用題過程分（作業層級設定、user 拍板）：答案錯的題附 crop、accessor 只回窄判定，計分由 code 做
+  const processCreditClause = ensureString(answerKey?.processCreditRule, 'none') !== 'none'
+    ? `
+  🔧 PROCESS VERDICT（本作業設定＝過程對但答案錯${processCreditRuleLabel(answerKey)}）: 對 calculation/word_problem
+     且學生「最終答案錯誤」的題，除原本欄位外必須額外回傳 processVerdict：
+     - 'correct_until_final'＝列式正確、計算過程正確到最後一步，僅最終答案計算錯誤或抄寫錯誤
+     - 'process_error'＝列式或計算過程本身有錯（含用錯公式、middle 步驟算錯）
+     - 'no_process'＝沒有可辨識的計算過程
+     嚴格判準：必須逐步驗算圖中過程；任何一步不確定 → 回 'process_error'（不可腦補）。
+     分數不用你調整、系統會依 verdict 依作業規則計分。`
+    : ''
   // 2026-07-15 嚴格模式 rubric 偏移（user 拍板三級設計：標準是唯一穩定性主戰場、
   //   嚴格＝標準＋極少量明確偏移條款）：S1 專有名詞不容忍、S2 因果需明確連結。
   const strictRubricClause = strictness === 'strict'
@@ -6512,7 +6545,7 @@ UNIT EQUIVALENCE TABLE — these pairs are ALWAYS treated as identical regardles
   Note: Same-name pairs above (e.g. cm³ ↔ 立方公分, m² ↔ 平方公尺) ARE identical.
   Note: Different units (e.g. 公尺 vs 公分, kg vs g) are still WRONG even if both appear in this table.
   🚨 DIMENSION RULE: 長度(m/公尺/cm) ≠ 面積(m²/平方公尺/cm²) ≠ 體積(m³/立方公尺/cm³) are DIFFERENT dimensions.
-     Same number with a wrong dimension is a UNIT ERROR (errorType='unit', score 0), e.g. "408.2 m³" vs answer "408.2 平方公尺" → WRONG (體積 vs 面積).${unitErrorHalfClause}
+     Same number with a wrong dimension is a UNIT ERROR (errorType='unit', score 0), e.g. "408.2 m³" vs answer "408.2 平方公尺" → WRONG (體積 vs 面積).${unitErrorHalfClause}${processCreditClause}
 
 Rules:
 - score must be 0..maxScore.
@@ -7625,6 +7658,17 @@ function buildFinalGradingResult({
             row.reason = `數值正確但單位錯誤（本作業規則：${unitErrorRuleLabel(answerKey)}）：學生 "${stuFinal}"、標準 "${refFinal}"`
             row.confidence = 100
             console.log(`[programmatic-override] ${questionId} unit-partial(${row.score}) (${stuFinal} vs ${refFinal})`)
+          } else if (ensureString(answerKey?.processCreditRule, 'none') !== 'none'
+              && ensureString(row?.processVerdict, '') === 'correct_until_final') {
+            // 2026-07-16 應用題過程分（user 拍板）：accessor 看 crop 窄判定「過程正確到最後一步、
+            //   僅最終答案算錯/抄錯」→ 依作業規則給部分分（計分 code 做、判定 AI 做窄題）
+            row.isCorrect = false
+            row.score = processCreditScoreFor(qMaxScore, answerKey)
+            row.needExplain = true
+            row.errorType = 'calculation'
+            row.reason = `列式與計算過程正確、僅最終答案錯誤（本作業規則：${processCreditRuleLabel(answerKey)}）：學生 "${stuFinal}"、標準 "${refFinal}"`
+            row.confidence = 100
+            console.log(`[programmatic-override] ${questionId} process-credit(${row.score}) (${stuFinal} vs ${refFinal})`)
           } else {
           // 最終答案錯 → 0分（binary：不論是否有步驟、不論 accessor 給多少 partial）
           const prevScore = row.score
@@ -13012,24 +13056,39 @@ export async function runStagedGradingPhaseB({
     }
   }
 
-  // Phase 2：找出 final ≠ expected 的 word_problem/calculation 題 (不含 manualBypass)
-  const finalMismatchIds = new Set()
+  // Phase 2（2026-07-16 重構、user 拍板 crop 政策翻轉）：calc/word_problem 依「最終答案抽取比對」分三組——
+  //   matched=抽得出且答案對（binary 滿分/防抄、crop 白送 → 不附）
+  //   wrong=抽得出且答案錯（processCreditRule 開啟時附 crop、accessor 回 processVerdict 窄判定）
+  //   unextractable=抽不出（安全網：照舊附 crop、accessor 判分生效）
+  //   舊版用 manualEditDeterministicMatch 整格原文比對＝有過程必不匹配 → 實務上錯的對的都亂送，一併矯正。
+  const calcFinalMatchedIds = new Set()
+  const calcFinalWrongIds = new Set()
+  const calcUnextractableIds = new Set()
+  const processCreditOn = ensureString(answerKey?.processCreditRule, 'none') !== 'none'
   for (const ans of finalReadAnswerResult.answers) {
     if (manualBypassIds.has(ans.questionId)) continue
     if (ans.status !== 'read') continue
     const q = akQById.get(ans.questionId)
     if (!q || !calcTypes.has(q?.questionCategory)) continue
-    const studentText = ans.studentAnswerRaw
-    const expectedText = ensureString(q?.answer, '')
-    if (!manualEditDeterministicMatch(studentText, expectedText)) {
-      finalMismatchIds.add(ans.questionId)
+    const refFinal = extractFinalAnswerFromCalc(ensureString(q?.referenceAnswer || q?.answer, ''))
+    const stuFinal = extractFinalAnswerFromCalc(ensureString(ans.studentAnswerRaw, ''))
+    if (refFinal && stuFinal) {
+      const matched = refFinal === stuFinal || isNumericEqual(refFinal, stuFinal)
+      if (matched) calcFinalMatchedIds.add(ans.questionId)
+      else calcFinalWrongIds.add(ans.questionId)
+    } else {
+      calcUnextractableIds.add(ans.questionId)
     }
   }
-  if (finalMismatchIds.size > 0) {
-    logStaged(pipelineRunId, 'basic', `[B-Phase2] final mismatch → skip crop for Accessor`, {
-      count: finalMismatchIds.size
-    })
-  }
+  // 舊名沿用（下游 crop filter 讀）：不該附 crop 的集合 = matched ∪（rule 關閉時的 wrong）
+  const finalMismatchIds = new Set([
+    ...calcFinalMatchedIds,
+    ...(processCreditOn ? [] : [...calcFinalWrongIds])
+  ])
+  logStaged(pipelineRunId, 'basic', `[B-Phase2] calc 三組分類`, {
+    matched: calcFinalMatchedIds.size, wrong: calcFinalWrongIds.size,
+    unextractable: calcUnextractableIds.size, processCreditOn
+  })
 
   // ── Crop calculation/word_problem questions for Accessor visual grading ──
   // Accessor needs to see the student's handwritten work (not just AI-transcribed text)
