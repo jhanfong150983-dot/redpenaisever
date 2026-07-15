@@ -2076,6 +2076,35 @@ export function composeEquivalentToKey(rawText, keyText) {
   return key
 }
 
+// 2026-07-15 排序題確定性計分（user 拍板：全對才給分）。
+// 病：ordering 無確定性規則、accessor 每輪自由心證——英語期末 1-B2-1 同一答案兩輪 6↔0/0↔5 亂跳、
+//   還有「明知兩格錯卻給滿分」的放水。規則：token 序列完全一致→滿分、否則 0；
+//   含 ?（讀不清格）/無法辨識 → 不收編、交 accessor（罕見、fail-open）。
+export function gradeOrderingDeterministic(q, studentAnswerRaw, status) {
+  const cat = q?.questionCategory ?? q?.questionType
+  if (cat !== 'ordering') return { gradable: false }
+  const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+  const key = ensureString(q?.answer, '').trim()
+  if (!maxScore || !key) return { gradable: false }
+  const tok = (s) => ensureString(s, '').toUpperCase().split(/[^0-9A-Z]+/).filter(Boolean)
+  const kTok = tok(key)
+  if (kTok.length < 2) return { gradable: false }
+  if (status === 'blank') return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'blank', scoringReason: '學生未作答' }
+  if (status === 'unreadable') return { gradable: false }
+  const raw = ensureString(studentAnswerRaw, '').trim()
+  if (!raw || raw.includes('?')) return { gradable: false }
+  const sTok = tok(raw)
+  if (!sTok.length) return { gradable: false }
+  const isCorrect = sTok.length === kTok.length && sTok.every((t, i) => t === kTok[i])
+  return {
+    gradable: true, isCorrect, score: isCorrect ? maxScore : 0, maxScore,
+    errorType: isCorrect ? 'none' : 'calculation',
+    scoringReason: isCorrect
+      ? `排序完全正確（${sTok.join(',')}）`
+      : `學生排序「${sTok.join(',')}」，正確排序「${kTok.join(',')}」——排序題全對才給分，判 0 分`
+  }
+}
+
 // 2026-07-15 多選字母題（multi_fill、正解=逗號分隔單字母清單）確定性計分。
 // r10/r11 同碼基準揭露 accessor 對分隔符裁量不穩（座3「C、F.G」6→2、座6 6→0 同文異判、全班最大單格擺幅）。
 // user 拍板（國中小慣例）：對一個字母給該字母配分（maxScore/正解字母數）、寫錯一個扣 1 分（去重不重複扣）、
@@ -12096,6 +12125,39 @@ export async function runStagedGradingPhaseB({
     }
     if (mfCount > 0) {
       logStaged(pipelineRunId, 'basic', `[B-Phase0b2] multi_fill 字母集合 code-bypass（不送 Accessor）`, { count: mfCount })
+    }
+  }
+
+  // Phase 0b-3 (2026-07-15)：排序題 code 直判（user 拍板全對才給分）、不送 Accessor。
+  //   kill switch: ORDERING_DETERMINISTIC_ENABLED='false'。含 ?/無法辨識 → 不收編照舊交 accessor。
+  if (process.env.ORDERING_DETERMINISTIC_ENABLED !== 'false') {
+    let odCount = 0
+    for (const ans of finalReadAnswerResult.answers) {
+      const qid = ensureString(ans?.questionId).trim()
+      if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
+      const q = akQById.get(qid)
+      if (!q) continue
+      const res = gradeOrderingDeterministic(q, ans.studentAnswerRaw, ans.status)
+      if (!res.gradable) continue
+      objectiveBypassIds.add(qid)
+      odCount++
+      deterministicScores.push({
+        questionId: qid,
+        isCorrect: res.isCorrect,
+        score: res.score,
+        maxScore: res.maxScore,
+        errorType: res.errorType,
+        reason: res.scoringReason,
+        scoringReason: res.scoringReason,
+        confidence: 100,
+        scoreConfidence: 100,
+        studentFinalAnswer: ensureString(ans.studentAnswerRaw, ''),
+        needExplain: !res.isCorrect && res.errorType !== 'blank',
+        _objectiveBypass: true
+      })
+    }
+    if (odCount > 0) {
+      logStaged(pipelineRunId, 'basic', `[B-Phase0b3] ordering 全對才給分 code-bypass（不送 Accessor）`, { count: odCount })
     }
   }
 
