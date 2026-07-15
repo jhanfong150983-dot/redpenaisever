@@ -2001,6 +2001,25 @@ export function unitOnlyMismatch(studentText, refText) {
   return s.unit === r.unit ? 'equal' : 'unit_diff'
 }
 
+// 2026-07-15 unitErrorRule 計分（zero=0分(預設)/half=一半/deduct=扣固定 unitErrorDeduction 分、下限0）。
+// 回傳「數值對但單位錯」時該題應得分數；規則 zero 或 deduct 未設有效扣分 → 0。
+export function unitErrorScoreFor(maxScore, answerKey) {
+  const rule = ensureString(answerKey?.unitErrorRule, 'zero')
+  const max = Math.max(0, toFiniteNumber(maxScore) ?? 0)
+  if (rule === 'half') return max / 2
+  if (rule === 'deduct') {
+    const d = toFiniteNumber(answerKey?.unitErrorDeduction)
+    if (d !== null && d > 0) return Math.max(0, max - d)
+  }
+  return 0
+}
+export function unitErrorRuleLabel(answerKey) {
+  const rule = ensureString(answerKey?.unitErrorRule, 'zero')
+  if (rule === 'half') return '給一半分數'
+  if (rule === 'deduct') return `扣 ${toFiniteNumber(answerKey?.unitErrorDeduction) ?? 1} 分`
+  return '整題 0 分'
+}
+
 // Deterministic match：老師人工編輯 final 跟 expected 比對、normalize + 單位等價
 function manualEditDeterministicMatch(studentText, expectedText) {
   // 2026-06-02: 去掉「緊貼數字的約/大約/約為/≈」等近似詞，避免答案卷寫「約 257.04 立方公分」
@@ -6319,10 +6338,13 @@ export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gra
 - short_answer when Domain is "社會" or "自然": prioritize 核心結論. If core conclusion is semantically correct, allow full score even when supporting evidence is brief.
 - This policy must NOT be applied when strictness is strict/standard.`
       : ''
-  // 2026-07-15 單位錯誤計分規則（作業層級設定、user 拍板留給老師選；預設 zero=現行全有全無）
-  const unitErrorHalfClause = ensureString(answerKey?.unitErrorRule, 'zero') === 'half'
+  // 2026-07-15 單位錯誤計分規則（作業層級設定、user 拍板留給老師選；預設 zero=現行全有全無、
+  //   half=一半、deduct=扣固定分數）
+  const unitErrorRuleVal = ensureString(answerKey?.unitErrorRule, 'zero')
+  const unitErrorHalfClause = (unitErrorRuleVal === 'half' || unitErrorRuleVal === 'deduct')
     ? `
-  🔧 UNIT ERROR SCORING（本作業設定＝給一半）: 數值正確、但單位錯誤或缺單位 → score = maxScore 的一半
+  🔧 UNIT ERROR SCORING（本作業設定＝${unitErrorRuleLabel(answerKey)}）: 數值正確、但單位錯誤或缺單位 →
+     score = ${unitErrorRuleVal === 'half' ? 'maxScore 的一半' : `max(0, maxScore − ${toFiniteNumber(answerKey?.unitErrorDeduction) ?? 1})`}
      （覆寫各題型「單位錯 score=0」規則）、errorType='unit'、isCorrect=false。數值錯誤仍為 0。`
     : ''
   // 2026-07-15 嚴格模式 rubric 偏移（user 拍板三級設計：標準是唯一穩定性主戰場、
@@ -7516,20 +7538,20 @@ function buildFinalGradingResult({
         }
         // 2026-07-15 unitErrorRule（作業設定）：數值＋單位等價正規化後全同 → 其實答對（治 15cm vs 15公分
         //   被 norm 誤殺的潛在案）；數值對、只錯/缺單位且本作業設定 half → 給一半分數。
-        let unitHalfApplied = false
+        let unitPartialApplied = false
         if (!programMatch && qCategory === 'fill_blank') {
           const um = unitOnlyMismatch(studentAns, refAnswer)
           if (um === 'equal') programMatch = true
-          else if (um === 'unit_diff' && ensureString(answerKey?.unitErrorRule, 'zero') === 'half') unitHalfApplied = true
+          else if (um === 'unit_diff' && ensureString(answerKey?.unitErrorRule, 'zero') !== 'zero') unitPartialApplied = true
         }
-        if (unitHalfApplied) {
+        if (unitPartialApplied) {
           const qMax = toFiniteNumber(question?.maxScore) ?? row.maxScore
           row.isCorrect = false
-          row.score = qMax / 2
+          row.score = unitErrorScoreFor(qMax, answerKey)
           row.errorType = 'unit'
-          row.reason = `數值正確但單位錯誤（本作業規則：給一半分數）：學生 "${studentAns}"、標準 "${refAnswer}"`
+          row.reason = `數值正確但單位錯誤（本作業規則：${unitErrorRuleLabel(answerKey)}）：學生 "${studentAns}"、標準 "${refAnswer}"`
           row.confidence = 100
-          console.log(`[programmatic-override] ${questionId} unit-half ref="${refAnswer}" student="${studentAns}"`)
+          console.log(`[programmatic-override] ${questionId} unit-partial(${row.score}) ref="${refAnswer}" student="${studentAns}"`)
         } else if (programMatch !== row.isCorrect) {
           const prevCorrect = row.isCorrect
           row.isCorrect = programMatch
@@ -7595,14 +7617,14 @@ function buildFinalGradingResult({
             row.needExplain = false
             row.reason = `答案正確（程式比對覆核、單位等價）`
             row.confidence = 100
-          } else if (um === 'unit_diff' && ensureString(answerKey?.unitErrorRule, 'zero') === 'half') {
+          } else if (um === 'unit_diff' && ensureString(answerKey?.unitErrorRule, 'zero') !== 'zero') {
             row.isCorrect = false
-            row.score = qMaxScore / 2
+            row.score = unitErrorScoreFor(qMaxScore, answerKey)
             row.needExplain = true
             row.errorType = 'unit'
-            row.reason = `數值正確但單位錯誤（本作業規則：給一半分數）：學生 "${stuFinal}"、標準 "${refFinal}"`
+            row.reason = `數值正確但單位錯誤（本作業規則：${unitErrorRuleLabel(answerKey)}）：學生 "${stuFinal}"、標準 "${refFinal}"`
             row.confidence = 100
-            console.log(`[programmatic-override] ${questionId} unit-half (${stuFinal} vs ${refFinal})`)
+            console.log(`[programmatic-override] ${questionId} unit-partial(${row.score}) (${stuFinal} vs ${refFinal})`)
           } else {
           // 最終答案錯 → 0分（binary：不論是否有步驟、不論 accessor 給多少 partial）
           const prevScore = row.score
