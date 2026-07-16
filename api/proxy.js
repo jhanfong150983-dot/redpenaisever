@@ -855,6 +855,10 @@ export default async function handler(req, res) {
       res.status(504).json({ error: 'Gemini request timeout' })
       return
     }
-    res.status(500).json({ error: 'Failed to fetch Gemini API' })
+    // technical: 給前端藏在「技術資訊」摺疊區＋遠端除錯用（vertex 認證失敗等 exception 才看得到根因）
+    res.status(500).json({
+      error: 'Failed to fetch Gemini API',
+      technical: String(error?.message || error).slice(0, 300)
+    })
   }
 }
