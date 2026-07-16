@@ -31,6 +31,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   ANSWER_KEY_TAG_CONCEPTS: 'answer_key.tag_concepts',
   REPORT_TEACHER_SUMMARY: 'report.teacher_summary',
   REPORT_DOMAIN_DIAGNOSIS: 'report.domain_diagnosis',
+  REPORT_QUESTION_ERROR_FEATURES: 'report.question_error_features',  // 2026-07-16 開放題錯誤特徵 AI 歸納（on-demand）
   ADMIN_TAG_AGGREGATION: 'admin.tag_aggregation',
   PERSPECTIVE_DETECT_CORNERS: 'perspective.detect_corners',
   UNKNOWN: 'unknown'
