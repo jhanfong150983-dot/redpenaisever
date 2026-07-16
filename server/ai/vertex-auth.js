@@ -31,7 +31,12 @@ function getServiceAccount() {
   try {
     sa = JSON.parse(raw)
   } catch {
-    throw new Error('GCP_SA_JSON is not valid JSON')
+    // 2026-07-16: dashboard 貼 raw JSON 容易被引號/換行跳脫弄壞（實際發生過）→ 支援 base64 版（貼上不可能壞）
+    try {
+      sa = JSON.parse(Buffer.from(raw, 'base64').toString('utf8'))
+    } catch {
+      throw new Error('GCP_SA_JSON is not valid JSON (raw and base64 both failed)')
+    }
   }
   if (!sa?.client_email || !sa?.private_key || !sa?.token_uri) {
     throw new Error('GCP_SA_JSON missing client_email/private_key/token_uri')
