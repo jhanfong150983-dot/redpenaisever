@@ -8,3 +8,6 @@ node_modules/
 .env*.local
 api/debug/
 *.log
+# GCP Service Account 金鑰絕不進 repo（廠商 Vertex AI 憑證）
+*sa-key*.json
+credentials/

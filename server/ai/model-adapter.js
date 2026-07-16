@@ -1,3 +1,9 @@
+import {
+  isVertexEnabled,
+  buildVertexModelUrl,
+  getVertexAccessToken
+} from './vertex-auth.js'
+
 function parseResponseBody(rawText) {
   if (typeof rawText !== 'string') return {}
   try {
@@ -67,13 +73,20 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
   const modelPath = String(model).startsWith('models/')
     ? String(model)
     : `models/${model}`
-  const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${apiKey}`
+  // 2026-07-16: AI_PROVIDER=vertex → 走廠商 Vertex AI（SA JSON 認證、global endpoint）。
+  //   request/response body 兩邊 schema 相同，只差 URL 與 auth header；重試邏輯共用。
+  //   kill switch：Vercel 拿掉 AI_PROVIDER 即回退 generativelanguage + API key。
+  const useVertex = isVertexEnabled()
+  const url = useVertex
+    ? buildVertexModelUrl(model)
+    : `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${apiKey}`
   const { retryCount, baseBackoffMs } = getRetryConfig()
   const { retryCount: retry429Count, backoffMs: backoff429Ms } = get429RetryConfig()
   const hasTimeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
   const effectiveTimeoutMs = hasTimeout ? Math.max(1000, Number(timeoutMs)) : null
 
   let attempts429 = 0
+  let attempts401 = 0
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
     const controller = hasTimeout ? new AbortController() : null
@@ -85,9 +98,13 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
 
     let response
     try {
+      const headers = { 'Content-Type': 'application/json' }
+      if (useVertex) {
+        headers.Authorization = `Bearer ${await getVertexAccessToken()}`
+      }
       response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ contents, ...payload }),
         ...(controller ? { signal: controller.signal } : {})
       })
@@ -117,6 +134,15 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
 
     const rawText = await response.text()
     const data = parseResponseBody(rawText)
+
+    // 401 = Vertex token 失效（提早撤銷/時鐘漂移）— 強制刷新一次再試，不消耗 504 retry budget。
+    if (useVertex && Number(response.status) === 401 && attempts401 < 1) {
+      attempts401 += 1
+      console.warn(`[ai-model-adapter] vertex 401 model=${model} — force token refresh and retry`)
+      await getVertexAccessToken({ forceRefresh: true })
+      attempt -= 1
+      continue
+    }
 
     // 503 = model overloaded — 2026-06-30：改成「同模型退避重試」，不降階換模型。
     //   原因：降階到別的 model 會讓批改結果在不同 model 間不一致（違反「精準度跨次一致」目標）。
