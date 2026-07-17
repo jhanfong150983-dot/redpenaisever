@@ -3480,26 +3480,32 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       for (let i = 0; i < unitAids.length; i += 200) {
         const chunk = unitAids.slice(i, i + 200)
         const { data: rows } = await supabaseAdmin
-          .from('assignments').select('id, answer_sheet_mode, domain, total_pages').in('id', chunk)
+          .from('assignments').select('id, answer_sheet_mode, domain, total_pages, total_questions').in('id', chunk)
         for (const a of (rows || [])) aAttrMap[a.id] = a
       }
-      const unitGroups = { mode: {}, domain: {}, pages: {} }
-      const pushUnit = (dim, key, u) => {
-        if (!unitGroups[dim][key]) unitGroups[dim][key] = { key, twds: [], runTwds: [], calls: 0, twd: 0 }
+      const unitGroups = { mode: {}, domain: {}, pages: {}, questions: {} }
+      // 2026-07-18: qn=該卷題數（assignments.total_questions）→ perQ 收集「單輪成本/題」樣本、算 NT$/題中位
+      const pushUnit = (dim, key, u, qn) => {
+        if (!unitGroups[dim][key]) unitGroups[dim][key] = { key, twds: [], runTwds: [], calls: 0, twd: 0, perQ: [] }
         const g = unitGroups[dim][key]
         g.twds.push(u.twd); g.runTwds.push(...(u.runTwds || [])); g.calls += u.calls; g.twd += u.twd
+        if (qn > 0) g.perQ.push(...(u.runTwds || []).map((t) => t / qn))
       }
       for (const sid of unitSubIds) {
         const u = subCostMap[sid]
         const sub = subMetaMap[sid]
         const asg = aAttrMap[sub?.assignment_id || u.assignment_id]
+        const qn = Number(asg?.total_questions) || 0
         // submission 或 assignment 已刪 → 歸「(未分類)」不硬塞
         const modeKey = (sub && asg)
           ? `${asg.answer_sheet_mode === 'answer_only' ? 'ao' : 'wq'}_${sub.source === 'teacher_scan' ? 'pdf' : 'photo'}`
           : '(未分類)'
-        pushUnit('mode', modeKey, u)
-        pushUnit('domain', asg ? (asg.domain || '(未填領域)') : '(未分類)', u)
-        pushUnit('pages', asg ? (asg.total_pages ? `${asg.total_pages} 頁` : '(未填頁數)') : '(未分類)', u)
+        pushUnit('mode', modeKey, u, qn)
+        pushUnit('domain', asg ? (asg.domain || '(未填領域)') : '(未分類)', u, qn)
+        pushUnit('pages', asg ? (asg.total_pages ? `${asg.total_pages} 頁` : '(未填頁數)') : '(未分類)', u, qn)
+        pushUnit('questions', asg
+          ? (qn > 0 ? (qn <= 20 ? '≤20 題' : qn <= 30 ? '21-30 題' : qn <= 40 ? '31-40 題' : '41+ 題') : '(未填題數)')
+          : '(未分類)', u, qn)
       }
       const medianOf = (arr) => {
         if (!arr.length) return 0
@@ -3517,13 +3523,17 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
         // 單次批改（時間聚類拆輪、只算完整輪）：中位數＋每份平均輪數
         runMedian: +medianOf(g.runTwds).toFixed(2),
         runCount: g.runTwds.length,
-        runsPerSub: +(g.runTwds.length / g.twds.length).toFixed(1)
+        runsPerSub: +(g.runTwds.length / g.twds.length).toFixed(1),
+        // 2026-07-18: 單輪成本/題 中位（B2B 報價口徑；無題數資料的份不進樣本）
+        runPerQMedian: g.perQ.length ? +medianOf(g.perQ).toFixed(2) : null
       })).sort((a, b) => b.count - a.count)
+      const Q_ORDER = { '≤20 題': 1, '21-30 題': 2, '31-40 題': 3, '41+ 題': 4 }
       unitEcon = {
         byMode: summarizeUnits('mode'),
         byDomain: summarizeUnits('domain'),
         // 頁數表按頁數排、非按份數排
-        byPages: summarizeUnits('pages').sort((a, b) => (parseInt(a.key) || 999) - (parseInt(b.key) || 999))
+        byPages: summarizeUnits('pages').sort((a, b) => (parseInt(a.key) || 999) - (parseInt(b.key) || 999)),
+        byQuestions: summarizeUnits('questions').sort((a, b) => (Q_ORDER[a.key] || 9) - (Q_ORDER[b.key] || 9))
       }
     }
 

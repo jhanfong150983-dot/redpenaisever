@@ -178,6 +178,15 @@ function normalizeAnswerSheetMode(value) {
   return null
 }
 
+// 2026-07-18: assignments.total_questions 維護（單位經濟「按題數/NT$/題」用）——answer_key 寫入時同步題數。
+// 數不出來回 null（呼叫端用 ?? undefined 略過、不覆蓋既有值）。
+function countAkQuestions(ak) {
+  try {
+    const v = typeof ak === 'string' ? JSON.parse(ak) : ak
+    return Array.isArray(v?.questions) && v.questions.length > 0 ? v.questions.length : null
+  } catch { return null }
+}
+
 function compactObject(obj) {
   return Object.fromEntries(
     Object.entries(obj).filter(([, value]) => value !== undefined)
@@ -4608,6 +4617,7 @@ async function handleSync(req, res) {
             ) ?? undefined,
             prior_weight_types: a.priorWeightTypes ?? undefined,
             answer_key: a.answerKey ?? undefined,
+            total_questions: countAkQuestions(a.answerKey) ?? undefined,
             answer_key_template_id: a.answerKeyTemplateId ?? a.answer_key_template_id ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
             student_upload_enabled: a.studentUploadEnabled ?? a.student_upload_enabled ?? undefined,
@@ -4705,9 +4715,10 @@ async function handleSync(req, res) {
             // 所以 client push 一定會帶舊 answerKey 把 assignment 覆寫成 stale。這層是 SSoT。
             const ak = t.answerKey ?? t.answer_key
             if (ak !== undefined && ak !== null) {
+              const tq = countAkQuestions(ak)
               const { error: akErr, count: akCount } = await supabaseDb
                 .from('assignments')
-                .update({ answer_key: ak, updated_at: nowIso }, { count: 'exact' })
+                .update({ answer_key: ak, updated_at: nowIso, ...(tq != null ? { total_questions: tq } : {}) }, { count: 'exact' })
                 .eq('owner_id', user.id)
                 .eq('answer_key_template_id', t.id)
               if (akErr) {
