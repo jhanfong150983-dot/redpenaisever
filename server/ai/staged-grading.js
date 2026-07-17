@@ -2186,13 +2186,20 @@ export function gradeOrderingDeterministic(q, studentAnswerRaw, status) {
   if (!raw || raw.includes('?')) return { gradable: false }
   const sTok = tok(raw)
   if (!sTok.length) return { gradable: false }
-  const isCorrect = sTok.length === kTok.length && sTok.every((t, i) => t === kTok[i])
+  // 2026-07-18 user 改拍板「錯幾格扣幾分、下限 0」（取代 7/15 的全對才給分）：
+  //   起因=eng-final r1/r2 揭露舊 accessor 時代同讀值拿過 6/4/0 三種分（1-B2-1）、確定性化後規則跟老師慣例對齊。
+  //   錯格數=逐格與正解不同的位置數（漏格/多格也各算 1 錯）；相鄰兩格對調=2 錯。
+  let mismatches = 0
+  for (let i = 0; i < kTok.length; i++) if (sTok[i] !== kTok[i]) mismatches++
+  if (sTok.length > kTok.length) mismatches += sTok.length - kTok.length
+  const score = Math.max(0, maxScore - mismatches)
+  const isCorrect = mismatches === 0
   return {
-    gradable: true, isCorrect, score: isCorrect ? maxScore : 0, maxScore,
+    gradable: true, isCorrect, score, maxScore,
     errorType: isCorrect ? 'none' : 'calculation',
     scoringReason: isCorrect
       ? `排序完全正確（${sTok.join(',')}）`
-      : `學生排序「${sTok.join(',')}」，正確排序「${kTok.join(',')}」——排序題全對才給分，判 0 分`
+      : `學生排序「${sTok.join(',')}」，正確排序「${kTok.join(',')}」：${mismatches} 格不同、每格扣 1 分 → ${score} 分`
   }
 }
 
@@ -12304,7 +12311,8 @@ export async function runStagedGradingPhaseB({
     }
   }
 
-  // Phase 0b-3 (2026-07-15)：排序題 code 直判（user 拍板全對才給分）、不送 Accessor。
+  // Phase 0b-3 (2026-07-15)：排序題 code 直判、不送 Accessor。
+  //   2026-07-18 規則改「錯幾格扣幾分、下限0」（user 改拍板、取代全對才給分）——見 gradeOrderingDeterministic。
   //   kill switch: ORDERING_DETERMINISTIC_ENABLED='false'。含 ?/無法辨識 → 不收編照舊交 accessor。
   if (process.env.ORDERING_DETERMINISTIC_ENABLED !== 'false') {
     let odCount = 0
@@ -12333,7 +12341,7 @@ export async function runStagedGradingPhaseB({
       })
     }
     if (odCount > 0) {
-      logStaged(pipelineRunId, 'basic', `[B-Phase0b3] ordering 全對才給分 code-bypass（不送 Accessor）`, { count: odCount })
+      logStaged(pipelineRunId, 'basic', `[B-Phase0b3] ordering 錯格扣分 code-bypass（不送 Accessor）`, { count: odCount })
     }
   }
 
