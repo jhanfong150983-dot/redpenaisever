@@ -82,6 +82,7 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.REPORT_TEACHER_SUMMARY]: MODEL_FLASH,     // 老師週報
   [AI_ROUTE_KEYS.REPORT_DOMAIN_DIAGNOSIS]: MODEL_FLASH,    // 學生領域診斷
   [AI_ROUTE_KEYS.REPORT_QUESTION_ERROR_FEATURES]: MODEL_PRO,  // 開放題錯誤特徵歸納（3.5、demo 實證品質）
+  [AI_ROUTE_KEYS.REPORT_PARENT_COMMENT]: MODEL_FLASH,     // 家長報告評語（純文字摘要、2.5 便宜足夠）
   [AI_ROUTE_KEYS.ADMIN_TAG_AGGREGATION]: MODEL_FLASH,      // admin 標籤聚合
 
   // ──────────────────────────────────────────────────
