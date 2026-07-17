@@ -214,15 +214,17 @@ export async function callGeminiGenerateContent({
   const allModels = [model, ...fallbackModels]
   let lastResult = null
 
-  // 2026-05-17: Pro 3.x preview 不支援 thinking_level='MINIMAL' (Flash-only flag)、對 Pro strip
-  // 2026-05-20: gemini-3.5-flash + thinking_level=MINIMAL 會偷懶輸出 pixel bbox、一併 strip
-  // 2026-05-21: gemini-2.5-flash 也不吃 thinking config（read 切到 FLASH 時遇到 400 reject）
-  //   結論：我們現用的所有 model 都不該帶 thinking config、改成「flash 或 pro 都 strip」
-  const isProModel = (m) => typeof m === 'string' && (/pro/i.test(m) || /flash/i.test(m))
+  // 2026-07-17: 3.5-flash 解除 strip（exp-read-thinking-2026-07-17 判決）：read 開 MINIMAL 品質同或略好
+  //   （L1 放行真錯 5.1%→3.8%、NR 持平）、call 快 2.3x、thoughts 歸零（兩讀成本 -28%）。
+  //   探針：3.5-flash 吃 MINIMAL/LOW；2.5-flash 仍 400（"Thinking level is not supported"）；Pro 未驗證。
+  //   → 白名單只放 3.5-flash；帶 thinkingConfig 進來的只有 READ_ANSWER/VJ_GRADE 兩個 config
+  //   （classify 不帶、5/20 pixel bbox 舊案不受影響）。kill switch：THINKING_STRIP_ALL='1' 回全 strip。
+  const supportsThinkingLevel = (m) => typeof m === 'string' && /3\.5-flash/i.test(m)
+    && process.env.THINKING_STRIP_ALL !== '1'
 
   for (let i = 0; i < allModels.length; i++) {
     const currentModel = allModels[i]
-    const shouldStrip = i > 0 || isProModel(currentModel)
+    const shouldStrip = i > 0 || !supportsThinkingLevel(currentModel)
     const effectivePayload = shouldStrip ? stripThinkingConfig(payload) : payload
     if (i > 0) {
       console.warn(

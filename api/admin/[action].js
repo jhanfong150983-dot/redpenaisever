@@ -3205,7 +3205,7 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     const usageQuery = (from, to) => {
       let q = supabaseAdmin
         .from('ink_session_usage')
-        .select('billing_user_id, route_key, model_name, input_tokens, output_tokens, total_tokens, is_admin_test, assignment_id, submission_id, created_at')
+        .select('billing_user_id, route_key, model_name, input_tokens, output_tokens, total_tokens, is_admin_test, assignment_id, submission_id, created_at, thoughts_tokens:usage_metadata->thoughtsTokenCount')
         .gte('created_at', fromIso)
         .lte('created_at', toIso)
       if (userId) q = q.eq('billing_user_id', userId)
@@ -3260,10 +3260,12 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     }
     const USD_TO_TWD = 33
 
+    // 2026-07-17: thoughts tokens 按輸出價計費、原本漏算（output_tokens 只存 candidates）→ 成本少算過半。
+    //   thoughts 從 usage_metadata JSON 抽出（select 用 -> 只抽單鍵、不拉整顆）；舊 row 無此鍵＝0（當年也確實沒 thinking 記錄可考）。
     function rowCostTwd(row) {
       const rates = modelRates(row.model_name)
       const usd = (Number(row.input_tokens) || 0) * rates.inUsd / 1_000_000
-        + (Number(row.output_tokens) || 0) * rates.outUsd / 1_000_000
+        + ((Number(row.output_tokens) || 0) + (Number(row.thoughts_tokens) || 0)) * rates.outUsd / 1_000_000
       return usd * USD_TO_TWD
     }
 
@@ -3280,18 +3282,18 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     }
 
     // ── Summary ──
-    let totalIn = 0, totalOut = 0, totalUsd = 0
+    let totalIn = 0, totalOut = 0, totalThoughts = 0, totalUsd = 0
     for (const r of usageRows) {
       totalIn += Number(r.input_tokens) || 0
       totalOut += Number(r.output_tokens) || 0
-      const rates = modelRates(r.model_name)
-      totalUsd += (Number(r.input_tokens) || 0) * rates.inUsd / 1_000_000
-        + (Number(r.output_tokens) || 0) * rates.outUsd / 1_000_000
+      totalThoughts += Number(r.thoughts_tokens) || 0
+      totalUsd += rowCostTwd(r) / USD_TO_TWD
     }
     const summary = {
       totalCalls: usageRows.length,
       totalInputTokens: totalIn,
       totalOutputTokens: totalOut,
+      totalThoughtsTokens: totalThoughts,
       totalUsdCost: +totalUsd.toFixed(4),
       totalTwdCost: +(totalUsd * USD_TO_TWD).toFixed(2)
     }
