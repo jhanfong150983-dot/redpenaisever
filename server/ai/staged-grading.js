@@ -12992,7 +12992,12 @@ export async function runStagedGradingPhaseB({
           if (getRemainingBudget() < 45_000) break
           const cRow = classifyArrSc.find((r) => (r.questionId || r.id) === t.qid)
           if (!cRow?.answerBbox || !imgSc?.data) continue
-          let crop = await cropInlineImageByBbox(imgSc.data, imgSc.mimeType, inflateBboxForType(cRow.answerBbox, 'single_choice'), true, 0.005)
+          // 2026-07-18 紅框版（座12 6-7-3 放水案）：舊 crop 會把框旁「印刷數字」當學生作答（恰=正解→放水給分）。
+          //   改 set-of-mark 紅框＋prompt 只讀框內手寫（沙盒 25/25：印刷3不再誤認、5-6-3 仍讀 1、座13 真空白×3 全 blank）。
+          //   紅框失敗退回舊 crop（fail-open）。
+          let usedMark = true
+          let crop = await cropWithMarkByBbox(imgSc.data, imgSc.mimeType, cRow.answerBbox, 0.012, 0.008)
+          if (!crop) { usedMark = false; crop = await cropInlineImageByBbox(imgSc.data, imgSc.mimeType, inflateBboxForType(cRow.answerBbox, 'single_choice'), true, 0.005) }
           if (!crop) continue
           try {
             const { default: sharp } = await import('sharp')
@@ -13002,7 +13007,8 @@ export async function runStagedGradingPhaseB({
               crop = { data: (await sharp(cb).resize({ width: Math.min(500, cm.width * 3) }).jpeg({ quality: 92 }).toBuffer()).toString('base64'), mimeType: 'image/jpeg' }
             }
           } catch { /* 用原 crop */ }
-          const scPrompt = `這是一格「單選題」的手寫作答區。學生的答案**必然是 ${digits}（或字母 ${letters}）其中之一、或空白**——不存在其他可能。
+          const scMarkLine = usedMark ? '圖中的紅色方框標示本題的作答區：只讀紅框內、紅框外一律忽略。紅框內也只認「手寫」筆畫——印刷的數字/文字（題號、選項編號）不是學生作答、不要當成答案。\n' : ''
+          const scPrompt = `這是一格「單選題」的手寫作答區。${scMarkLine}學生的答案**必然是 ${digits}（或字母 ${letters}）其中之一、或空白**——不存在其他可能。
 學生常用速記筆畫：一豎或一撇通常是 1、「Z」形是 2、平頂彎底是 3、十字型是 4。
 即使潦草，也請對應到最接近的合法選項；真正完全沒有墨水才是 blank。
 只輸出 JSON：{"choice":"選項代號或blank","seen":"看到的筆畫（15字內）"}`
@@ -13017,13 +13023,22 @@ export async function runStagedGradingPhaseB({
             if (resp) stageResponses.push(resp)
             if (!resp?.ok) return null
             const j = parseCandidateJson(resp.data)
+            const seen = ensureString(j?.seen, '').slice(0, 15)
             const c = ensureString(j?.choice, '').trim().toUpperCase()
-            if (c === 'BLANK') return 'blank'
+            if (c === 'BLANK') return { v: 'blank', seen }
             const idx = canonicalOptionIndex(c)
-            return (idx != null && idx >= 1 && idx <= domainMax) ? String(idx) : null
+            return { v: (idx != null && idx >= 1 && idx <= domainMax) ? String(idx) : null, seen }
           }
-          const [v1, v2] = await Promise.all([callSc(), callSc()])
-          if (v1 === null || v2 === null || v1 !== v2) continue // 兩抽不一致 → 維持原判（未作答/無法辨識）歸零
+          const [dr1, dr2] = await Promise.all([callSc(), callSc()])
+          // 2026-07-18 兩抽讀值持久化（7/15 記帳的觀測破口）：無論採納與否都留痕、事後可定罪
+          const scDraws = [dr1, dr2].map((d) => d ? `${d.v ?? '無效'}${d.seen ? '|' + d.seen : ''}` : '讀取失敗')
+          const v1 = dr1?.v ?? null, v2 = dr2?.v ?? null
+          if (v1 === null || v2 === null || v1 !== v2) {
+            // 兩抽不一致 → 維持原判（未作答/無法辨識）歸零；抽值掛在既有同題直判項目上留痕
+            const prevKeep = deterministicScores.find((d) => d.questionId === t.qid)
+            if (prevKeep) prevKeep._scDraws = scDraws
+            continue
+          }
           // 2026-07-15 r12 驗證抓到：雙 blank 格 Phase 0b 已先塞一筆「未作答」直判項目，救援的第二筆
           //   同題項目在下游取首筆時被蓋掉（8 格簽名全是無法辨識出身、blank 出身 0 格的鐵證）。
           //   採納前先移除同題舊項目、救援結果才落地。
@@ -13034,7 +13049,7 @@ export async function runStagedGradingPhaseB({
             deterministicScores.push({
               questionId: t.qid, isCorrect: false, score: 0, maxScore: gMaxSc, errorType: 'blank',
               scoringReason: '學生未作答（值域覆核：格內無墨水）', scoreConfidence: 90,
-              studentFinalAnswer: '未作答', needExplain: false, _vjBypass: true, _scRescue: true
+              studentFinalAnswer: '未作答', needExplain: false, _vjBypass: true, _scRescue: true, _scDraws: scDraws
             })
           } else {
             const res = gradeObjectiveDeterministic(t.q, v1, 'read')
@@ -13043,7 +13058,7 @@ export async function runStagedGradingPhaseB({
               questionId: t.qid, isCorrect: res.isCorrect, score: res.score, maxScore: res.maxScore,
               errorType: res.errorType, scoringReason: `${res.scoringReason}（速記筆跡、值域覆核判讀）`,
               scoreConfidence: 90, studentFinalAnswer: v1, needExplain: !res.isCorrect,
-              _vjBypass: true, _scRescue: true
+              _vjBypass: true, _scRescue: true, _scDraws: scDraws
             })
           }
           vjBypassIds.add(t.qid)
