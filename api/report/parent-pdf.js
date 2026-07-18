@@ -52,14 +52,16 @@ export default async function handler(req, res) {
       try { await page.evaluateHandle('document.fonts.ready') } catch { /* 字型就緒非必要條件 */ }
 
       // 只輸出「內容真正需要的頁數」，砍掉結尾幽靈空白頁（不論前端分頁 CSS 新舊）。
-      //   報告份數（.pr-root）與內容高度換算頁數取大者：單份請求以高度為準（可容溢出）、
-      //   多份（有強制分頁）以份數為準。A4@96dpi≈1122.5px、減 24px 容差避免臨界值誤判成兩頁。
-      const { reportCount, heightPx } = await page.evaluate(() => ({
+      //   報告份數(.pr-root) + 內部強制分頁數(.pr-page2) 為底，與內容高度換算頁數取大者：
+      //   .pr-page2 是報告內「第二頁」的強制分頁（一二三｜四五），要算進去否則會被砍掉。
+      //   A4@96dpi≈1122.5px、減 24px 容差避免臨界值誤判成兩頁。
+      const { reportCount, flipCount, heightPx } = await page.evaluate(() => ({
         reportCount: document.querySelectorAll('.pr-root').length,
+        flipCount: document.querySelectorAll('.pr-page2').length,
         heightPx: document.body.scrollHeight,
       }))
       const heightPages = Math.max(1, Math.ceil((heightPx - 24) / 1122.52))
-      const numPages = Math.max(reportCount || 1, heightPages)
+      const numPages = Math.max((reportCount || 1) + flipCount, heightPages)
 
       const pdf = await page.pdf({
         printBackground: true,
