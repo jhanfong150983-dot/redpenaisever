@@ -51,10 +51,21 @@ export default async function handler(req, res) {
       await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 })
       try { await page.evaluateHandle('document.fonts.ready') } catch { /* 字型就緒非必要條件 */ }
 
+      // 只輸出「內容真正需要的頁數」，砍掉結尾幽靈空白頁（不論前端分頁 CSS 新舊）。
+      //   報告份數（.pr-root）與內容高度換算頁數取大者：單份請求以高度為準（可容溢出）、
+      //   多份（有強制分頁）以份數為準。A4@96dpi≈1122.5px、減 24px 容差避免臨界值誤判成兩頁。
+      const { reportCount, heightPx } = await page.evaluate(() => ({
+        reportCount: document.querySelectorAll('.pr-root').length,
+        heightPx: document.body.scrollHeight,
+      }))
+      const heightPages = Math.max(1, Math.ceil((heightPx - 24) / 1122.52))
+      const numPages = Math.max(reportCount || 1, heightPages)
+
       const pdf = await page.pdf({
         printBackground: true,
         preferCSSPageSize: true, // 用 HTML 內的 @page（A4、margin:0）
         margin: { top: 0, right: 0, bottom: 0, left: 0 },
+        pageRanges: `1-${numPages}`,
       })
       res.setHeader('Content-Type', 'application/pdf')
       res.setHeader('Content-Length', pdf.length)
