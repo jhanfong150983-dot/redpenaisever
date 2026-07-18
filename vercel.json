@@ -39,6 +39,10 @@
     "api/storage/download.js": {
       "memory": 256,
       "maxDuration": 15
+    },
+    "api/report/parent-pdf.js": {
+      "memory": 1536,
+      "maxDuration": 60
     }
   },
   "env": {
