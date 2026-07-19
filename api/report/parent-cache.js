@@ -1,15 +1,25 @@
 // 家長報告快取（2026-07-20）：只存花錢的 AI 產物（逐題診斷 + 老師的話）到 parent_reports。
 //   GET  ?assignmentId=  → 載入該作業全部已快取的診斷/評語，並用指紋比對回傳每筆 stale。
 //   POST { assignmentId, items:[{studentId, diagnosis, comment}] } → 批次 upsert，
-//        server 端當下讀 submission.graded_at / assignment.updated_at 蓋指紋。
+//        server 端當下讀 submission.graded_at + answer_key 內容雜湊蓋指紋。
+//   ⚠指紋不可用 assignment.updated_at（sync/任何寫入都會 bump、報告幾分鐘就假失效）——
+//     改用 answer_key「內容雜湊」，只有答案卷真的變才失效。graded_at 抓重批改。
 //   截圖不進此表（免費、由 /api/report/crops 現切）。存取一律 service_role + owner 驗證。
+import crypto from 'node:crypto'
 import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
 
-async function assertOwner(supabaseAdmin, assignmentId, userId) {
+// 答案卷內容指紋：normalize（string→parse→stringify）後 sha1，跨讀取穩定、只隨內容變。
+function akFingerprint(ak) {
+  let obj = ak
+  if (typeof ak === 'string') { try { obj = JSON.parse(ak) } catch { obj = ak } }
+  return crypto.createHash('sha1').update(JSON.stringify(obj ?? null)).digest('hex')
+}
+
+async function loadAssignment(supabaseAdmin, assignmentId, userId) {
   const { data: asg } = await supabaseAdmin
-    .from('assignments').select('id, owner_id, updated_at').eq('id', assignmentId).maybeSingle()
+    .from('assignments').select('id, owner_id, answer_key').eq('id', assignmentId).maybeSingle()
   if (!asg || asg.owner_id !== userId) return null
   return asg
 }
@@ -25,7 +35,7 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       const assignmentId = String(req.query?.assignmentId ?? '').trim()
       if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
-      const asg = await assertOwner(supabaseAdmin, assignmentId, user.id)
+      const asg = await loadAssignment(supabaseAdmin, assignmentId, user.id)
       if (!asg) { res.status(403).json({ error: 'Forbidden' }); return }
 
       const { data: rows } = await supabaseAdmin
@@ -34,11 +44,11 @@ export default async function handler(req, res) {
         .eq('assignment_id', assignmentId)
       const cached = Array.isArray(rows) ? rows : []
 
-      // 現值指紋：每生 graded_at + 作業 updated_at
+      // 現值指紋：每生 graded_at（抓重批改）+ answer_key 內容雜湊（抓改答案卷）
       const { data: subs } = await supabaseAdmin
         .from('submissions').select('student_id, graded_at').eq('assignment_id', assignmentId)
       const gradedNow = new Map((subs ?? []).map((s) => [String(s.student_id), s.graded_at]))
-      const akNow = asg.updated_at
+      const akNow = akFingerprint(asg.answer_key)
 
       const items = cached.map((r) => {
         const sid = String(r.student_id)
@@ -60,14 +70,15 @@ export default async function handler(req, res) {
       const assignmentId = String(req.body?.assignmentId ?? '').trim()
       const rawItems = Array.isArray(req.body?.items) ? req.body.items : []
       if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
-      const asg = await assertOwner(supabaseAdmin, assignmentId, user.id)
+      const asg = await loadAssignment(supabaseAdmin, assignmentId, user.id)
       if (!asg) { res.status(403).json({ error: 'Forbidden' }); return }
       if (rawItems.length === 0) { res.status(200).json({ saved: 0 }); return }
 
-      // 蓋指紋用的現值 graded_at
+      // 蓋指紋用的現值 graded_at + answer_key 內容雜湊
       const { data: subs } = await supabaseAdmin
         .from('submissions').select('student_id, graded_at').eq('assignment_id', assignmentId)
       const gradedNow = new Map((subs ?? []).map((s) => [String(s.student_id), s.graded_at]))
+      const akFp = akFingerprint(asg.answer_key)
 
       const now = new Date().toISOString()
       const rows = rawItems
@@ -81,7 +92,7 @@ export default async function handler(req, res) {
             diagnosis: it?.diagnosis && typeof it.diagnosis === 'object' ? it.diagnosis : {},
             comment: typeof it?.comment === 'string' ? it.comment : null,
             graded_fp: gradedNow.get(sid) ?? null,
-            answer_key_fp: asg.updated_at,
+            answer_key_fp: akFp,
             updated_at: now,
           }
         })
