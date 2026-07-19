@@ -679,13 +679,30 @@ export default async function handler(req, res) {
   // ── 題本圖（Phase B explain 使用，answer_only 模式下需要題本圖來讀題目）────
   const answerSheetMode = requestedAnswerSheetMode || 'with_questions'
   let questionBookletImages = []
-  if (routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId) {
+  // 2026-07-19: 家長報告逐題診斷也需要題本圖（AI 要讀題幹才能推論學生為什麼寫錯）；
+  //   與 answer_only Phase B 共用同一個 RLS-safe loader（owner_id 比對 billingUserId）。
+  const needsBookletForDiagnosis = routeKey === 'report.parent_diagnosis' && payload?.assignmentId
+  if ((routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId) || needsBookletForDiagnosis) {
     questionBookletImages = await fetchQuestionBookletImages(
       // 2026-06-02: 同上，用 billingUserId 比對 owner_id（學生自助批改 answer_only 需題本圖）。
       supabaseAdmin, billingUserId, payload.assignmentId
     )
     if (questionBookletImages.length > 0) {
-      console.log(`📖 [QuestionBooklet] 載入 ${questionBookletImages.length} 頁題本圖 assignmentId=${payload.assignmentId}`)
+      console.log(`📖 [QuestionBooklet] 載入 ${questionBookletImages.length} 頁題本圖 assignmentId=${payload.assignmentId} routeKey=${routeKey}`)
+    }
+  }
+  // 家長報告診斷：把題本圖 server 端注入 contents（client 只送文字 prompt + assignmentId、
+  //   不必自己抓題本圖，也避開 client 對 question-booklets bucket 的 RLS 讀取限制）。
+  if (needsBookletForDiagnosis && questionBookletImages.length > 0) {
+    const bookletParts = questionBookletImages
+      .filter((img) => img?.data && img?.mimeType)
+      .map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } }))
+    const cloned = JSON.parse(JSON.stringify(processedContents))
+    const lastUser = [...cloned].reverse().find((c) => c?.role === 'user' && Array.isArray(c?.parts))
+    if (lastUser && bookletParts.length > 0) {
+      lastUser.parts.push(...bookletParts)
+      processedContents = cloned
+      console.log(`📖 [ParentDiagnosis] 注入 ${bookletParts.length} 頁題本圖到 contents`)
     }
   }
 

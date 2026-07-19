@@ -33,6 +33,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   REPORT_DOMAIN_DIAGNOSIS: 'report.domain_diagnosis',
   REPORT_QUESTION_ERROR_FEATURES: 'report.question_error_features',  // 2026-07-16 開放題錯誤特徵 AI 歸納（on-demand）
   REPORT_PARENT_COMMENT: 'report.parent_comment',  // 2026-07-18 家長報告老師評語生成（純文字、依批改結果、鼓勵型）
+  REPORT_PARENT_DIAGNOSIS: 'report.parent_diagnosis',  // 2026-07-19 家長報告逐題錯因診斷（餵題本圖、一生一 call 批全部錯題、2.5-flash）
   ADMIN_TAG_AGGREGATION: 'admin.tag_aggregation',
   PERSPECTIVE_DETECT_CORNERS: 'perspective.detect_corners',
   UNKNOWN: 'unknown'

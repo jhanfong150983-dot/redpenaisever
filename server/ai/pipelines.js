@@ -1,6 +1,24 @@
 import { AI_ROUTE_KEYS } from './routes.js'
 import { validateResponseByRoute } from './quality-gates.js'
 
+// Gemini generateContent 允許的 body 欄位；app 層欄位（assignmentId/submissionId 等）
+// 若隨 payload spread 進 Gemini body 會 400（Unknown name）。單次呼叫路徑（executeSinglePipelineCall）
+// 會把 preparedRequest.payload 原樣 spread 給 Gemini，故在此白名單過濾。
+// 2026-07-19：report.parent_diagnosis 是第一個在此路徑帶 assignmentId 的 route，才踩出此 latent bug。
+const GEMINI_PAYLOAD_FIELDS = new Set([
+  'generationConfig', 'generation_config',
+  'safetySettings', 'safety_settings',
+  'systemInstruction', 'system_instruction',
+  'tools', 'toolConfig', 'tool_config',
+  'cachedContent', 'cached_content', 'labels'
+])
+function pickGeminiPayload(payload) {
+  if (!payload || typeof payload !== 'object') return {}
+  const out = {}
+  for (const k of Object.keys(payload)) if (GEMINI_PAYLOAD_FIELDS.has(k)) out[k] = payload[k]
+  return out
+}
+
 function createPipeline(key, name) {
   return {
     key,
@@ -9,7 +27,7 @@ function createPipeline(key, name) {
       return {
         model,
         contents,
-        payload: payload || {}
+        payload: pickGeminiPayload(payload)
       }
     },
     async validate({ data }) {
