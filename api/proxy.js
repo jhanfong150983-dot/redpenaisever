@@ -691,6 +691,17 @@ export default async function handler(req, res) {
       console.log(`📖 [QuestionBooklet] 載入 ${questionBookletImages.length} 頁題本圖 assignmentId=${payload.assignmentId} routeKey=${routeKey}`)
     }
   }
+  // 家長報告診斷：限制 thinking 預算（2.5-flash 預設 dynamic thinking 會吐 ~15-22k thought token、
+  //   單生拖到 74-102s；沙盒實測 budget 2048 → ~20s 且品質可接受、user 拍板中等）。
+  //   budget（整數）2.5-flash 支援；model-adapter 只 strip thinking LEVEL、保留 budget。env 可調/關。
+  if (needsBookletForDiagnosis) {
+    const budget = Number(process.env.PARENT_DIAGNOSIS_THINKING_BUDGET ?? 2048)
+    payload.generationConfig = {
+      temperature: 0.4,
+      ...(payload.generationConfig || {}),
+      ...(Number.isFinite(budget) && budget >= 0 ? { thinkingConfig: { thinkingBudget: budget } } : {}),
+    }
+  }
   // 家長報告診斷：把題本圖 server 端注入 contents（client 只送文字 prompt + assignmentId、
   //   不必自己抓題本圖，也避開 client 對 question-booklets bucket 的 RLS 讀取限制）。
   if (needsBookletForDiagnosis && questionBookletImages.length > 0) {

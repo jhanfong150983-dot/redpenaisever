@@ -194,9 +194,16 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
 }
 
 function stripThinkingConfig(payload) {
-  if (!payload?.generationConfig?.thinkingConfig) return payload
-  const { thinkingConfig: _removed, ...restGenConfig } = payload.generationConfig
-  return { ...payload, generationConfig: restGenConfig }
+  const tc = payload?.generationConfig?.thinkingConfig
+  if (!tc) return payload
+  // 只移除 thinking LEVEL（thinking_level/thinkingLevel）——2.5-flash 等不支援、會 400
+  // （"Thinking level is not supported"）。保留 thinkingBudget（整數預算、2.5-flash 也吃、實測 status 200），
+  // 讓家長報告診斷等 route 能在 2.5-flash 上限制 thinking 預算（治 dynamic thinking 拖到 ~100s）。
+  const { thinking_level: _l1, thinkingLevel: _l2, ...restTc } = tc
+  const newGen = { ...payload.generationConfig }
+  if (Object.keys(restTc).length > 0) newGen.thinkingConfig = restTc
+  else delete newGen.thinkingConfig
+  return { ...payload, generationConfig: newGen }
 }
 
 // Calls Gemini with automatic model fallback on 503.
