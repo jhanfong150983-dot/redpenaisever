@@ -142,11 +142,49 @@ export function classifyVjBlank(itemLabels, blankRead) {
 
 // ── Phase B：grade（PRO）帶權威 blank 參數 ───────────────────────────────────
 // itemLabels、gradingDefinition 來自 vjRubric；notBlankIdxs：已確認非空白的 idx（只評這些）
-export function buildVjGradePrompt(itemLabels, gradingDefinition, notBlankIdxs) {
+// category：questionCategory；hasReference：是否附了【正確答案圖】（作圖/地圖符號題用）
+export function buildVjGradePrompt(category, itemLabels, gradingDefinition, notBlankIdxs, hasReference) {
   const labels = Array.isArray(itemLabels) ? itemLabels : []
   const notBlank = Array.isArray(notBlankIdxs) ? notBlankIdxs : []
   const list = labels.map((label, i) => `  ${i + 1}. ${label}`).join('\n')
   const nbStr = notBlank.length ? notBlank.join('、') : '（無）'
+  const blankGuard = `【100% 正確的已知資訊，務必遵守】以下項目「確定有學生的作答筆跡」：項 ${nbStr}。
+你**絕對不可判它沒畫(blank)**，請務必仔細找出學生那條筆跡並判斷對錯（correct/wrong）。
+（未列在上面的項目可能沒畫，若真找不到才回 blank。）`
+  const jsonOut = `【輸出 JSON（純 JSON、無 markdown）】
+{ "perItem": [ { "idx": 1, "seen": "...", "verdict": "correct|wrong|blank" } ] }
+只輸出 JSON。`
+
+  // 2026-07-21：作圖/地圖符號題改「結構比對」（治「AI 自己數方格報錯座標→把畫對的判 0」；
+  //   沙盒實測附正解圖能止住亂數座標的幻覺）。diagram_color（描柱高/塗色）維持原本已驗證的藍筆 prompt。
+  if (category === 'grid_geometry' || category === 'map_symbol') {
+    const refIntro = hasReference
+      ? '附兩張圖：**【正確答案圖】**（老師畫的標準答案）與**【學生作答圖】**（要批改的），兩張畫在**相同版面**（相同格線／地圖／對稱軸）上。'
+      : '附【學生作答圖】。'
+    const refRule = hasReference
+      ? `【最關鍵：跟「正確答案圖」比對，不要自己報座標】
+- 逐項把「學生作答圖」的該元素，拿去跟「正確答案圖」對應元素**比對**，判斷是否**結構等價**——形狀、大小（相對格數）、相對於軸／基準的位置一致。`
+      : `【最關鍵：判斷結構、不要自己報座標】
+- 逐項判斷學生畫的該元素，形狀／大小／相對位置是否符合評判標準。`
+    return `這是一份視覺作答題的學生作答，需逐項判斷對錯。${refIntro}
+
+【子元素清單（共 ${labels.length} 項）】
+${list}
+
+【評判標準】${gradingDefinition || '依題意判斷學生作答是否正確。'}
+
+${blankGuard}
+
+${refRule}
+- ⚠ **容許手繪誤差**：線條抖動、不直、輕微偏移、未完全閉合但形狀可辨，一律算 correct。
+- ⚠ **絕對不要自己數方格、報絕對座標**（如「應在 (4,1)、你畫在 (5,2)」）——你數格容易數錯。
+- 只要學生畫的結構一致就 correct；只有**明顯形狀不同／漏畫該元素／位置關係錯**才 wrong。判不出來時傾向 correct（寧可不冤枉）。
+
+逐項：先簡述你看到學生畫什麼${hasReference ? '、跟正解圖差在哪' : ''}，再給 verdict。
+${jsonOut}`
+  }
+
+  // diagram_color（描柱高/塗色）：維持原本已驗證的 prompt（只算藍筆、忽略印刷線）。
   return `這是一份視覺作答題的學生作答，需逐項判斷對錯。
 
 【子元素清單（共 ${labels.length} 項）】
@@ -154,9 +192,7 @@ ${list}
 
 【評判標準】${gradingDefinition || '依題意判斷學生作答是否正確。'}
 
-【100% 正確的已知資訊，務必遵守】以下項目「確定有學生的作答筆跡」：項 ${nbStr}。
-你**絕對不可判它沒畫(blank)**，請務必仔細找出學生那條筆跡並判斷對錯（correct/wrong）。
-（未列在上面的項目可能沒畫，若真找不到才回 blank。）
+${blankGuard}
 
 【最關鍵：只算學生的藍筆，忽略題目印刷的線】
 學生用「藍色筆」描柱高作答。圖上**原本就印好**的線——特別是題目用來標示「底面的高」的**虛線/輔助線**、以及柱體的印刷外框——都**不是學生畫的**。
@@ -165,9 +201,7 @@ ${list}
 - 學生若描了多條或有少許雜筆，以**最明顯、最完整描在某一條邊**的那條為準。
 
 逐項：先簡述你看到學生畫在哪，再給 verdict。
-【輸出 JSON（純 JSON、無 markdown）】
-{ "perItem": [ { "idx": 1, "seen": "...", "verdict": "correct|wrong|blank" } ] }
-只輸出 JSON。`
+${jsonOut}`
 }
 
 export function parseVjGradeResult(rawText, expectedCount) {

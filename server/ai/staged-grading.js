@@ -12735,10 +12735,24 @@ export async function runStagedGradingPhaseB({
           const bbox = classifyRow?.answerBbox
           const crop = bbox ? await cropInlineImageByBbox(studentImg.data, studentImg.mimeType, inflateBboxForType(bbox, classifyRow.questionType || q.questionCategory), true, 0.01) : null
           if (crop) {
+            // 2026-07-21：作圖/地圖符號題附「正確答案圖」（answer-key crop）當參考 → 結構比對、治亂數座標判 0。
+            //   diagram_color 不附、維持原本已驗證的藍筆流程（stageContents 完全不變）。
+            let refCropInline = null
+            if ((q.questionCategory === 'grid_geometry' || q.questionCategory === 'map_symbol') && q.cropImagePath) {
+              try {
+                const supabase = getSupabaseAdmin()
+                const { data: rblob } = await supabase.storage.from('homework-images').download(q.cropImagePath)
+                if (rblob) refCropInline = { mimeType: q.cropImagePath.endsWith('.jpg') ? 'image/jpeg' : 'image/webp', data: Buffer.from(await rblob.arrayBuffer()).toString('base64') }
+              } catch (e) { logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 正解圖下載失敗：${e?.message}`) }
+            }
+            const gradePromptText = buildVjGradePrompt(q.questionCategory, itemLabels, vjRubric.gradingDefinition, notBlank, !!refCropInline)
+            const gradeParts = refCropInline
+              ? [{ text: gradePromptText }, { text: '【正確答案圖】' }, { inlineData: refCropInline }, { text: '【學生作答圖】' }, { inlineData: crop }]
+              : [{ text: gradePromptText }, { inlineData: crop }]
             const resp = await executeStage({
               apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
               timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
-              stageContents: [{ role: 'user', parts: [{ text: buildVjGradePrompt(itemLabels, vjRubric.gradingDefinition, notBlank) }, { inlineData: crop }] }]
+              stageContents: [{ role: 'user', parts: gradeParts }]
             })
             if (resp?.ok) grades = parseVjGradeResult(extractCandidateText(resp.data) || '', n) || []
             if (resp) stageResponses.push(resp)
