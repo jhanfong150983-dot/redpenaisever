@@ -679,10 +679,13 @@ export default async function handler(req, res) {
   // ── 題本圖（Phase B explain 使用，answer_only 模式下需要題本圖來讀題目）────
   const answerSheetMode = requestedAnswerSheetMode || 'with_questions'
   let questionBookletImages = []
-  // 2026-07-19: 家長報告逐題診斷也需要題本圖（AI 要讀題幹才能推論學生為什麼寫錯）；
+  // 需要題本圖的 report route：家長報告逐題診斷（全題本）＋試題分析「AI 歸納錯誤樣態」（該題那一頁）。
+  //   answer_only 卷的答案卷沒印題目 → 一律靠題本圖才能讀真正的題幹（否則 AI 只看答案框會腦補題意）。
   //   與 answer_only Phase B 共用同一個 RLS-safe loader（owner_id 比對 billingUserId）。
   const needsBookletForDiagnosis = routeKey === 'report.parent_diagnosis' && payload?.assignmentId
-  if ((routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId) || needsBookletForDiagnosis) {
+  const needsBookletForErrorFeatures = routeKey === 'report.question_error_features' && payload?.assignmentId
+  if ((routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId)
+      || needsBookletForDiagnosis || needsBookletForErrorFeatures) {
     questionBookletImages = await fetchQuestionBookletImages(
       // 2026-06-02: 同上，用 billingUserId 比對 owner_id（學生自助批改 answer_only 需題本圖）。
       supabaseAdmin, billingUserId, payload.assignmentId
@@ -702,9 +705,10 @@ export default async function handler(req, res) {
       ...(Number.isFinite(budget) && budget >= 0 ? { thinkingConfig: { thinkingBudget: budget } } : {}),
     }
   }
-  // 家長報告診斷：把題本圖 server 端注入 contents（client 只送文字 prompt + assignmentId、
-  //   不必自己抓題本圖，也避開 client 對 question-booklets bucket 的 RLS 讀取限制）。
-  if (needsBookletForDiagnosis && questionBookletImages.length > 0) {
+  // 把題本圖 server 端注入 contents（client 只送文字 + assignmentId、不必自抓、避開 bucket RLS）。
+  //   兩個 route 都注入全部頁：answer_only 卷的題號 pageIndex 對應的是「答案卷單頁」、對不上多頁題本，
+  //   無法可靠指定單頁 → 送全部頁、由 AI 依題號+正解自己找到本題（parent_diagnosis 本來就這樣、可靠）。
+  if ((needsBookletForDiagnosis || needsBookletForErrorFeatures) && questionBookletImages.length > 0) {
     const bookletParts = questionBookletImages
       .filter((img) => img?.data && img?.mimeType)
       .map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } }))
@@ -713,7 +717,7 @@ export default async function handler(req, res) {
     if (lastUser && bookletParts.length > 0) {
       lastUser.parts.push(...bookletParts)
       processedContents = cloned
-      console.log(`📖 [ParentDiagnosis] 注入 ${bookletParts.length} 頁題本圖到 contents`)
+      console.log(`📖 [BookletInject] 注入 ${bookletParts.length} 頁題本圖 routeKey=${routeKey}`)
     }
   }
 
