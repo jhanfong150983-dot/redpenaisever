@@ -193,6 +193,41 @@ function compactObject(obj) {
   )
 }
 
+// 2026-07-20 保留試題分析 metadata：client 端 Dexie 的 answer_key 沒有 analysis/kpTips（那些是直接
+//   backfill 到 Supabase 的），sync 若整包覆蓋就會把它們擦掉。此函式在寫入前把「incoming 缺、existing 有」
+//   的 analysis（逐題，用 id 對應）與 kpTips（頂層）補回 incoming，不覆蓋 incoming 已有的值。
+function parseAk(v) {
+  if (v == null) return null
+  if (typeof v === 'string') { try { return JSON.parse(v) } catch { return null } }
+  return v
+}
+function hasAnalysis(a) {
+  return a && typeof a === 'object' && (a.topic || (Array.isArray(a.knowledgePoints) && a.knowledgePoints.length > 0))
+}
+function preserveAnalysisFields(incoming, existingRaw) {
+  if (!incoming || typeof incoming !== 'object') return incoming
+  const existing = parseAk(existingRaw)
+  if (!existing || typeof existing !== 'object') return incoming
+  const out = { ...incoming }
+  // 頂層 kpTips
+  const inKp = out.kpTips
+  if ((!inKp || (typeof inKp === 'object' && Object.keys(inKp).length === 0))
+      && existing.kpTips && typeof existing.kpTips === 'object' && Object.keys(existing.kpTips).length > 0) {
+    out.kpTips = existing.kpTips
+  }
+  // 逐題 analysis（用 id 對應）
+  const exById = new Map((Array.isArray(existing.questions) ? existing.questions : [])
+    .map((q) => [String(q?.id ?? q?.questionId ?? ''), q]))
+  if (Array.isArray(out.questions) && exById.size > 0) {
+    out.questions = out.questions.map((q) => {
+      const ex = exById.get(String(q?.id ?? q?.questionId ?? ''))
+      if (!hasAnalysis(q?.analysis) && hasAnalysis(ex?.analysis)) return { ...q, analysis: ex.analysis }
+      return q
+    })
+  }
+  return out
+}
+
 function summarizeLogValue(value, depth = 0) {
   if (depth > 2) return '[MaxDepth]'
   if (value === null || value === undefined) return value
@@ -4597,12 +4632,21 @@ async function handleSync(req, res) {
       syncTimerEnd('students')
 
       syncTimer('assignments')
+      // 2026-07-20 先撈既有 answer_key，寫入時保留 analysis/kpTips（防 client 沒帶這些欄位就整包覆蓋擦掉）。
+      const asgIdsForMerge = assignments.filter((a) => a?.id && a?.classroomId).map((a) => a.id)
+      const existingAsgAk = new Map()
+      for (let i = 0; i < asgIdsForMerge.length; i += 100) {
+        const chunk = asgIdsForMerge.slice(i, i + 100)
+        const { data: exRows } = await supabaseDb.from('assignments').select('id, answer_key').in('id', chunk)
+        for (const r of exRows || []) existingAsgAk.set(r.id, r.answer_key)
+      }
       const assignmentRows = await buildUpsertRows(
         'assignments',
         assignments.filter((a) => a?.id && a?.classroomId),
         (a) => {
           const scoringMode =
             normalizeScoringMode(a.scoringMode ?? a.scoring_mode) ?? undefined
+          const mergedAk = a.answerKey != null ? preserveAnalysisFields(a.answerKey, existingAsgAk.get(a.id)) : undefined
           return compactObject({
             id: a.id,
             classroom_id: a.classroomId,
@@ -4616,7 +4660,7 @@ async function handleSync(req, res) {
               a.gradeWeightPercent ?? a.grade_weight_percent
             ) ?? undefined,
             prior_weight_types: a.priorWeightTypes ?? undefined,
-            answer_key: a.answerKey ?? undefined,
+            answer_key: mergedAk ?? undefined,
             total_questions: countAkQuestions(a.answerKey) ?? undefined,
             answer_key_template_id: a.answerKeyTemplateId ?? a.answer_key_template_id ?? undefined,
             concept_tags: a.conceptTags ?? undefined,
@@ -4662,6 +4706,18 @@ async function handleSync(req, res) {
           })
         : []
       if (incomingTemplates.length > 0) {
+        // 2026-07-20 先撈既有模板 answer_key，保留 analysis/kpTips；merged 版同時用於模板 upsert 與下面的反向同步。
+        const existingTplAk = new Map()
+        {
+          const ids = incomingTemplates.map((t) => t.id)
+          for (let i = 0; i < ids.length; i += 100) {
+            const chunk = ids.slice(i, i + 100)
+            const { data: exRows } = await supabaseDb.from('answer_key_templates').select('id, answer_key').in('id', chunk)
+            for (const r of exRows || []) existingTplAk.set(r.id, r.answer_key)
+          }
+        }
+        const mergedTplAk = new Map(incomingTemplates.map((t) =>
+          [t.id, preserveAnalysisFields(t.answerKey ?? t.answer_key, existingTplAk.get(t.id))]))
         const templateRows = incomingTemplates.map((t) => compactObject({
           id: t.id,
           owner_id: user.id,
@@ -4669,7 +4725,7 @@ async function handleSync(req, res) {
           domain: t.domain ?? undefined,
           doc_type: t.docType ?? t.doc_type ?? undefined,
           folder: t.folder ?? undefined,
-          answer_key: t.answerKey ?? t.answer_key,
+          answer_key: mergedTplAk.get(t.id) ?? t.answerKey ?? t.answer_key,
           question_count: t.questionCount ?? t.question_count ?? undefined,
           total_score: t.totalScore ?? t.total_score ?? undefined,
           share_code: t.shareCode ?? t.share_code ?? ('AK-' + Math.random().toString(36).substring(2, 8).toUpperCase()),
@@ -4713,7 +4769,8 @@ async function handleSync(req, res) {
             // 同 sync request 內 assignments upsert (~L4047) 跑在 templates upsert 之前、
             // 且 client Dexie 的 assignment.answerKey 不會跟著 AnswerBank 編輯自動更新、
             // 所以 client push 一定會帶舊 answerKey 把 assignment 覆寫成 stale。這層是 SSoT。
-            const ak = t.answerKey ?? t.answer_key
+            // 用 merged 版（已保留 analysis/kpTips）反向同步，避免把 assignment 的試題分析擦掉。
+            const ak = mergedTplAk.get(t.id) ?? t.answerKey ?? t.answer_key
             if (ak !== undefined && ak !== null) {
               const tq = countAkQuestions(ak)
               const { error: akErr, count: akCount } = await supabaseDb
