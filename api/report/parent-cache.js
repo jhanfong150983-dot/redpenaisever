@@ -42,8 +42,15 @@ export default async function handler(req, res) {
         const { data: a } = await supabaseAdmin
           .from('assignments').select('owner_id').eq('id', assignmentId).maybeSingle()
         if (!a || a.owner_id !== user.id) { res.status(403).json({ error: 'Forbidden' }); return }
-        const { count } = await supabaseAdmin
+        let q = supabaseAdmin
           .from('parent_reports').select('student_id', { count: 'exact', head: true }).eq('assignment_id', assignmentId)
+        // 可選：限縮到指定學生（重批改只影響被重批的那幾位、不是整份作業）。
+        const sidsRaw = String(req.query?.studentIds ?? '').trim()
+        if (sidsRaw) {
+          const ids = sidsRaw.split(',').map((s) => s.trim()).filter(Boolean)
+          if (ids.length) q = q.in('student_id', ids)
+        }
+        const { count } = await q
         res.setHeader('Cache-Control', 'no-store')
         res.status(200).json({ count: count ?? 0 })
         return
