@@ -35,6 +35,20 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       const assignmentId = String(req.query?.assignmentId ?? '').trim()
       if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
+
+      // 輕量模式：只回「有幾筆家長報告」（給重批改/改答案卷的前置閘用）——不撈診斷內容、不算 stale，
+      //   避免整包 diagnosis JSONB 拖慢前置檢查（原本 ~1s 像當機）。owner 只查 owner_id、不撈 answer_key。
+      if (String(req.query?.countOnly ?? '') === '1') {
+        const { data: a } = await supabaseAdmin
+          .from('assignments').select('owner_id').eq('id', assignmentId).maybeSingle()
+        if (!a || a.owner_id !== user.id) { res.status(403).json({ error: 'Forbidden' }); return }
+        const { count } = await supabaseAdmin
+          .from('parent_reports').select('student_id', { count: 'exact', head: true }).eq('assignment_id', assignmentId)
+        res.setHeader('Cache-Control', 'no-store')
+        res.status(200).json({ count: count ?? 0 })
+        return
+      }
+
       const asg = await loadAssignment(supabaseAdmin, assignmentId, user.id)
       if (!asg) { res.status(403).json({ error: 'Forbidden' }); return }
 
