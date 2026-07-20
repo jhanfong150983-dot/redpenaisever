@@ -3534,6 +3534,33 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
         if (correct && mathNumericEquivalent(ensureString(answer?.studentAnswerRaw, ''), correct)) { score = maxScore; mathEqRestoredWhole = true }
       }
     }
+    // 2026-07-20: code 兜底——是/否語意等價救回（不通過=否、通過=是…）。
+    //   AI 對「語意等於標準是/否答案」的小題判錯時 code 推翻；只加分不減分；只在雙方都能歸到 是/否
+    //   且相同時觸發（yesNoSemanticEqual）→ 只可能救該對的是/否題、不會誤放行。gate: YESNO_SEMANTIC_ENABLED。
+    const yesNoRestoredSubIds = new Set()
+    let yesNoRestoredWhole = false
+    if (YESNO_SEMANTIC_ENABLED && readStatus === 'read' && maxScore > 0
+        && (question?.questionCategory === 'fill_blank' || question?.questionCategory === 'short_answer')) {
+      const rawParts = Array.isArray(row?.partResults) ? row.partResults : null
+      const keyParts = Array.isArray(question?.parts) ? question.parts : null
+      if (rawParts && keyParts && keyParts.length > 0) {
+        const ansBySub = new Map(keyParts.map((p) => [String(p?.subId ?? '').trim(), ensureString(p?.answer, '')]))
+        const maxBySub = new Map(keyParts.map((p) => [String(p?.subId ?? '').trim(), Math.max(0, toFiniteNumber(p?.maxScore) ?? 0)]))
+        let restored = 0
+        for (const pr of rawParts) {
+          const sub = String(pr?.subId ?? '').trim()
+          if (!sub || pr?.correct === true || caseRestoredSubIds.has(sub) || dotRestoredSubIds.has(sub) || mathEqRestoredSubIds.has(sub)) continue
+          if (yesNoSemanticEqual(ensureString(pr?.student, ''), ansBySub.get(sub) ?? ensureString(pr?.expected, ''))) {
+            yesNoRestoredSubIds.add(sub)
+            restored += (maxBySub.get(sub) ?? 0)
+          }
+        }
+        if (restored > 0) score = Math.min(maxScore, score + restored)
+      } else if (!(typeof row?.isCorrect === 'boolean' ? row.isCorrect : score >= maxScore)) {
+        const correct = ensureString(question?.answer || question?.referenceAnswer, '')
+        if (correct && yesNoSemanticEqual(ensureString(answer?.studentAnswerRaw, ''), correct)) { score = maxScore; yesNoRestoredWhole = true }
+      }
+    }
     // 2026-07-06: 數學列舉題「全寫策略」判錯（老師拍板：把所有可能答案都列出＝錯。
     //   座15 列 15~27 被 AI 判對、座32 同型答案被判錯——同型不同判，改確定性規則統一）。
     //   嚴格限定：標準答案為 ≥2 個純數值清單、學生也是純數值清單、且為標準的「真超集」→ 強制 0 分。
@@ -3567,6 +3594,7 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
     const caseRestored = !enumSupersetWrong && (caseRestoredSubIds.size > 0 || caseRestoredWhole
       || dotRestoredSubIds.size > 0 || dotRestoredWhole
       || mathEqRestoredSubIds.size > 0 || mathEqRestoredWhole
+      || yesNoRestoredSubIds.size > 0 || yesNoRestoredWhole
       || siblingTokenRestored)
 
     // Hard override: blank/unreadable always score=0 regardless of model output
@@ -3626,18 +3654,21 @@ export function normalizeAccessorResult(parsed, answerKey, answers, domainHint) 
             const restoredCase = caseRestoredSubIds.has(sub)  // 大小寫救回 → 標記為對
             const restoredDot = dotRestoredSubIds.has(sub)    // 數學頭尾雜點救回 → 標記為對
             const restoredMathEq = mathEqRestoredSubIds.has(sub)  // 數值代入等價救回 → 標記為對
+            const restoredYesNo = yesNoRestoredSubIds.has(sub)  // 是/否語意救回（不通過=否…）→ 標記為對
             return {
               subId: sub,
               student: ensureString(p.student, ''),
               expected: ensureString(p.expected, ''),
-              correct: p.correct === true || restoredCase || restoredDot || restoredMathEq,
+              correct: p.correct === true || restoredCase || restoredDot || restoredMathEq || restoredYesNo,
               reason: restoredCase
                 ? '大小寫等價（普通字首字母／結尾標點），視為正確'
                 : restoredDot
                   ? '頭尾雜點等價（數字前後的筆誤墨點），視為正確'
                   : restoredMathEq
                     ? '數學等價（代入驗證與標準答案同解），視為正確'
-                    : (typeof p.reason === 'string' ? p.reason : undefined)
+                    : restoredYesNo
+                      ? '是／否語意等價（如「不通過」＝「否」），視為正確'
+                      : (typeof p.reason === 'string' ? p.reason : undefined)
             }
           })
       : undefined
@@ -6348,6 +6379,23 @@ export function dotForgivableEqual(studentText, correctText) {
   const ss = stripEdgeDots(s)
   if (!ss || ss === s) return false  // 沒有頭尾點 → 不適用（真的答錯，交回原判）
   return ss === c || ss === stripEdgeDots(c)
+}
+
+// 2026-07-20: 是/否語意等價（含 通過/不通過）。回 'Y'/'N'/null。
+//   只用於 normalizeAccessorResult 的「只錯→對」救回：因為只在「雙方都能歸到是/否且相同」時才算等價，
+//   而 ref 必為該題標準答案，故只可能把「該對的是/否題」救回、不可能把該錯的放行。
+const YESNO_SEMANTIC_ENABLED = process.env.YESNO_SEMANTIC_ENABLED !== 'false'
+function yesNoClass(raw) {
+  const s = String(raw ?? '').replace(/[.。．、,，:：;；()（）\s]/gu, '').trim()
+  if (!s) return null
+  if (/^[○〇OoTt]$/.test(s) || /^(?:對|是|正確|ｏ|yes|true|通過|有通過|會通過|過關|成立)$/iu.test(s)) return 'Y'
+  if (/^[✗✘×XxFf叉]$/.test(s) || /^(?:錯|否|不對|不是|no|false|不通過|未通過|沒通過|沒有通過|沒過|不過關|不會通過|不成立)$/iu.test(s)) return 'N'
+  return null
+}
+function yesNoSemanticEqual(student, ref) {
+  const a = yesNoClass(student)
+  const b = yesNoClass(ref)
+  return a !== null && a === b
 }
 
 export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gradeBand) {
