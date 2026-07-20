@@ -10,11 +10,19 @@ import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
 
-// 答案卷內容指紋：normalize（string→parse→stringify）後 sha1，跨讀取穩定、只隨內容變。
+// 答案卷「答案內容」指紋：只取影響報告對錯的欄位（每題 id + answer + parts 答案），
+//   ⚠不可含整個 answer_key——批改會回寫 bbox/crop/alignment 等 metadata、害整個雜湊變、報告全假失效。
+//   只有老師真的改「答案」才會變。跨讀取穩定。
 function akFingerprint(ak) {
   let obj = ak
-  if (typeof ak === 'string') { try { obj = JSON.parse(ak) } catch { obj = ak } }
-  return crypto.createHash('sha1').update(JSON.stringify(obj ?? null)).digest('hex')
+  if (typeof ak === 'string') { try { obj = JSON.parse(ak) } catch { obj = null } }
+  const qs = Array.isArray(obj?.questions) ? obj.questions : []
+  const core = qs.map((q) => ({
+    id: String(q?.id ?? q?.questionId ?? ''),
+    a: String(q?.answer ?? q?.referenceAnswer ?? ''),
+    p: Array.isArray(q?.parts) ? q.parts.map((pp) => `${pp?.subId ?? ''}=${pp?.answer ?? ''}`) : [],
+  }))
+  return crypto.createHash('sha1').update(JSON.stringify(core)).digest('hex')
 }
 
 async function loadAssignment(supabaseAdmin, assignmentId, userId) {
