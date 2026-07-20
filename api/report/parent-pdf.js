@@ -51,33 +51,13 @@ export default async function handler(req, res) {
       await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 })
       try { await page.evaluateHandle('document.fonts.ready') } catch { /* 字型就緒非必要條件 */ }
 
-      // 只輸出「內容真正需要的頁數」，砍掉結尾幽靈空白頁；但**逐區塊**計算以正確處理強制分頁。
-      //   .pr-page2 有 page-break-before:always → 一份報告分成「第一頁區塊(一二三)」與「四五區塊」兩段，
-      //   各自從新頁起算。舊版用整份 scrollHeight 換算會把第一頁沒填滿的空白漏算 → 四五很長時最後一頁(五)被切掉。
-      //   改成每份 .pr-root 內：ceil(第一頁區塊高) + ceil(四五區塊高)，逐份加總。A4@96dpi≈1122.5px、減 24px 容差。
-      const numPages = await page.evaluate((pageH) => {
-        const ceilPages = (h) => Math.max(1, Math.ceil((h - 24) / pageH))
-        const roots = document.querySelectorAll('.pr-root')
-        if (roots.length === 0) return Math.max(1, Math.ceil((document.body.scrollHeight - 24) / pageH))
-        let pages = 0
-        roots.forEach((root) => {
-          const p2 = root.querySelector('.pr-page2')
-          if (p2) {
-            const rootTop = root.getBoundingClientRect().top
-            const p2Rect = p2.getBoundingClientRect()
-            pages += ceilPages(p2Rect.top - rootTop) + ceilPages(p2Rect.height)
-          } else {
-            pages += ceilPages(root.getBoundingClientRect().height)
-          }
-        })
-        return pages
-      }, 1122.52)
-
+      // 2026-07-20：不再用高度換算 clamp 頁數。逐題錯題卡片有 break-inside:avoid，卡片跳頁會留白，
+      //   高度計算無法反映真實列印頁數 → 會少算、把「五、老師的話」等結尾內容切掉（user 兩次回報）。
+      //   改為讓 Chrome 自然分頁（絕不切內容）。CSS 用 break-before（非 break-after），不會產生結尾幽靈空白頁。
       const pdf = await page.pdf({
         printBackground: true,
         preferCSSPageSize: true, // 用 HTML 內的 @page（A4、margin:0）
         margin: { top: 0, right: 0, bottom: 0, left: 0 },
-        pageRanges: `1-${numPages}`,
       })
       res.setHeader('Content-Type', 'application/pdf')
       res.setHeader('Content-Length', pdf.length)
