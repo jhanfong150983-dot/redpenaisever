@@ -13510,6 +13510,68 @@ export async function runStagedGradingPhaseB({
     }
   }
 
+  // ── 🆕 2026-07-21 國語 short_answer 錯字覆核（加法式、只會扣分；user 拍板）────────────
+  // 背景：accessor 對國語詞語解釋／簡答判「語意等價」太寬，錯別字／注音代國字／用錯字詞仍給滿分（放水）。
+  //   培英A班沙盒：現對格 280 → 加法式覆核翻 8 格、全 A 類（極速/急速、的/地）、零附帶（不動 B 疊加/C 不完整/近義）、
+  //   3 輪穩定 8/8（1 格 0.36% 邊界抖）。user 拍板「只扣用字錯誤（A）、組合/不完整/近義不扣」。
+  // 設計：只對「國語 domain × short_answer × accessor 已判對」跑純文字覆核，hasError → 翻 0 分（加法式：只往錯翻）。
+  //   read 對 short_answer 是忠實轉錄（保留「極速/的」），故文字覆核夠用、不需再看圖。kill switch SHORTANS_CHARERR='0'。
+  //   ⚠ 位置在 QG retry 之後（accessorResult 定案、不會被重跑洗掉）、explainQuestionIds／stopAfterAccessor 早退之前（翻錯的格能進 explain 判斷與回傳 context）。
+  //   ⚠ 理由用「用字錯誤」措辭、刻意避開顯示層 isImageJudged 的觸發詞（視覺覆核/字形錯誤）——short_answer 該顯示學生實寫值、非「圖像辨識」。
+  if (process.env.SHORTANS_CHARERR !== '0' && !precomputedAccessorContext && glyphDomainOk && Array.isArray(accessorResult?.scores)) {
+    try {
+      const saTargets = accessorResult.scores.filter((sc) => {
+        const q = akQById.get(ensureString(sc?.questionId).trim())
+        if (q?.questionCategory !== 'short_answer') return false
+        if (sc?.isCorrect !== true) return false  // 只覆核「已判對」——加法式，永遠只會現對→錯，不放寬語意錯的
+        const ref = ensureString(q?.referenceAnswer ?? q?.answer, '').trim()
+        const stu = ensureString(sc?.studentFinalAnswer, '').trim()
+        return ref && stu && stu !== '未作答' && stu !== '無法辨識'
+      })
+      if (saTargets.length > 0 && getRemainingBudget() > 25_000) {
+        const ceDeadline = Date.now() + 40_000
+        let ceIdx = 0, ceFlipped = 0
+        await Promise.all(Array.from({ length: Math.min(4, saTargets.length) }, async () => {
+          while (ceIdx < saTargets.length) {
+            if (Date.now() > ceDeadline) return  // stage 到點、剩餘格 fail-open（保留 accessor 判對）
+            const sc = saTargets[ceIdx++]
+            const q = akQById.get(ensureString(sc.questionId).trim())
+            const ref = ensureString(q?.referenceAnswer ?? q?.answer, '').trim()
+            const stu = ensureString(sc.studentFinalAnswer, '').trim()
+            const cePrompt = `國語科用字覆核。標準答案：「${ref}」。學生作答（已判定語意正確）：「${stu}」。
+只檢查「用字錯誤」，其餘一律忽略：
+✅要抓（hasError=true）：錯別字（字或部件寫錯）、以注音符號代替國字、把標準的關鍵字詞寫成不同的字（如「急速」寫成「極速」、「地」寫成「的」）。
+❌一律忽略、不算錯：答案不完整／漏字、只答部分、把多個可接受答案併寫、用意思相近的詞、標點差異、簡繁體。
+只輸出 JSON：{"hasError":true|false,"which":"若有，指出哪個字寫錯（20字內）"}`
+            const resp = await executeStage({
+              apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+              payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+              timeoutMs: Math.min(getRemainingBudget(), 15_000), routeHint,
+              routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+              stageContents: [{ role: 'user', parts: [{ text: cePrompt }] }]
+            })
+            if (resp) stageResponses.push(resp)
+            if (!resp?.ok) continue
+            const parsed = parseCandidateJson(resp.data)
+            if (parsed?.hasError === true) {
+              const which = ensureString(parsed?.which, '').slice(0, 30)
+              sc.isCorrect = false
+              sc.score = 0
+              sc.errorType = 'concept'
+              sc.scoringReason = `用字錯誤：${which || '出現錯別字'}（意思雖對，國語卷用字計分）`
+              sc.needExplain = false
+              sc._charErrOverride = true
+              ceFlipped++
+            }
+          }
+        }))
+        if (ceFlipped > 0) logStaged(pipelineRunId, 'basic', `[B-CharErr] 國語 short_answer 錯字覆核：${saTargets.length} 格 → 翻 ${ceFlipped} 格（意思對但用字錯）`)
+      }
+    } catch (e) {
+      logStaged(pipelineRunId, 'basic', `[B-CharErr] 失敗(fail-open 保留 accessor 判對)：${e?.message}`)
+    }
+  }
+
   // ── Cross-stage: Read → Accessor consistency ────────────────────────────
   const readAccessorQG = validateReadAccessorConsistency(finalReadAnswerResult, accessorResult)
   logStaged(pipelineRunId, stagedLogLevel, 'cross-stage read→accessor quality-gate', {
