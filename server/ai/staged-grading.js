@@ -1540,6 +1540,31 @@ export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
   return { adopted: null, level: null, illegible: false }
 }
 
+// 2026-07-21 知答制裁決（user 拍板：丟盲讀、只用知答讀）─────────────────────────────
+//   背景：盲讀對國字注音系統性誤讀（讀印刷字），blindguard 100% 採錯（培英A班 77/77 誤殺）。
+//   新架構：空白由盲讀當閘（在呼叫端擋掉），內容全交知答讀；此函式處理「知答四票」的選擇。
+//   原則（沙盒驗證 informed-only-log 95 格：77 救回、真錯正確判錯、0 誤殺/放水）：
+//     ① 非標準值出現 ≥2 → 採信（學生真的寫錯；抗住投射拉力=可信）
+//     ② 某值 ≥3 多數 → 採之
+//     ③ 標準值至少一次 → 採標準（單次非標準＝看走眼、防誤殺）
+//     ④ 真分裂 → 低信心（45）+ 暫定最多票 → 前端 badge / 老師申訴
+//   reads=知答讀值陣列（'' =空白、null=失敗）。
+export function computeInformedDecision(reads, key) {
+  const fold = (x) => normalizeAnswerForComparison(deLatexMathText(ensureString(x, '')))
+  const keyN = fold(key)
+  const vals = (reads || []).filter((v) => v != null)
+  if (vals.length === 0) return { adopted: null, level: 'read_fail', illegible: false, chainConfidence: null }
+  const tally = new Map(), rawByNorm = new Map()
+  for (const v of vals) { const n = fold(v); tally.set(n, (tally.get(n) || 0) + 1); if (!rawByNorm.has(n)) rawByNorm.set(n, v) }
+  const entries = [...tally.entries()].sort((a, b) => b[1] - a[1])
+  const nonKey = entries.find(([k, c]) => k !== keyN && c >= 2)
+  if (nonKey) return { adopted: rawByNorm.get(nonKey[0]), level: 'informed_nonkey', illegible: false, chainConfidence: 80 }
+  const maj = entries.find(([, c]) => c >= 3)
+  if (maj) return { adopted: rawByNorm.get(maj[0]), level: 'informed_majority', illegible: false, chainConfidence: 80 }
+  if ((tally.get(keyN) || 0) >= 1) return { adopted: rawByNorm.get(keyN) ?? key, level: 'informed_key', illegible: false, chainConfidence: 70 }
+  return { adopted: rawByNorm.get(entries[0][0]), level: 'informed_split', illegible: true, chainConfidence: 45 }
+}
+
 // 層級鏈執行器（兩個 Phase A 入口共用：runStagedGradingPhaseA 單體路徑＋runStagedGradingPhaseAArbiter split 路徑）。
 // 就地改寫 questionResults 的 arbiterResult；任何失敗 fail-open 維持 needs_review。
 // env ESCALATION_CHAIN：未設/'1'=套用（**預設開**、2026-07-11 user 拍板）、'shadow'=只跑＋記錄不套用、'0'/'false'/'off'=關。
@@ -1570,6 +1595,9 @@ export async function applyEscalationChain({
       const akQ = akMap?.get?.(qid)
       return ensureString(akQ?.answer ?? akQ?.referenceAnswer, '').trim()
     }
+    const ecFold = (x) => normalizeAnswerForComparison(deLatexMathText(ensureString(x, '')))
+    const ecSame = (a, b) => a != null && b != null && ecFold(a) === ecFold(b)
+    const ecKeyEq = (t, k) => t != null && !!k && ecFold(t) === ecFold(k)
     const targets = questionResults.filter((qr) =>
       qr.arbiterResult?.arbiterStatus === 'needs_review'
       // 2026-07-13: compound_* 納入鏈守備範圍（空白衝突 chain-native 改版：社會卷圈選+理由題
@@ -1596,13 +1624,16 @@ export async function applyEscalationChain({
     //   現行版漏 5/6；含印刷選項圈選型（[V]經濟發展/勾選電燈））
     const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。${MULTILINE_CLAUSE}${CHAIN_MARK_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
     const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。${MULTILINE_CLAUSE}${CHAIN_MARK_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
-    const readOnce = async (qr, prompt) => {
+    const readOnce = async (qr, prompt, temp) => {
       const crop = cropMap.get(qr.questionId)
       if (!crop) return { value: null, ms: 0, status: 'no_crop' }
       const startedAt = Date.now()
+      const genConfig = Number.isFinite(temp)
+        ? { generationConfig: { ...READ_ANSWER_GENERATION_CONFIG.generationConfig, temperature: temp } }
+        : READ_ANSWER_GENERATION_CONFIG
       const resp = await executeStage({
         apiKey, model, modelOverride: MODEL_PRO,
-        payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+        payload: { ...payload, ...genConfig },
         timeoutMs: Math.min(getRemainingBudget(), 45000), routeHint,
         routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
         stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: crop }] }]
@@ -1615,6 +1646,11 @@ export async function applyEscalationChain({
       //   鏈的單題讀漏了 → 採用值帶「\le132」進 Phase B 被判錯（round7 座3 實測）
       return { value: a ? ecVal({ status: a.status, studentAnswerRaw: deLatexMathText(ensureString(a.studentAnswerRaw, '')) }) : null, ms, status: a?.status ?? 'parse_fail' }
     }
+    // 2026-07-21 知答制（user 拍板：丟盲讀內容、只留盲讀當空白閘）─────────────────
+    //   空白閘：原盲讀(read1) 判空白 → 未作答（盲讀不知答案、不腦補；防空白放水）。
+    //   內容：知答讀 L0 ×2（temp0+temp0.6），一致採用；不一致 L1 再 ×2 → computeInformedDecision。
+    //   開關 CHAIN_INFORMED='1' 開啟知答制（預設關＝舊「盲+知答」blindguard，爆炸半徑受控、逐步驗證）。
+    const informedMode = process.env.CHAIN_INFORMED === '1'
     // 併行上限 6（同 type-split LIM、避免 rate-limit 連鎖）
     const results = []
     let idx = 0
@@ -1622,15 +1658,42 @@ export async function applyEscalationChain({
       while (idx < targets.length) {
         const qr = targets[idx++]
         const key = keyFor(qr.questionId)
+        const r1 = ecVal(qr.readAnswer1), r2 = ecVal(qr.readAnswer2)
+        if (informedMode) {
+          // 空白閘：盲讀(read1) 說空白 → 未作答（防空白格被知答讀腦補放水）
+          if (r1 === '') {
+            results.push({ qr, adopted: '', level: 'blank_gate', illegible: false, chainConfidence: 90, r1p: '', r2p: null, key })
+            continue
+          }
+          // 內容讀 L0：知答 ×2（temp0 + temp0.6）
+          const [ia, ib] = await Promise.all([
+            readOnce(qr, informedPrompt(qr.questionId, key), 0),
+            readOnce(qr, informedPrompt(qr.questionId, key), 0.6)
+          ])
+          const meta0 = { r1p: ia.value, r2p: ib.value, r1pMs: ia.ms, r2pMs: ib.ms, r1pStatus: ia.status, r2pStatus: ib.status, key }
+          if (ia.value == null && ib.value == null) { results.push({ qr, adopted: null, level: 'read_fail', illegible: false, ...meta0 }); continue }
+          if (ecSame(ia.value, ib.value)) {
+            results.push({ qr, adopted: ia.value, level: 'L0_agree', illegible: false, chainConfidence: ecKeyEq(ia.value, key) ? 92 : 88, ...meta0 })
+            continue
+          }
+          // 裁決 L1：再知答 ×2（湊四票）
+          const [ic, id] = await Promise.all([
+            readOnce(qr, informedPrompt(qr.questionId, key), 0),
+            readOnce(qr, informedPrompt(qr.questionId, key), 0.6)
+          ])
+          const decision = computeInformedDecision([ia.value, ib.value, ic.value, id.value], key)
+          results.push({ qr, ...decision, r1p: ia.value, r2p: ib.value, r3p: ic.value, r4p: id.value, r1pMs: ia.ms, r2pMs: ib.ms, r1pStatus: ia.status, r2pStatus: ib.status, key })
+          continue
+        }
+        // ── 舊模式（盲+知答 blindguard；CHAIN_INFORMED='0' 才走）──
         const [rd1, rd2] = await Promise.all([
           readOnce(qr, blindPrompt(qr.questionId)),
           readOnce(qr, informedPrompt(qr.questionId, key))
         ])
         const r1p = rd1.value, r2p = rd2.value
         const meta = { r1p, r2p, r1pMs: rd1.ms, r2pMs: rd2.ms, r1pStatus: rd1.status, r2pStatus: rd2.status, key }
-        // 兩支重讀全失敗＝「升級嘗試失敗」非「四票發散」→ fail-open 維持送審（不 tail）
         if (r1p == null && r2p == null) { results.push({ qr, adopted: null, level: 'read_fail', illegible: false, ...meta }); continue }
-        const decision = computeEscalationDecision({ r1: ecVal(qr.readAnswer1), r2: ecVal(qr.readAnswer2), r1p, r2p, key })
+        const decision = computeEscalationDecision({ r1, r2, r1p, r2p, key })
         results.push({ qr, ...decision, ...meta })
       }
     }))
@@ -1644,7 +1707,7 @@ export async function applyEscalationChain({
         questionId: r.qr.questionId,
         level: r.level, illegible: r.illegible, applied: mode === '1' && r.adopted != null && r.level !== 'read_fail',
         r1: ecVal(r.qr.readAnswer1), r2: ecVal(r.qr.readAnswer2),
-        r1p: r.r1p, r2p: r.r2p, key: r.key, adopted: r.adopted,
+        r1p: r.r1p, r2p: r.r2p, r3p: r.r3p, r4p: r.r4p, key: r.key, adopted: r.adopted, chainConfidence: r.chainConfidence,
         r1pMs: r.r1pMs, r2pMs: r.r2pMs, r1pStatus: r.r1pStatus, r2pStatus: r.r2pStatus
       }))
     }
@@ -1656,7 +1719,8 @@ export async function applyEscalationChain({
           arbiterStatus: 'arbitrated_agree',
           finalAnswer: r.adopted,
           chainLevel: r.level,
-          chainIllegible: r.illegible
+          chainIllegible: r.illegible,
+          ...(Number.isFinite(r.chainConfidence) ? { chainConfidence: r.chainConfidence } : {})
         }
       }
     }
@@ -7805,10 +7869,16 @@ function buildFinalGradingResult({
       }
       else if (score?._scRescue) { base = 90; journey = '單選值域救援' }
       else if (score?._vjBypass) { base = 90; journey = 'VJ視覺判斷' }
-      // A 段修正（只對走過讀取的格子）
+      // 2026-07-21 知答制鏈信心：新裁決(computeInformedDecision)直接帶 chainConfidence
+      //   （L0一致92/88、多數或非標準≥2=80、單次看走眼採標準70、真分裂=45低信心）→ 直接當基準，
+      //   已內含路徑信心、不再走 A 段 -8（否則低信心45會被再扣、或高信心被誤降）。前端 badge <70 才亮。
+      const chainConf = consistency?.arbiterResult?.chainConfidence
+      const hasChainConf = Number.isFinite(chainConf)
+      if (hasChainConf) { base = chainConf; journey = `知答鏈:${ensureString(consistency?.arbiterResult?.chainLevel, '')}` }
+      // A 段修正（只對走過讀取的格子；知答鏈已自帶信心 → 跳過）
       const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷'])
       let aTag = ''
-      if (!skipA.has(journey)) {
+      if (!hasChainConf && !skipA.has(journey)) {
         if (row.consistencyStatus === 'stable') aTag = '兩讀一致'
         else if (row.consistencyStatus) { base -= 8; aTag = '兩讀分歧經鏈' }
         else aTag = ''
@@ -11502,6 +11572,7 @@ Return JSON:
         // 2026-07-11 層級鏈：來源層級＋「筆跡難辨」標記（前端 badge/申訴入口用）
         ...(qr.arbiterResult?.chainLevel ? { chainLevel: qr.arbiterResult.chainLevel } : {}),
         ...(qr.arbiterResult?.chainIllegible ? { chainIllegible: true } : {}),
+        ...(Number.isFinite(qr.arbiterResult?.chainConfidence) ? { chainConfidence: qr.arbiterResult.chainConfidence } : {}),
       })),
       // 2026-07-11 層級鏈 audit：完整輸入輸出（r1/r2/r1'/r2'/key/adopted 全文）＋逐 call 時間，
       // 供事後直接檢視（不用從結果反推）；費用另在 ink_session_usage（routeKey=grading.re_read_answer）
@@ -11969,6 +12040,7 @@ export async function runStagedGradingPhaseAArbiter({
         // 2026-07-11 層級鏈：來源層級＋「筆跡難辨」標記（前端 badge/申訴入口用）
         ...(qr.arbiterResult?.chainLevel ? { chainLevel: qr.arbiterResult.chainLevel } : {}),
         ...(qr.arbiterResult?.chainIllegible ? { chainIllegible: true } : {}),
+        ...(Number.isFinite(qr.arbiterResult?.chainConfidence) ? { chainConfidence: qr.arbiterResult.chainConfidence } : {}),
       })),
       // 2026-07-11 層級鏈 audit：完整輸入輸出（r1/r2/r1'/r2'/key/adopted 全文）＋逐 call 時間，
       // 供事後直接檢視（不用從結果反推）；費用另在 ink_session_usage（routeKey=grading.re_read_answer）
@@ -12048,7 +12120,10 @@ export async function runStagedGradingPhaseB({
         arbiterResult: arb ? {
           arbiterStatus: arb.arbiterStatus,
           finalAnswer: arb.finalAnswer,
-          consistent: arb.consistent
+          consistent: arb.consistent,
+          ...(arb.chainLevel ? { chainLevel: arb.chainLevel } : {}),
+          ...(arb.chainIllegible ? { chainIllegible: true } : {}),
+          ...(Number.isFinite(arb.chainConfidence) ? { chainConfidence: arb.chainConfidence } : {})
         } : undefined,
         consistencyStatus: arb?.consistent === true ? 'stable' : arb?.consistent === false ? 'diff' : 'unstable',
         answerBbox: aq.answerBbox,
