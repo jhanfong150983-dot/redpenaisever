@@ -1649,8 +1649,8 @@ export async function applyEscalationChain({
     // 2026-07-21 知答制（user 拍板：丟盲讀內容、只留盲讀當空白閘）─────────────────
     //   空白閘：原盲讀(read1) 判空白 → 未作答（盲讀不知答案、不腦補；防空白放水）。
     //   內容：知答讀 L0 ×2（temp0+temp0.6），一致採用；不一致 L1 再 ×2 → computeInformedDecision。
-    //   開關 CHAIN_INFORMED='1' 開啟知答制（預設關＝舊「盲+知答」blindguard，爆炸半徑受控、逐步驗證）。
-    const informedMode = process.env.CHAIN_INFORMED === '1'
+    //   知答制**預設開**（user 拍板直接上線測）；kill-switch CHAIN_INFORMED='0' → 回舊「盲+知答」blindguard。
+    const informedMode = process.env.CHAIN_INFORMED !== '0'
     // 併行上限 6（同 type-split LIM、避免 rate-limit 連鎖）
     const results = []
     let idx = 0
