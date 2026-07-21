@@ -1627,11 +1627,14 @@ export async function applyEscalationChain({
     //   ＋多行條款「抄到最後一個字」→ 鏈重讀把鄰列/整組表格全抄進一格（6-7-8 兩列混抄、4-5-5 跨列
     //   撈到別列人物假給分）。crop+prompt 必須成對（r8 教訓）——補上並定義「作答區=紅框內」。
     const CHAIN_MARK_CLAUSE = markRead ? `\n⚠ 圖中的「紅色方框」標示本題的作答區——只讀紅框內、紅框外（其他列/其他題）一律忽略；「抄到最後一個字」指紅框內的最後一個字。紅框內仍然只回報「學生手寫」的內容：印刷的題目文字、引導模板、選項文字都不要抄（學生有圈選/勾選的印刷選項除外）。` : ''
+    // 2026-07-21 不抄題幹條款（座31 1-1-6：淡墨注音、鏈重讀把印刷國字「仄」當答案＝誤殺）：
+    //   鏈重讀 prompt 原本只在紅框模式(markRead)才禁抄印刷字、國語拍照卷沒有 → 補一條永遠生效。
+    const CHAIN_NOPRINT_CLAUSE = `\n⚠ 圖中可能有「印刷的題目文字／國字提示／□框／引導字」——這些都不是學生的作答，一律不要抄；只回報學生「手寫」的內容。特別是國字注音題：印刷提示常是「國字」（例：仄、紮），學生手寫的是「注音」（例：ㄗㄜˋ）——只抄手寫的注音、絕不可把印刷國字當成學生答案；若手寫太淡看不清 → status="unreadable"（不要拿印刷字充數）。`
     // ↑ 2026-07-14 立場條款（user r4 對照：立場詞抄錄不穩=主要翻動軸——反對/民變/經濟發展等
     //   前綴有時被丟、accessor 判未表態誤扣。沙盒 e-chain-stance：6 格×2 抽 12/12 全中、
     //   現行版漏 5/6；含印刷選項圈選型（[V]經濟發展/勾選電燈））
-    const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。${MULTILINE_CLAUSE}${CHAIN_MARK_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
-    const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。${MULTILINE_CLAUSE}${CHAIN_MARK_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    const blindPrompt = (qid) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。你是抄寫員：不知道正確答案，只忠實逐字元回報學生實際手寫的內容、不要猜。若是句子或片語請輸出完整連續一串。${MULTILINE_CLAUSE}${CHAIN_NOPRINT_CLAUSE}${CHAIN_MARK_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    const informedPrompt = (qid, key) => `這是一題學生手寫作答區的裁切放大圖（填空/簡答題）。本題參考答案：「${key}」。你是校對員：參考答案只當「看仔細一點」的提示；仍只回報學生實際手寫的內容、逐字元照抄，絕不可把參考答案填進去、不要把模糊筆跡「腦補」成參考答案——筆跡與參考答案不符時，照筆跡抄。${MULTILINE_CLAUSE}${CHAIN_NOPRINT_CLAUSE}${CHAIN_MARK_CLAUSE}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"${qid}","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
     const readOnce = async (qr, prompt, temp) => {
       const crop = cropMap.get(qr.questionId)
       if (!crop) return { value: null, ms: 0, status: 'no_crop' }
