@@ -9456,10 +9456,25 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     if (ps) return ps.map((p) => `${p.subId}=${ensureString(p?.answer, '')}`).join('；')
     return ensureString(ak?.answer || ak?.referenceAnswer, '').trim()
   }
+  // ── 2026-07-21 國字注音拔 read（user 拍板、真 VJ 化）───────────────────────────
+  //   這些格的判分/空白/顯示全由 Phase B 字形終審看 crop 定案（blank 沙盒 30/30、吵架=判錯+低信心已定）
+  //   → 兩讀對它們純浪費 → 直接跳過、讀值以「圖像辨識」佔位（兩讀相同 → stable、不進鏈/不進審查；
+  //   Phase B 判官以 crop 重判並覆寫分數與顯示）。
+  //   kill-switch：GZ_SKIP_READ='0' 單獨恢復 read；GLYPH_JUDGE_ALL/GLYPH_JUDGE 關閉時自動恢復（判官不接手就不能拔）。
+  const gzVjSkipRead = process.env.GZ_SKIP_READ !== '0' && process.env.GLYPH_JUDGE_ALL !== '0' && process.env.GLYPH_JUDGE !== '0'
+    && ensureString(payload?.domain ?? internalContext?.domainHint, '').includes('國')
+  const gzIsVjCell = (qid) => {
+    if (!gzVjSkipRead) return false
+    const ak = akMapForAi2.get(qid)
+    if (!ak || ensureString(ak.questionCategory, '') !== 'fill_blank') return false
+    const key = ensureString(ak.answer ?? ak.referenceAnswer, '').trim()
+    return /^[一-鿿]{1,2}$/u.test(key) || /^[ㄅ-ㄩˊˇˋ˙]{1,5}$/u.test(key)
+  }
   const runTypeSplitRole = async (role) => {
     const groups = new Map()
     for (const q of classifyAligned) {
       if (!q.visible || TYPE_SPLIT_SKIP.has(q.questionType) || !allQuestionCropMap.has(q.questionId)) continue
+      if (gzIsVjCell(q.questionId)) continue // 國字注音拔 read：判官全接手
       if (!groups.has(q.questionType)) groups.set(q.questionType, [])
       groups.get(q.questionType).push(q)
     }
@@ -9585,14 +9600,14 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     parallelCalls = [runTypeSplitRole('detail'), runTypeSplitRole('review')]
   } else {
     // ── 現行全域讀（AI1 盲 + AI2 校對，各一支含全部題）──
-    const ai1IncludeIds = Array.from(allQuestionCropMap.keys())
+    const ai1IncludeIds = Array.from(allQuestionCropMap.keys()).filter((qid) => !gzIsVjCell(qid))
     const ai1TextPrompt = buildDetailReadPrompt(classifyResult, {
       includeQuestionIds: ai1IncludeIds.length > 0 ? ai1IncludeIds : undefined,
       answerKeyQuestions, domainHint: internalContext?.domainHint
     })
     const ai1Parts = [{ text: ai1TextPrompt }]
     for (const q of classifyAligned) {
-      if (!q.visible) continue
+      if (!q.visible || gzIsVjCell(q.questionId)) continue
       const crop = allQuestionCropMap.get(q.questionId)
       if (!crop) continue
       ai1Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}）---` })
@@ -9601,7 +9616,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     const globalReadPrompt = buildReviewReadPrompt(classifyResult, { answerKeyQuestions, domainHint: internalContext?.domainHint })
     const ai2Parts = [{ text: globalReadPrompt }]
     for (const q of classifyAligned) {
-      if (!q.visible) continue
+      if (!q.visible || gzIsVjCell(q.questionId)) continue
       const crop = allQuestionCropMap.get(q.questionId)
       if (!crop) continue
       const akQ = akMapForAi2.get(q.questionId)
@@ -9870,6 +9885,22 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       console.warn(`[PhaseA][${pipelineRunId}] AI2 也 parse 失敗、AI2 raw text preview：`, ai2RawText)
       throw new Error('PhaseA read_answer parse failed (AI1 + AI2 都讀不到合法 JSON)')
     }
+  }
+
+  // ── 2026-07-21 國字注音拔 read：被跳過的格注入 synthetic 讀值 ──────────────────
+  //   兩讀同值「圖像辨識」→ computeConsistencyStatus 必 stable → 不觸發 NR/鏈/審查；
+  //   finalAnswers 得到佔位值 → Phase B 判官（status='read'）以 crop 重判並覆寫分數與顯示。
+  if (gzVjSkipRead) {
+    const seen1 = new Set((readAnswerParsed?.answers || []).map((a) => ensureString(a?.questionId).trim()))
+    const seen2 = new Set((reReadAnswerParsed?.answers || []).map((a) => ensureString(a?.questionId).trim()))
+    let synthN = 0
+    for (const q of classifyAligned) {
+      if (!q.visible || !gzIsVjCell(q.questionId)) continue
+      const entry = () => ({ questionId: q.questionId, studentAnswerRaw: '圖像辨識', status: 'read', _gzVjSynthetic: true })
+      if (!seen1.has(q.questionId)) { readAnswerParsed.answers = readAnswerParsed.answers || []; readAnswerParsed.answers.push(entry()); synthN++ }
+      if (reReadAnswerParsed && !seen2.has(q.questionId)) { reReadAnswerParsed.answers = reReadAnswerParsed.answers || []; reReadAnswerParsed.answers.push(entry()) }
+    }
+    if (synthN > 0) logStaged(pipelineRunId, 'basic', `[A2] 國字注音拔 read：${synthN} 格跳過兩讀（省 crop×2＋thinking）、synthetic 佔位、Phase B 判官定案`)
   }
 
   // ── 2026-06-30: AI2(校對) 整份/大量判空白偵測 → 重抽 read2 一次 ──────────────
@@ -13150,6 +13181,21 @@ export async function runStagedGradingPhaseB({
           }
           }
         }))
+        // ── 2026-07-21 拔 read 安全網：synthetic 格（讀值=佔位「圖像辨識」、無真讀值可退）若判官未定案
+        //   （call 失敗／缺 crop／stage 到點）→ 不可交 accessor（會拿佔位字判錯）→ 確定性 0 分＋低信心 45
+        //   亮黃燈請老師確認。有真讀值的格維持舊 fail-open 交 accessor。
+        for (const t of glyphTargets) {
+          if (vjBypassIds.has(t.qid)) continue
+          if (ensureString(t.student, '') !== '圖像辨識') continue
+          const gMaxFb = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
+          deterministicScores.push({
+            questionId: t.qid, isCorrect: false, score: 0, maxScore: gMaxFb, errorType: 'unreadable',
+            scoringReason: `視覺覆核未完成（系統忙碌或無法裁定）、暫判 0 分請老師確認（標準「${t.key}」、視覺覆核、低信心）`,
+            scoreConfidence: 45, studentFinalAnswer: '圖像辨識', needExplain: false,
+            _vjBypass: true, _glyphJudge: true, _glyphSplit: true
+          })
+          vjBypassIds.add(t.qid)
+        }
         logStaged(pipelineRunId, 'basic', `[B-Glyph] 字形終審 ${glyphTargets.length} 格 → 攔下 ${glyphFlipped} 格（剩餘預算 ${Math.round(getRemainingBudget() / 1000)}s）`)
       }
     } catch (e) {
