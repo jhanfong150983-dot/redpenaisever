@@ -7880,7 +7880,8 @@ function buildFinalGradingResult({
         if (row.isCorrect) {
           if (rTxt.includes('調號覆核放行')) { base = 95; journey = '調號覆核放行' }
           else { base = 97; journey = isZy ? '注音判官放行' : '字形判官全票放行' }
-        } else if (score?.glyphBorderline) { base = 55; journey = '字形邊界攔' }
+        } else if (score?._glyphSplit) { base = 45; journey = '判官分歧攔(低信心)' }
+        else if (score?.glyphBorderline) { base = 55; journey = '字形邊界攔' }
         else if (isZy) {
           const toneKept = Array.isArray(score?.glyphVotes) && score.glyphVotes.some((v) => String(v).startsWith('覆核'))
           if (toneKept) { base = 70; journey = '注音調號攔(覆核維持)' }
@@ -13022,7 +13023,11 @@ export async function runStagedGradingPhaseB({
             if (va === 'blank' && vb === 'blank') { gVerdict = 'blank'; parsed = pb } // 兩判官都看不到手寫 → 未作答
             else if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
-            else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
+            // 2026-07-21 user 拍板（寧殺勿放）：兩判官「都有效回答但意見不合」＝筆跡有歧義 → 判錯＋低信心45亮黃燈。
+            //   沙盒：吵架 20/155 注音格、平均每生 0.65 格（不爆量）；16/20 學生其實寫對→黃燈＋申訴要分兜底。
+            //   吵架是系統性的（A/B 檢查流程盲點不同、兩輪吵法一致）→ 第三票無仲裁力、不加抽。
+            else if (['same', 'different', 'blank'].includes(va) && ['same', 'different', 'blank'].includes(vb)) { gVerdict = 'split'; parsed = pb }
+            else { gVerdict = ''; parsed = null } // call 失敗/parse 失敗 → fail-open 交 accessor
             // ── 2026-07-13 調號覆核否決（user 拍板、few-shot 沙盒 11/12）────────────
             //   根因：語言先驗讓判官把符號自身筆畫（ㄔ斜撇/ㄩ右豎收勾）認領為期待中的調號、
             //   雙判官會一致幻覺（ㄑㄩ 近乎確定性誤殺、read 層同病＝視覺層才能修）。
@@ -13087,27 +13092,15 @@ export async function runStagedGradingPhaseB({
             else { gVerdict = ''; parsed = null } // 有效票 <2 → fail-open 交 accessor
           }
           const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
-          // 2026-07-13 學生答案欄與視覺覆核對齊（user 回報：欄位顯示「ㄎㄢˋ」、理由卻說漏寫調號）——
-          //   read 層調號雙向不可靠（幻覺補全/吃掉）、「學生答案」欄來自 read＝可能與判官視覺真相矛盾。
-          //   判官攔調號類錯誤時，把顯示值校正成視覺所見：漏寫→去調、多寫X聲→補上該調號。只動顯示、不動計分。
-          let displayStudent = ensureString(t.student, '')
-          if (t.kind === 'zhuyin' && gVerdict === 'different') {
-            const rsn = ensureString(parsed?.reason, '')
-            if (/漏寫|缺少|未寫/.test(rsn) && /調號|[一二三四輕]聲|聲調/.test(rsn)) {
-              displayStudent = displayStudent.replace(/[ˊˇˋ˙]/g, '')
-            } else {
-              const mTone = rsn.match(/(?:多寫|寫成|寫了)[^，。]*?([二三四輕])聲/)
-              if (mTone && !/[ˊˇˋ˙]/.test(displayStudent)) {
-                const mark = { '二': 'ˊ', '三': 'ˇ', '四': 'ˋ', '輕': '˙' }[mTone[1]]
-                if (mark) displayStudent = displayStudent + mark
-              }
-            }
-          }
+          // 2026-07-21 顯示統一（user 拍板）：VJ 化後「學生答案」欄不再顯示轉錄值（顯示太多反招質疑）——
+          //   有作答（對/錯/吵架）一律顯示「圖像辨識」、未作答顯示「未作答」（比照作圖題有寫/沒寫 UI）。
+          //   哪裡錯由理由欄（字形錯誤：…）與 crop 說明；誤殺走申訴、低信心老師直接改分。
+          //   （舊 displayStudent 調號校正邏輯隨之退役——顯示值不再放轉錄字串。）
           if (gVerdict === 'different') {
             deterministicScores.push({
               questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
               scoringReason: `字形錯誤：${ensureString(parsed?.reason, '').slice(0, 40) || '與標準筆畫結構不符'}（標準「${t.key}」、視覺覆核${glyphBorderline ? '、邊界判定' : ''}）`,
-              scoreConfidence: glyphBorderline ? 70 : 95, studentFinalAnswer: displayStudent, needExplain: false,
+              scoreConfidence: glyphBorderline ? 70 : 95, studentFinalAnswer: '圖像辨識', needExplain: false,
               _vjBypass: true, _glyphJudge: true,
               // 逐塊分析全文——申訴/badge UI 的證據欄（學生看得到哪個部件錯了）
               glyphAnalysis: ensureString(parsed?.analysis ?? parsed?.blocks, '').slice(0, 200),
@@ -13126,22 +13119,34 @@ export async function runStagedGradingPhaseB({
             deterministicScores.push({
               questionId: t.qid, isCorrect: true, score: gMax, maxScore: gMax, errorType: 'none',
               scoringReason: `答案正確（字形視覺覆核通過、標準「${t.key}」${toneReviewReleased ? '、調號覆核放行' : ''}）`,
-              scoreConfidence: 100, studentFinalAnswer: t.keyMatched ? ensureString(t.student, '') : t.key, needExplain: false,
+              scoreConfidence: 100, studentFinalAnswer: '圖像辨識', needExplain: false,
               _vjBypass: true, _glyphJudge: true,
               glyphVotes
             })
             vjBypassIds.add(t.qid)
           } else if (gVerdict === 'blank') {
             // 2026-07-21 VJ 化：判官共識「格內無手寫」→ 未作答 0 分（read 的假內容不採；
-            //   沙盒 blank/blank 30 格與現行未作答全吻合）。
+            //   沙盒 blank/blank 30 格與現行未作答全吻合）。顯示「未作答」（比照作圖題）。
             deterministicScores.push({
               questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'blank',
               scoringReason: `學生未作答（字形視覺覆核：格內無手寫筆跡、標準「${t.key}」）`,
-              scoreConfidence: 90, studentFinalAnswer: '', needExplain: false,
+              scoreConfidence: 90, studentFinalAnswer: '未作答', needExplain: false,
               _vjBypass: true, _glyphJudge: true,
               glyphVotes
             })
             vjBypassIds.add(t.qid)
+          } else if (gVerdict === 'split') {
+            // 2026-07-21 user 拍板（寧殺勿放）：兩位判官意見不合＝筆跡有歧義 → 判錯＋低信心45亮黃燈。
+            //   誤殺方向由申訴/老師改分兜底（沙盒 16/20 吵架格學生其實寫對、每生平均 0.65 格）。
+            deterministicScores.push({
+              questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
+              scoringReason: `兩位視覺判官意見不合（筆跡有歧義）：${ensureString(parsed?.reason, '').slice(0, 36) || '無法一致認定'}（標準「${t.key}」、視覺覆核、低信心）`,
+              scoreConfidence: 45, studentFinalAnswer: '圖像辨識', needExplain: false,
+              _vjBypass: true, _glyphJudge: true, _glyphSplit: true,
+              glyphVotes, glyphBorderline: true
+            })
+            vjBypassIds.add(t.qid)
+            glyphFlipped++
           }
           }
         }))
