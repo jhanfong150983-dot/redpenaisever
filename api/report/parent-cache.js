@@ -73,10 +73,13 @@ export default async function handler(req, res) {
         .eq('assignment_id', assignmentId)
       const cached = Array.isArray(rows) ? rows : []
 
-      // 現值指紋：每生 graded_at（抓重批改）+ answer_key 內容雜湊（抓改答案卷）
+      // 現值指紋：每生 graded_at＋score（抓重批改「與老師手動改分」）+ answer_key 內容雜湊（抓改答案卷）
+      //   2026-07-22：graded_fp 從 graded_at 擴充為 `${graded_at}|${score}`——老師申訴改分不動 graded_at、
+      //   舊指紋聞不到 → 報告停在舊分數。score 是輕欄位、不碰大 JSONB。格式切換屬一次性失效（重生即回新格式）。
+      //   殘餘：只改答案文字、分數沒變 → 不失效（外觀級、接受）。
       const { data: subs } = await supabaseAdmin
-        .from('submissions').select('student_id, graded_at').eq('assignment_id', assignmentId)
-      const gradedNow = new Map((subs ?? []).map((s) => [String(s.student_id), s.graded_at]))
+        .from('submissions').select('student_id, graded_at, score').eq('assignment_id', assignmentId)
+      const gradedNow = new Map((subs ?? []).map((s) => [String(s.student_id), `${s.graded_at}|${s.score ?? ''}`]))
       const akNow = akFingerprint(asg.answer_key)
 
       const items = cached.map((r) => {
@@ -103,10 +106,10 @@ export default async function handler(req, res) {
       if (!asg) { res.status(403).json({ error: 'Forbidden' }); return }
       if (rawItems.length === 0) { res.status(200).json({ saved: 0 }); return }
 
-      // 蓋指紋用的現值 graded_at + answer_key 內容雜湊
+      // 蓋指紋用的現值 graded_at＋score + answer_key 內容雜湊（2026-07-22 與 GET 同格式 `${graded_at}|${score}`）
       const { data: subs } = await supabaseAdmin
-        .from('submissions').select('student_id, graded_at').eq('assignment_id', assignmentId)
-      const gradedNow = new Map((subs ?? []).map((s) => [String(s.student_id), s.graded_at]))
+        .from('submissions').select('student_id, graded_at, score').eq('assignment_id', assignmentId)
+      const gradedNow = new Map((subs ?? []).map((s) => [String(s.student_id), `${s.graded_at}|${s.score ?? ''}`]))
       const akFp = akFingerprint(asg.answer_key)
 
       const now = new Date().toISOString()
