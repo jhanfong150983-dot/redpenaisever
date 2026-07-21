@@ -84,6 +84,7 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.REPORT_QUESTION_ERROR_FEATURES]: MODEL_PRO,  // 開放題錯誤特徵歸納（3.5、demo 實證品質）
   [AI_ROUTE_KEYS.REPORT_PARENT_COMMENT]: MODEL_FLASH,     // 家長報告評語（純文字摘要、2.5 便宜足夠）
   [AI_ROUTE_KEYS.REPORT_PARENT_DIAGNOSIS]: MODEL_FLASH,   // 家長報告逐題錯因診斷（餵題本圖、2.5-flash、沙盒實證品質足）
+  [AI_ROUTE_KEYS.REPORT_KP_TAGGING]: MODEL_PRO,           // 知識點歸類（整本題本逐題判斷考點、每卷一次性 → 用 3.5；backfill 沙盒同款）
   [AI_ROUTE_KEYS.ADMIN_TAG_AGGREGATION]: MODEL_FLASH,      // admin 標籤聚合
 
   // ──────────────────────────────────────────────────

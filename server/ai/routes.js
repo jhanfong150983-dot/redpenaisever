@@ -34,6 +34,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   REPORT_QUESTION_ERROR_FEATURES: 'report.question_error_features',  // 2026-07-16 開放題錯誤特徵 AI 歸納（on-demand）
   REPORT_PARENT_COMMENT: 'report.parent_comment',  // 2026-07-18 家長報告老師評語生成（純文字、依批改結果、鼓勵型）
   REPORT_PARENT_DIAGNOSIS: 'report.parent_diagnosis',  // 2026-07-19 家長報告逐題錯因診斷（餵題本圖、一生一 call 批全部錯題、2.5-flash）
+  REPORT_KP_TAGGING: 'report.kp_tagging',  // 2026-07-22 知識點歸類（進階報告升級時懶跑、每卷一次性；tagging 餵題本圖＋kpTips 純文字共用此 key）
   ADMIN_TAG_AGGREGATION: 'admin.tag_aggregation',
   PERSPECTIVE_DETECT_CORNERS: 'perspective.detect_corners',
   UNKNOWN: 'unknown'

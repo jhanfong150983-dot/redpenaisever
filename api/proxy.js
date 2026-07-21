@@ -684,8 +684,11 @@ export default async function handler(req, res) {
   //   與 answer_only Phase B 共用同一個 RLS-safe loader（owner_id 比對 billingUserId）。
   const needsBookletForDiagnosis = routeKey === 'report.parent_diagnosis' && payload?.assignmentId
   const needsBookletForErrorFeatures = routeKey === 'report.question_error_features' && payload?.assignmentId
+  // 2026-07-22 知識點歸類（升級進階報告時懶跑）：tagging call 需整本題本圖（withBooklet=true）；
+  //   同 key 的 kpTips call 純文字（withBooklet 不帶）→ 不注入、不浪費圖 token。
+  const needsBookletForKpTagging = routeKey === 'report.kp_tagging' && payload?.assignmentId && payload?.withBooklet === true
   if ((routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId)
-      || needsBookletForDiagnosis || needsBookletForErrorFeatures) {
+      || needsBookletForDiagnosis || needsBookletForErrorFeatures || needsBookletForKpTagging) {
     questionBookletImages = await fetchQuestionBookletImages(
       // 2026-06-02: 同上，用 billingUserId 比對 owner_id（學生自助批改 answer_only 需題本圖）。
       supabaseAdmin, billingUserId, payload.assignmentId
@@ -708,7 +711,7 @@ export default async function handler(req, res) {
   // 把題本圖 server 端注入 contents（client 只送文字 + assignmentId、不必自抓、避開 bucket RLS）。
   //   兩個 route 都注入全部頁：answer_only 卷的題號 pageIndex 對應的是「答案卷單頁」、對不上多頁題本，
   //   無法可靠指定單頁 → 送全部頁、由 AI 依題號+正解自己找到本題（parent_diagnosis 本來就這樣、可靠）。
-  if ((needsBookletForDiagnosis || needsBookletForErrorFeatures) && questionBookletImages.length > 0) {
+  if ((needsBookletForDiagnosis || needsBookletForErrorFeatures || needsBookletForKpTagging) && questionBookletImages.length > 0) {
     const bookletParts = questionBookletImages
       .filter((img) => img?.data && img?.mimeType)
       .map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } }))
