@@ -7882,6 +7882,9 @@ function buildFinalGradingResult({
           else { base = 97; journey = isZy ? '注音判官放行' : '字形判官全票放行' }
         } else if (score?._glyphSplit) { base = 45; journey = '判官分歧攔(低信心)' }
         else if (score?.glyphBorderline) { base = 55; journey = '字形邊界攔' }
+        // ↓ 2026-07-21 拔read後修：_glyphJudge 格不做 A 段讀取一致性修正（判官不用讀值、synthetic 讀值
+        //   的 consistency 標籤無意義——實測 fromCache 重建把 synthetic 標 unstable → 全部 gz 格被冤 -8
+        //   還掛「兩讀分歧經鏈」誤導標籤）。skipA 判斷在下方以 _glyphJudge 直接跳過。
         else if (isZy) {
           const toneKept = Array.isArray(score?.glyphVotes) && score.glyphVotes.some((v) => String(v).startsWith('覆核'))
           if (toneKept) { base = 70; journey = '注音調號攔(覆核維持)' }
@@ -7896,10 +7899,10 @@ function buildFinalGradingResult({
       const chainConf = consistency?.arbiterResult?.chainConfidence
       const hasChainConf = Number.isFinite(chainConf)
       if (hasChainConf) { base = chainConf; journey = `知答鏈:${ensureString(consistency?.arbiterResult?.chainLevel, '')}` }
-      // A 段修正（只對走過讀取的格子；知答鏈已自帶信心 → 跳過）
+      // A 段修正（只對走過讀取的格子；知答鏈已自帶信心 → 跳過；_glyphJudge=判官看圖、與讀取無關 → 跳過）
       const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷'])
       let aTag = ''
-      if (!hasChainConf && !skipA.has(journey)) {
+      if (!hasChainConf && !skipA.has(journey) && !score?._glyphJudge) {
         if (row.consistencyStatus === 'stable') aTag = '兩讀一致'
         else if (row.consistencyStatus) { base -= 8; aTag = '兩讀分歧經鏈' }
         else aTag = ''
@@ -12177,7 +12180,12 @@ export async function runStagedGradingPhaseB({
           ...(arb.chainIllegible ? { chainIllegible: true } : {}),
           ...(Number.isFinite(arb.chainConfidence) ? { chainConfidence: arb.chainConfidence } : {})
         } : undefined,
-        consistencyStatus: arb?.consistent === true ? 'stable' : arb?.consistent === false ? 'diff' : 'unstable',
+        // 2026-07-21：consistent 欄缺失時、兩讀同值(read)仍應視為 stable（synthetic 佔位/舊資料——
+        //   否則整批被標 unstable、systemConfidence 冤 -8＋掛「兩讀分歧經鏈」誤導標籤）
+        consistencyStatus: arb?.consistent === true ? 'stable'
+          : arb?.consistent === false ? 'diff'
+          : (r1?.status === 'read' && r2?.status === 'read' && ensureString(r1?.answer, '') && ensureString(r1?.answer, '') === ensureString(r2?.answer, '')) ? 'stable'
+          : 'unstable',
         answerBbox: aq.answerBbox,
         bboxCorrected: !!aq.bboxCorrected,
         framingReason: aq.framingReason
@@ -13057,7 +13065,8 @@ export async function runStagedGradingPhaseB({
             // 2026-07-21 user 拍板（寧殺勿放）：兩判官「都有效回答但意見不合」＝筆跡有歧義 → 判錯＋低信心45亮黃燈。
             //   沙盒：吵架 20/155 注音格、平均每生 0.65 格（不爆量）；16/20 學生其實寫對→黃燈＋申訴要分兜底。
             //   吵架是系統性的（A/B 檢查流程盲點不同、兩輪吵法一致）→ 第三票無仲裁力、不加抽。
-            else if (['same', 'different', 'blank'].includes(va) && ['same', 'different', 'blank'].includes(vb)) { gVerdict = 'split'; parsed = pb }
+            //   split 理由取「說 different 那位」的指控（實測取 pb 會出現「意見不合：與標準一致」的自相矛盾理由）
+            else if (['same', 'different', 'blank'].includes(va) && ['same', 'different', 'blank'].includes(vb)) { gVerdict = 'split'; parsed = (vb === 'different' ? pb : va === 'different' ? pa : pb) }
             else { gVerdict = ''; parsed = null } // call 失敗/parse 失敗 → fail-open 交 accessor
             // ── 2026-07-13 調號覆核否決（user 拍板、few-shot 沙盒 11/12）────────────
             //   根因：語言先驗讓判官把符號自身筆畫（ㄔ斜撇/ㄩ右豎收勾）認領為期待中的調號、
