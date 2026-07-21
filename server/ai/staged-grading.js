@@ -7879,6 +7879,7 @@ function buildFinalGradingResult({
         const isZy = /[ㄅ-ㄩ]/.test(ensureString(question?.answer, ''))
         if (row.isCorrect) {
           if (rTxt.includes('調號覆核放行')) { base = 95; journey = '調號覆核放行' }
+          else if (score?.glyphPanelDissent) { base = 75; journey = '注音三判官多數放行' }
           else { base = 97; journey = isZy ? '注音判官放行' : '字形判官全票放行' }
         } else if (score?._glyphSplit) { base = 45; journey = '判官分歧攔(低信心)' }
         else if (score?.glyphBorderline) { base = 55; journey = '字形邊界攔' }
@@ -12973,6 +12974,61 @@ export async function runStagedGradingPhaseB({
         // 2026-07-12 參考圖管線整個拔除：V1 粗部件沙盒 A1(有參考圖) vs A2(無) 逐格逐輪完全相同
         //   ＝粗粒度下參考圖零增量；且參考圖（老師手寫）曾是誤殺源（逐像素比對兩份手寫的挑剔）。
         let glyphFlipped = 0
+        // ── 2026-07-21 注音三判官 v2：標準答案圖取得器（lazy、整段 run 只解析一次；拿不到 → fallback 舊雙判官）──
+        //   來源三層：assignment.answer_sheet_image_paths → template.answer_sheet_image_paths →
+        //   storage 慣例路徑（template-answer-sheets/{tid}/page-N.webp、answer-sheets/{aid}/page-N.webp，
+        //   舊模板欄位常 null 但檔案在——A班實證）。crop 用 akQ.answerBbox、注音不放大（鐵則）。
+        let zyRefCtx = null
+        const getZyRefCrop = async (q) => {
+          try {
+            if (process.env.ZY_PANEL3 === '0') return null
+            if (!zyRefCtx) {
+              const supa = getSupabaseAdmin()
+              const subId = internalContext?.submissionId || payload?.submissionId || null
+              let aid = payload?.assignmentId || internalContext?.assignmentId || null
+              if (!aid && subId) { const { data } = await supa.from('submissions').select('assignment_id').eq('id', subId).limit(1); aid = data?.[0]?.assignment_id || null }
+              let tplId = null, aPaths = null, tPaths = null
+              if (aid) { const { data } = await supa.from('assignments').select('answer_key_template_id, answer_sheet_image_paths').eq('id', aid).limit(1); tplId = data?.[0]?.answer_key_template_id || null; aPaths = data?.[0]?.answer_sheet_image_paths || null }
+              if (tplId && !Array.isArray(aPaths)) { const { data } = await supa.from('answer_key_templates').select('answer_sheet_image_paths').eq('id', tplId).limit(1); tPaths = data?.[0]?.answer_sheet_image_paths || null }
+              zyRefCtx = {
+                supa, pages: new Map(),
+                candidates: (pageIndex) => {
+                  const c = []
+                  if (Array.isArray(aPaths) && aPaths[pageIndex]) c.push(aPaths[pageIndex])
+                  if (Array.isArray(tPaths) && tPaths[pageIndex]) c.push(tPaths[pageIndex])
+                  if (tplId) c.push(`template-answer-sheets/${tplId}/page-${pageIndex}.webp`)
+                  if (aid) c.push(`answer-sheets/${aid}/page-${pageIndex}.webp`)
+                  return c
+                }
+              }
+            }
+            const pageIndex = Math.max(0, Number(q?.pageIndex) || 0)
+            if (!zyRefCtx.pages.has(pageIndex)) {
+              let loaded = null
+              for (const p of zyRefCtx.candidates(pageIndex)) {
+                try {
+                  const { data: blob, error } = await zyRefCtx.supa.storage.from('homework-images').download(p)
+                  if (error || !blob) continue
+                  const buf = Buffer.from(await blob.arrayBuffer())
+                  const { default: sharpMod } = await import('sharp')
+                  loaded = { buf, sharp: sharpMod, meta: await sharpMod(buf).metadata() }
+                  break
+                } catch { /* 下一個候選 */ }
+              }
+              zyRefCtx.pages.set(pageIndex, loaded)
+            }
+            const pg = zyRefCtx.pages.get(pageIndex)
+            const b = q?.answerBbox
+            if (!pg?.buf || !b || !pg.meta?.width) return null
+            const pad = 0.01
+            const cx = Math.round(Math.max(0, b.x - pad) * pg.meta.width), cy = Math.round(Math.max(0, b.y - pad) * pg.meta.height)
+            const cw = Math.min(pg.meta.width - cx, Math.round((Math.min(1, b.x + b.w + pad) - Math.max(0, b.x - pad)) * pg.meta.width))
+            const ch = Math.min(pg.meta.height - cy, Math.round((Math.min(1, b.y + b.h + pad) - Math.max(0, b.y - pad)) * pg.meta.height))
+            if (cw < 4 || ch < 4) return null
+            const outBuf = await pg.sharp(pg.buf).extract({ left: cx, top: cy, width: cw, height: ch }).jpeg({ quality: 90 }).toBuffer()
+            return { mimeType: 'image/jpeg', data: outBuf.toString('base64') }
+          } catch { return null }
+        }
         // 2026-07-12 事故修（07-11 國語卷 503×8）：三道預算防護——
         //   ①進場守門：剩餘預算 <90s 直接跳過整段（accessor 的份不可被吃）
         //   ②stage 硬上限：字形終審整段最多用 60s、到點中止剩餘格（fail-open 交 accessor）
@@ -13054,8 +13110,55 @@ export async function runStagedGradingPhaseB({
             if (!resp?.ok) return null
             return parseCandidateJson(resp.data)
           }
-          let parsed, gVerdict, glyphVotes = null, glyphBorderline = false, toneReviewReleased = false
+          let parsed, gVerdict, glyphVotes = null, glyphBorderline = false, toneReviewReleased = false, glyphPanelDissent = false
           if (t.kind === 'zhuyin') {
+            // ── 2026-07-21 注音三判官 v2（user 拍板；沙盒 155 格×2 輪：放水 0、誤殺 2（字醜/淡墨型、黃燈+申訴）、
+            //    純調號誤殺 0、155/155 零翻動）：三位「檢查流程不同」的判官全帶標準答案圖＋冒號條款 → 三票多數決。
+            //    調號幻覺在源頭被治好（單票幻覺被 2:1 壓掉）→ ⛔ 不再進調號覆核（判定即終審；覆核歷史上
+            //    還是座5/座11 放水元兇——整格放行吞掉符號指控）。標準圖拿不到 → fallback 舊雙判官＋調號覆核。
+            //    kill-switch ZY_PANEL3='0'（回雙判官）。
+            const zyRefCrop = await getZyRefCrop(t.q)
+            if (zyRefCrop) {
+              const COLON_CLAUSE = `\n⚠ 印刷題目的冒號「：」、頓號、標點都不是學生的筆畫——不要把它們當成輕聲點或調號。`
+              const pnA = `這是「國字注音」題。第一張是【標準答案圖】（老師答案卷、標準答案「${t.key}」）、第二張是【學生作答圖】。
+你的任務是「比對」、不是辨認：
+1. analysis：把標準「${t.key}」拆成注音符號＋聲調記號（一聲=無記號），逐一對照——標準圖有的符號/調號學生有沒有？學生有沒有標準圖上沒有的多餘筆畫？
+2. verdict：與標準圖一致 → "same"；符號不同、或多寫/少寫調號 → "different"；學生格內沒有手寫 → "blank"${COLON_CLAUSE}
+只輸出 JSON：{"analysis":"60字內","verdict":"same|different|blank","reason":"20字內"}`
+              const pnB = `這是「國字注音」題。第一張是【標準答案圖】（標準答案「${t.key}」）、第二張是【學生作答圖】。
+你的任務是「比對」：
+1. analysis：由上而下列出學生實際手寫的每個注音符號、跟標準圖並排比形狀；再比調號——先定位「獨立的短斜筆/勾/點」有沒有，⚠不可把符號自身筆畫當調號。
+2. verdict：形狀序列與調號跟標準圖一致 → "same"；任一不同 → "different"；沒寫 → "blank"${COLON_CLAUSE}
+只輸出 JSON：{"analysis":"60字內","verdict":"same|different|blank","reason":"20字內"}`
+              const pnC = `這是「國字注音」題。第一張是【標準答案圖】（標準答案「${t.key}」）、第二張是【學生作答圖】。
+你的任務是「找不同」（純比形狀、不要辨認符號名稱）：
+1. diff：並排比較兩張圖中「手寫注音」的部分，列出所有視覺差異（形狀、筆畫數、多出/缺少的獨立筆畫）。
+2. verdict：差異只是字醜、粗細、大小、位置偏移 → "same"；有「多出或缺少一筆獨立筆畫」或「某符號的形狀根本是另一個東西」 → "different"；學生格內沒有手寫 → "blank"${COLON_CLAUSE}
+只輸出 JSON：{"diff":"60字內","verdict":"same|different|blank","reason":"20字內"}`
+              const callJudgeRef = async (txt) => {
+                const parts = [{ text: txt }, { text: '【標準答案圖】' }, { inlineData: zyRefCrop }, { text: '【學生作答圖】' }, { inlineData: stuCrop }]
+                const resp = await executeStage({
+                  apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+                  payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                  timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
+                  routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
+                  stageContents: [{ role: 'user', parts }]
+                })
+                if (resp) stageResponses.push(resp)
+                if (!resp?.ok) return null
+                return parseCandidateJson(resp.data)
+              }
+              const pv = await Promise.all([callJudgeRef(pnA), callJudgeRef(pnB), callJudgeRef(pnC)])
+              glyphVotes = pv.map((v, i) => `${'ABC'[i]}:${ensureString(v?.verdict, '?')[0] ?? '?'}:${ensureString(v?.reason, '').slice(0, 30)}`)
+              const validP = pv.filter((v) => ['same', 'different', 'blank'].includes(v?.verdict))
+              const nOf = (k) => validP.filter((v) => v.verdict === k).length
+              if (nOf('blank') >= 2) { gVerdict = 'blank'; parsed = validP.find((v) => v.verdict === 'blank') }
+              else if (nOf('different') >= 2) { gVerdict = 'different'; parsed = validP.find((v) => v.verdict === 'different'); glyphBorderline = nOf('same') >= 1 } // 非全票=邊界(55🟡)
+              else if (nOf('same') >= 2) { gVerdict = 'same'; parsed = validP.find((v) => v.verdict === 'same'); glyphPanelDissent = nOf('different') >= 1 } // 2:1 給分(journey 75)
+              else if (validP.length >= 1) { gVerdict = 'split'; parsed = validP.find((v) => v.verdict === 'different') ?? validP[0] } // 全散 → 殺+45🟡
+              else { gVerdict = ''; parsed = null } // 三票全失敗 → fail-open（synthetic 格由安全網接 0+45🟡）
+            } else {
+            // ── fallback（無標準圖）：舊雙判官 AND 共識＋調號覆核 ──
             const [pa, pb] = await Promise.all([callJudge(zhuyinPromptA), callJudge(zhuyinPromptB)])
             const va = ensureString(pa?.verdict, ''), vb = ensureString(pb?.verdict, '')
             glyphVotes = [pa, pb].map((v, i) => `${i === 0 ? 'A' : 'B'}:${ensureString(v?.verdict, '?')[0] ?? '?'}:${ensureString(v?.reason, '').slice(0, 30)}`)
@@ -13063,8 +13166,6 @@ export async function runStagedGradingPhaseB({
             else if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
             // 2026-07-21 user 拍板（寧殺勿放）：兩判官「都有效回答但意見不合」＝筆跡有歧義 → 判錯＋低信心45亮黃燈。
-            //   沙盒：吵架 20/155 注音格、平均每生 0.65 格（不爆量）；16/20 學生其實寫對→黃燈＋申訴要分兜底。
-            //   吵架是系統性的（A/B 檢查流程盲點不同、兩輪吵法一致）→ 第三票無仲裁力、不加抽。
             //   split 理由取「說 different 那位」的指控（實測取 pb 會出現「意見不合：與標準一致」的自相矛盾理由）
             else if (['same', 'different', 'blank'].includes(va) && ['same', 'different', 'blank'].includes(vb)) { gVerdict = 'split'; parsed = (vb === 'different' ? pb : va === 'different' ? pa : pb) }
             else { gVerdict = ''; parsed = null } // call 失敗/parse 失敗 → fail-open 交 accessor
@@ -13075,8 +13176,11 @@ export async function runStagedGradingPhaseB({
             //   觸發窄門：標準無調號（一聲）×攔截理由=調號類（排除「聲母」等符號類指控）。
             //   三抽多數「無調號」→ 否決攔截放行＋標記；多數「有」（B座4 型離群墨）→ 維持攔截。
             //   實測：誤殺 8 格全救（跨兩班）、真調號 3/3 不誤傷、零觀察到漏放。kill switch ZY_TONE_REVIEW='0'。
+            //   2026-07-21 窄門修正（user 裁定坐實座5/座11 放水）：指控混到符號類問題（介音/聲母/字形…）
+            //   → 不得整格放行（覆核只審調號、放行會吞掉符號指控）；純調號指控才有資格被救。
             const toneClaim = /調號|聲調|[一二三四輕]聲/.test(ensureString(parsed?.reason, '') + ensureString(pa?.reason, ''))
-            if (process.env.ZY_TONE_REVIEW !== '0' && gVerdict === 'different' && !/[ˊˇˋ˙]/.test(t.key) && toneClaim) {
+            const symMixedClaim = /介音|聲母|韻母|符號|字形|形狀|拼音/.test(ensureString(parsed?.reason, '') + ensureString(pa?.reason, '') + ensureString(pb?.reason, ''))
+            if (process.env.ZY_TONE_REVIEW !== '0' && gVerdict === 'different' && !/[ˊˇˋ˙]/.test(t.key) && toneClaim && !symMixedClaim) {
               const toneReviewParts = [
                 { text: `你要判斷學生手寫注音「有沒有寫聲調記號」。先看兩張範例：
 【範例一】這位學生「沒有寫聲調記號」——注意：注音符號自身的筆畫（例如 ㄔ 的斜撇、ㄑ 的斜鉤、ㄩ 的收筆）看起來像小斜線，但它們是符號的一部分、不是調號：` },
@@ -13111,6 +13215,7 @@ export async function runStagedGradingPhaseB({
                 parsed = { reason: '調號覆核：無獨立調號筆畫' }
               }
             }
+            } // ← fallback（無標準圖：雙判官＋調號覆核）結束
           } else {
             // 國字：V1 粗部件 ×3 重抽、**一票 different 就攔＋非全票掛「邊界判定」標記**
             //   （user 拍板 2026-07-12：放水零容忍 > churn 誤殺；V11 全量票型重建實測：真錯誤全部
@@ -13158,9 +13263,10 @@ export async function runStagedGradingPhaseB({
             //   （read 值已證不可信、顯示 read 會出現「讀到ㄊㄨㄥˇ卻判對」矛盾）。
             deterministicScores.push({
               questionId: t.qid, isCorrect: true, score: gMax, maxScore: gMax, errorType: 'none',
-              scoringReason: `答案正確（字形視覺覆核通過、標準「${t.key}」${toneReviewReleased ? '、調號覆核放行' : ''}）`,
-              scoreConfidence: 100, studentFinalAnswer: '圖像辨識', needExplain: false,
+              scoringReason: `答案正確（字形視覺覆核通過、標準「${t.key}」${toneReviewReleased ? '、調號覆核放行' : ''}${glyphPanelDissent ? '、三判官2:1' : ''}）`,
+              scoreConfidence: glyphPanelDissent ? 75 : 100, studentFinalAnswer: '圖像辨識', needExplain: false,
               _vjBypass: true, _glyphJudge: true,
+              ...(glyphPanelDissent ? { glyphPanelDissent: true } : {}),
               glyphVotes
             })
             vjBypassIds.add(t.qid)
@@ -13180,7 +13286,7 @@ export async function runStagedGradingPhaseB({
             //   誤殺方向由申訴/老師改分兜底（沙盒 16/20 吵架格學生其實寫對、每生平均 0.65 格）。
             deterministicScores.push({
               questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'concept',
-              scoringReason: `兩位視覺判官意見不合（筆跡有歧義）：${ensureString(parsed?.reason, '').slice(0, 36) || '無法一致認定'}（標準「${t.key}」、視覺覆核、低信心）`,
+              scoringReason: `視覺判官意見分歧（筆跡有歧義）：${ensureString(parsed?.reason, '').slice(0, 36) || '無法一致認定'}（標準「${t.key}」、視覺覆核、低信心）`,
               scoreConfidence: 45, studentFinalAnswer: '圖像辨識', needExplain: false,
               _vjBypass: true, _glyphJudge: true, _glyphSplit: true,
               glyphVotes, glyphBorderline: true
