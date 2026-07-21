@@ -1557,11 +1557,19 @@ export function computeInformedDecision(reads, key) {
   const tally = new Map(), rawByNorm = new Map()
   for (const v of vals) { const n = fold(v); tally.set(n, (tally.get(n) || 0) + 1); if (!rawByNorm.has(n)) rawByNorm.set(n, v) }
   const entries = [...tally.entries()].sort((a, b) => b[1] - a[1])
-  const nonKey = entries.find(([k, c]) => k !== keyN && c >= 2)
-  if (nonKey) return { adopted: rawByNorm.get(nonKey[0]), level: 'informed_nonkey', illegible: false, chainConfidence: 80 }
+  const keyVotes = tally.get(keyN) || 0
+  const topNonKey = entries.find(([k]) => k !== keyN)  // 最高票的非標準值
+  const nonKeyVotes = topNonKey ? topNonKey[1] : 0
+  // ① 非標準值 ≥2 且「嚴格多於」標準票 → 採信（學生真的寫錯）。平手不採（見④，避免誤殺）。
+  if (nonKeyVotes >= 2 && nonKeyVotes > keyVotes) return { adopted: rawByNorm.get(topNonKey[0]), level: 'informed_nonkey', illegible: false, chainConfidence: 80 }
+  // ② 某值 ≥3 多數
   const maj = entries.find(([, c]) => c >= 3)
   if (maj) return { adopted: rawByNorm.get(maj[0]), level: 'informed_majority', illegible: false, chainConfidence: 80 }
-  if ((tally.get(keyN) || 0) >= 1) return { adopted: rawByNorm.get(keyN) ?? key, level: 'informed_key', illegible: false, chainConfidence: 70 }
+  // ③ 標準有票、且無「≥2 的非標準威脅」→ 採標準（單次非標準＝看走眼、防誤殺）
+  if (keyVotes >= 1 && nonKeyVotes < 2) return { adopted: rawByNorm.get(keyN) ?? key, level: 'informed_key', illegible: false, chainConfidence: 70 }
+  // ④ 標準與非標準平手（各 ≥2）＝真的模糊 → 暫定採標準（benefit of doubt 防誤殺）+ 低信心送老師
+  if (keyVotes >= 2) return { adopted: rawByNorm.get(keyN) ?? key, level: 'informed_tie', illegible: true, chainConfidence: 45 }
+  // ⑤ 無標準票的散裂 → 低信心 + 暫定最多票
   return { adopted: rawByNorm.get(entries[0][0]), level: 'informed_split', illegible: true, chainConfidence: 45 }
 }
 
