@@ -1606,6 +1606,13 @@ export async function applyEscalationChain({
     const ecFold = (x) => normalizeAnswerForComparison(deLatexMathText(ensureString(x, '')))
     const ecSame = (a, b) => a != null && b != null && ecFold(a) === ecFold(b)
     const ecKeyEq = (t, k) => t != null && !!k && ecFold(t) === ecFold(k)
+    // 2026-07-21 國字注音 VJ 化（user 拍板）：國語 fill_blank × 1~2字/注音 key 的格改由 Phase B
+    //   字形終審「全格視覺判分」（判官=主批改者、讀值不再決定分數）→ 鏈的重讀對它們是白花錢、跳過
+    //   （NR 落 tail 採 read2 僅供顯示；對錯/空白由判官看 crop 定案）。GLYPH_JUDGE_ALL='0' 連動回復。
+    const gzCjk12 = (s) => /^[一-鿿]{1,2}$/u.test(s)
+    const gzZhuyin5 = (s) => /^[ㄅ-ㄩˊˇˋ˙]{1,5}$/u.test(s)
+    const gzVjPrimary = process.env.GLYPH_JUDGE_ALL !== '0' && process.env.GLYPH_JUDGE !== '0'
+      && ensureString(payload?.domain, '').includes('國')
     const targets = questionResults.filter((qr) =>
       qr.arbiterResult?.arbiterStatus === 'needs_review'
       // 2026-07-13: compound_* 納入鏈守備範圍（空白衝突 chain-native 改版：社會卷圈選+理由題
@@ -1616,6 +1623,8 @@ export async function applyEscalationChain({
       && !(Array.isArray(qr.readAnswer2?.partValues) && qr.readAnswer2.partValues.length > 0)
       && cropMap?.has?.(qr.questionId)
       && keyFor(qr.questionId)
+      // 國字注音格：VJ 化後由字形終審全格判分、跳過鏈（省重讀）
+      && !(gzVjPrimary && qr.questionType === 'fill_blank' && (gzCjk12(keyFor(qr.questionId)) || gzZhuyin5(keyFor(qr.questionId))))
     )
     if (targets.length === 0) return null
     logStaged(pipelineRunId, 'basic', `[escalation-chain] mode=${mode} NR 候選 ${targets.length} 題 → 重抽盲+知答單圖對`)
@@ -12902,6 +12911,12 @@ export async function runStagedGradingPhaseB({
         ? classifyResult
         : (classifyResult?.alignedQuestions || classifyResult?.questions || [])
       const studentImgG = inlineImages[0]?.inlineData
+      // 2026-07-21 國字注音 VJ 化（user 拍板）：拔掉「讀出值==正解才覆核」窄門 → **全部**國字注音格
+      //   由判官視覺判分（判官=主批改者、讀值只當顯示參考）。沙盒 310 格×2 輪：與現行一致 91%、
+      //   8 格分歧經 user 逐格裁定 **7 格 VJ 對**（含救回 ㄔ/ㄊ 誤殺、抓到現行重批翻錯的 2 個放水）、
+      //   1 格可接受誤殺（土是相連、歸學生責任走申訴）；兩輪穩定 93%＝根治「重批注音亂翻」。
+      //   kill-switch GLYPH_JUDGE_ALL='0' → 回舊窄門（只覆核讀==正解）。
+      const glyphJudgeAll = process.env.GLYPH_JUDGE_ALL !== '0'
       const glyphTargets = []
       for (const ans of finalReadAnswerResult.answers) {
         if (ans.status !== 'read' || manualBypassIds.has(ans.questionId) || vjBypassIds.has(ans.questionId)) continue
@@ -12910,8 +12925,9 @@ export async function runStagedGradingPhaseB({
         const key = ensureString(q.answer, '').trim()
         const kind = cjk12(key) ? 'glyph' : zhuyin5(key) ? 'zhuyin' : null
         if (!kind) continue
-        if (normalizeAnswerForComparison(ensureString(ans.studentAnswerRaw, '')) !== normalizeAnswerForComparison(key)) continue
-        glyphTargets.push({ qid: ans.questionId, key, q, student: ans.studentAnswerRaw, kind })
+        const keyMatched = normalizeAnswerForComparison(ensureString(ans.studentAnswerRaw, '')) === normalizeAnswerForComparison(key)
+        if (!glyphJudgeAll && !keyMatched) continue
+        glyphTargets.push({ qid: ans.questionId, key, q, student: ans.studentAnswerRaw, kind, keyMatched })
       }
       if (glyphTargets.length > 0 && studentImgG?.data) {
         // 2026-07-12 參考圖管線整個拔除：V1 粗部件沙盒 A1(有參考圖) vs A2(無) 逐格逐輪完全相同
@@ -12963,24 +12979,26 @@ export async function runStagedGradingPhaseB({
 逐塊回答：學生在該位置寫的，大致上是這個部件嗎？
 判準（老師改考卷的標準）：字醜、潦草、微小筆畫差異（多一點/少一橫/內部細節模糊）都算 same。
 只有「某一大塊寫成別的東西」「缺了一整塊」「整個字是另一個字或自創字」才是 different。
-只輸出 JSON：{"blocks":"逐塊對照（60字內）","verdict":"same|different","reason":"20字內結論"}` : `這是學生手寫的一個國字。標準答案是「${t.key}」。
+格內完全沒有手寫筆跡（只有印刷）→ verdict="blank"。
+只輸出 JSON：{"blocks":"逐塊對照（60字內）","verdict":"same|different|blank","reason":"20字內結論"}` : `這是學生手寫的一個國字。標準答案是「${t.key}」。
 你的任務：判斷學生寫的是不是「${t.key}」這個字。用「大部件」層級比對、不要逐筆畫檢查：
 1. blocks：把「${t.key}」拆成最多 2~3 個大部件（左右或上下大塊），逐塊回答——學生在這個位置寫的，大致上是同一個東西嗎？
 2. 判準（老師改考卷的標準）：字醜、潦草、微小筆畫差異（多一點/少一橫/內部細節模糊）都算 same。
    只有「某一大塊寫成別的東西」「缺了一整塊」「整個字是另一個字或自創字」才是 different。
-只輸出 JSON：{"blocks":"逐塊對照（60字內）","verdict":"same|different","reason":"20字內結論"}`
+格內完全沒有手寫筆跡（只有印刷）→ verdict="blank"。
+只輸出 JSON：{"blocks":"逐塊對照（60字內）","verdict":"same|different|blank","reason":"20字內結論"}`
           // 注音雙判官（兩版 prompt 幻覺去相關、AND 共識才攔）
           const zhuyinPromptA = `這是學生手寫的注音答案。標準答案是「${t.key}」。
 你的任務不是辨認、是校對。請先逐符號分析、再下結論：
 1. analysis：把標準「${t.key}」拆成注音符號＋聲調記號（一聲=無記號、二聲ˊ、三聲ˇ、四聲ˋ、輕聲˙），逐一對照學生所寫
-2. verdict：符號與聲調記號完全一致 → "same"；符號不同、或聲調記號多寫/少寫/寫錯 → "different"
+2. verdict：符號與聲調記號完全一致 → "same"；符號不同、或聲調記號多寫/少寫/寫錯 → "different"；格內完全沒有手寫筆跡（只有印刷）→ "blank"
 ⚠ 特別檢查聲調：一聲的標準「沒有任何記號」——學生若寫了 ˊˇˋ˙ 任何一個就是 different。
-只輸出 JSON：{"analysis":"逐符號分析（60字內）","verdict":"same|different","reason":"20字內結論"}`
+只輸出 JSON：{"analysis":"逐符號分析（60字內）","verdict":"same|different|blank","reason":"20字內結論"}`
           const zhuyinPromptB = `這是學生手寫的注音答案。標準答案是「${t.key}」。
 你的任務不是辨認、是校對。請先逐符號分析、再下結論：
 1. analysis：由上而下列出學生實際寫的每一個注音符號；然後檢查聲調記號——**先定位**：符號右側或上方有沒有一筆「獨立的短斜筆/勾/點」？有→寫出位置與形狀再認定調號；沒有→一聲。⚠不可把注音符號自身筆畫或雜點當成調號。
-2. verdict：符號序列與聲調記號都一致 → "same"；任一符號或聲調（含有無）不同 → "different"
-只輸出 JSON：{"analysis":"符號清單＋調號定位（60字內）","verdict":"same|different","reason":"20字內結論"}`
+2. verdict：符號序列與聲調記號都一致 → "same"；任一符號或聲調（含有無）不同 → "different"；格內完全沒有手寫筆跡（只有印刷）→ "blank"
+只輸出 JSON：{"analysis":"符號清單＋調號定位（60字內）","verdict":"same|different|blank","reason":"20字內結論"}`
           const callJudge = async (txt) => {
             const parts = [{ text: txt }, { inlineData: stuCrop }]
             const resp = await executeStage({
@@ -13001,7 +13019,8 @@ export async function runStagedGradingPhaseB({
             const [pa, pb] = await Promise.all([callJudge(zhuyinPromptA), callJudge(zhuyinPromptB)])
             const va = ensureString(pa?.verdict, ''), vb = ensureString(pb?.verdict, '')
             glyphVotes = [pa, pb].map((v, i) => `${i === 0 ? 'A' : 'B'}:${ensureString(v?.verdict, '?')[0] ?? '?'}:${ensureString(v?.reason, '').slice(0, 30)}`)
-            if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
+            if (va === 'blank' && vb === 'blank') { gVerdict = 'blank'; parsed = pb } // 兩判官都看不到手寫 → 未作答
+            else if (va === 'different' && vb === 'different') { gVerdict = 'different'; parsed = pb }
             else if (va === 'same' && vb === 'same') { gVerdict = 'same'; parsed = pb }
             else { gVerdict = ''; parsed = null } // 分歧/失敗 → fail-open 交 accessor（read=key、實質放行）
             // ── 2026-07-13 調號覆核否決（user 拍板、few-shot 沙盒 11/12）────────────
@@ -13057,8 +13076,10 @@ export async function runStagedGradingPhaseB({
             // 2026-07-12 觀測補洞（user 問「三抽都有理由嗎」）：三票各有完整 blocks+reason、
             //   之前只存被採用那票 → 全票持久化（S/D + 理由摘要），事後稽核看得到票型（如 SSD 邊界格）
             glyphVotes = votes.map((v, i) => `${i + 1}:${ensureString(v?.verdict, '?')[0] ?? '?'}:${ensureString(v?.reason, '').slice(0, 30)}`)
+            const blankVotes = votes.filter((v) => v?.verdict === 'blank')
             const dVotes = valid.filter((v) => v.verdict === 'different')
-            if (dVotes.length >= 1) {
+            if (blankVotes.length >= 2) { gVerdict = 'blank'; parsed = blankVotes[0] } // 多數票看不到手寫 → 未作答
+            else if (dVotes.length >= 1) {
               gVerdict = 'different'; parsed = dVotes[0]
               glyphBorderline = dVotes.length < valid.length // 非全票=邊界判定（DDD 才算共識殺）
             }
@@ -13100,10 +13121,23 @@ export async function runStagedGradingPhaseB({
             // 2026-07-12 字形終審=國字題終點（user 指出 same 還會白搭 accessor）：
             //   讀出=正解（fold 相等）＋字形視覺驗證通過 → 確定性給滿分、bypass accessor
             //   （accessor 文字比對已無資訊增量、留著反而多一次誤判機會）。error/no_ref 仍 fail-open 進 accessor。
+            // 2026-07-21 VJ 化：read≠key 但視覺覆核通過（座3 ㄊㄨㄥˇ型誤讀被救回）→ 顯示值用標準形
+            //   （read 值已證不可信、顯示 read 會出現「讀到ㄊㄨㄥˇ卻判對」矛盾）。
             deterministicScores.push({
               questionId: t.qid, isCorrect: true, score: gMax, maxScore: gMax, errorType: 'none',
               scoringReason: `答案正確（字形視覺覆核通過、標準「${t.key}」${toneReviewReleased ? '、調號覆核放行' : ''}）`,
-              scoreConfidence: 100, studentFinalAnswer: ensureString(t.student, ''), needExplain: false,
+              scoreConfidence: 100, studentFinalAnswer: t.keyMatched ? ensureString(t.student, '') : t.key, needExplain: false,
+              _vjBypass: true, _glyphJudge: true,
+              glyphVotes
+            })
+            vjBypassIds.add(t.qid)
+          } else if (gVerdict === 'blank') {
+            // 2026-07-21 VJ 化：判官共識「格內無手寫」→ 未作答 0 分（read 的假內容不採；
+            //   沙盒 blank/blank 30 格與現行未作答全吻合）。
+            deterministicScores.push({
+              questionId: t.qid, isCorrect: false, score: 0, maxScore: gMax, errorType: 'blank',
+              scoringReason: `學生未作答（字形視覺覆核：格內無手寫筆跡、標準「${t.key}」）`,
+              scoreConfidence: 90, studentFinalAnswer: '', needExplain: false,
               _vjBypass: true, _glyphJudge: true,
               glyphVotes
             })
