@@ -12104,6 +12104,18 @@ export async function runStagedGradingPhaseB({
     //   漏題在 Phase B 被當「無法辨識」0 分（實測 數習P66-69 5/12 號全 0）。
     //   這裡一律用 arbiterDecisions 補「finalAnswers 沒有、但有 AI 讀取結果」的題（只補、不覆蓋老師已確認的）。
     if (!Array.isArray(finalAnswers)) finalAnswers = []
+    // ── 🆕 2026-07-21 拔掉「manual 強制保留」（user 拍板）──────────────────────────
+    //   背景：真實老師只智慧批改一次；改學生答案只在申訴/低信心且改完不重批 → 「manual + 重批」
+    //   只在我們測試時共存。舊行為「重批保留老師已確認的 manual（只補不覆蓋）」在真實使用用不到、
+    //   只製造 pre-0審查 殘留混亂（培英A班 23 格）。→ 重批一律丟棄舊 manual、由下方安全網用 arbiter(AI)重判。
+    //   涵蓋 payload 與 DB 兩個來源（此處 finalAnswers 已定案）。kill-switch PRESERVE_MANUAL_ON_REGRADE='1' 回復舊行為。
+    if (process.env.PRESERVE_MANUAL_ON_REGRADE !== '1') {
+      const beforeManual = finalAnswers.length
+      finalAnswers = finalAnswers.filter((fa) => fa?.finalAnswerSource !== 'manual')
+      if (finalAnswers.length !== beforeManual) {
+        console.log(`[PhaseB fromCache] 拔 manual 強制保留：丟棄 ${beforeManual - finalAnswers.length} 題舊 manual、改由 AI 重判（安全網 arbiter 補回）`)
+      }
+    }
     if (Array.isArray(cachedState.arbiterDecisions) && cachedState.arbiterDecisions.length > 0) {
       const faQids = new Set(finalAnswers.map((fa) => fa?.questionId).filter(Boolean))
       let filledFromArbiter = 0
