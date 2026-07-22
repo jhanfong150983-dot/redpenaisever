@@ -1717,6 +1717,24 @@ export async function applyEscalationChain({
         results.push({ qr, ...decision, ...meta })
       }
     }))
+    // 2026-07-22 鷹架克漏字 × 知答鏈（英語期末 座7 2-B-4 實案）：印刷句留空格、學生只填空格字時，
+    //   原讀(read1/2)報「印刷+手寫」全句、鏈的知答重讀只報手寫片段 → L0 兩讀片段一致就定案，
+    //   accessor 再拿片段對全句、把「印刷在卷上的字」當學生漏寫扣分（冤枉）。
+    //   修：鏈值為原讀的有序 token 子序列（嚴格較短）→ 採全句（同 read1/read2 間的 scaffoldClozeLongerRaw 規則）。
+    //   防誤採：鏈值須 ≥2 個 token（數學「5」⊂ 幻覺長句這種單值不適用）；中文 token 化後為空 → 自動不生效。
+    //   先比 read2（知答校對、含爭議字的正確拼寫才對得上）、再比 read1。
+    if (informedMode) {
+      for (const r of results) {
+        if (typeof r.adopted !== 'string' || !r.adopted.trim()) continue
+        if (String(r.adopted).trim().split(/\s+/).filter(Boolean).length < 2) continue
+        const full = scaffoldClozeLongerRaw(r.adopted, ecVal(r.qr.readAnswer2))
+          ?? scaffoldClozeLongerRaw(r.adopted, ecVal(r.qr.readAnswer1))
+        if (full && full !== r.adopted) {
+          r.adopted = full
+          r.level = `${r.level}_scaffold`
+        }
+      }
+    }
     const summary = {}
     for (const r of results) summary[r.level ?? 'unresolved'] = (summary[r.level ?? 'unresolved'] || 0) + 1
     const totalMs = Date.now() - chainStartedAt
