@@ -2435,8 +2435,16 @@ export function gradeSentenceClozeDeterministic(q, studentAnswerRaw, status) {
   const modelOrig = clozeTokenize(key)
   const model = modelOrig.map(clozeSynCanon)  // 同義正規化後比對(He↔Doctor 等)；拼錯/文法/數字不在字典→仍嚴
   const stu = clozeTokenize(raw).map(clozeSynCanon)
-  const matched = clozeLcsMatchedModelIdx(model, stu)
-  const wrongTokens = modelOrig.filter((_, idx) => !matched.has(idx))
+  // 2026-07-22 詞序顛倒案（英語期末 座7 2-D-1：「It is」寫成「is it」、LCS 只罰一半）：
+  //   詞數相同 → 逐「位置」比對（印刷鷹架天然對齊位置、swap 兩格都算錯＝老師的空格視角）；
+  //   詞數不同（漏寫/多寫、位置會整段錯位）→ 維持 LCS 對齊較公允。
+  let wrongTokens
+  if (model.length === stu.length) {
+    wrongTokens = modelOrig.filter((_, idx) => model[idx] !== stu[idx])
+  } else {
+    const matched = clozeLcsMatchedModelIdx(model, stu)
+    wrongTokens = modelOrig.filter((_, idx) => !matched.has(idx))
+  }
   const wrongCount = wrongTokens.length
   const score = Math.max(0, Math.min(maxScore, maxScore - wrongCount))
   return {
