@@ -18,6 +18,8 @@ function mergeAnalysis(ak, byId, kpTips) {
     q.analysis = {
       topic: String(it.topic ?? '').slice(0, 60),
       knowledgePoints: (Array.isArray(it.knowledgePoints) ? it.knowledgePoints : []).map((k) => String(k).slice(0, 60)).slice(0, 4),
+      // 2026-07-22 三層版：課綱指標代碼（固定候選、跨卷穩定）——未來趨勢聚合用這層
+      ...(it.code ? { code: String(it.code).slice(0, 20) } : {}),
       ...(it.ability ? { ability: String(it.ability).slice(0, 30) } : {}),
       ...(it.cnaArea ? { cnaArea: String(it.cnaArea).slice(0, 30) } : {}),
       ...(it.note ? { note: String(it.note).slice(0, 120) } : {}),
