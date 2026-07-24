@@ -226,7 +226,9 @@ export async function callGeminiGenerateContent({
   //   探針：3.5-flash 吃 MINIMAL/LOW；2.5-flash 仍 400（"Thinking level is not supported"）；Pro 未驗證。
   //   → 白名單只放 3.5-flash；帶 thinkingConfig 進來的只有 READ_ANSWER/VJ_GRADE 兩個 config
   //   （classify 不帶、5/20 pixel bbox 舊案不受影響）。kill switch：THINKING_STRIP_ALL='1' 回全 strip。
-  const supportsThinkingLevel = (m) => typeof m === 'string' && /3\.5-flash/i.test(m)
+  // 2026-07-22: 白名單補 3.6-flash——切 3.6 當天發現寫死 3.5 害 MINIMAL 靜默失效、
+  //   鏈重讀退回 dynamic thinking（社會卷單次重批 NT$12、95% 是 thoughts）。3.6 實測吃 MINIMAL(200、thoughts 歸零)。
+  const supportsThinkingLevel = (m) => typeof m === 'string' && /3\.[56]-flash/i.test(m)
     && process.env.THINKING_STRIP_ALL !== '1'
 
   for (let i = 0; i < allModels.length; i++) {
