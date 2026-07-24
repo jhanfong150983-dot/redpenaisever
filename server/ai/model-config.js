@@ -19,7 +19,10 @@
 
 import { AI_ROUTE_KEYS } from './routes.js'
 
-export const MODEL_PRO = process.env.MODEL_PRO || 'gemini-3.5-flash'
+// 2026-07-22 全套 3.5→3.6（user 拍板）：四路由沙盒＝read 100%(3.5=94%)+輸出側帳單-42%、
+//   classify 在偷懶案例框貼手寫(3.5 框壓印刷字、眼球裁決)、extract 單題 2/5 題型翻動(微退可接受)、
+//   注音判官誤殺 2→3(邊界字跡、放水維持 0、寧殺勿放可接受)。回退=env MODEL_PRO 設回 3.5。
+export const MODEL_PRO = process.env.MODEL_PRO || 'gemini-3.6-flash'
 export const MODEL_FLASH = process.env.MODEL_FLASH || 'gemini-2.5-flash'
 
 // 2026-06-30：移除降階換模型（FALLBACK_CHAIN 清空）。

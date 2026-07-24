@@ -3246,6 +3246,7 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
     }
 
     // ── 成本計算 helper（依實際 model 真實 Gemini rate） ──
+    // gemini-3.6-flash: $1.50 input / $7.50 output per 1M（2026-07-21 發布價）
     // gemini-3.5-flash: $1.50 input / $9.00 output per 1M
     // gemini-2.5-flash: $0.075 input / $0.30 output per 1M
     // 未知 model: 用 3.5-flash rate 保守估
@@ -3253,6 +3254,7 @@ async function handleTokenUsage(req, res, supabaseAdmin) {
       const m = String(modelName || '').toLowerCase()
       if (m.includes('2.5-flash-lite')) return { inUsd: 0.10, outUsd: 0.40 }
       if (m.includes('2.5-flash')) return { inUsd: 0.075, outUsd: 0.30 }
+      if (m.includes('3.6-flash')) return { inUsd: 1.50, outUsd: 7.50 }
       if (m.includes('3.5-flash')) return { inUsd: 1.50, outUsd: 9.00 }
       if (m.includes('3-flash-preview')) return { inUsd: 1.50, outUsd: 9.00 }
       if (m.includes('pro')) return { inUsd: 1.25, outUsd: 5.00 }
