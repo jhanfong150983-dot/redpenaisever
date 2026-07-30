@@ -395,6 +395,30 @@ export async function fetchCampus1ClassStudents(dsns, accessToken) {
 }
 
 /**
+ * 2026-07-30 全校教師名冊:getTeacher 不帶參數=全校所有教師(官方規格確認)。
+ * 回傳 teacher 陣列:{ teacherID(校內唯一), teacherName, teacherAcc, teacherNo, ... }
+ * @param {string} dsns
+ * @param {string} accessToken
+ * @returns {Promise<Array>}
+ */
+export async function fetchCampus1Teachers(dsns, accessToken) {
+  const base = getJasmineApiBase()
+  const url = `${base}/${dsns}/getTeacher`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  })
+  if (response.status === 404) return []
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`Jasmine getTeacher failed ${response.status}: ${text.slice(0, 200)}`)
+  }
+  const json = await response.json()
+  const teachers = json?.teacher ?? json?.data?.teacher ?? []
+  return Array.isArray(teachers) ? teachers : []
+}
+
+/**
  * 2026-07-30 轉出清查:傳入已知 studentID 清單,回傳「非在校」者(含 status:休學/畢業及離校/刪除/其他)。
  * 休學也算非在校、復學沿用同 studentID(官方規格)。status 欄位可能需 jasmine.profile scope。
  * @param {string} dsns

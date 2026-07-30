@@ -2,7 +2,8 @@ import crypto from 'node:crypto'
 import {
   getJasmineAccessToken,
   fetchCampus1ClassStudents,
-  fetchCampus1StudentDeparted
+  fetchCampus1StudentDeparted,
+  fetchCampus1Teachers
 } from './_1campus.js'
 
 function toIntOrNull(v) {
@@ -302,6 +303,38 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
     }
   }
 
+  // 5) 全校教師名冊(2026-07-30 user 拍板:教師也全校抓、不等登入;綁定狀態由 overview 比對)
+  let teacherCount = 0
+  try {
+    const teacherList = await fetchCampus1Teachers(dsns, token)
+    const rosterRows = []
+    const seenTid = new Set()
+    for (const t of teacherList) {
+      const tid = t.teacherID != null && String(t.teacherID).trim() ? String(t.teacherID).trim() : null
+      if (!tid || seenTid.has(tid)) continue
+      seenTid.add(tid)
+      rosterRows.push({
+        school_id: schoolId,
+        campus_teacher_id: tid,
+        teacher_name: String(t.teacherName || '').trim() || null,
+        teacher_acc: String(t.teacherAcc || '').trim() || null,
+        updated_at: nowIso
+      })
+    }
+    for (const chunk of chunkArray(rosterRows, 200)) {
+      const { error } = await supabaseAdmin
+        .from('school_teacher_roster')
+        .upsert(chunk, { onConflict: 'school_id,campus_teacher_id' })
+      if (error) {
+        console.warn('[roster-sync] teacher roster upsert failed:', error.message)
+        break
+      }
+    }
+    teacherCount = rosterRows.length
+  } catch (e) {
+    console.warn('[roster-sync] teacher roster failed (non-blocking):', e?.message)
+  }
+
   const parentBound = [...studentByPid.values()].filter((s) => (s.parentCount ?? 0) > 0).length
   return {
     classes: classRows.length,
@@ -311,6 +344,7 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
     missingChecked: missing.length,
     departedMarked,
     parentFieldPresent,
-    parentBound
+    parentBound,
+    teacherCount
   }
 }

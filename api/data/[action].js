@@ -7503,56 +7503,113 @@ async function handleSchoolTeacherOverview(req, res) {
     return
   }
   try {
-    const { data: tRows, error: tErr } = await supabaseAdmin
-      .from('school_teachers')
-      .select('teacher_user_id, status, created_at')
-      .eq('school_id', schoolId)
-    if (tErr) throw tErr
-    const active = (tRows ?? []).filter((r) => r.status === 'active')
-    const ids = active.map((r) => r.teacher_user_id)
-    if (!ids.length) {
-      res.status(200).json({ teachers: [] })
-      return
-    }
-    const [{ data: profs }, { data: classrooms }] = await Promise.all([
-      supabaseAdmin.from('profiles').select('id, name, email, ink_balance').in('id', ids),
-      supabaseAdmin.from('classrooms').select('id, owner_id').eq('school_id', schoolId).in('owner_id', ids)
+    // 2026-07-30 user 拍板:以「全校教師名冊」(getTeacher 全校抓、school_teacher_roster)為主體,
+    // 不再只列登入過的老師。綁定比對:external_identities(campus1, 同 dsns) 的 teacherID/帳號 ↔ 名冊。
+    // 顯示帳號統一用 1Campus 帳號(tmail 只是新竹市的 google 帳號、他縣市不同),綁定與否另掛標籤。
+    const [{ data: school }, { data: roster }] = await Promise.all([
+      supabaseAdmin.from('schools').select('id, provider_dsns').eq('id', schoolId).maybeSingle(),
+      supabaseAdmin
+        .from('school_teacher_roster')
+        .select('campus_teacher_id, teacher_name, teacher_acc')
+        .eq('school_id', schoolId)
     ])
-    const profById = new Map((profs ?? []).map((p) => [p.id, p]))
-    const classroomIds = (classrooms ?? []).map((c) => c.id)
-    const ownerByClassroom = new Map((classrooms ?? []).map((c) => [c.id, c.owner_id]))
-    // 作業數 per 老師(1Campus 班的作業;classroomIds 班級級距小、單次 .in 可承受,保守仍 chunk)
-    const assignCountByOwner = new Map()
-    for (let i = 0; i < classroomIds.length; i += 100) {
-      const chunk = classroomIds.slice(i, i + 100)
-      const { data: assigns } = await supabaseAdmin
-        .from('assignments')
-        .select('id, classroom_id')
-        .in('classroom_id', chunk)
-      for (const a of assigns ?? []) {
-        const owner = ownerByClassroom.get(a.classroom_id)
-        if (owner) assignCountByOwner.set(owner, (assignCountByOwner.get(owner) || 0) + 1)
+    const dsns = school?.provider_dsns || ''
+
+    // 綁定映射:teacherID → user_id(主鍵比對),1Campus 帳號 → user_id(備援)
+    const userByTid = new Map()
+    const userByAcc = new Map()
+    if (dsns) {
+      const { data: idents } = await supabaseAdmin
+        .from('external_identities')
+        .select('user_id, provider_account, provider_meta')
+        .eq('provider', 'campus1')
+        .eq('provider_dsns', dsns)
+      for (const it of idents ?? []) {
+        const tid = String(it.provider_meta?.teacherID ?? '').trim()
+        if (tid) userByTid.set(tid, it.user_id)
+        const acc = String(it.provider_account || '').trim().toLowerCase()
+        if (acc) userByAcc.set(acc, it.user_id)
       }
     }
+
+    // 已綁定者的 profile 與班級/作業統計
+    const boundIds = [...new Set([...userByTid.values(), ...userByAcc.values()])]
+    const profById = new Map()
     const classCountByOwner = new Map()
-    for (const c of classrooms ?? []) {
-      classCountByOwner.set(c.owner_id, (classCountByOwner.get(c.owner_id) || 0) + 1)
-    }
-    const teachers = active
-      .map((r) => {
-        const p = profById.get(r.teacher_user_id)
-        return {
-          profileId: r.teacher_user_id,
-          name: p?.name || '',
-          email: p?.email || '',
-          inkBalance: typeof p?.ink_balance === 'number' ? p.ink_balance : 0,
-          classroomCount: classCountByOwner.get(r.teacher_user_id) || 0,
-          assignmentCount: assignCountByOwner.get(r.teacher_user_id) || 0,
-          joinedAt: r.created_at
+    const assignCountByOwner = new Map()
+    if (boundIds.length) {
+      const [{ data: profs }, { data: classrooms }] = await Promise.all([
+        supabaseAdmin.from('profiles').select('id, name, email, ink_balance').in('id', boundIds),
+        supabaseAdmin.from('classrooms').select('id, owner_id').eq('school_id', schoolId).in('owner_id', boundIds)
+      ])
+      for (const p of profs ?? []) profById.set(p.id, p)
+      const classroomIds = (classrooms ?? []).map((c) => c.id)
+      const ownerByClassroom = new Map((classrooms ?? []).map((c) => [c.id, c.owner_id]))
+      for (const c of classrooms ?? []) {
+        classCountByOwner.set(c.owner_id, (classCountByOwner.get(c.owner_id) || 0) + 1)
+      }
+      for (let i = 0; i < classroomIds.length; i += 100) {
+        const chunk = classroomIds.slice(i, i + 100)
+        const { data: assigns } = await supabaseAdmin
+          .from('assignments')
+          .select('id, classroom_id')
+          .in('classroom_id', chunk)
+        for (const a of assigns ?? []) {
+          const owner = ownerByClassroom.get(a.classroom_id)
+          if (owner) assignCountByOwner.set(owner, (assignCountByOwner.get(owner) || 0) + 1)
         }
+      }
+    }
+
+    const buildRow = ({ name, account, profileId }) => {
+      const p = profileId ? profById.get(profileId) : null
+      return {
+        name: name || p?.name || '',
+        account: account || '',
+        bound: !!p,
+        profileId: p ? profileId : null,
+        loginEmail: p?.email || '',
+        inkBalance: p ? (typeof p.ink_balance === 'number' ? p.ink_balance : 0) : null,
+        classroomCount: p ? classCountByOwner.get(profileId) || 0 : null,
+        assignmentCount: p ? assignCountByOwner.get(profileId) || 0 : null
+      }
+    }
+
+    let teachers
+    if ((roster ?? []).length > 0) {
+      teachers = (roster ?? []).map((r) => {
+        const acc = String(r.teacher_acc || '').trim().toLowerCase()
+        const profileId = userByTid.get(String(r.campus_teacher_id)) ?? (acc ? userByAcc.get(acc) : undefined)
+        return buildRow({ name: r.teacher_name, account: r.teacher_acc, profileId })
       })
-      .sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email, 'zh-TW'))
-    res.status(200).json({ teachers })
+    } else {
+      // 名冊尚未同步:退回舊行為(只列登入過的老師)
+      const { data: tRows } = await supabaseAdmin
+        .from('school_teachers')
+        .select('teacher_user_id, status')
+        .eq('school_id', schoolId)
+      const active = (tRows ?? []).filter((r) => r.status === 'active')
+      if (active.length && !profById.size) {
+        const { data: profs } = await supabaseAdmin
+          .from('profiles')
+          .select('id, name, email, ink_balance')
+          .in('id', active.map((r) => r.teacher_user_id))
+        for (const p of profs ?? []) profById.set(p.id, p)
+      }
+      teachers = active.map((r) => {
+        const p = profById.get(r.teacher_user_id)
+        return buildRow({ name: p?.name, account: p?.email, profileId: r.teacher_user_id })
+      })
+    }
+    teachers.sort((a, b) => {
+      if (a.bound !== b.bound) return a.bound ? -1 : 1
+      return (a.name || a.account).localeCompare(b.name || b.account, 'zh-TW')
+    })
+    res.status(200).json({
+      teachers,
+      teacherCount: teachers.length,
+      boundCount: teachers.filter((t) => t.bound).length
+    })
   } catch (err) {
     res.status(500).json({ error: err?.message || '讀取教師總覽失敗' })
   }
