@@ -9,6 +9,7 @@
  */
 import crypto from 'crypto'
 import { handleCors } from '../../server/_cors.js'
+import { enrollSchoolTeacher } from '../../server/school-membership.js'
 import {
   setAuthCookies,
   isSecureRequest,
@@ -431,6 +432,11 @@ async function handlePhase1(req, res) {
     const isRateLimit = /429|rate.?limit|too.?many/i.test(err?.message || '')
     ssoErrorRedirect(res, frontendUrl, isRateLimit ? 'system_busy' : 'create_user_failed')
     return
+  }
+
+  // 2026-07-25 學校端子計畫1:老師登入即自動歸校(1Campus 專屬、fail-open、removed 不復活)
+  if (!isStudent) {
+    await enrollSchoolTeacher(supabaseAdmin, { userId, dsns })
   }
 
   // 學生：綁定 auth_user_id（多層備援，避免單一鍵值不一致）

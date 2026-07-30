@@ -13,6 +13,7 @@ import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
 import { localizeBookletQuestions } from '../../server/ai/booklet-locate.js'
+import { enrollSchoolTeacher } from '../../server/school-membership.js'
 import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import { trackingContext } from '../../server/ink-usage-tracker.js'
@@ -7588,6 +7589,9 @@ async function handleCampus1ClassroomSync(req, res) {
       if (schoolErr) console.warn('[1campus sync] schools upsert failed:', schoolErr.message)
     }
   }
+
+  // 2026-07-25 學校端子計畫1:同步班級的老師自動歸校(schools 列此刻必存在)
+  await enrollSchoolTeacher(supabaseAdmin, { userId: user.id, schoolId })
 
   for (const cls of groupedClasses) {
     const providerClassId = cls.courseID
