@@ -7654,6 +7654,271 @@ async function processSchoolJobSubmission({ supabaseDb, apiKey, job, sub, assign
   return { score: totalScore }
 }
 
+// ============================================================
+// 2026-07-30 Step 6(獨立模型):考卷母實體(school_exams)+建卷 fan-out。
+// 考卷=母實體+逐班 assignment(全在考卷持有帳號名下、folder='學校考卷'、教師介面過濾)。
+// fan-out 鏡像老師端「從模板建作業」:answer_key 深拷貝+規則注入、totalPages 由題號前綴推算、
+// 答案卷頁圖不複製(assignment.answer_sheet_image_paths 直接引用模板路徑,消費端本有 fallback)。
+// ============================================================
+async function resolveExamOwner(supabaseDb, schoolId, fallbackUserId) {
+  const { data: sc } = await supabaseDb
+    .from('schools').select('exam_owner_profile_id').eq('id', schoolId).maybeSingle()
+  let examOwner = sc?.exam_owner_profile_id || null
+  if (!examOwner && fallbackUserId) {
+    examOwner = fallbackUserId
+    await supabaseDb
+      .from('schools')
+      .update({ exam_owner_profile_id: examOwner, updated_at: new Date().toISOString() })
+      .eq('id', schoolId)
+      .is('exam_owner_profile_id', null)
+    const { data: re } = await supabaseDb
+      .from('schools').select('exam_owner_profile_id').eq('id', schoolId).maybeSingle()
+    examOwner = re?.exam_owner_profile_id || examOwner
+  }
+  return examOwner
+}
+
+async function handleSchoolExams(req, res) {
+  const supabaseDb = getSupabaseAdmin()
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+
+  if (req.method === 'GET') {
+    const schoolId = typeof req.query.schoolId === 'string' ? req.query.schoolId.trim() : ''
+    if (!schoolId) {
+      res.status(400).json({ error: 'Missing schoolId' })
+      return
+    }
+    const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+    if (!actor.isAdminUser && !actor.schoolIds.includes(schoolId)) {
+      res.status(403).json({ error: 'Forbidden' })
+      return
+    }
+    // ?templates=1 → 答案卷選單(行政自己的+考卷持有帳號的模板)
+    if (String(req.query.templates || '') === '1') {
+      const examOwner = await resolveExamOwner(supabaseDb, schoolId, null)
+      const ownerIds = [...new Set([user.id, examOwner].filter(Boolean))]
+      const { data: tpls } = await supabaseDb
+        .from('answer_key_templates')
+        .select('id, name, domain, folder, doc_type, answer_sheet_mode, question_count, total_score, page_orientations')
+        .in('owner_id', ownerIds)
+        .order('updated_at', { ascending: false })
+        .limit(100)
+      res.status(200).json({
+        templates: (tpls ?? []).map((t) => ({
+          id: t.id,
+          name: t.name || '',
+          domain: t.domain || undefined,
+          folder: t.folder || undefined,
+          docType: t.doc_type || undefined,
+          answerSheetMode: t.answer_sheet_mode || undefined,
+          questionCount: t.question_count ?? 0,
+          totalScore: t.total_score ?? 0,
+          pageOrientations: t.page_orientations || undefined
+        }))
+      })
+      return
+    }
+    // 考卷列表+各班
+    const { data: exams } = await supabaseDb
+      .from('school_exams')
+      .select('id, title, status, answer_key_template_id, created_at, updated_at')
+      .eq('school_id', schoolId)
+      .order('created_at', { ascending: false })
+      .limit(30)
+    const examIds = (exams ?? []).map((e) => e.id)
+    let classesByExam = new Map()
+    if (examIds.length) {
+      const { data: cls } = await supabaseDb
+        .from('school_exam_classes')
+        .select('exam_id, campus_class_id, classroom_id, assignment_id, class_name')
+        .in('exam_id', examIds)
+      classesByExam = new Map()
+      for (const c of cls ?? []) {
+        if (!classesByExam.has(c.exam_id)) classesByExam.set(c.exam_id, [])
+        classesByExam.get(c.exam_id).push({
+          campusClassId: c.campus_class_id,
+          classroomId: c.classroom_id,
+          assignmentId: c.assignment_id,
+          className: c.class_name || ''
+        })
+      }
+    }
+    res.status(200).json({
+      exams: (exams ?? []).map((e) => ({
+        id: e.id,
+        title: e.title,
+        status: e.status,
+        createdAt: e.created_at,
+        classes: classesByExam.get(e.id) || []
+      }))
+    })
+    return
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const mode = typeof body?.mode === 'string' ? body.mode : 'create'
+  const schoolId = typeof body?.schoolId === 'string' ? body.schoolId.trim() : ''
+  if (!schoolId) {
+    res.status(400).json({ error: 'Missing schoolId' })
+    return
+  }
+  const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+  if (!actor.isAdminUser && !actor.schoolIds.includes(schoolId)) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+
+  if (mode === 'create') {
+    const title = typeof body.title === 'string' ? body.title.trim() : ''
+    const templateId = typeof body.templateId === 'string' ? body.templateId.trim() : ''
+    const campusClassIds = Array.isArray(body.campusClassIds)
+      ? [...new Set(body.campusClassIds.map((x) => String(x)))]
+      : []
+    const rules = body.settings && typeof body.settings === 'object' ? body.settings : {}
+    if (!title || !templateId || campusClassIds.length === 0) {
+      res.status(400).json({ error: '缺少考卷名稱、答案卷或班級' })
+      return
+    }
+    try {
+      const examOwner = await resolveExamOwner(supabaseDb, schoolId, user.id)
+      const { data: tpl } = await supabaseDb
+        .from('answer_key_templates')
+        .select('*')
+        .eq('id', templateId)
+        .maybeSingle()
+      if (!tpl) {
+        res.status(404).json({ error: '找不到此答案卷' })
+        return
+      }
+      if (tpl.owner_id !== user.id && tpl.owner_id !== examOwner) {
+        res.status(403).json({ error: '這份答案卷不在您的名下(請先用分享碼匯入)' })
+        return
+      }
+      // answerKey 深拷貝+批改規則注入(鏡像老師端 AssignmentList 建作業)
+      const answerKey = JSON.parse(JSON.stringify(tpl.answer_key || {}))
+      if (rules.strictness) answerKey.strictness = rules.strictness
+      if (tpl.domain === '數學') {
+        if (rules.fractionRule) answerKey.fractionRule = rules.fractionRule
+        if (rules.unitErrorRule) {
+          answerKey.unitErrorRule = rules.unitErrorRule
+          answerKey.unitErrorDeduction = Number(rules.unitErrorDeduction) || 1
+        }
+        if (rules.processCreditRule) {
+          answerKey.processCreditRule = rules.processCreditRule
+          answerKey.processCreditDeduction = Number(rules.processCreditDeduction) || 1
+        }
+      }
+      if (tpl.domain === '英語') {
+        answerKey.englishRules = {
+          ...(rules.enPunctuationCheck
+            ? { punctuationCheck: { enabled: true, deductionPerError: Number(rules.enPunctuationDeduction) || 1 } }
+            : {}),
+          ...(rules.enWordOrderCheck
+            ? { wordOrderCheck: { enabled: true, deductionPerError: Number(rules.enWordOrderDeduction) || 1 } }
+            : {})
+        }
+      }
+      const questions = Array.isArray(answerKey?.questions) ? answerKey.questions : []
+      const totalPages = Math.max(
+        1,
+        ...questions.map((q) => parseInt(String(q?.id || '1').split('-')[0], 10) || 1)
+      )
+
+      // 班級鏡像就緒檢查:缺班就自動補一次
+      const loadMirror = async () => {
+        const { data } = await supabaseDb
+          .from('classrooms')
+          .select('id, campus_class_id, name')
+          .eq('owner_id', examOwner)
+          .eq('school_id', schoolId)
+          .in('campus_class_id', campusClassIds)
+        return data ?? []
+      }
+      let mirrors = await loadMirror()
+      if (mirrors.length < campusClassIds.length) {
+        try {
+          await mirrorSchoolClassesToOwner(supabaseDb, { schoolId, ownerId: examOwner })
+          mirrors = await loadMirror()
+        } catch (e) {
+          console.warn('[school-exams] ensure mirror failed:', e?.message)
+        }
+      }
+      const mirrorByClassId = new Map(mirrors.map((m) => [String(m.campus_class_id), m]))
+      const missing = campusClassIds.filter((cid) => !mirrorByClassId.has(cid))
+      if (missing.length) {
+        res.status(400).json({ error: `有 ${missing.length} 個班級尚未就緒,請先按「全校名冊同步」` })
+        return
+      }
+
+      // fan-out:每班一份 assignment(owner=考卷持有帳號;圖引用模板路徑不複製)
+      const nowIso = new Date().toISOString()
+      const examId = 'sxm_' + crypto.randomBytes(8).toString('hex')
+      const assignmentRows = []
+      const examClassRows = []
+      for (const cid of campusClassIds) {
+        const m = mirrorByClassId.get(cid)
+        const aid = 'sxa_' + crypto.randomBytes(8).toString('hex')
+        assignmentRows.push({
+          id: aid,
+          owner_id: examOwner,
+          classroom_id: m.id,
+          title,
+          total_pages: totalPages,
+          domain: tpl.domain || null,
+          doc_type: tpl.doc_type || null,
+          folder: '學校考卷',
+          scoring_mode: rules.scoringMode === 'unscored' ? 'unscored' : 'scored',
+          answer_key: answerKey,
+          total_questions: questions.length,
+          answer_key_template_id: tpl.id,
+          student_upload_enabled: false,
+          allow_student_ai_grading: false,
+          answer_sheet_mode: tpl.answer_sheet_mode || null,
+          answer_sheet_image_paths: tpl.answer_sheet_image_paths || null,
+          question_booklet_image_paths: tpl.question_booklet_image_paths || null,
+          updated_at: nowIso
+        })
+        examClassRows.push({
+          exam_id: examId,
+          campus_class_id: cid,
+          classroom_id: m.id,
+          assignment_id: aid,
+          class_name: m.name || ''
+        })
+      }
+      const { error: aErr } = await supabaseDb.from('assignments').insert(assignmentRows)
+      if (aErr) throw new Error(`建立班級作業失敗:${aErr.message}`)
+      const { error: eErr } = await supabaseDb.from('school_exams').insert({
+        id: examId,
+        school_id: schoolId,
+        owner_id: examOwner,
+        created_by: user.id,
+        title,
+        answer_key_template_id: tpl.id,
+        status: 'draft'
+      })
+      if (eErr) throw new Error(`建立考卷失敗:${eErr.message}`)
+      const { error: cErr } = await supabaseDb.from('school_exam_classes').insert(examClassRows)
+      if (cErr) throw new Error(`建立考卷班級關聯失敗:${cErr.message}`)
+      console.log('[school-exams] created', examId, title, `${campusClassIds.length} classes`)
+      res.status(200).json({ ok: true, examId, classCount: campusClassIds.length })
+    } catch (err) {
+      res.status(500).json({ error: err?.message || '建立考卷失敗' })
+    }
+    return
+  }
+
+  res.status(400).json({ error: 'Unknown mode' })
+}
+
 // 2026-07-30 Step 5(獨立模型):班級鏡像——行政按鈕觸發,在「自己名下」建立全校班級+學生
 // (來源=全校名冊 SSoT;獨立模型:學校考卷 owner=行政帳號,教師端功能原生可用)。冪等可重按。
 async function handleSchoolMirrorClasses(req, res) {
@@ -9642,6 +9907,10 @@ const log = document.getElementById('log');
   }
   if (action === 'school-mirror-classes') {
     await handleSchoolMirrorClasses(req, res)
+    return
+  }
+  if (action === 'school-exams') {
+    await handleSchoolExams(req, res)
     return
   }
   if (action === '1campus-debug') {
