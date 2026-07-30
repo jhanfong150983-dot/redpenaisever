@@ -3782,7 +3782,66 @@ export default async function handler(req, res) {
     return await handleSchoolAdmins(req, res, supabaseAdmin)
   }
 
+  if (action === 'school-wallet') {
+    return await handleSchoolWallet(req, res, supabaseAdmin, adminUser)
+  }
+
   res.status(404).json({ error: 'Unknown action' })
+}
+
+// ========== 學校錢包儲值(2026-07-30 user 拍板:學校層級共用錢包) ==========
+// schools.ink_balance=學校點數池(同校行政共見、統一批改扣此池);簽約制、儲值由系統 admin 後台操作。
+// POST {schoolId, delta, note?}:delta 正=儲值、負=調減(不低於 0);寫 school_ink_ledger 供對帳。
+// 未來「配發給老師」= reason 'school_grant' 轉帳(school 池減、teacher profile 加),本端點不處理。
+async function handleSchoolWallet(req, res, supabaseAdmin, adminUser) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const body = parseJsonBody(req, res)
+  if (!body) return
+  const schoolId = String(body.schoolId || '').trim()
+  const delta = Number(body.delta)
+  const note = typeof body.note === 'string' ? body.note.trim().slice(0, 200) : ''
+  if (!schoolId || !Number.isFinite(delta) || !Number.isInteger(delta) || delta === 0) {
+    res.status(400).json({ error: '缺少 schoolId 或 delta 非非零整數' })
+    return
+  }
+  try {
+    const { data: school, error: sErr } = await supabaseAdmin
+      .from('schools')
+      .select('id, name, ink_balance')
+      .eq('id', schoolId)
+      .maybeSingle()
+    if (sErr) throw sErr
+    if (!school) {
+      res.status(404).json({ error: '找不到此學校' })
+      return
+    }
+    const before = typeof school.ink_balance === 'number' ? school.ink_balance : 0
+    const after = Math.max(0, before + delta)
+    const { error: uErr } = await supabaseAdmin
+      .from('schools')
+      .update({ ink_balance: after, updated_at: new Date().toISOString() })
+      .eq('id', schoolId)
+    if (uErr) throw uErr
+    const { error: lErr } = await supabaseAdmin.from('school_ink_ledger').insert({
+      school_id: schoolId,
+      delta: after - before,
+      balance_after: after,
+      reason: delta > 0 ? 'admin_topup' : 'admin_adjustment',
+      actor_profile_id: adminUser?.id ?? null,
+      metadata: { before, after, ...(note ? { note } : {}) }
+    })
+    if (lErr) {
+      // ledger 失敗要讓 admin 知道(餘額已改),不靜默
+      res.status(500).json({ error: `餘額已更新但點數紀錄寫入失敗:${lErr.message}` })
+      return
+    }
+    res.status(200).json({ ok: true, balance: after, schoolName: school.name || '' })
+  } catch (err) {
+    res.status(500).json({ error: err?.message || '學校儲值失敗' })
+  }
 }
 
 // ========== 學校行政開通 ==========

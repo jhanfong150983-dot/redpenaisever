@@ -7405,6 +7405,51 @@ async function handleGradingResults(req, res) {
 // 1Campus 班級同步
 // ============================================================
 
+// 2026-07-30 Step 4(user 拍板改判):學校層級共用錢包——schools.ink_balance,同校所有行政
+// 看同一個餘額、統一批改扣學校池。GET=餘額查詢(系統 admin 或該校 school_admin);
+// 儲值走 admin API(school-wallet POST,簽約制我們後台操作)。
+async function handleSchoolWallet(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const schoolId = typeof req.query.schoolId === 'string' ? req.query.schoolId.trim() : ''
+  if (!schoolId) {
+    res.status(400).json({ error: 'Missing schoolId' })
+    return
+  }
+  const supabaseAdmin = getSupabaseAdmin()
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseAdmin.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseAdmin.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const allowed =
+    profile?.role === 'admin' || (Array.isArray(saRows) && saRows.some((r) => r.school_id === schoolId))
+  if (!allowed) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  const { data: school, error } = await supabaseAdmin
+    .from('schools')
+    .select('id, ink_balance')
+    .eq('id', schoolId)
+    .maybeSingle()
+  if (error) {
+    res.status(500).json({ error: error.message })
+    return
+  }
+  if (!school) {
+    res.status(404).json({ error: '找不到此學校' })
+    return
+  }
+  res.status(200).json({ balance: typeof school.ink_balance === 'number' ? school.ink_balance : 0 })
+}
+
 // 2026-07-30 Step 3.5:行政端全校名冊同步(getClassStudent 全校 → school_classes+school_person SSoT
 // +getStudentDeparted 轉出標記)。權限=系統 admin 或該校 school_admin。細節見 server/school-membership.js。
 async function handleSchoolRosterSync(req, res) {
@@ -8538,6 +8583,10 @@ const log = document.getElementById('log');
   }
   if (action === 'school-roster-sync') {
     await handleSchoolRosterSync(req, res)
+    return
+  }
+  if (action === 'school-wallet') {
+    await handleSchoolWallet(req, res)
     return
   }
   if (action === '1campus-debug') {
