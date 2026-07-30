@@ -2600,6 +2600,16 @@ async function handleImportTemplate(req, res) {
   if (!shareCode) { res.status(400).json({ error: '請輸入分享碼' }); return }
 
   const supabaseDb = getSupabaseAdmin()
+  // 2026-07-31 學校歸屬:行政端匯入時帶 schoolId → 複製品標記為學校答案卷
+  //(行政端只顯示學校的、教師端只顯示個人的,兩邊不混)。驗證=該校行政或 admin。
+  let importSchoolId = null
+  const requestedSchoolId = typeof body?.schoolId === 'string' ? body.schoolId.trim() : ''
+  if (requestedSchoolId) {
+    const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+    if (actor.isAdminUser || actor.schoolIds.includes(requestedSchoolId)) {
+      importSchoolId = requestedSchoolId
+    }
+  }
   try {
     // 查找分享碼對應的答案卷（不限 owner，任何人的都可以匯入）
     // 2026-05-28: SELECT 補 page_orientations + answer_sheet_mode、避免新匯入者踩
@@ -2642,6 +2652,7 @@ async function handleImportTemplate(req, res) {
         answer_sheet_mode: source.answer_sheet_mode,
         answer_sheet_image_paths: newAnswerSheetPaths.length ? newAnswerSheetPaths : null,
         question_booklet_image_paths: newBookletPaths.length ? newBookletPaths : null,
+        school_id: importSchoolId,
         created_at: nowIso,
         updated_at: nowIso
       })
@@ -2663,6 +2674,7 @@ async function handleImportTemplate(req, res) {
         answerSheetMode: source.answer_sheet_mode,
         answerSheetImagePaths: newAnswerSheetPaths.length ? newAnswerSheetPaths : undefined,
         questionBookletImagePaths: newBookletPaths.length ? newBookletPaths : undefined,
+        schoolId: importSchoolId ?? undefined,
         updatedAt: nowIso
       }
     })
@@ -4284,6 +4296,7 @@ async function handleSync(req, res) {
           domain: row.domain ?? undefined,
           docType: row.doc_type ?? undefined,
           folder: row.folder ?? undefined,
+          schoolId: row.school_id ?? undefined,
           answerKey: row.answer_key ?? undefined,
           questionCount: row.question_count ?? undefined,
           totalScore: row.total_score ?? undefined,
@@ -4727,6 +4740,7 @@ async function handleSync(req, res) {
           domain: t.domain ?? undefined,
           doc_type: t.docType ?? t.doc_type ?? undefined,
           folder: t.folder ?? undefined,
+          school_id: t.schoolId ?? t.school_id ?? undefined,
           answer_key: mergedTplAk.get(t.id) ?? t.answerKey ?? t.answer_key,
           question_count: t.questionCount ?? t.question_count ?? undefined,
           total_score: t.totalScore ?? t.total_score ?? undefined,
@@ -7665,14 +7679,12 @@ async function handleSchoolExams(req, res) {
       res.status(403).json({ error: 'Forbidden' })
       return
     }
-    // ?templates=1 → 答案卷選單(行政自己的+考卷持有帳號的模板)
+    // ?templates=1 → 答案卷選單(該校的學校答案卷——school_id 標記;不含任何人的個人答案卷)
     if (String(req.query.templates || '') === '1') {
-      const examOwner = await resolveExamOwner(supabaseDb, schoolId, null)
-      const ownerIds = [...new Set([user.id, examOwner].filter(Boolean))]
       const { data: tpls } = await supabaseDb
         .from('answer_key_templates')
         .select('id, name, domain, folder, doc_type, answer_sheet_mode, question_count, total_score, page_orientations')
-        .in('owner_id', ownerIds)
+        .eq('school_id', schoolId)
         .order('updated_at', { ascending: false })
         .limit(100)
       res.status(200).json({
