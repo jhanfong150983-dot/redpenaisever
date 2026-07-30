@@ -14,6 +14,7 @@ import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
 import { localizeBookletQuestions } from '../../server/ai/booklet-locate.js'
 import { enrollSchoolTeacher, upsertSchoolPersonsForClassroom, syncSchoolRoster, mirrorSchoolClassesToOwner } from '../../server/school-membership.js'
+import { debitSchoolInk } from '../../server/school-wallet.js'
 import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import { trackingContext } from '../../server/ink-usage-tracker.js'
@@ -7478,40 +7479,7 @@ async function schoolJobFetchBookletImages(supabaseAdmin, assignment) {
   }
 }
 
-// 原子扣學校點數(樂觀鎖 ×4;允許單卷成本造成的小幅負值飄移,tick 入口以 balance>0 守門)
-async function debitSchoolInk(supabaseAdmin, { schoolId, points, jobId, submissionId, assignmentId, actorProfileId, calls }) {
-  if (!points || points <= 0) return { ok: true, balance: null }
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const { data: school } = await supabaseAdmin
-      .from('schools').select('ink_balance').eq('id', schoolId).maybeSingle()
-    const before = typeof school?.ink_balance === 'number' ? school.ink_balance : 0
-    const after = before - points
-    const { data: updated, error } = await supabaseAdmin
-      .from('schools')
-      .update({ ink_balance: after, updated_at: new Date().toISOString() })
-      .eq('id', schoolId)
-      .eq('ink_balance', before)
-      .select('id')
-    if (error) {
-      console.warn('[school-job] debit failed:', error.message)
-      return { ok: false, balance: before }
-    }
-    if (updated?.length) {
-      const { error: lErr } = await supabaseAdmin.from('school_ink_ledger').insert({
-        school_id: schoolId,
-        delta: -points,
-        balance_after: after,
-        reason: 'grading_job',
-        actor_profile_id: actorProfileId ?? null,
-        metadata: { jobId, submissionId, assignmentId, calls }
-      })
-      if (lErr) console.warn('[school-job] debit ledger insert failed:', lErr.message)
-      return { ok: true, balance: after }
-    }
-  }
-  console.warn('[school-job] debit optimistic-lock exhausted schoolId=', schoolId)
-  return { ok: false, balance: null }
-}
+// 原子扣學校點數:共用 server/school-wallet.js 的 debitSchoolInk(2026-07-31 抽出、proxy 學校計費共用)
 
 // 單卷端到端:下載卷圖 → Phase A → finalAnswers → Phase B fromCache → 存檔+state transitions
 async function processSchoolJobSubmission({ supabaseDb, apiKey, job, sub, assignment, answerKeyStr, answerKeyImages, bookletImages }) {
@@ -8353,11 +8321,9 @@ async function handleSchoolGradingJob(req, res) {
         const debit = await debitSchoolInk(supabaseDb, {
           schoolId: job.school_id,
           points: costAcc.points,
-          jobId: job.id,
-          submissionId: next.id,
-          assignmentId: assignment.id,
           actorProfileId: job.actor_profile_id,
-          calls: costAcc.calls
+          reason: 'grading_job',
+          metadata: { jobId: job.id, submissionId: next.id, assignmentId: assignment.id, calls: costAcc.calls }
         })
         points += costAcc.points
         if (debit.ok && typeof debit.balance === 'number' && debit.balance <= 0) {

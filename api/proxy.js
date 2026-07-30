@@ -13,6 +13,7 @@ import { getEnvValue } from '../server/_env.js'
 import { runAiPipeline } from '../server/ai/orchestrator.js'
 import { MODEL_FLASH } from '../server/ai/model-config.js'
 import { resolveBillingUserId } from '../server/billing-user.js'
+import { debitSchoolInk } from '../server/school-wallet.js'
 import crypto from 'crypto'
 
 // 🆕 AnswerKey 緩存（按 user + hash 存儲）
@@ -536,6 +537,10 @@ export default async function handler(req, res) {
   let currentBalance = 0
   let isAdmin = false
   let hasValidInkSession = false
+  // 2026-07-31 學校計費:client(學校檢視)掛的 header;驗證通過後 schoolBillingId 生效
+  const requestedSchoolBillingId = readSingleHeaderValue(req?.headers?.['x-school-billing']) || ''
+  let schoolBillingId = null
+  const schoolCostAcc = { points: 0, calls: 0 }
   // 計費對象：學生 → 老師 owner_id；老師/admin → 自己
   // 「老師付費、學生免費」的核心：所有 balance check / deduction 都對 billingUserId 做
   let billingUserId = user.id
@@ -569,6 +574,38 @@ export default async function handler(req, res) {
       console.log(`${logPrefix} billing-routed student actor=${actorUserId.slice(0, 8)}... → teacher=${billingUserId.slice(0, 8)}... balance=${currentBalance}`)
     }
 
+    // 2026-07-31 學校計費(user 拍板:行政端的 AI 一律扣學校錢包、教師端照舊扣個人):
+    // client 在學校檢視掛 x-school-billing header;驗證通過才生效——
+    // 生效後跳過個人 session/個人扣款,per-call 點數經 ALS 累加、回應前原子扣 schools.ink_balance。
+    if (requestedSchoolBillingId) {
+      try {
+        const { data: saRows } = await supabaseAdmin
+          .from('school_admins')
+          .select('school_id')
+          .eq('profile_id', user.id)
+        const allowedSchool =
+          isAdmin || (Array.isArray(saRows) && saRows.some((r) => r.school_id === requestedSchoolBillingId))
+        if (allowedSchool) {
+          const { data: sch } = await supabaseAdmin
+            .from('schools')
+            .select('ink_balance')
+            .eq('id', requestedSchoolBillingId)
+            .maybeSingle()
+          const schoolBalance = typeof sch?.ink_balance === 'number' ? sch.ink_balance : 0
+          if (schoolBalance <= 0 && !isAdmin) {
+            res.status(402).json({ error: '學校點數不足,請聯繫 RedPen AI 儲值後再試' })
+            return
+          }
+          schoolBillingId = requestedSchoolBillingId
+          console.log(`${logPrefix} school-billing school=${schoolBillingId} balance=${schoolBalance}`)
+        } else {
+          console.warn(`${logPrefix} school-billing rejected user=${maskUserId(user.id)} school=${requestedSchoolBillingId}`)
+        }
+      } catch (e) {
+        console.warn(`${logPrefix} school-billing check failed:`, e?.message)
+      }
+    }
+
     if (inkSessionId) {
       try {
         // session 仍以 actor（學生本人）為 key — 一個老師可能同時有多個學生在批改、
@@ -599,7 +636,7 @@ export default async function handler(req, res) {
       }
     }
 
-    if (!isAdmin && !hasValidInkSession && currentBalance <= 0) {
+    if (!isAdmin && !schoolBillingId && !hasValidInkSession && currentBalance <= 0) {
       const message = inkSessionId
         ? '批改會話已結束或點數不足，請重新進入或補充墨水'
         : '墨水不足，請先補充墨水'
@@ -733,10 +770,14 @@ export default async function handler(req, res) {
         actorUserId,
         billingUserId,
         isAdmin,
-        inkSessionId,
+        // 學校計費模式:個人 session 一律不掛(usage row session_id=null、不會被個人結算)
+        inkSessionId: schoolBillingId ? null : inkSessionId,
         // 2026-05-23: 帶 assignment/submission 給 recordTokenUsage 寫入 ink_session_usage
         assignmentId: payload?.assignmentId || undefined,
-        submissionId: payload?.submissionId || undefined
+        submissionId: payload?.submissionId || undefined,
+        ...(schoolBillingId
+          ? { billingScope: 'school', schoolId: schoolBillingId, schoolCost: schoolCostAcc }
+          : {})
       },
       () =>
         runAiPipeline({
@@ -777,7 +818,38 @@ export default async function handler(req, res) {
       data.answerKeyHash = answerKeyHash
     }
 
-    if (responseOk && data?.usageMetadata) {
+    // 學校計費:per-call 點數已由 ink-usage-tracker 累加進 schoolCostAcc(staged 多 call 也齊),
+    // 這裡一次原子扣學校錢包+一筆 ledger(reason='school_ai');不走個人扣款分支。
+    if (responseOk && schoolBillingId) {
+      try {
+        if (schoolCostAcc.points > 0) {
+          const debit = await debitSchoolInk(supabaseAdmin, {
+            schoolId: schoolBillingId,
+            points: schoolCostAcc.points,
+            actorProfileId: user.id,
+            reason: 'school_ai',
+            metadata: {
+              routeKey: pipelineResult.resolvedRouteKey || routeKey || null,
+              calls: schoolCostAcc.calls,
+              assignmentId: payload?.assignmentId || null
+            }
+          })
+          if (data && typeof data === 'object') {
+            data.ink = {
+              chargedPoints: schoolCostAcc.points,
+              schoolBilling: true,
+              applied: debit.ok,
+              balanceAfter: debit.balance
+            }
+          }
+          console.log(`${logPrefix} school-billing charged ${schoolCostAcc.points} pts (${schoolCostAcc.calls} calls) school=${schoolBillingId}`)
+        } else if (data && typeof data === 'object') {
+          data.ink = { chargedPoints: 0, schoolBilling: true, applied: true }
+        }
+      } catch (error) {
+        console.warn('School ink billing failed:', error)
+      }
+    } else if (responseOk && data?.usageMetadata) {
       try {
         const cost = computeInkPoints(data.usageMetadata)
         let inkSummary = null
