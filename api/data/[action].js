@@ -7576,6 +7576,7 @@ async function handleSchoolTeacherOverview(req, res) {
     }
 
     let teachers
+    let source = 'roster'
     if ((roster ?? []).length > 0) {
       teachers = (roster ?? []).map((r) => {
         const acc = String(r.teacher_acc || '').trim().toLowerCase()
@@ -7583,6 +7584,7 @@ async function handleSchoolTeacherOverview(req, res) {
         return buildRow({ name: r.teacher_name, account: r.teacher_acc, profileId })
       })
     } else {
+      source = 'fallback'
       // 名冊尚未同步:退回舊行為(只列登入過的老師)
       const { data: tRows } = await supabaseAdmin
         .from('school_teachers')
@@ -7608,7 +7610,8 @@ async function handleSchoolTeacherOverview(req, res) {
     res.status(200).json({
       teachers,
       teacherCount: teachers.length,
-      boundCount: teachers.filter((t) => t.bound).length
+      boundCount: teachers.filter((t) => t.bound).length,
+      source
     })
   } catch (err) {
     res.status(500).json({ error: err?.message || '讀取教師總覽失敗' })
