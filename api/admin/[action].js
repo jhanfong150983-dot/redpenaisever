@@ -3778,7 +3778,140 @@ export default async function handler(req, res) {
     return await handleQuality(req, res, supabaseAdmin)
   }
 
+  if (action === 'school-admins') {
+    return await handleSchoolAdmins(req, res, supabaseAdmin)
+  }
+
   res.status(404).json({ error: 'Unknown action' })
+}
+
+// ========== 學校行政開通 ==========
+// 學校端 Step 3:簽約制、系統 admin 後台把既有 profile 掛進 school_admins(user 2026-07-25 拍板)。
+// 學校列只來自 1Campus 同步(schools 表),不在後台建校——無 1Campus 的學校 by design 不開通。
+// GET    → { schools, admins }(admins 含 profile email/name 供列表)
+// POST   {email, schoolId} → 開通(對方需登入過一次、已有 profile)
+// DELETE {profileId, schoolId}(或 query 同名參數)→ 移除
+async function handleSchoolAdmins(req, res, supabaseAdmin) {
+  if (req.method === 'GET') {
+    try {
+      const [{ data: schools, error: schoolsErr }, { data: saRows, error: saErr }] = await Promise.all([
+        supabaseAdmin.from('schools').select('id, name, provider_dsns, school_type').order('name', { ascending: true }),
+        supabaseAdmin.from('school_admins').select('school_id, profile_id, created_at')
+      ])
+      if (schoolsErr) throw schoolsErr
+      if (saErr) throw saErr
+      const profileIds = [...new Set((saRows ?? []).map((r) => r.profile_id))]
+      let profileById = new Map()
+      if (profileIds.length) {
+        const { data: profiles, error: pErr } = await supabaseAdmin
+          .from('profiles')
+          .select('id, email, name, role')
+          .in('id', profileIds)
+        if (pErr) throw pErr
+        profileById = new Map((profiles ?? []).map((p) => [p.id, p]))
+      }
+      const admins = (saRows ?? []).map((r) => {
+        const p = profileById.get(r.profile_id)
+        return {
+          schoolId: r.school_id,
+          profileId: r.profile_id,
+          createdAt: r.created_at,
+          email: p?.email || '',
+          name: p?.name || '',
+          role: p?.role || ''
+        }
+      })
+      res.status(200).json({ schools: schools ?? [], admins })
+    } catch (err) {
+      res.status(500).json({ error: err?.message || '讀取學校行政清單失敗' })
+    }
+    return
+  }
+
+  if (req.method === 'POST') {
+    const body = parseJsonBody(req, res)
+    if (!body) return
+    const email = String(body.email || '').trim().toLowerCase()
+    const schoolId = String(body.schoolId || '').trim()
+    if (!email || !schoolId) {
+      res.status(400).json({ error: '缺少 email 或 schoolId' })
+      return
+    }
+    try {
+      const { data: school } = await supabaseAdmin
+        .from('schools')
+        .select('id, name')
+        .eq('id', schoolId)
+        .maybeSingle()
+      if (!school) {
+        res.status(404).json({ error: '找不到此學校' })
+        return
+      }
+      // ilike 無萬用字元=不分大小寫等值比對(profiles.email 大小寫可能不一)
+      const { data: profs, error: pErr } = await supabaseAdmin
+        .from('profiles')
+        .select('id, email, name, role')
+        .ilike('email', email)
+        .limit(2)
+      if (pErr) throw pErr
+      if (!profs?.length) {
+        res.status(404).json({ error: '找不到此 Email 的使用者(對方需先登入過一次建立帳號)' })
+        return
+      }
+      if (profs.length > 1) {
+        res.status(409).json({ error: '此 Email 對應多個帳號,請先到使用者管理確認' })
+        return
+      }
+      const target = profs[0]
+      const { data: existing } = await supabaseAdmin
+        .from('school_admins')
+        .select('profile_id')
+        .eq('school_id', schoolId)
+        .eq('profile_id', target.id)
+        .maybeSingle()
+      if (existing) {
+        res.status(200).json({ ok: true, alreadyExists: true, name: target.name || '', schoolName: school.name || '' })
+        return
+      }
+      const { error: insErr } = await supabaseAdmin
+        .from('school_admins')
+        .insert({ school_id: schoolId, profile_id: target.id })
+      if (insErr) throw insErr
+      res.status(200).json({ ok: true, profileId: target.id, name: target.name || '', schoolName: school.name || '' })
+    } catch (err) {
+      res.status(500).json({ error: err?.message || '開通失敗' })
+    }
+    return
+  }
+
+  if (req.method === 'DELETE') {
+    let body = {}
+    if (req.body) {
+      const parsed = parseJsonBody(req, res)
+      if (!parsed) return // 無效 JSON:parseJsonBody 已回 400
+      body = parsed
+    }
+    const profileId = String(body.profileId || req.query?.profileId || '').trim()
+    const schoolId = String(body.schoolId || req.query?.schoolId || '').trim()
+    if (!profileId || !schoolId) {
+      res.status(400).json({ error: '缺少 profileId 或 schoolId' })
+      return
+    }
+    try {
+      const { error } = await supabaseAdmin
+        .from('school_admins')
+        .delete()
+        .eq('school_id', schoolId)
+        .eq('profile_id', profileId)
+      if (error) throw error
+      res.status(200).json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: err?.message || '移除失敗' })
+    }
+    return
+  }
+
+  res.status(405).json({ error: 'Method Not Allowed' })
 }
 
 // ========== QUALITY DASHBOARD ==========
