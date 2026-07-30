@@ -7516,17 +7516,24 @@ async function handleCampus1ClassroomSync(req, res) {
     // 科目名稱通常已包含班級名稱（如「五年6班_智慧探究家：科技創新任務課程」）
     const displayName = courseName
 
+    // 2026-07-30 時間章:course 物件內含 schoolYear(西元)+semester(1上/2下)——1Campus 官方確認。
+    // classID 整學年不變、courseID 每學期換號 → classID 是跨學期歸併同班卡片的鍵。
+    const schoolYearNum = parseInt(String(course.schoolYear ?? ''), 10)
+    const semesterNum = parseInt(String(course.semester ?? ''), 10)
     classByCourseID[key] = {
       courseID: key,
       classID,
       className: displayName,
       gradeYear: classInfo.gradeYear ?? null,
+      schoolYear: !isNaN(schoolYearNum) && schoolYearNum > 0 ? schoolYearNum : null,
+      semester: semesterNum === 1 || semesterNum === 2 ? semesterNum : null,
       students: Array.isArray(course.student) ? course.student : []
     }
   }
 
   const groupedClasses = Object.values(classByCourseID)
-  console.log('[1campus sync] grouped into', groupedClasses.length, 'courses (one classroom per course)')
+  console.log('[1campus sync] grouped into', groupedClasses.length, 'courses (one classroom per course)',
+    'timeStamp:', { schoolYear: groupedClasses[0]?.schoolYear ?? null, semester: groupedClasses[0]?.semester ?? null })
 
   if (!groupedClasses.length) {
     res.status(200).json({ success: true, synced: 0, total: 0, classrooms: [] })
@@ -7673,7 +7680,11 @@ async function handleCampus1ClassroomSync(req, res) {
               name: className,
               folder: folderName,
               school_id: schoolId,
-              ...(gradeValue != null ? { grade: gradeValue } : {})
+              ...(gradeValue != null ? { grade: gradeValue } : {}),
+              // 時間章:值存在才寫,避免某次回應缺欄位時把既有章洗成 null
+              ...(cls.schoolYear != null ? { school_year: cls.schoolYear } : {}),
+              ...(cls.semester != null ? { semester: cls.semester } : {}),
+              ...(cls.classID ? { campus_class_id: cls.classID } : {})
             },
             { onConflict: 'id' }
           )
