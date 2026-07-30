@@ -348,3 +348,126 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
     teacherCount
   }
 }
+
+// ============================================================
+// 2026-07-30 Step 5(獨立模型):班級鏡像——行政名下從全校名冊建立全校 classrooms+students。
+// 學校考卷的 owner=行政帳號自己(獨立模型定案),老師端功能對行政原生可用;
+// 不依賴任何老師登入。冪等:classroom 以 (owner, school, campus_class_id) 對齊、
+// students 以座號 diff-and-skip(只增改不刪);學生自動歸戶(重用既有管線)。
+// ============================================================
+export async function mirrorSchoolClassesToOwner(supabaseAdmin, { schoolId, ownerId }) {
+  const { data: school } = await supabaseAdmin
+    .from('schools')
+    .select('id, name, school_type')
+    .eq('id', schoolId)
+    .maybeSingle()
+  if (!school) throw new Error('找不到學校')
+  const { data: refClasses } = await supabaseAdmin
+    .from('school_classes')
+    .select('campus_class_id, class_name, grade_year, school_year, semester')
+    .eq('school_id', schoolId)
+  if (!refClasses?.length) throw new Error('尚無全校名冊,請先執行「全校名冊同步」')
+
+  // 學制→絕對年級(與老師同步同規則:高中+9、國中+6、國小+0、未知不設)
+  const schoolType = String(school.school_type || '')
+  const gradeOffset = schoolType.includes('高中') ? 9 : schoolType.includes('國中') ? 6 : schoolType.includes('國小') ? 0 : null
+
+  const { data: existing } = await supabaseAdmin
+    .from('classrooms')
+    .select('id, campus_class_id')
+    .eq('owner_id', ownerId)
+    .eq('school_id', schoolId)
+    .not('campus_class_id', 'is', null)
+  const byClassId = new Map((existing ?? []).map((c) => [String(c.campus_class_id), c]))
+
+  const nowIso = new Date().toISOString()
+  let created = 0
+  let updated = 0
+  let studentTotal = 0
+  for (const rc of refClasses) {
+    const cid = String(rc.campus_class_id)
+    const gradeRaw = rc.grade_year != null ? Number(rc.grade_year) : null
+    const gradeValue = gradeRaw != null && gradeOffset != null ? gradeRaw + gradeOffset : gradeRaw
+    const row = {
+      owner_id: ownerId,
+      name: rc.class_name || cid,
+      folder: '學校考卷',
+      school_id: schoolId,
+      ...(gradeValue != null ? { grade: gradeValue } : {}),
+      ...(rc.school_year != null ? { school_year: rc.school_year } : {}),
+      ...(rc.semester != null ? { semester: rc.semester } : {}),
+      campus_class_id: cid
+    }
+    let classroomId = byClassId.get(cid)?.id
+    if (!classroomId) {
+      classroomId = 'cls_' + crypto.randomBytes(8).toString('hex')
+      const { error } = await supabaseAdmin.from('classrooms').insert({ id: classroomId, ...row })
+      if (error) {
+        console.warn('[mirror] classroom insert failed:', rc.class_name, error.message)
+        continue
+      }
+      created += 1
+    } else {
+      const { error } = await supabaseAdmin
+        .from('classrooms')
+        .update({ ...row, updated_at: nowIso })
+        .eq('id', classroomId)
+      if (error) console.warn('[mirror] classroom update failed:', rc.class_name, error.message)
+      else updated += 1
+    }
+
+    // 在籍學生 → students(diff-and-skip by 座號;只增改不刪)
+    const { data: persons } = await supabaseAdmin
+      .from('school_person')
+      .select('name, email, provider_student_id, seat_no, status')
+      .eq('school_id', schoolId)
+      .eq('campus_class_id', cid)
+    const active = (persons ?? []).filter((p) => (p.status ?? 'active') === 'active' && p.seat_no != null)
+    const { data: curStudents } = await supabaseAdmin
+      .from('students')
+      .select('id, seat_number, name, email, provider_student_id')
+      .eq('owner_id', ownerId)
+      .eq('classroom_id', classroomId)
+    const curBySeat = new Map((curStudents ?? []).map((s) => [s.seat_number, s]))
+    const inserts = []
+    for (const p of active) {
+      const cur = curBySeat.get(p.seat_no)
+      if (!cur) {
+        inserts.push({
+          id: 'stu_' + crypto.randomBytes(8).toString('hex'),
+          classroom_id: classroomId,
+          owner_id: ownerId,
+          seat_number: p.seat_no,
+          name: p.name || '',
+          email: p.email || null,
+          provider_student_id: p.provider_student_id != null ? String(p.provider_student_id) : null
+        })
+      } else {
+        const nameChanged = (p.name || '') !== (cur.name || '')
+        const emailChanged = Boolean(p.email) && p.email !== cur.email
+        const pidChanged = String(p.provider_student_id ?? '') !== String(cur.provider_student_id ?? '')
+        if (nameChanged || emailChanged || pidChanged) {
+          const { error } = await supabaseAdmin
+            .from('students')
+            .update({
+              name: p.name || cur.name,
+              email: p.email ?? cur.email,
+              provider_student_id: p.provider_student_id != null ? String(p.provider_student_id) : cur.provider_student_id,
+              updated_at: nowIso
+            })
+            .eq('id', cur.id)
+            .eq('owner_id', ownerId)
+          if (error) console.warn('[mirror] student update failed:', error.message)
+        }
+      }
+    }
+    if (inserts.length) {
+      const { error } = await supabaseAdmin.from('students').insert(inserts)
+      if (error) console.warn('[mirror] students insert failed:', error.message)
+    }
+    studentTotal += active.length
+    // 學號自動歸戶(既有管線:person 已存在→只補 link)
+    await upsertSchoolPersonsForClassroom(supabaseAdmin, { schoolId, classroomId })
+  }
+  return { classes: refClasses.length, created, updated, students: studentTotal }
+}

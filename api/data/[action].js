@@ -13,7 +13,7 @@ import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
 import { localizeBookletQuestions } from '../../server/ai/booklet-locate.js'
-import { enrollSchoolTeacher, upsertSchoolPersonsForClassroom, syncSchoolRoster } from '../../server/school-membership.js'
+import { enrollSchoolTeacher, upsertSchoolPersonsForClassroom, syncSchoolRoster, mirrorSchoolClassesToOwner } from '../../server/school-membership.js'
 import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import { trackingContext } from '../../server/ink-usage-tracker.js'
@@ -7654,6 +7654,39 @@ async function processSchoolJobSubmission({ supabaseDb, apiKey, job, sub, assign
   return { score: totalScore }
 }
 
+// 2026-07-30 Step 5(獨立模型):班級鏡像——行政按鈕觸發,在「自己名下」建立全校班級+學生
+// (來源=全校名冊 SSoT;獨立模型:學校考卷 owner=行政帳號,教師端功能原生可用)。冪等可重按。
+async function handleSchoolMirrorClasses(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const schoolId = typeof body?.schoolId === 'string' ? body.schoolId.trim() : ''
+  if (!schoolId) {
+    res.status(400).json({ error: 'Missing schoolId' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+  if (!actor.isAdminUser && !actor.schoolIds.includes(schoolId)) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  try {
+    const summary = await mirrorSchoolClassesToOwner(supabaseDb, { schoolId, ownerId: user.id })
+    console.log('[mirror-classes]', schoolId, '→', user.id, summary)
+    res.status(200).json({ success: true, ...summary })
+  } catch (err) {
+    res.status(500).json({ error: err?.message || '建立考卷班級失敗' })
+  }
+}
+
 // 代批選擇器:某老師在該校 1Campus 班的作業清單+各作業待批/已批數
 async function handleSchoolTeacherAssignments(req, res) {
   if (req.method !== 'GET') {
@@ -9567,6 +9600,10 @@ const log = document.getElementById('log');
   }
   if (action === 'school-teacher-assignments') {
     await handleSchoolTeacherAssignments(req, res)
+    return
+  }
+  if (action === 'school-mirror-classes') {
+    await handleSchoolMirrorClasses(req, res)
     return
   }
   if (action === '1campus-debug') {
