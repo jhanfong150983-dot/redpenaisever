@@ -3832,9 +3832,10 @@ async function handleSchoolAdmins(req, res, supabaseAdmin) {
     const body = parseJsonBody(req, res)
     if (!body) return
     const email = String(body.email || '').trim().toLowerCase()
+    const profileId = String(body.profileId || '').trim()
     const schoolId = String(body.schoolId || '').trim()
-    if (!email || !schoolId) {
-      res.status(400).json({ error: '缺少 email 或 schoolId' })
+    if ((!email && !profileId) || !schoolId) {
+      res.status(400).json({ error: '缺少 email/profileId 或 schoolId' })
       return
     }
     try {
@@ -3847,22 +3848,38 @@ async function handleSchoolAdmins(req, res, supabaseAdmin) {
         res.status(404).json({ error: '找不到此學校' })
         return
       }
-      // ilike 無萬用字元=不分大小寫等值比對(profiles.email 大小寫可能不一)
-      const { data: profs, error: pErr } = await supabaseAdmin
-        .from('profiles')
-        .select('id, email, name, role')
-        .ilike('email', email)
-        .limit(2)
-      if (pErr) throw pErr
-      if (!profs?.length) {
-        res.status(404).json({ error: '找不到此 Email 的使用者(對方需先登入過一次建立帳號)' })
-        return
+      let target = null
+      if (profileId) {
+        // 2026-07-30 整合進使用者管理:詳情頁直接以 profileId 開通、免填 email
+        const { data: p, error: pErr } = await supabaseAdmin
+          .from('profiles')
+          .select('id, email, name, role')
+          .eq('id', profileId)
+          .maybeSingle()
+        if (pErr) throw pErr
+        if (!p) {
+          res.status(404).json({ error: '找不到此使用者' })
+          return
+        }
+        target = p
+      } else {
+        // ilike 無萬用字元=不分大小寫等值比對(profiles.email 大小寫可能不一)
+        const { data: profs, error: pErr } = await supabaseAdmin
+          .from('profiles')
+          .select('id, email, name, role')
+          .ilike('email', email)
+          .limit(2)
+        if (pErr) throw pErr
+        if (!profs?.length) {
+          res.status(404).json({ error: '找不到此 Email 的使用者(對方需先登入過一次建立帳號)' })
+          return
+        }
+        if (profs.length > 1) {
+          res.status(409).json({ error: '此 Email 對應多個帳號,請先到使用者管理確認' })
+          return
+        }
+        target = profs[0]
       }
-      if (profs.length > 1) {
-        res.status(409).json({ error: '此 Email 對應多個帳號,請先到使用者管理確認' })
-        return
-      }
-      const target = profs[0]
       const { data: existing } = await supabaseAdmin
         .from('school_admins')
         .select('profile_id')
