@@ -7724,9 +7724,23 @@ async function handleCampus1ClassroomSync(req, res) {
         studentCount = normalizedStudents.length
 
         // 更新 email / provider_student_id / student_number（upsert_students_batch 不處理這些欄位）
-        const studentsNeedUpdate = normalizedStudents.filter(
-          (s) => s.email || s.provider_student_id || s.student_number
-        )
+        // 2026-07-30 提速(user 抓的:資料沒變同步就該秒過):先撈現況一次、只更新真的變了的——
+        //   原本每位學生無條件逐筆 UPDATE(N+1、~百次連續往返=同步 10-20 秒的主因),穩定態改為 0 次。
+        //   ⚠不 select student_number(production 無此欄位會 400);它不當變更依據、留給 retry 邏輯。
+        const { data: currentRows } = await supabaseAdmin
+          .from('students')
+          .select('seat_number, email, provider_student_id')
+          .eq('owner_id', user.id)
+          .eq('classroom_id', classroomId)
+        const curBySeat = new Map((currentRows ?? []).map((r) => [r.seat_number, r]))
+        const studentsNeedUpdate = normalizedStudents.filter((s) => {
+          if (!(s.email || s.provider_student_id || s.student_number)) return false
+          const cur = curBySeat.get(s.seat_number)
+          if (!cur) return true
+          const emailChanged = !!s.email && s.email !== cur.email
+          const pidChanged = !!s.provider_student_id && s.provider_student_id !== cur.provider_student_id
+          return emailChanged || pidChanged
+        })
         if (studentsNeedUpdate.length > 0) {
           let studentNumberColumnMissing = false
           let updateFailedCount = 0
