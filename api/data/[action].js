@@ -7795,6 +7795,9 @@ async function handleCampus1ClassroomSync(req, res) {
           provider_class_id: providerClassId,
           classroom_id: classroomId,
           sync_status: 'success',
+          // 2026-07-30: 成功時清掉舊錯誤——原本殘留的 last_error 會與 success 並存、誤導診斷
+          //（Step 1 驗收實測:34 列掛著幾個月前 FK 錯誤文字、實際同步早已成功）
+          last_error: null,
           last_sync_at: nowIso,
           provider_class_name: className,
           last_student_count: studentCount,
