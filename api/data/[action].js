@@ -7802,8 +7802,8 @@ async function handleCampus1ClassroomSync(req, res) {
 
       // 2026-07-30 學校端子計畫2:該班學生自動歸戶(school_person + link、fail-open)
       const enrollStats = await upsertSchoolPersonsForClassroom(supabaseAdmin, { schoolId, classroomId })
-      if (enrollStats.persons > 0) {
-        console.log('[1campus sync] 歸戶:', { className, newPersons: enrollStats.persons, links: enrollStats.links })
+      if (enrollStats.persons > 0 || enrollStats.healed > 0) {
+        console.log('[1campus sync] 歸戶:', { className, newPersons: enrollStats.persons, links: enrollStats.links, healed: enrollStats.healed })
       }
 
       // 更新同步記錄（按自然鍵 upsert，搭配唯一鍵冪等、防併發）

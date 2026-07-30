@@ -88,23 +88,41 @@ export async function upsertSchoolPersonsForClassroom(supabaseAdmin, { schoolId,
       for (const p of refreshed ?? []) personByPid.set(String(p.provider_student_id), p.id)
     }
 
-    const linkRows = withPid
-      .map((s) => {
-        const personId = personByPid.get(String(s.provider_student_id))
-        return personId
-          ? { student_id: s.id, person_id: personId, match_source: 'provider_student_id', confidence: 'auto' }
-          : null
-      })
-      .filter(Boolean)
-    if (linkRows.length) {
+    // 2026-07-30 連結自愈:students 列的比對鍵是座號,學期中名冊重排時同一列可能換人
+    // (學號被同步刷新)——自動建立的既有連結若 person 學號≠此列現在的學號,跟著現況改指;
+    // 人工確認過的連結(confidence≠'auto')永不自動改動。
+    const { data: existingLinks } = await supabaseAdmin
+      .from('student_person_link')
+      .select('student_id, person_id, confidence')
+      .in('student_id', withPid.map((s) => s.id))
+    const linkByStudent = new Map((existingLinks ?? []).map((l) => [l.student_id, l]))
+
+    const newLinks = []
+    let healed = 0
+    for (const s of withPid) {
+      const personId = personByPid.get(String(s.provider_student_id))
+      if (!personId) continue
+      const cur = linkByStudent.get(s.id)
+      if (!cur) {
+        newLinks.push({ student_id: s.id, person_id: personId, match_source: 'provider_student_id', confidence: 'auto' })
+      } else if (cur.person_id !== personId && cur.confidence === 'auto') {
+        const { error: healErr } = await supabaseAdmin
+          .from('student_person_link')
+          .update({ person_id: personId, match_source: 'provider_student_id', confidence: 'auto' })
+          .eq('student_id', s.id)
+        if (healErr) console.warn('[school-person] link heal failed:', healErr.message)
+        else healed += 1
+      }
+    }
+    if (newLinks.length) {
       const { error: linkErr } = await supabaseAdmin
         .from('student_person_link')
-        .upsert(linkRows, { onConflict: 'student_id', ignoreDuplicates: true })
+        .upsert(newLinks, { onConflict: 'student_id', ignoreDuplicates: true })
       if (linkErr) console.warn('[school-person] link upsert failed:', linkErr.message)
     }
-    return { persons: newRows.length, links: linkRows.length }
+    return { persons: newRows.length, links: newLinks.length, healed }
   } catch (e) {
     console.warn('[school-person] pipeline failed:', e?.message)
-    return { persons: 0, links: 0 }
+    return { persons: 0, links: 0, healed: 0 }
   }
 }
