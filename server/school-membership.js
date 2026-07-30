@@ -206,7 +206,10 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
           name: String(s.studentName || '').trim() || null,
           email: s.email && String(s.email).includes('@') ? String(s.email).trim().toLowerCase() : null,
           studentNumber: s.studentNumber != null && String(s.studentNumber).trim() ? String(s.studentNumber).trim() : null,
-          parentCount: Array.isArray(s.parent) ? s.parent.length : null
+          parentCount: Array.isArray(s.parent) ? s.parent.length : null,
+          // 目前在籍班籍(getClassStudent 一生一班):學校檢視班級名冊靠它
+          classId,
+          seatNo: toIntOrNull(s.seatNo)
         })
       }
     }
@@ -242,6 +245,8 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
         status: 'active',
         departed_status: null,
         parent_bound_count: s.parentCount,
+        campus_class_id: s.classId ?? null,
+        seat_no: s.seatNo,
         last_seen_at: nowIso
       })
     } else {
@@ -256,6 +261,8 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
         status: 'active',
         departed_status: null,
         parent_bound_count: s.parentCount ?? cur.parent_bound_count,
+        campus_class_id: s.classId ?? null,
+        seat_no: s.seatNo,
         last_seen_at: nowIso
       })
     }

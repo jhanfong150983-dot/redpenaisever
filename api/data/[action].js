@@ -5776,6 +5776,33 @@ async function handleSchoolAdminOverview(req, res) {
       res.status(200).json({ person: personResult.data ? personPublic : null, records: recordsResult.data || [] })
       return
     }
+    // 2026-07-30 Step 3.5:classId=全校名冊(SSoT)的班級名冊——涵蓋全班在籍學生,
+    // 不再受限「老師同步過才有」。subject_count 為 null(個別學生點進去仍看得到跨科檔案)。
+    const classId = typeof req.query.classId === 'string' ? req.query.classId : ''
+    if (schoolId && classId) {
+      if (!canAccessSchool(schoolId)) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
+      const { data, error } = await supabaseDb
+        .from('school_person')
+        .select('id, name, student_number, seat_no, status')
+        .eq('school_id', schoolId)
+        .eq('campus_class_id', classId)
+        .order('seat_no', { ascending: true })
+      if (error) throw error
+      const students = (data || [])
+        .filter((p) => (p.status ?? 'active') === 'active')
+        .map((p) => ({
+          person_id: p.id,
+          name: p.name,
+          student_number: p.student_number,
+          seat_number: p.seat_no,
+          subject_count: null
+        }))
+      res.status(200).json({ students })
+      return
+    }
     if (schoolId && classLabel) {
       if (!canAccessSchool(schoolId)) {
         res.status(403).json({ error: 'Forbidden' })
@@ -5792,6 +5819,24 @@ async function handleSchoolAdminOverview(req, res) {
     if (schoolId) {
       if (!canAccessSchool(schoolId)) {
         res.status(403).json({ error: 'Forbidden' })
+        return
+      }
+      // 2026-07-30 Step 3.5:班級清單以全校名冊參考表為準(全部班級都在);
+      // 尚未跑過全校同步的學校退回舊 RPC(老師同步驅動、只有部分班級)
+      const { data: refClasses, error: refErr } = await supabaseDb
+        .from('school_classes')
+        .select('campus_class_id, class_name, grade_year, student_count')
+        .eq('school_id', schoolId)
+        .order('class_name', { ascending: true })
+      if (refErr) throw refErr
+      if (refClasses && refClasses.length > 0) {
+        const classes = refClasses.map((c) => ({
+          class_label: c.class_name || c.campus_class_id,
+          grade: c.grade_year,
+          student_count: c.student_count ?? 0,
+          campus_class_id: c.campus_class_id
+        }))
+        res.status(200).json({ classes })
         return
       }
       const { data, error } = await supabaseDb.rpc('school_admin_classes', { p_school_id: schoolId })
