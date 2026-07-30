@@ -38,10 +38,12 @@ export async function enrollSchoolTeacher(supabaseAdmin, { userId, dsns, schoolI
 export async function upsertSchoolPersonsForClassroom(supabaseAdmin, { schoolId, classroomId }) {
   try {
     if (!schoolId || !classroomId) return { persons: 0, links: 0 }
-    const { data: studs } = await supabaseAdmin
+    // ⚠ production students 表沒有 student_number 欄位(2026-07-30 實測 400)——不可 select 它
+    const { data: studs, error: selErr } = await supabaseAdmin
       .from('students')
-      .select('id, name, email, provider_student_id, student_number')
+      .select('id, name, email, provider_student_id')
       .eq('classroom_id', classroomId)
+    if (selErr) { console.warn('[school-person] students select failed:', selErr.message); return { persons: 0, links: 0 } }
     const withPid = (studs ?? []).filter((s) => s.provider_student_id != null && String(s.provider_student_id).trim() !== '')
     if (!withPid.length) return { persons: 0, links: 0 }
 
@@ -67,7 +69,6 @@ export async function upsertSchoolPersonsForClassroom(supabaseAdmin, { schoolId,
           id: 'sp_' + crypto.randomBytes(8).toString('hex'),
           school_id: schoolId,
           name: s.name ?? null,
-          student_number: s.student_number ?? null,
           provider_student_id: pid,
           email: s.email ?? null,
           status: 'active',
