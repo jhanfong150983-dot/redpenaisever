@@ -7405,6 +7405,701 @@ async function handleGradingResults(req, res) {
 // 1Campus 班級同步
 // ============================================================
 
+// ============================================================
+// 2026-07-30 Step 4b:學校統一批改 job(server-side、代 owner、扣學校錢包)
+// grading job=一個作業的代批工作;tick=一次 ≤200s 的處理迴圈(前端驅動、可重入),
+// lease 防併發、學校點數不足自動暫停(儲值後下一次 tick 自動續跑)。
+// 批改本體=把老師 client 的組裝搬到 server:下載合併卷圖→Phase A(單體)→從
+// arbiterDecisions 重建 finalAnswers(鏡像 client rebuildFinalAnswersFromPhaseAState、
+// 全數 ai_read1)→Phase B fromCache(skipExplain)→save(同 handleSaveGrading 欄位
+// +state transitions)。黃燈不在 job 內處理(老師事後用批改頁檢視,定案)。
+// 計費:ALS billingScope='school' 逐 call 累加(ink-usage-tracker),每卷結束
+// 原子扣 schools.ink_balance+一筆 school_ink_ledger(reason='grading_job')。
+// ============================================================
+const SCHOOL_JOB_TIME_BUDGET_MS = 200_000
+const SCHOOL_JOB_LEASE_MS = 290_000
+
+async function resolveSchoolActorContext(supabaseAdmin, userId) {
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseAdmin.from('profiles').select('role').eq('id', userId).maybeSingle(),
+    supabaseAdmin.from('school_admins').select('school_id').eq('profile_id', userId)
+  ])
+  return {
+    isAdminUser: profile?.role === 'admin',
+    schoolIds: Array.isArray(saRows) ? saRows.map((r) => r.school_id) : []
+  }
+}
+
+// 抄 proxy fetchAnswerSheetImagesForClassify、拔 owner 檢查(job 在 create 已驗過委任關係)
+async function schoolJobFetchAnswerSheetImages(supabaseAdmin, assignmentId) {
+  try {
+    const bucket = supabaseAdmin.storage.from('homework-images')
+    const { data: first, error: firstErr } = await bucket.download(`answer-sheets/${assignmentId}/page-0.webp`)
+    if (firstErr || !first) return []
+    const images = [{ mimeType: 'image/webp', data: Buffer.from(await first.arrayBuffer()).toString('base64') }]
+    const results = await Promise.allSettled(
+      Array.from({ length: 9 }, (_, i) => i + 1).map(async (i) => {
+        const { data, error } = await bucket.download(`answer-sheets/${assignmentId}/page-${i}.webp`)
+        if (error || !data) return null
+        return { mimeType: 'image/webp', data: Buffer.from(await data.arrayBuffer()).toString('base64') }
+      })
+    )
+    for (const r of results) {
+      const val = r.status === 'fulfilled' ? r.value : null
+      if (!val) break
+      images.push(val)
+    }
+    return images
+  } catch (e) {
+    console.warn('[school-job] answer sheet fetch failed:', e?.message)
+    return []
+  }
+}
+
+// answer_only Phase B 需題本圖(答案卡沒印題目);assignment 目錄優先、退 template 目錄
+async function schoolJobFetchBookletImages(supabaseAdmin, assignment) {
+  try {
+    const bucket = supabaseAdmin.storage.from('homework-images')
+    const dirs = [assignment.id, assignment.answer_key_template_id].filter(Boolean)
+    for (const dir of dirs) {
+      const { data: first } = await bucket.download(`question-booklets/${dir}/page-0.webp`)
+      if (!first) continue
+      const images = [{ mimeType: 'image/webp', data: Buffer.from(await first.arrayBuffer()).toString('base64') }]
+      for (let i = 1; i < 10; i++) {
+        const { data } = await bucket.download(`question-booklets/${dir}/page-${i}.webp`)
+        if (!data) break
+        images.push({ mimeType: 'image/webp', data: Buffer.from(await data.arrayBuffer()).toString('base64') })
+      }
+      return images
+    }
+    return []
+  } catch {
+    return []
+  }
+}
+
+// 原子扣學校點數(樂觀鎖 ×4;允許單卷成本造成的小幅負值飄移,tick 入口以 balance>0 守門)
+async function debitSchoolInk(supabaseAdmin, { schoolId, points, jobId, submissionId, assignmentId, actorProfileId, calls }) {
+  if (!points || points <= 0) return { ok: true, balance: null }
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const { data: school } = await supabaseAdmin
+      .from('schools').select('ink_balance').eq('id', schoolId).maybeSingle()
+    const before = typeof school?.ink_balance === 'number' ? school.ink_balance : 0
+    const after = before - points
+    const { data: updated, error } = await supabaseAdmin
+      .from('schools')
+      .update({ ink_balance: after, updated_at: new Date().toISOString() })
+      .eq('id', schoolId)
+      .eq('ink_balance', before)
+      .select('id')
+    if (error) {
+      console.warn('[school-job] debit failed:', error.message)
+      return { ok: false, balance: before }
+    }
+    if (updated?.length) {
+      const { error: lErr } = await supabaseAdmin.from('school_ink_ledger').insert({
+        school_id: schoolId,
+        delta: -points,
+        balance_after: after,
+        reason: 'grading_job',
+        actor_profile_id: actorProfileId ?? null,
+        metadata: { jobId, submissionId, assignmentId, calls }
+      })
+      if (lErr) console.warn('[school-job] debit ledger insert failed:', lErr.message)
+      return { ok: true, balance: after }
+    }
+  }
+  console.warn('[school-job] debit optimistic-lock exhausted schoolId=', schoolId)
+  return { ok: false, balance: null }
+}
+
+// 單卷端到端:下載卷圖 → Phase A → finalAnswers → Phase B fromCache → 存檔+state transitions
+async function processSchoolJobSubmission({ supabaseDb, apiKey, job, sub, assignment, answerKeyStr, answerKeyImages, bookletImages }) {
+  const imagePath = sub.image_url || `submissions/${sub.id}.webp`
+  const { data: blob, error: dlErr } = await supabaseDb.storage.from('homework-images').download(imagePath)
+  if (dlErr || !blob) throw new Error(`卷圖下載失敗:${dlErr?.message || 'empty'}`)
+  const base64 = Buffer.from(await blob.arrayBuffer()).toString('base64')
+  const mimeType = imagePath.endsWith('.webp')
+    ? 'image/webp'
+    : imagePath.endsWith('.png') ? 'image/png' : 'image/jpeg'
+  const contents = [{ role: 'user', parts: [{ inlineData: { mimeType, data: base64 } }] }]
+
+  const pageBreaks = Array.isArray(sub.page_breaks) && sub.page_breaks.length > 0 ? sub.page_breaks : undefined
+  const answerSheetMode = assignment.answer_sheet_mode === 'answer_only' ? 'answer_only' : 'with_questions'
+  const baseInternal = {
+    requestId: `job-${String(job.id).slice(-6)}-${String(sub.id).slice(-6)}`,
+    enableStagedGrading: true,
+    answerKeyImages,
+    answerSheetMode,
+    questionBookletImages: bookletImages,
+    domainHint: assignment.domain || undefined,
+    ownerId: job.owner_id,
+    assignmentId: assignment.id,
+    submissionId: sub.id,
+    assignmentTotalPages: assignment.total_pages != null ? Number(assignment.total_pages) : null
+  }
+
+  // Phase A 單體(內含 classify/read/arbiter;3-endpoint split 是 client UI 分段用)
+  const phaseARes = await runAiPipeline({
+    apiKey,
+    model: MODEL_PRO,
+    contents,
+    payload: {
+      answerKey: answerKeyStr,
+      assignmentId: assignment.id,
+      submissionId: sub.id,
+      submissionSource: sub.source || 'teacher_scan',
+      ...(pageBreaks ? { pageBreaks } : {}),
+      ...(sub.status === 'grading_failed' ? { clearForRerun: true } : {}),
+      ...(assignment.domain ? { domain: assignment.domain } : {})
+    },
+    requestedRouteKey: 'grading.phase_a',
+    routeHint: { hasAnswerKeyPayload: true },
+    internalContext: baseInternal
+  })
+  const phaseAText = phaseARes?.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  let phaseAData = null
+  try {
+    phaseAData = JSON.parse(phaseAText)
+  } catch {
+    throw new Error(`Phase A 回應無法解析(status=${phaseARes?.status})`)
+  }
+  if (!phaseAData?.phaseAComplete) {
+    const pf = phaseAData?.pipelineFailure
+    throw new Error(pf?.userMessage || pf?.reasonCode || `Phase A 失敗(status=${phaseARes?.status})`)
+  }
+
+  // finalAnswers:鏡像 client rebuild(新卷 existing 空 → 全部從 arbiter 建、ai_read1;
+  // needs_review(無 finalAnswer)略過=黃燈交老師)
+  const finalAnswers = []
+  for (const qr of Array.isArray(phaseAData.questionResults) ? phaseAData.questionResults : []) {
+    const fa = qr?.arbiterResult?.finalAnswer
+    if (qr?.questionId && typeof fa === 'string') {
+      finalAnswers.push({ questionId: qr.questionId, finalStudentAnswer: fa, finalAnswerSource: 'ai_read1' })
+    }
+  }
+  await supabaseDb
+    .from('submissions')
+    .update({ final_answers: finalAnswers, updated_at: new Date().toISOString() })
+    .eq('id', sub.id)
+    .eq('owner_id', job.owner_id)
+
+  // Phase B fromCache(accessor;explain 已 on-demand 化)
+  const phaseBRes = await runAiPipeline({
+    apiKey,
+    model: MODEL_PRO,
+    contents,
+    payload: {
+      fromCache: true,
+      skipExplain: true,
+      assignmentId: assignment.id,
+      submissionId: sub.id,
+      finalAnswers,
+      ...(assignment.domain ? { domain: assignment.domain } : {})
+    },
+    requestedRouteKey: 'grading.phase_b',
+    routeHint: {},
+    internalContext: baseInternal
+  })
+  const bStatus = Number(phaseBRes?.status) || 500
+  if (bStatus < 200 || bStatus >= 300) {
+    throw new Error(phaseBRes?.data?.error || `Phase B 失敗(status=${bStatus})`)
+  }
+  const phaseBText = phaseBRes?.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  let gradingResult = null
+  try {
+    gradingResult = JSON.parse(phaseBText)
+  } catch {
+    throw new Error('Phase B 回應無法解析')
+  }
+  delete gradingResult._phaseContext
+  delete gradingResult._internal
+  const totalScore = toNumber(gradingResult?.totalScore) ?? 0
+
+  const gradedAt = Date.now()
+  const { error: saveErr } = await supabaseDb
+    .from('submissions')
+    .update({
+      status: 'graded',
+      score: totalScore,
+      ai_score: totalScore,
+      score_source: 'ai',
+      grading_result: gradingResult,
+      graded_at: gradedAt,
+      graded_by: 'teacher',
+      grading_lock: null,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', sub.id)
+    .eq('owner_id', job.owner_id)
+  if (saveErr) throw new Error(`存檔失敗:${saveErr.message}`)
+
+  try {
+    await applySubmissionStateTransitions(supabaseDb, job.owner_id, [
+      {
+        id: sub.id,
+        assignment_id: assignment.id,
+        student_id: sub.student_id,
+        status: 'graded',
+        score: totalScore,
+        graded_at: gradedAt,
+        grading_result: gradingResult,
+        updated_at: new Date().toISOString()
+      }
+    ])
+  } catch (e) {
+    console.warn('[school-job] state transitions failed (non-fatal):', e?.message)
+  }
+
+  return { score: totalScore }
+}
+
+// 代批選擇器:某老師在該校 1Campus 班的作業清單+各作業待批/已批數
+async function handleSchoolTeacherAssignments(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const schoolId = typeof req.query.schoolId === 'string' ? req.query.schoolId.trim() : ''
+  const teacherProfileId = typeof req.query.teacherProfileId === 'string' ? req.query.teacherProfileId.trim() : ''
+  if (!schoolId || !teacherProfileId) {
+    res.status(400).json({ error: 'Missing schoolId or teacherProfileId' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+  if (!actor.isAdminUser && !actor.schoolIds.includes(schoolId)) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  try {
+    const { data: classrooms } = await supabaseDb
+      .from('classrooms')
+      .select('id, name')
+      .eq('school_id', schoolId)
+      .eq('owner_id', teacherProfileId)
+    const classroomIds = (classrooms ?? []).map((c) => c.id)
+    if (!classroomIds.length) {
+      res.status(200).json({ assignments: [] })
+      return
+    }
+    const nameByClassroom = new Map((classrooms ?? []).map((c) => [c.id, c.name]))
+    const { data: assigns } = await supabaseDb
+      .from('assignments')
+      .select('id, title, classroom_id, created_at')
+      .in('classroom_id', classroomIds)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    const aids = (assigns ?? []).map((a) => a.id)
+    const pendingByAid = new Map()
+    const gradedByAid = new Map()
+    for (let i = 0; i < aids.length; i += 20) {
+      const chunk = aids.slice(i, i + 20)
+      const { data: subs } = await supabaseDb
+        .from('submissions')
+        .select('assignment_id, status')
+        .in('assignment_id', chunk)
+        .eq('owner_id', teacherProfileId)
+        .or('source.is.null,source.neq.student_correction')
+        .limit(2000)
+      for (const s of subs ?? []) {
+        if (s.status === 'synced' || s.status === 'grading_failed') {
+          pendingByAid.set(s.assignment_id, (pendingByAid.get(s.assignment_id) || 0) + 1)
+        } else if (s.status === 'graded') {
+          gradedByAid.set(s.assignment_id, (gradedByAid.get(s.assignment_id) || 0) + 1)
+        }
+      }
+    }
+    res.status(200).json({
+      assignments: (assigns ?? []).map((a) => ({
+        id: a.id,
+        title: a.title || '',
+        classroomName: nameByClassroom.get(a.classroom_id) || '',
+        pendingCount: pendingByAid.get(a.id) || 0,
+        gradedCount: gradedByAid.get(a.id) || 0,
+        createdAt: a.created_at
+      }))
+    })
+  } catch (err) {
+    res.status(500).json({ error: err?.message || '讀取作業清單失敗' })
+  }
+}
+
+async function handleSchoolGradingJob(req, res) {
+  const supabaseDb = getSupabaseAdmin()
+
+  // GET=job 列表(附作業標題)
+  if (req.method === 'GET') {
+    const { user } = await getAuthUser(req, res)
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const schoolId = typeof req.query.schoolId === 'string' ? req.query.schoolId.trim() : ''
+    if (!schoolId) {
+      res.status(400).json({ error: 'Missing schoolId' })
+      return
+    }
+    const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+    if (!actor.isAdminUser && !actor.schoolIds.includes(schoolId)) {
+      res.status(403).json({ error: 'Forbidden' })
+      return
+    }
+    const { data: jobs } = await supabaseDb
+      .from('school_grading_jobs')
+      .select('id, assignment_id, owner_id, status, total_count, done_count, failed_count, ink_points, last_error, created_at, updated_at')
+      .eq('school_id', schoolId)
+      .order('created_at', { ascending: false })
+      .limit(20)
+    const aids = [...new Set((jobs ?? []).map((j) => j.assignment_id))]
+    let titleById = new Map()
+    if (aids.length) {
+      const { data: assigns } = await supabaseDb.from('assignments').select('id, title').in('id', aids)
+      titleById = new Map((assigns ?? []).map((a) => [a.id, a.title]))
+    }
+    res.status(200).json({
+      jobs: (jobs ?? []).map((j) => ({ ...j, assignment_title: titleById.get(j.assignment_id) || '' }))
+    })
+    return
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const mode = typeof body?.mode === 'string' ? body.mode : ''
+
+  // tick 支援 cron secret(無 user、兜底續跑);create/cancel 一定要 user
+  const cronSecret = process.env.CRON_SECRET
+  const isCron = Boolean(cronSecret && req.headers['x-cron-secret'] === cronSecret)
+  let user = null
+  if (!isCron) {
+    const auth = await getAuthUser(req, res)
+    if (!auth.user) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    user = auth.user
+  }
+
+  if (mode === 'create') {
+    const schoolId = String(body.schoolId || '').trim()
+    const assignmentId = String(body.assignmentId || '').trim()
+    if (!user || !schoolId || !assignmentId) {
+      res.status(400).json({ error: '缺少 schoolId 或 assignmentId' })
+      return
+    }
+    const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+    if (!actor.isAdminUser && !actor.schoolIds.includes(schoolId)) {
+      res.status(403).json({ error: 'Forbidden' })
+      return
+    }
+    const { data: assignment } = await supabaseDb
+      .from('assignments')
+      .select('id, owner_id, classroom_id, title')
+      .eq('id', assignmentId)
+      .maybeSingle()
+    if (!assignment) {
+      res.status(404).json({ error: '找不到此作業' })
+      return
+    }
+    // 委任驗證:owner 是該校 active 老師 + 班級掛在該校(1Campus 班)
+    const [{ data: st }, { data: classroom }] = await Promise.all([
+      supabaseDb
+        .from('school_teachers')
+        .select('status')
+        .eq('school_id', schoolId)
+        .eq('teacher_user_id', assignment.owner_id)
+        .maybeSingle(),
+      supabaseDb.from('classrooms').select('school_id').eq('id', assignment.classroom_id).maybeSingle()
+    ])
+    if (!st || st.status !== 'active') {
+      res.status(400).json({ error: '這份作業的老師不屬於此學校' })
+      return
+    }
+    if (classroom?.school_id !== schoolId) {
+      res.status(400).json({ error: '這份作業的班級不是此學校的 1Campus 班級' })
+      return
+    }
+    const { data: existing } = await supabaseDb
+      .from('school_grading_jobs')
+      .select('id')
+      .eq('assignment_id', assignmentId)
+      .in('status', ['queued', 'running', 'paused_insufficient'])
+      .limit(1)
+    if (existing?.length) {
+      res.status(409).json({ error: '此作業已有進行中的代批工作' })
+      return
+    }
+    const { count } = await supabaseDb
+      .from('submissions')
+      .select('id', { count: 'exact', head: true })
+      .eq('assignment_id', assignmentId)
+      .eq('owner_id', assignment.owner_id)
+      .in('status', ['synced', 'grading_failed'])
+      .or('source.is.null,source.neq.student_correction')
+    if (!count) {
+      res.status(400).json({ error: '沒有待批改的卷(已批完或尚未匯入)' })
+      return
+    }
+    const jobId = 'sgj_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+    const { error: insErr } = await supabaseDb.from('school_grading_jobs').insert({
+      id: jobId,
+      school_id: schoolId,
+      assignment_id: assignmentId,
+      owner_id: assignment.owner_id,
+      actor_profile_id: user.id,
+      status: 'queued',
+      total_count: count,
+      done_count: 0,
+      failed_count: 0,
+      ink_points: 0,
+      failed_items: []
+    })
+    if (insErr) {
+      res.status(500).json({ error: `建立代批工作失敗:${insErr.message}` })
+      return
+    }
+    res.status(200).json({ ok: true, jobId, totalCount: count })
+    return
+  }
+
+  if (mode === 'cancel') {
+    const jobId = String(body.jobId || '').trim()
+    if (!user || !jobId) {
+      res.status(400).json({ error: '缺少 jobId' })
+      return
+    }
+    const { data: job } = await supabaseDb.from('school_grading_jobs').select('id, school_id, status').eq('id', jobId).maybeSingle()
+    if (!job) {
+      res.status(404).json({ error: '找不到此工作' })
+      return
+    }
+    const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+    if (!actor.isAdminUser && !actor.schoolIds.includes(job.school_id)) {
+      res.status(403).json({ error: 'Forbidden' })
+      return
+    }
+    if (!['completed', 'completed_with_errors', 'cancelled'].includes(job.status)) {
+      await supabaseDb
+        .from('school_grading_jobs')
+        .update({ status: 'cancelled', lease_until: null, updated_at: new Date().toISOString() })
+        .eq('id', jobId)
+    }
+    res.status(200).json({ ok: true })
+    return
+  }
+
+  if (mode === 'tick') {
+    const jobIdReq = String(body.jobId || '').trim()
+    const nowIso = new Date().toISOString()
+    let query = supabaseDb
+      .from('school_grading_jobs')
+      .select('*')
+      .in('status', ['queued', 'running', 'paused_insufficient'])
+      .or(`lease_until.is.null,lease_until.lt.${nowIso}`)
+      .order('created_at', { ascending: true })
+      .limit(5)
+    if (jobIdReq) query = query.eq('id', jobIdReq)
+    const { data: candidates } = await query
+    let job = null
+    if (candidates?.length) {
+      if (isCron) {
+        job = candidates[0]
+      } else {
+        const actor = await resolveSchoolActorContext(supabaseDb, user.id)
+        job = candidates.find((j) => actor.isAdminUser || actor.schoolIds.includes(j.school_id)) || null
+      }
+    }
+    if (!job) {
+      res.status(200).json({ idle: true })
+      return
+    }
+
+    // 餘額守門:paused_insufficient 在儲值後也由此自動復跑
+    const { data: schoolRow } = await supabaseDb.from('schools').select('ink_balance').eq('id', job.school_id).maybeSingle()
+    const startBalance = typeof schoolRow?.ink_balance === 'number' ? schoolRow.ink_balance : 0
+    if (startBalance <= 0) {
+      await supabaseDb
+        .from('school_grading_jobs')
+        .update({
+          status: 'paused_insufficient',
+          lease_until: null,
+          last_error: `學校點數不足(目前 ${startBalance} 點),儲值後會自動續跑`,
+          updated_at: nowIso
+        })
+        .eq('id', job.id)
+      res.status(200).json({ jobId: job.id, status: 'paused_insufficient', balance: startBalance })
+      return
+    }
+
+    // 搶 lease(樂觀:只有 lease 過期/空者搶得到)
+    const leaseUntil = new Date(Date.now() + SCHOOL_JOB_LEASE_MS).toISOString()
+    const { data: leased } = await supabaseDb
+      .from('school_grading_jobs')
+      .update({ status: 'running', lease_until: leaseUntil, last_error: null, updated_at: nowIso })
+      .eq('id', job.id)
+      .or(`lease_until.is.null,lease_until.lt.${nowIso}`)
+      .select('*')
+    if (!leased?.length) {
+      res.status(200).json({ jobId: job.id, busy: true })
+      return
+    }
+    job = leased[0]
+
+    const { data: assignment } = await supabaseDb
+      .from('assignments')
+      .select('id, owner_id, classroom_id, title, answer_key, answer_sheet_mode, answer_key_template_id, total_pages, domain')
+      .eq('id', job.assignment_id)
+      .maybeSingle()
+    const apiKey = getEnvValue('SYSTEM_GEMINI_API_KEY') || getEnvValue('SECRET_API_KEY')
+    if (!assignment?.answer_key || !apiKey) {
+      const reason = !apiKey ? 'Server API Key 未設定' : '作業沒有答案卷,無法代批'
+      await supabaseDb
+        .from('school_grading_jobs')
+        .update({ status: 'completed_with_errors', last_error: reason, lease_until: null, updated_at: new Date().toISOString() })
+        .eq('id', job.id)
+      res.status(200).json({ jobId: job.id, status: 'completed_with_errors', error: reason })
+      return
+    }
+    const answerKeyStr =
+      typeof assignment.answer_key === 'string' ? assignment.answer_key : JSON.stringify(assignment.answer_key)
+    const answerKeyImages = await schoolJobFetchAnswerSheetImages(supabaseDb, assignment.id)
+    const bookletImages =
+      assignment.answer_sheet_mode === 'answer_only' ? await schoolJobFetchBookletImages(supabaseDb, assignment) : []
+
+    const startMs = Date.now()
+    const failedItems = Array.isArray(job.failed_items) ? [...job.failed_items] : []
+    const failedIds = new Set(failedItems.map((f) => f?.submissionId).filter(Boolean))
+    let done = job.done_count || 0
+    let failed = job.failed_count || 0
+    let points = job.ink_points || 0
+    let finalStatus = 'running'
+    let processedThisTick = 0
+
+    while (Date.now() - startMs < SCHOOL_JOB_TIME_BUDGET_MS) {
+      const { data: subs } = await supabaseDb
+        .from('submissions')
+        .select('id, owner_id, assignment_id, student_id, image_url, page_breaks, source, status')
+        .eq('assignment_id', assignment.id)
+        .eq('owner_id', job.owner_id)
+        .in('status', ['synced', 'grading_failed'])
+        .or('source.is.null,source.neq.student_correction')
+        .order('created_at', { ascending: true })
+        .limit(20)
+      const next = (subs ?? []).find((s) => !failedIds.has(s.id))
+      if (!next) {
+        finalStatus = failed > 0 ? 'completed_with_errors' : 'completed'
+        break
+      }
+
+      const costAcc = { points: 0, calls: 0 }
+      try {
+        await trackingContext.run(
+          {
+            supabaseAdmin: supabaseDb,
+            actorUserId: job.actor_profile_id || job.owner_id,
+            billingUserId: job.actor_profile_id || job.owner_id,
+            isAdmin: false,
+            inkSessionId: null,
+            assignmentId: assignment.id,
+            submissionId: next.id,
+            billingScope: 'school',
+            schoolId: job.school_id,
+            schoolCost: costAcc
+          },
+          () =>
+            processSchoolJobSubmission({
+              supabaseDb, apiKey, job, sub: next, assignment, answerKeyStr, answerKeyImages, bookletImages
+            })
+        )
+        done += 1
+      } catch (e) {
+        failed += 1
+        failedIds.add(next.id)
+        failedItems.push({ submissionId: next.id, studentId: next.student_id, error: String(e?.message || e).slice(0, 300) })
+        console.warn('[school-job] submission failed:', next.id, e?.message)
+        try {
+          await supabaseDb
+            .from('submissions')
+            .update({ status: 'grading_failed', updated_at: new Date().toISOString() })
+            .eq('id', next.id)
+            .eq('owner_id', job.owner_id)
+        } catch { /* non-fatal */ }
+      }
+      processedThisTick += 1
+
+      // 每卷結束扣學校點數(失敗卷已消耗的 AI call 也照扣)
+      if (costAcc.points > 0) {
+        const debit = await debitSchoolInk(supabaseDb, {
+          schoolId: job.school_id,
+          points: costAcc.points,
+          jobId: job.id,
+          submissionId: next.id,
+          assignmentId: assignment.id,
+          actorProfileId: job.actor_profile_id,
+          calls: costAcc.calls
+        })
+        points += costAcc.points
+        if (debit.ok && typeof debit.balance === 'number' && debit.balance <= 0) {
+          finalStatus = 'paused_insufficient'
+        }
+      }
+
+      await supabaseDb
+        .from('school_grading_jobs')
+        .update({
+          done_count: done,
+          failed_count: failed,
+          ink_points: points,
+          failed_items: failedItems,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', job.id)
+
+      if (finalStatus === 'paused_insufficient') break
+    }
+
+    const patch = {
+      done_count: done,
+      failed_count: failed,
+      ink_points: points,
+      failed_items: failedItems,
+      lease_until: null,
+      updated_at: new Date().toISOString()
+    }
+    if (finalStatus === 'completed' || finalStatus === 'completed_with_errors') {
+      patch.status = finalStatus
+    } else if (finalStatus === 'paused_insufficient') {
+      patch.status = 'paused_insufficient'
+      patch.last_error = '學校點數不足,儲值後會自動續跑'
+    } else {
+      patch.status = 'running'
+    }
+    await supabaseDb.from('school_grading_jobs').update(patch).eq('id', job.id)
+
+    res.status(200).json({
+      jobId: job.id,
+      status: patch.status,
+      done,
+      failed,
+      totalCount: job.total_count,
+      inkPoints: points,
+      processedThisTick,
+      hasMore: patch.status === 'running'
+    })
+    return
+  }
+
+  res.status(400).json({ error: 'Unknown mode' })
+}
+
 // 2026-07-30 Step 4(user 拍板改判):學校層級共用錢包——schools.ink_balance,同校所有行政
 // 看同一個餘額、統一批改扣學校池。GET=餘額查詢(系統 admin 或該校 school_admin);
 // 儲值走 admin API(school-wallet POST,簽約制我們後台操作)。
@@ -8864,6 +9559,14 @@ const log = document.getElementById('log');
   }
   if (action === 'school-grant') {
     await handleSchoolGrant(req, res)
+    return
+  }
+  if (action === 'school-grading-job') {
+    await handleSchoolGradingJob(req, res)
+    return
+  }
+  if (action === 'school-teacher-assignments') {
+    await handleSchoolTeacherAssignments(req, res)
     return
   }
   if (action === '1campus-debug') {

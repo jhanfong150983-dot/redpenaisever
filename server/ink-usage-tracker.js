@@ -14,6 +14,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { computeInkPointsFromTokens } from './ink-session.js'
 
 export const trackingContext = new AsyncLocalStorage()
 
@@ -57,6 +58,20 @@ export async function recordTokenUsage({ usageMetadata, routeKey, modelName }) {
       `[ink-usage-tracker] insert failed routeKey=${routeKey} model=${modelName}:`,
       error.message
     )
+  }
+
+  // 2026-07-30 學校統一批改 job:billingScope='school' 時把本次 call 的點數累加進 ALS 的
+  // schoolCost 累加器——不逐 call 寫 DB(一卷 20-40 個 AI call 會灌爆 ledger),
+  // 由 job worker 每卷結束後一次性扣 schools.ink_balance + 寫一筆 school_ink_ledger。
+  // 個人/session 計費路徑(無 billingScope)完全不受影響。
+  if (ctx.billingScope === 'school' && ctx.schoolCost && typeof ctx.schoolCost.points === 'number') {
+    try {
+      const cost = computeInkPointsFromTokens({ inputTokens, outputTokens, totalTokens })
+      ctx.schoolCost.points += cost?.points || 0
+      ctx.schoolCost.calls = (ctx.schoolCost.calls || 0) + 1
+    } catch (e) {
+      console.warn('[ink-usage-tracker] school cost accumulate failed:', e?.message)
+    }
   }
 }
 
