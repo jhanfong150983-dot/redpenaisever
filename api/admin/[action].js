@@ -3789,11 +3789,68 @@ export default async function handler(req, res) {
   res.status(404).json({ error: 'Unknown action' })
 }
 
-// ========== 學校錢包儲值(2026-07-30 user 拍板:學校層級共用錢包) ==========
-// schools.ink_balance=學校點數池(同校行政共見、統一批改扣此池);簽約制、儲值由系統 admin 後台操作。
-// POST {schoolId, delta, note?}:delta 正=儲值、負=調減(不低於 0);寫 school_ink_ledger 供對帳。
-// 未來「配發給老師」= reason 'school_grant' 轉帳(school 池減、teacher profile 加),本端點不處理。
+// ========== 學校錢包(2026-07-30 user 拍板:學校層級共用錢包、儲值只在 admin 後台) ==========
+// schools.ink_balance=學校點數池(同校行政共見、統一批改扣此池);學校端只讀。
+// GET  → { schools:[{id,name,dsns,balance}] };GET ?schoolId= → { balance, ledger }
+// POST {schoolId, delta, note?}:delta 正=儲值(付款/簽約後)、負=調減(不低於 0);寫 school_ink_ledger。
+// 「配發給老師」在學校端 data/school-grant(行政操作),本端點不處理。
 async function handleSchoolWallet(req, res, supabaseAdmin, adminUser) {
+  if (req.method === 'GET') {
+    try {
+      const schoolId = typeof req.query?.schoolId === 'string' ? req.query.schoolId.trim() : ''
+      if (!schoolId) {
+        const { data: schools, error } = await supabaseAdmin
+          .from('schools')
+          .select('id, name, provider_dsns, ink_balance')
+          .order('name', { ascending: true })
+        if (error) throw error
+        res.status(200).json({
+          schools: (schools ?? []).map((s) => ({
+            id: s.id,
+            name: s.name || s.id,
+            dsns: s.provider_dsns || '',
+            balance: typeof s.ink_balance === 'number' ? s.ink_balance : 0
+          }))
+        })
+        return
+      }
+      const [{ data: school }, { data: ledger, error: lErr }] = await Promise.all([
+        supabaseAdmin.from('schools').select('id, name, ink_balance').eq('id', schoolId).maybeSingle(),
+        supabaseAdmin
+          .from('school_ink_ledger')
+          .select('delta, balance_after, reason, actor_profile_id, metadata, created_at')
+          .eq('school_id', schoolId)
+          .order('created_at', { ascending: false })
+          .limit(100)
+      ])
+      if (lErr) throw lErr
+      if (!school) {
+        res.status(404).json({ error: '找不到此學校' })
+        return
+      }
+      const actorIds = [...new Set((ledger ?? []).map((l) => l.actor_profile_id).filter(Boolean))]
+      let nameById = new Map()
+      if (actorIds.length) {
+        const { data: actors } = await supabaseAdmin.from('profiles').select('id, name, email').in('id', actorIds)
+        nameById = new Map((actors ?? []).map((a) => [a.id, a.name || a.email || '']))
+      }
+      res.status(200).json({
+        balance: typeof school.ink_balance === 'number' ? school.ink_balance : 0,
+        ledger: (ledger ?? []).map((l) => ({
+          delta: l.delta,
+          balanceAfter: l.balance_after,
+          reason: l.reason,
+          actorName: l.actor_profile_id ? nameById.get(l.actor_profile_id) || '' : '',
+          note: l.metadata?.note || l.metadata?.teacherName || '',
+          createdAt: l.created_at
+        }))
+      })
+    } catch (err) {
+      res.status(500).json({ error: err?.message || '讀取學校錢包失敗' })
+    }
+    return
+  }
+
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
     return
