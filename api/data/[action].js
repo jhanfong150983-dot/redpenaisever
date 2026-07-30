@@ -7447,7 +7447,216 @@ async function handleSchoolWallet(req, res) {
     res.status(404).json({ error: '找不到此學校' })
     return
   }
-  res.status(200).json({ balance: typeof school.ink_balance === 'number' ? school.ink_balance : 0 })
+  const result = { balance: typeof school.ink_balance === 'number' ? school.ink_balance : 0 }
+  // ?ledger=1 → 附最近 50 筆點數紀錄(含操作者名稱)
+  if (String(req.query.ledger || '') === '1') {
+    const { data: ledger } = await supabaseAdmin
+      .from('school_ink_ledger')
+      .select('delta, balance_after, reason, actor_profile_id, metadata, created_at')
+      .eq('school_id', schoolId)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    const actorIds = [...new Set((ledger ?? []).map((l) => l.actor_profile_id).filter(Boolean))]
+    let nameById = new Map()
+    if (actorIds.length) {
+      const { data: actors } = await supabaseAdmin.from('profiles').select('id, name, email').in('id', actorIds)
+      nameById = new Map((actors ?? []).map((a) => [a.id, a.name || a.email || '']))
+    }
+    result.ledger = (ledger ?? []).map((l) => ({
+      delta: l.delta,
+      balanceAfter: l.balance_after,
+      reason: l.reason,
+      actorName: l.actor_profile_id ? nameById.get(l.actor_profile_id) || '' : '',
+      note: l.metadata?.note || l.metadata?.teacherName || '',
+      createdAt: l.created_at
+    }))
+  }
+  res.status(200).json(result)
+}
+
+// 2026-07-30 學校端教師總覽:該校 school_teachers(active)+各自的班級數/作業數/個人餘額。
+// 權限同 school-wallet(系統 admin 或該校行政)。批改狀況明細(逐作業進度)留待 job 儀表板一併做。
+async function handleSchoolTeacherOverview(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const schoolId = typeof req.query.schoolId === 'string' ? req.query.schoolId.trim() : ''
+  if (!schoolId) {
+    res.status(400).json({ error: 'Missing schoolId' })
+    return
+  }
+  const supabaseAdmin = getSupabaseAdmin()
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseAdmin.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseAdmin.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const allowed =
+    profile?.role === 'admin' || (Array.isArray(saRows) && saRows.some((r) => r.school_id === schoolId))
+  if (!allowed) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  try {
+    const { data: tRows, error: tErr } = await supabaseAdmin
+      .from('school_teachers')
+      .select('teacher_user_id, status, created_at')
+      .eq('school_id', schoolId)
+    if (tErr) throw tErr
+    const active = (tRows ?? []).filter((r) => r.status === 'active')
+    const ids = active.map((r) => r.teacher_user_id)
+    if (!ids.length) {
+      res.status(200).json({ teachers: [] })
+      return
+    }
+    const [{ data: profs }, { data: classrooms }] = await Promise.all([
+      supabaseAdmin.from('profiles').select('id, name, email, ink_balance').in('id', ids),
+      supabaseAdmin.from('classrooms').select('id, owner_id').eq('school_id', schoolId).in('owner_id', ids)
+    ])
+    const profById = new Map((profs ?? []).map((p) => [p.id, p]))
+    const classroomIds = (classrooms ?? []).map((c) => c.id)
+    const ownerByClassroom = new Map((classrooms ?? []).map((c) => [c.id, c.owner_id]))
+    // 作業數 per 老師(1Campus 班的作業;classroomIds 班級級距小、單次 .in 可承受,保守仍 chunk)
+    const assignCountByOwner = new Map()
+    for (let i = 0; i < classroomIds.length; i += 100) {
+      const chunk = classroomIds.slice(i, i + 100)
+      const { data: assigns } = await supabaseAdmin
+        .from('assignments')
+        .select('id, classroom_id')
+        .in('classroom_id', chunk)
+      for (const a of assigns ?? []) {
+        const owner = ownerByClassroom.get(a.classroom_id)
+        if (owner) assignCountByOwner.set(owner, (assignCountByOwner.get(owner) || 0) + 1)
+      }
+    }
+    const classCountByOwner = new Map()
+    for (const c of classrooms ?? []) {
+      classCountByOwner.set(c.owner_id, (classCountByOwner.get(c.owner_id) || 0) + 1)
+    }
+    const teachers = active
+      .map((r) => {
+        const p = profById.get(r.teacher_user_id)
+        return {
+          profileId: r.teacher_user_id,
+          name: p?.name || '',
+          email: p?.email || '',
+          inkBalance: typeof p?.ink_balance === 'number' ? p.ink_balance : 0,
+          classroomCount: classCountByOwner.get(r.teacher_user_id) || 0,
+          assignmentCount: assignCountByOwner.get(r.teacher_user_id) || 0,
+          joinedAt: r.created_at
+        }
+      })
+      .sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email, 'zh-TW'))
+    res.status(200).json({ teachers })
+  } catch (err) {
+    res.status(500).json({ error: err?.message || '讀取教師總覽失敗' })
+  }
+}
+
+// 2026-07-30 學校點數配發:學校池 → 老師個人餘額(user 拍板的未來功能,隨教師總覽一併落地)。
+// 樂觀鎖:schools 更新帶 .eq('ink_balance', before) 防併發雙扣;老師入帳失敗→回滾學校池。
+async function handleSchoolGrant(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const schoolId = typeof body?.schoolId === 'string' ? body.schoolId.trim() : ''
+  const teacherProfileId = typeof body?.teacherProfileId === 'string' ? body.teacherProfileId.trim() : ''
+  const amount = Number(body?.amount)
+  if (!schoolId || !teacherProfileId || !Number.isInteger(amount) || amount <= 0) {
+    res.status(400).json({ error: '缺少 schoolId/teacherProfileId 或 amount 非正整數' })
+    return
+  }
+  const supabaseAdmin = getSupabaseAdmin()
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseAdmin.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseAdmin.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const allowed =
+    profile?.role === 'admin' || (Array.isArray(saRows) && saRows.some((r) => r.school_id === schoolId))
+  if (!allowed) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  try {
+    // 收款人必須是該校 active 老師
+    const { data: st } = await supabaseAdmin
+      .from('school_teachers')
+      .select('status')
+      .eq('school_id', schoolId)
+      .eq('teacher_user_id', teacherProfileId)
+      .maybeSingle()
+    if (!st || st.status !== 'active') {
+      res.status(400).json({ error: '收款對象不是該校的老師' })
+      return
+    }
+    const { data: school } = await supabaseAdmin
+      .from('schools')
+      .select('id, name, ink_balance')
+      .eq('id', schoolId)
+      .maybeSingle()
+    const before = typeof school?.ink_balance === 'number' ? school.ink_balance : 0
+    if (before < amount) {
+      res.status(400).json({ error: `學校點數不足(目前 ${before} 點)` })
+      return
+    }
+    const after = before - amount
+    const { data: updated, error: uErr } = await supabaseAdmin
+      .from('schools')
+      .update({ ink_balance: after, updated_at: new Date().toISOString() })
+      .eq('id', schoolId)
+      .eq('ink_balance', before)
+      .select('id')
+    if (uErr) throw uErr
+    if (!updated?.length) {
+      res.status(409).json({ error: '餘額剛被其他操作變更,請重新整理後再試' })
+      return
+    }
+    const { data: tProf } = await supabaseAdmin
+      .from('profiles')
+      .select('id, name, email, ink_balance')
+      .eq('id', teacherProfileId)
+      .maybeSingle()
+    const tBefore = typeof tProf?.ink_balance === 'number' ? tProf.ink_balance : 0
+    const { error: tErr } = await supabaseAdmin
+      .from('profiles')
+      .update({ ink_balance: tBefore + amount, updated_at: new Date().toISOString() })
+      .eq('id', teacherProfileId)
+    if (tErr) {
+      // 入帳失敗:回滾學校池(盡力而為,失敗則留 log 供人工對帳)
+      await supabaseAdmin.from('schools').update({ ink_balance: before }).eq('id', schoolId)
+      throw new Error(`老師入帳失敗,學校點數已回復:${tErr.message}`)
+    }
+    const teacherName = tProf?.name || tProf?.email || teacherProfileId
+    await supabaseAdmin.from('school_ink_ledger').insert({
+      school_id: schoolId,
+      delta: -amount,
+      balance_after: after,
+      reason: 'school_grant',
+      actor_profile_id: user.id,
+      metadata: { teacherProfileId, teacherName, before, after }
+    })
+    await supabaseAdmin.from('ink_ledger').insert({
+      user_id: teacherProfileId,
+      delta: amount,
+      reason: 'school_grant',
+      metadata: { schoolId, schoolName: school?.name || '', before: tBefore, after: tBefore + amount }
+    })
+    res.status(200).json({ ok: true, balance: after, teacherName })
+  } catch (err) {
+    res.status(500).json({ error: err?.message || '配發失敗' })
+  }
 }
 
 // 2026-07-30 Step 3.5:行政端全校名冊同步(getClassStudent 全校 → school_classes+school_person SSoT
@@ -8587,6 +8796,14 @@ const log = document.getElementById('log');
   }
   if (action === 'school-wallet') {
     await handleSchoolWallet(req, res)
+    return
+  }
+  if (action === 'school-teacher-overview') {
+    await handleSchoolTeacherOverview(req, res)
+    return
+  }
+  if (action === 'school-grant') {
+    await handleSchoolGrant(req, res)
     return
   }
   if (action === '1campus-debug') {
