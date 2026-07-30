@@ -7842,12 +7842,12 @@ async function handleSchoolExams(req, res) {
 
       // fan-out:每班一份 assignment(owner=考卷持有帳號;圖引用模板路徑不複製)
       const nowIso = new Date().toISOString()
-      const examId = 'sxm_' + crypto.randomBytes(8).toString('hex')
+      const examId = 'sxm_' + nodeCrypto.randomBytes(8).toString('hex')
       const assignmentRows = []
       const examClassRows = []
       for (const cid of campusClassIds) {
         const m = mirrorByClassId.get(cid)
-        const aid = 'sxa_' + crypto.randomBytes(8).toString('hex')
+        const aid = 'sxa_' + nodeCrypto.randomBytes(8).toString('hex')
         assignmentRows.push({
           id: aid,
           owner_id: examOwner,
