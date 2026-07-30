@@ -8492,7 +8492,16 @@ async function handleSchoolRosterSync(req, res) {
   try {
     const summary = await syncSchoolRoster(supabaseAdmin, { schoolId, dsns: school.provider_dsns })
     console.log('[roster-sync]', school.name || schoolId, summary)
-    res.status(200).json({ success: true, schoolName: school.name || '', ...summary })
+    // 2026-07-30(user 拍板合併):同步完自動把「考卷班級」(行政名下工作副本)建好/更新好——
+    // 行政不需要知道「鏡像」概念,一顆按鈕搞定。fail-open:鏡像失敗不影響名冊同步結果。
+    let mirror = null
+    try {
+      mirror = await mirrorSchoolClassesToOwner(supabaseAdmin, { schoolId, ownerId: user.id })
+      console.log('[roster-sync] mirror:', mirror)
+    } catch (e) {
+      console.warn('[roster-sync] mirror failed (non-blocking):', e?.message)
+    }
+    res.status(200).json({ success: true, schoolName: school.name || '', ...summary, mirror })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[roster-sync] failed:', msg)
