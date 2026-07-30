@@ -7679,8 +7679,23 @@ async function handleSchoolMirrorClasses(req, res) {
     return
   }
   try {
-    const summary = await mirrorSchoolClassesToOwner(supabaseDb, { schoolId, ownerId: user.id })
-    console.log('[mirror-classes]', schoolId, '→', user.id, summary)
+    // 考卷資料持有帳號=每校唯一(同 roster-sync 的解析規則)
+    const { data: sc } = await supabaseDb
+      .from('schools').select('exam_owner_profile_id').eq('id', schoolId).maybeSingle()
+    let examOwner = sc?.exam_owner_profile_id || null
+    if (!examOwner) {
+      examOwner = user.id
+      await supabaseDb
+        .from('schools')
+        .update({ exam_owner_profile_id: examOwner, updated_at: new Date().toISOString() })
+        .eq('id', schoolId)
+        .is('exam_owner_profile_id', null)
+      const { data: re } = await supabaseDb
+        .from('schools').select('exam_owner_profile_id').eq('id', schoolId).maybeSingle()
+      examOwner = re?.exam_owner_profile_id || examOwner
+    }
+    const summary = await mirrorSchoolClassesToOwner(supabaseDb, { schoolId, ownerId: examOwner })
+    console.log('[mirror-classes]', schoolId, '→', examOwner, summary)
     res.status(200).json({ success: true, ...summary })
   } catch (err) {
     res.status(500).json({ error: err?.message || '建立考卷班級失敗' })
@@ -8478,7 +8493,7 @@ async function handleSchoolRosterSync(req, res) {
   }
   const { data: school } = await supabaseAdmin
     .from('schools')
-    .select('id, name, provider_dsns')
+    .select('id, name, provider_dsns, exam_owner_profile_id')
     .eq('id', schoolId)
     .maybeSingle()
   if (!school) {
@@ -8492,12 +8507,26 @@ async function handleSchoolRosterSync(req, res) {
   try {
     const summary = await syncSchoolRoster(supabaseAdmin, { schoolId, dsns: school.provider_dsns })
     console.log('[roster-sync]', school.name || schoolId, summary)
-    // 2026-07-30(user 拍板合併):同步完自動把「考卷班級」(行政名下工作副本)建好/更新好——
-    // 行政不需要知道「鏡像」概念,一顆按鈕搞定。fail-open:鏡像失敗不影響名冊同步結果。
+    // 2026-07-30(user 拍板合併):同步完自動把「考卷班級」工作副本建好/更新好。
+    // ⚠考卷資料持有帳號=每校唯一(schools.exam_owner_profile_id,首位同步的行政自動成為;
+    // 之後任何行政按同步都寫進同一套,不會裂成多份)。fail-open:鏡像失敗不影響名冊同步。
     let mirror = null
     try {
-      mirror = await mirrorSchoolClassesToOwner(supabaseAdmin, { schoolId, ownerId: user.id })
-      console.log('[roster-sync] mirror:', mirror)
+      let examOwner = school.exam_owner_profile_id || null
+      if (!examOwner) {
+        examOwner = user.id
+        await supabaseAdmin
+          .from('schools')
+          .update({ exam_owner_profile_id: examOwner, updated_at: new Date().toISOString() })
+          .eq('id', schoolId)
+          .is('exam_owner_profile_id', null)
+        // 併發防護:若同時被別人設走,回讀權威值
+        const { data: re } = await supabaseAdmin
+          .from('schools').select('exam_owner_profile_id').eq('id', schoolId).maybeSingle()
+        examOwner = re?.exam_owner_profile_id || examOwner
+      }
+      mirror = await mirrorSchoolClassesToOwner(supabaseAdmin, { schoolId, ownerId: examOwner })
+      console.log('[roster-sync] mirror:', { examOwner, ...mirror })
     } catch (e) {
       console.warn('[roster-sync] mirror failed (non-blocking):', e?.message)
     }
