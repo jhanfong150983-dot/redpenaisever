@@ -368,6 +368,63 @@ export async function fetchCampus1CourseStudents(dsns, teacherID, accessToken) {
 }
 
 /**
+ * 2026-07-30 Step 3.5 全校名冊:getClassStudent 不帶參數=全校所有班級+學生(官方規格確認)。
+ * 回傳 class 陣列:每班 { classID, className, gradeYear, classNo, schoolYear, semester,
+ *   teacher:{teacherID,teacherName,teacherAcc}, student:[{studentID, studentName, studentNumber,
+ *   seatNo, studentAcc, email(需 jasmine.contact), parent:[...](綁定家長,可能需額外 scope)}] }
+ * @param {string} dsns
+ * @param {string} accessToken - Jasmine client_credentials token
+ * @returns {Promise<Array>} class 陣列
+ */
+export async function fetchCampus1ClassStudents(dsns, accessToken) {
+  const base = getJasmineApiBase()
+  const url = `${base}/${dsns}/getClassStudent`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    // 全校資料量大,放寬 timeout
+    signal: AbortSignal.timeout(30000)
+  })
+  if (response.status === 404) return []
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`Jasmine getClassStudent failed ${response.status}: ${text.slice(0, 200)}`)
+  }
+  const json = await response.json()
+  const classes = json?.class ?? json?.data?.class ?? []
+  return Array.isArray(classes) ? classes : []
+}
+
+/**
+ * 2026-07-30 轉出清查:傳入已知 studentID 清單,回傳「非在校」者(含 status:休學/畢業及離校/刪除/其他)。
+ * 休學也算非在校、復學沿用同 studentID(官方規格)。status 欄位可能需 jasmine.profile scope。
+ * @param {string} dsns
+ * @param {Array<number>} studentIDs
+ * @param {string} accessToken
+ * @returns {Promise<Array<{studentID:number,status?:string}>>}
+ */
+export async function fetchCampus1StudentDeparted(dsns, studentIDs, accessToken) {
+  if (!Array.isArray(studentIDs) || studentIDs.length === 0) return []
+  const base = getJasmineApiBase()
+  const url = `${base}/${dsns}/getStudentDeparted`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentID: studentIDs }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  })
+  if (response.status === 404) return []
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`Jasmine getStudentDeparted failed ${response.status}: ${text.slice(0, 200)}`)
+  }
+  const json = await response.json()
+  const rows = Array.isArray(json) ? json : (json?.student ?? json?.data ?? [])
+  if (!Array.isArray(rows)) return []
+  // 規格為物件陣列;防禦性容忍純 ID 陣列
+  return rows.map((r) => (typeof r === 'object' && r !== null ? r : { studentID: r }))
+}
+
+/**
  * 取得本 app 被授權的所有學校資料（含 schoolType 學制 / 正式校名）。
  * 端點為 /api/jasmine/getSchool（dsns 不在路徑、回全部授權學校）。
  * @param {string} accessToken - Jasmine access token

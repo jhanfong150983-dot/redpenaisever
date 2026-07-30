@@ -13,7 +13,7 @@ import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
 import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
 import { localizeBookletQuestions } from '../../server/ai/booklet-locate.js'
-import { enrollSchoolTeacher, upsertSchoolPersonsForClassroom } from '../../server/school-membership.js'
+import { enrollSchoolTeacher, upsertSchoolPersonsForClassroom, syncSchoolRoster } from '../../server/school-membership.js'
 import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import { trackingContext } from '../../server/ink-usage-tracker.js'
@@ -7360,6 +7360,59 @@ async function handleGradingResults(req, res) {
 // 1Campus 班級同步
 // ============================================================
 
+// 2026-07-30 Step 3.5:行政端全校名冊同步(getClassStudent 全校 → school_classes+school_person SSoT
+// +getStudentDeparted 轉出標記)。權限=系統 admin 或該校 school_admin。細節見 server/school-membership.js。
+async function handleSchoolRosterSync(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const schoolId = typeof body?.schoolId === 'string' ? body.schoolId.trim() : ''
+  if (!schoolId) {
+    res.status(400).json({ error: 'Missing schoolId' })
+    return
+  }
+  const supabaseAdmin = getSupabaseAdmin()
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseAdmin.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseAdmin.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const allowed =
+    profile?.role === 'admin' || (Array.isArray(saRows) && saRows.some((r) => r.school_id === schoolId))
+  if (!allowed) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  const { data: school } = await supabaseAdmin
+    .from('schools')
+    .select('id, name, provider_dsns')
+    .eq('id', schoolId)
+    .maybeSingle()
+  if (!school) {
+    res.status(404).json({ error: '找不到此學校' })
+    return
+  }
+  if (!school.provider_dsns || !isValidDsns(school.provider_dsns)) {
+    res.status(400).json({ error: '此學校沒有 1Campus 連動資料,無法同步全校名冊' })
+    return
+  }
+  try {
+    const summary = await syncSchoolRoster(supabaseAdmin, { schoolId, dsns: school.provider_dsns })
+    console.log('[roster-sync]', school.name || schoolId, summary)
+    res.status(200).json({ success: true, schoolName: school.name || '', ...summary })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[roster-sync] failed:', msg)
+    res.status(500).json({ error: msg || '全校名冊同步失敗' })
+  }
+}
+
 async function handleCampus1ClassroomSync(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -8436,6 +8489,10 @@ const log = document.getElementById('log');
   }
   if (action === '1campus-classroom-sync') {
     await handleCampus1ClassroomSync(req, res)
+    return
+  }
+  if (action === 'school-roster-sync') {
+    await handleSchoolRosterSync(req, res)
     return
   }
   if (action === '1campus-debug') {

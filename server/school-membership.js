@@ -1,4 +1,41 @@
 import crypto from 'node:crypto'
+import {
+  getJasmineAccessToken,
+  fetchCampus1ClassStudents,
+  fetchCampus1StudentDeparted
+} from './_1campus.js'
+
+function toIntOrNull(v) {
+  const n = parseInt(String(v ?? ''), 10)
+  return Number.isFinite(n) ? n : null
+}
+
+function chunkArray(arr, size) {
+  const out = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
+// PostgREST 預設 1000 筆 cap:整校 person(關埔 ~1,900)必須分頁撈
+async function fetchAllPersonRows(supabaseAdmin, schoolId) {
+  const all = []
+  const pageSize = 1000
+  let from = 0
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from('school_person')
+      .select('id, provider_student_id, name, email, student_number, status, parent_bound_count')
+      .eq('school_id', schoolId)
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1)
+    if (error) throw new Error('school_person select failed: ' + error.message)
+    if (!data || data.length === 0) break
+    all.push(...data)
+    if (data.length < pageSize) break
+    from += pageSize
+  }
+  return all
+}
 
 // 2026-07-25 學校端子計畫1:1Campus 老師自動歸校(school_teachers)。
 // 規則(user 拍板):學校功能=1Campus 連動學校專屬——dsns 找得到 schools 列才歸,
@@ -124,5 +161,149 @@ export async function upsertSchoolPersonsForClassroom(supabaseAdmin, { schoolId,
   } catch (e) {
     console.warn('[school-person] pipeline failed:', e?.message)
     return { persons: 0, links: 0, healed: 0 }
+  }
+}
+
+// ============================================================
+// 2026-07-30 Step 3.5:行政端全校名冊同步
+// getClassStudent(不帶參數)一次拿全校班級+學生 → school_classes 參考表 + school_person SSoT。
+// 邊界(user 拍板):不代建老師的 classrooms/students(老師同步時按學號自動 link 收斂);
+// 全校同步是姓名/email 的權威來源(老師管線只建不改);轉出=getStudentDeparted 權威清查、
+// 只標記 status='inactive'+departed_status、永不刪除;復學(重新出現在名冊)自動翻回 active。
+// ============================================================
+export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
+  const token = await getJasmineAccessToken()
+  const classes = await fetchCampus1ClassStudents(dsns, token)
+  const nowIso = new Date().toISOString()
+
+  // 1) 彙整班級與學生(pid 去重;同生多班取先見的資料)
+  const classRows = []
+  const studentByPid = new Map()
+  let parentFieldPresent = false
+  for (const cls of classes) {
+    const classId = String(cls.classID ?? '').trim()
+    if (!classId) continue
+    const students = Array.isArray(cls.student) ? cls.student : []
+    const semesterNum = toIntOrNull(cls.semester)
+    classRows.push({
+      school_id: schoolId,
+      campus_class_id: classId,
+      class_name: String(cls.className || '').trim() || null,
+      grade_year: toIntOrNull(cls.gradeYear),
+      class_no: cls.classNo != null ? String(cls.classNo).trim() || null : null,
+      school_year: toIntOrNull(cls.schoolYear),
+      semester: semesterNum === 1 || semesterNum === 2 ? semesterNum : null,
+      teacher_name: String(cls.teacher?.teacherName || '').trim() || null,
+      student_count: students.length,
+      updated_at: nowIso
+    })
+    for (const s of students) {
+      const pid = s.studentID != null && String(s.studentID).trim() ? String(s.studentID).trim() : null
+      if (!pid) continue
+      if (Array.isArray(s.parent)) parentFieldPresent = true
+      if (!studentByPid.has(pid)) {
+        studentByPid.set(pid, {
+          name: String(s.studentName || '').trim() || null,
+          email: s.email && String(s.email).includes('@') ? String(s.email).trim().toLowerCase() : null,
+          studentNumber: s.studentNumber != null && String(s.studentNumber).trim() ? String(s.studentNumber).trim() : null,
+          parentCount: Array.isArray(s.parent) ? s.parent.length : null
+        })
+      }
+    }
+  }
+
+  // 2) 班級參考表整批 upsert(PK=school_id+campus_class_id)
+  for (const chunk of chunkArray(classRows, 200)) {
+    const { error } = await supabaseAdmin
+      .from('school_classes')
+      .upsert(chunk, { onConflict: 'school_id,campus_class_id' })
+    if (error) throw new Error('school_classes upsert failed: ' + error.message)
+  }
+
+  // 3) person upsert:既有列沿用原 id(links 引用它、絕不能換),新列生成 sp_ id
+  const existing = await fetchAllPersonRows(supabaseAdmin, schoolId)
+  const personByPid = new Map(
+    existing.filter((p) => p.provider_student_id != null).map((p) => [String(p.provider_student_id), p])
+  )
+  const upsertRows = []
+  let newCount = 0
+  let reactivated = 0
+  for (const [pid, s] of studentByPid) {
+    const cur = personByPid.get(pid)
+    if (!cur) {
+      newCount += 1
+      upsertRows.push({
+        id: 'sp_' + crypto.randomBytes(8).toString('hex'),
+        school_id: schoolId,
+        provider_student_id: pid,
+        name: s.name,
+        email: s.email,
+        student_number: s.studentNumber,
+        status: 'active',
+        departed_status: null,
+        parent_bound_count: s.parentCount,
+        last_seen_at: nowIso
+      })
+    } else {
+      if (cur.status && cur.status !== 'active') reactivated += 1
+      upsertRows.push({
+        id: cur.id,
+        school_id: schoolId,
+        provider_student_id: pid,
+        name: s.name ?? cur.name,
+        email: s.email ?? cur.email,
+        student_number: s.studentNumber ?? cur.student_number,
+        status: 'active',
+        departed_status: null,
+        parent_bound_count: s.parentCount ?? cur.parent_bound_count,
+        last_seen_at: nowIso
+      })
+    }
+  }
+  for (const chunk of chunkArray(upsertRows, 500)) {
+    const { error } = await supabaseAdmin.from('school_person').upsert(chunk, { onConflict: 'id' })
+    if (error) throw new Error('school_person upsert failed: ' + error.message)
+  }
+
+  // 4) 轉出清查:DB 有、本次全校名冊沒出現 → getStudentDeparted 權威確認才標記(fail-open)
+  const missing = existing.filter(
+    (p) => p.provider_student_id != null && !studentByPid.has(String(p.provider_student_id))
+  )
+  let departedMarked = 0
+  if (missing.length) {
+    try {
+      const ids = missing
+        .map((p) => Number(p.provider_student_id))
+        .filter((n) => Number.isFinite(n))
+      const departed = []
+      for (const chunk of chunkArray(ids, 100)) {
+        departed.push(...(await fetchCampus1StudentDeparted(dsns, chunk, token)))
+      }
+      const depByPid = new Map(departed.map((d) => [String(d.studentID), d]))
+      for (const p of missing) {
+        const d = depByPid.get(String(p.provider_student_id))
+        if (!d) continue
+        const { error } = await supabaseAdmin
+          .from('school_person')
+          .update({ status: 'inactive', departed_status: String(d.status || '').trim() || null })
+          .eq('id', p.id)
+        if (error) console.warn('[roster-sync] mark departed failed:', error.message)
+        else departedMarked += 1
+      }
+    } catch (e) {
+      console.warn('[roster-sync] departed check failed (non-blocking):', e?.message)
+    }
+  }
+
+  const parentBound = [...studentByPid.values()].filter((s) => (s.parentCount ?? 0) > 0).length
+  return {
+    classes: classRows.length,
+    studentsSeen: studentByPid.size,
+    newPersons: newCount,
+    reactivated,
+    missingChecked: missing.length,
+    departedMarked,
+    parentFieldPresent,
+    parentBound
   }
 }
