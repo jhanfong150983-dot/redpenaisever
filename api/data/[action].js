@@ -15,6 +15,8 @@ import { runRecheckPipeline } from '../../server/ai/staged-grading.js'
 import { localizeBookletQuestions } from '../../server/ai/booklet-locate.js'
 import { enrollSchoolTeacher, upsertSchoolPersonsForClassroom, syncSchoolRoster, mirrorSchoolClassesToOwner } from '../../server/school-membership.js'
 import { debitSchoolInk } from '../../server/school-wallet.js'
+// node:crypto 顯式匯入——Vercel Node 18+ 全域 crypto 是 WebCrypto、沒有 randomBytes(2026-07-31 踩雷)
+import nodeCrypto from 'node:crypto'
 import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import { trackingContext } from '../../server/ink-usage-tracker.js'
