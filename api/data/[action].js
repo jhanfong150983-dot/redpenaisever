@@ -7452,7 +7452,27 @@ async function schoolJobFetchAnswerSheetImages(supabaseAdmin, assignmentId) {
   try {
     const bucket = supabaseAdmin.storage.from('homework-images')
     const { data: first, error: firstErr } = await bucket.download(`answer-sheets/${assignmentId}/page-0.webp`)
-    if (firstErr || !first) return []
+    if (firstErr || !first) {
+      // 學校考卷:answer_sheet_image_paths 引用模板路徑(同 proxy 2026-07-31 fallback)
+      const { data: aRow } = await supabaseAdmin
+        .from('assignments')
+        .select('answer_sheet_image_paths')
+        .eq('id', assignmentId)
+        .maybeSingle()
+      const refPaths = Array.isArray(aRow?.answer_sheet_image_paths) ? aRow.answer_sheet_image_paths : []
+      if (refPaths.length > 0) {
+        const settled = await Promise.allSettled(
+          refPaths.map(async (p) => {
+            const { data, error } = await bucket.download(p)
+            if (error || !data) return null
+            return { mimeType: 'image/webp', data: Buffer.from(await data.arrayBuffer()).toString('base64') }
+          })
+        )
+        const imgs = settled.map((r) => (r.status === 'fulfilled' ? r.value : null)).filter(Boolean)
+        if (imgs.length > 0) return imgs
+      }
+      return []
+    }
     const images = [{ mimeType: 'image/webp', data: Buffer.from(await first.arrayBuffer()).toString('base64') }]
     const results = await Promise.allSettled(
       Array.from({ length: 9 }, (_, i) => i + 1).map(async (i) => {

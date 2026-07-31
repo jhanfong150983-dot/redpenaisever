@@ -241,6 +241,29 @@ async function fetchAnswerSheetImagesForClassify(supabaseAdmin, userId, assignme
     // 先試 page-0，不存在就直接返回（避免白打 9 個 404）
     const { data: first, error: firstErr } = await bucket.download(`answer-sheets/${assignmentId}/page-0.webp`)
     if (firstErr || !first) {
+      // 2026-07-31 學校考卷(fan-out)沒有自己的答案卷圖、以 answer_sheet_image_paths 引用模板路徑
+      // (template-answer-sheets/{tplId}/…)——沒有此 fallback 時 classify 無參考圖,
+      // 勾選題全讀空白(行政英語TEST 五年3班1號實證 -3 分)。
+      const { data: aRow } = await supabaseAdmin
+        .from('assignments')
+        .select('answer_sheet_image_paths')
+        .eq('id', assignmentId)
+        .maybeSingle()
+      const refPaths = Array.isArray(aRow?.answer_sheet_image_paths) ? aRow.answer_sheet_image_paths : []
+      if (refPaths.length > 0) {
+        const settled = await Promise.allSettled(
+          refPaths.map(async (p) => {
+            const { data, error } = await bucket.download(p)
+            if (error || !data) return null
+            return { mimeType: 'image/webp', data: Buffer.from(await data.arrayBuffer()).toString('base64') }
+          })
+        )
+        const imgs = settled.map((r) => (r.status === 'fulfilled' ? r.value : null)).filter(Boolean)
+        if (imgs.length > 0) {
+          console.log(`[AnswerSheet] paths fallback(模板引用)載入 ${imgs.length} 張，耗時 ${Date.now() - startMs}ms`)
+          return imgs
+        }
+      }
       console.log(`[AnswerSheet] page-0 不存在，跳過，耗時 ${Date.now() - startMs}ms`)
       return []
     }
