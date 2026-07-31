@@ -1049,6 +1049,8 @@ const VALID_QUESTION_CATEGORIES = new Set([
   // Bucket A
   'single_choice', 'multi_choice', 'circle_select_one', 'circle_select_many',
   'single_check', 'multi_check', 'true_false', 'fill_blank', 'multi_fill',
+  // 2026-07-31 與 client AK_VALID_CATEGORIES 同步補 table_cell/table_check(此清單目前為死碼、防日後分岔)
+  'table_cell', 'table_check',
   'matching', 'ordering', 'mark_in_text',
   'calculation', 'word_problem',
   // Bucket B
