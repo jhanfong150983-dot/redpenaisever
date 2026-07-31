@@ -2638,6 +2638,41 @@ async function handleImportTemplate(req, res) {
     const newAnswerSheetPaths = await copyTemplateStorageImages(supabaseDb, source.answer_sheet_image_paths, newId)
     const newBookletPaths = await copyTemplateStorageImages(supabaseDb, source.question_booklet_image_paths, newId)
 
+    // 2026-07-31: answer_key 內 per-question cropImagePath(作圖/地圖題 VJ 正解參考圖)指向
+    // 原 owner 的 answer-crops/{原id}/…——原樣照抄會讓複製品依賴原模板的檔案(原卷刪除→
+    // VJ 參考圖靜默失效、批改品質無聲下降)。crop 檔一併複製並改寫路徑(fail-open 不擋匯入)。
+    let copiedAnswerKey = source.answer_key
+    try {
+      const ak = typeof source.answer_key === 'string' ? JSON.parse(source.answer_key) : JSON.parse(JSON.stringify(source.answer_key ?? {}))
+      const qs = Array.isArray(ak?.questions) ? ak.questions : []
+      const bucket = supabaseDb.storage.from('homework-images')
+      let copiedCrops = 0
+      for (const q of qs) {
+        const src = typeof q?.cropImagePath === 'string' ? q.cropImagePath : ''
+        if (!src.startsWith('answer-crops/')) continue
+        const parts = src.split('/')
+        if (parts.length < 3) continue
+        const { data: blob, error: dlErr } = await bucket.download(src)
+        if (dlErr || !blob) continue
+        parts[1] = newId
+        const dest = parts.join('/')
+        const buf = Buffer.from(await blob.arrayBuffer())
+        const { error: upErr } = await bucket.upload(dest, buf, {
+          contentType: src.endsWith('.jpg') ? 'image/jpeg' : 'image/webp',
+          upsert: true
+        })
+        if (upErr) continue
+        q.cropImagePath = dest
+        copiedCrops++
+      }
+      if (copiedCrops > 0) {
+        copiedAnswerKey = ak
+        console.log(`[import-template] copied ${copiedCrops} answer crops → ${newId}`)
+      }
+    } catch (e) {
+      console.warn('[import-template] crop copy failed (non-fatal):', e?.message)
+    }
+
     const { error: insertErr } = await supabaseDb
       .from('answer_key_templates')
       .insert({
@@ -2646,7 +2681,7 @@ async function handleImportTemplate(req, res) {
         name: source.name,
         domain: source.domain,
         doc_type: source.doc_type,
-        answer_key: source.answer_key,
+        answer_key: copiedAnswerKey,
         question_count: source.question_count,
         total_score: source.total_score,
         share_code: newShareCode,
@@ -2668,7 +2703,7 @@ async function handleImportTemplate(req, res) {
         name: source.name,
         domain: source.domain,
         docType: source.doc_type,
-        answerKey: source.answer_key,
+        answerKey: copiedAnswerKey,
         shareCode: newShareCode,
         questionCount: source.question_count,
         totalScore: source.total_score,
