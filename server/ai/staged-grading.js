@@ -6322,6 +6322,13 @@ function caseEquivNormalize(text) {
 //   - 字母/空格/內部標點/撇號(don't) 一律不動。
 function overrideNormItem(text) {
   let s = caseEquivNormalize(String(text ?? '')).trim()
+  // 2026-07-31 斷詞噪聲正規化(user 拍板 Layer1):read 整句照抄常把標點/縮寫撇號斷開空格
+  //   (「Class 512 's idea .」)→ punctuation/wordOrder 規則把噪聲當錯誤誤扣(行政英語TEST
+  //   2-D-1 實證 -1)。收斂:標點前空格移除、撇號兩側貼回、連續空格收一格。
+  //   套在學生讀值與正解兩邊(對稱)——只消格式噪聲,不動字母/標點本身,句尾標點檢查語意不變。
+  s = s.replace(/\s+([.,!?;:])/gu, '$1')
+  s = s.replace(/(\w)\s*[’']\s*(\w)/gu, "$1'$2")
+  s = s.replace(/\s{2,}/g, ' ').trim()
   s = s.replace(/[,;]+$/u, '').trim()
   if (s.split(/\s+/).filter(Boolean).length <= 2) s = s.replace(/[.!?]+$/u, '').trim()
   return s
