@@ -2426,10 +2426,11 @@ function isSentenceClozeAnswer(answer, maxScore) {
 }
 export function gradeSentenceClozeDeterministic(q, studentAnswerRaw, status) {
   const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
-  const key = ensureString(q?.answer, '').trim()
+  // 2026-07-31 Layer1:斷詞噪聲正規化兩邊對稱(「512 's」→「512's」),tokenize 才對得上
+  const key = spacingNoiseNormalize(ensureString(q?.answer, '').trim())
   if (status === 'unreadable') return { gradable: false }
   if (status === 'blank') return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'blank', scoringReason: '學生未作答' }
-  const raw = ensureString(studentAnswerRaw, '').trim()
+  const raw = spacingNoiseNormalize(ensureString(studentAnswerRaw, '').trim())
   if (!raw || !key || maxScore <= 0) return { gradable: false }
   if (!isSentenceClozeAnswer(key, maxScore)) return { gradable: false }
   const modelOrig = clozeTokenize(key)
@@ -6320,15 +6321,22 @@ function caseEquivNormalize(text) {
 //   - 結尾逗號/分號 ,; → 永遠去（任何答案結尾逗號都非刻意、多為誤點/分隔殘留）。
 //   - 句末 . ! ? → 只在「短答案(≤2字)」赦免；句子(3+字)保留(punctuationCheck 有意義、不可動)。
 //   - 字母/空格/內部標點/撇號(don't) 一律不動。
-function overrideNormItem(text) {
-  let s = caseEquivNormalize(String(text ?? '')).trim()
-  // 2026-07-31 斷詞噪聲正規化(user 拍板 Layer1):read 整句照抄常把標點/縮寫撇號斷開空格
-  //   (「Class 512 's idea .」)→ punctuation/wordOrder 規則把噪聲當錯誤誤扣(行政英語TEST
-  //   2-D-1 實證 -1)。收斂:標點前空格移除、撇號兩側貼回、連續空格收一格。
-  //   套在學生讀值與正解兩邊(對稱)——只消格式噪聲,不動字母/標點本身,句尾標點檢查語意不變。
+// 2026-07-31 Layer1 共用:斷詞噪聲正規化(user 拍板)。read 整句照抄常把標點/縮寫撇號
+//   斷開空格(「Class 512 's idea .」)→ 下游比對把噪聲當錯誤。收斂:標點前空格移除、
+//   撇號兩側貼回、連續空格收一格。只消格式噪聲、不動字母/標點本身。
+//   消費者:①accessor 入口 overrideNormItem ②確定性克漏字 gradeSentenceClozeDeterministic
+//   (2-D-1 實證:「512 's」被拆兩 token → 關鍵詞「512's」比不上 → 誤扣 1)。兩邊對稱套用。
+function spacingNoiseNormalize(text) {
+  let s = String(text ?? '')
   s = s.replace(/\s+([.,!?;:])/gu, '$1')
   s = s.replace(/(\w)\s*[’']\s*(\w)/gu, "$1'$2")
-  s = s.replace(/\s{2,}/g, ' ').trim()
+  s = s.replace(/\s{2,}/g, ' ')
+  return s.trim()
+}
+
+function overrideNormItem(text) {
+  let s = caseEquivNormalize(String(text ?? '')).trim()
+  s = spacingNoiseNormalize(s)
   s = s.replace(/[,;]+$/u, '').trim()
   if (s.split(/\s+/).filter(Boolean).length <= 2) s = s.replace(/[.!?]+$/u, '').trim()
   return s
