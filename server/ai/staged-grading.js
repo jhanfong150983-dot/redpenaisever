@@ -667,6 +667,159 @@ export async function cropWithMarkByBbox(imageBase64, mimeType, bbox, padX = 0.0
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-08-01 聚焦重定位（classify focus repair、[[classify-sample-k-experiment]]）:
+//   3.6-flash 對「題號.( 答 ) 緊貼題目文字」版面整欄系統性右偏（44 次全偏、取樣中位數無解、
+//   prompt 修法沙盒失敗且有副作用）；但同模型在聚焦小圖上 20/20 全中 → 偵測到偏位就裁小圖重定位。
+//   偵測=學生框 vs 答案卷同題框的 x 軸重疊率 <50%（僅 detection、修正框仍由 AI 看學生卷產出、
+//   不違反「不可用答案卷 bbox 覆蓋」鐵律）；容器類型限 tight_answer 選擇題族；wq_pdf 限定；fail-open。
+//   kill switch: CLASSIFY_FOCUS_REPAIR='0'。
+const FOCUS_REPAIR_TYPES = new Set(['single_choice', 'multi_choice', 'true_false'])
+
+async function applyClassifyFocusRepair({
+  apiKey, model, payload, routeHint, pipelineRunId,
+  aligned, akQuestions, pageBreaks, inlineImage, getRemainingBudget, stageResponses
+}) {
+  // ── 答案卷框換算到學生全圖座標（ak bbox 是單頁座標、pageIndex 或 id 前綴定頁）──
+  const cuts = [0, ...(Array.isArray(pageBreaks) ? pageBreaks : []), 1]
+  const pageBoundsOf = (idx) => (idx >= 0 && idx < cuts.length - 1) ? [cuts[idx], cuts[idx + 1]] : [0, 1]
+  const akById = new Map()
+  for (const q of akQuestions) {
+    const id = q?.id
+    const bb = q?.answerBbox
+    if (!id || !FOCUS_REPAIR_TYPES.has(q?.questionCategory) || !bb) continue
+    if (![bb.x, bb.y, bb.w, bb.h].every((v) => Number.isFinite(Number(v)))) continue
+    let pi = Number.isInteger(q?.pageIndex) ? q.pageIndex : null
+    if (pi == null) { const m = String(id).match(/^(\d+)-/); pi = m ? (parseInt(m[1], 10) - 1) : 0 }
+    const [py0, py1] = pageBoundsOf(pi)
+    const ph = py1 - py0
+    akById.set(id, {
+      x: Number(bb.x), y: py0 + Number(bb.y) * ph,
+      w: Number(bb.w), h: Math.max(1e-4, Number(bb.h) * ph),
+      pageIndex: pi, pageY0: py0, pageY1: py1
+    })
+  }
+  if (akById.size === 0) return
+
+  // ⚠️ 只比 x 軸:病灶是水平位移;y 軸經 pageBreaks(近似三等分)換算、頁底誤差可達 0.02+、
+  //   2D 交集會把正常題誤旗(沙盒實證 9/18 誤旗觸發保險絲)。x 不受頁面堆疊影響、乾淨。
+  const xOverlapRatio = (s, k) => {
+    const ix = Math.max(0, Math.min(s.x + s.w, k.x + k.w) - Math.max(s.x, k.x))
+    return ix / Math.max(1e-9, s.w)
+  }
+  // ── 偵測:x 重疊率 <50% 且 y 中心大致同列(容忍換算誤差 0.05)才旗標 ──
+  //   門檻 50%:沙盒抓到 30% 門檻漏網 case(偏位框重疊恰 30% 未觸發、但仍讀不到字);
+  //   正常題重疊 65-100% 不誤觸;就算誤旗、聚焦重定位只會畫回同位置(成本=1 個小 call、無害)。
+  const flagged = []
+  let detectable = 0
+  for (const q of aligned) {
+    if (!q?.visible || !q?.answerBbox) continue
+    const k = akById.get(q.questionId)
+    if (!k) continue
+    detectable++
+    const yDiff = Math.abs((q.answerBbox.y + q.answerBbox.h / 2) - (k.y + k.h / 2))
+    if (yDiff > 0.05) continue // y 換算不可信 → 不旗標(fail-open)
+    if (xOverlapRatio(q.answerBbox, k) < 0.5) flagged.push({ q, k })
+  }
+  if (flagged.length === 0) return
+  // 保險絲:>40% 的題同時旗標=座標換算或版面整體有問題、非個別偏位 → 整個放棄（維持現狀）
+  if (flagged.length / detectable > 0.4) {
+    logStaged(pipelineRunId, 'basic', `[FocusRepair] 旗標比例過高(${flagged.length}/${detectable})→ 放棄修復(疑座標換算/版面問題)`)
+    return
+  }
+  logStaged(pipelineRunId, 'basic', `[FocusRepair] 偵測 ${flagged.length}/${detectable} 題框偏位(vs 答案卷 x 重疊<50%):${flagged.map((f) => f.q.questionId).join(',')}`)
+
+  // ── 分組:同頁+同欄(ak x 相近)+垂直相鄰 → 一組一張聚焦圖一個 call ──
+  flagged.sort((a, b) => (a.k.pageIndex - b.k.pageIndex) || (a.k.x - b.k.x) || (a.k.y - b.k.y))
+  const groups = []
+  for (const f of flagged) {
+    const g = groups.find((gr) => gr.pageIndex === f.k.pageIndex
+      && Math.abs(gr.akX - f.k.x) < 0.08
+      && (f.k.y - gr.maxY) < 0.06
+      && gr.items.length < 8)
+    if (g) { g.items.push(f); g.maxY = Math.max(g.maxY, f.k.y + f.k.h) }
+    else groups.push({ pageIndex: f.k.pageIndex, akX: f.k.x, maxY: f.k.y + f.k.h, pageY0: f.k.pageY0, pageY1: f.k.pageY1, items: [f] })
+  }
+
+  const { default: sharp } = await import('sharp')
+  const imgBuf = Buffer.from(inlineImage.data, 'base64')
+  const meta = await sharp(imgBuf).metadata()
+  if (!meta?.width || !meta?.height) return
+  const printedNum = (id) => { const m = String(id).match(/(\d+)\s*$/); return m ? m[1] : String(id) }
+  let repairedCount = 0
+
+  for (const g of groups) {
+    if (getRemainingBudget() < 40_000) break
+    // 裁切窗:x=學生框 ∪ 答案卷框(兩個候選區都要看得到)+邊距(左留題號錨點、右留題幹上下文);
+    //   y=只用學生框(全圖真值;ak y 經 pageBreaks 換算有誤差、不可當窗界)、clamp 頁界
+    const xs = [], xe = [], ys = [], ye = []
+    for (const { q, k } of g.items) {
+      xs.push(q.answerBbox.x, k.x); xe.push(q.answerBbox.x + q.answerBbox.w, k.x + k.w)
+      ys.push(q.answerBbox.y); ye.push(q.answerBbox.y + q.answerBbox.h)
+    }
+    let wx0 = Math.max(0, Math.min(...xs) - 0.06)
+    let wx1 = Math.min(1, Math.max(...xe) + 0.10)
+    if (wx1 - wx0 < 0.22) { const c = (wx0 + wx1) / 2; wx0 = Math.max(0, c - 0.11); wx1 = Math.min(1, c + 0.11) }
+    let wy0 = Math.max(g.pageY0, Math.min(...ys) - 0.012)
+    let wy1 = Math.min(g.pageY1, Math.max(...ye) + 0.012)
+    if (wy1 - wy0 < 0.015) { const c = (wy0 + wy1) / 2; wy0 = Math.max(g.pageY0, c - 0.0075); wy1 = Math.min(g.pageY1, c + 0.0075) }
+    const ww = wx1 - wx0, wh = wy1 - wy0
+    if (ww <= 0 || wh <= 0) continue
+    let cropBuf
+    try {
+      const left = Math.round(wx0 * meta.width), top = Math.round(wy0 * meta.height)
+      const cw = Math.max(1, Math.min(meta.width - left, Math.round(ww * meta.width)))
+      const ch = Math.max(1, Math.min(meta.height - top, Math.round(wh * meta.height)))
+      let pipe = sharp(imgBuf).extract({ left, top, width: cw, height: ch })
+      if (cw < 400) pipe = pipe.resize({ width: cw * 2, kernel: 'lanczos3' })
+      cropBuf = await pipe.jpeg({ quality: 92 }).toBuffer()
+    } catch (e) {
+      logStaged(pipelineRunId, 'basic', `[FocusRepair] 裁圖失敗(skip group):${e?.message}`)
+      continue
+    }
+    const nums = g.items.map((it) => printedNum(it.q.questionId))
+    const prompt = `這是一張考卷的局部裁切圖。圖中應有題號 ${nums.map((n) => `${n}.`).join(' ')} 的題目,每題題號後緊接一對印刷括號「(  )」(答案格),學生可能在括號內手寫代號(字母/數字/○✗)。
+任務:對每一題,框出「括號及其中手寫內容」的精確 bbox——不含括號左側的題號、不含括號右側的題目文字。
+座標用這張裁切圖的 normalized [0,1](左上角原點)。找不到括號的題直接省略。
+只輸出 JSON:{"boxes":[{"n":"${nums[0]}","bbox":{"x":0.0,"y":0.0,"w":0.0,"h":0.0}}]}`
+    const resp = await executeStage({
+      apiKey, model,
+      modelOverride: STAGE_MODEL[AI_ROUTE_KEYS.GRADING_CLASSIFY],
+      payload,
+      timeoutMs: Math.min(getRemainingBudget(), 25_000),
+      routeHint,
+      routeKey: AI_ROUTE_KEYS.GRADING_CLASSIFY,
+      stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: cropBuf.toString('base64') } }] }]
+    })
+    if (resp) stageResponses.push(resp)
+    if (!resp?.ok) { logStaged(pipelineRunId, 'basic', `[FocusRepair] 聚焦 call 失敗(skip group)`); continue }
+    const parsed = parseCandidateJson(resp.data)
+    const boxes = Array.isArray(parsed?.boxes) ? parsed.boxes : null
+    if (!boxes) { logStaged(pipelineRunId, 'basic', `[FocusRepair] 回傳無 boxes(skip group)`); continue }
+    for (const b of boxes) {
+      const bb = b?.bbox
+      if (!bb || ![bb.x, bb.y, bb.w, bb.h].every((v) => Number.isFinite(Number(v)))) continue
+      const item = g.items.find((it) => printedNum(it.q.questionId) === String(b.n))
+      if (!item) continue
+      // 映回全圖
+      const nb = { x: wx0 + Number(bb.x) * ww, y: wy0 + Number(bb.y) * wh, w: Number(bb.w) * ww, h: Number(bb.h) * wh }
+      // 驗收三關(任一不過=保留原框):①窗內 ②x 對答案卷框重疊 ≥50% 且列不動(y 中心離原框 ≤0.015)
+      // ③尺寸合理(w 對答案卷框 0.5~3 倍、h 對原框 ≤3 倍——原框的列/高本來就對、只有 x 錯)
+      if (nb.w <= 0 || nb.h <= 0 || nb.x < wx0 - 0.005 || nb.x + nb.w > wx1 + 0.005) continue
+      const newRatio = xOverlapRatio(nb, item.k)
+      if (newRatio < 0.5) continue
+      const old = item.q.answerBbox
+      if (Math.abs((nb.y + nb.h / 2) - (old.y + old.h / 2)) > 0.015) continue
+      if (nb.w < 0.5 * item.k.w || nb.w > 3 * item.k.w) continue
+      if (nb.h > 3 * Math.max(old.h, 0.006)) continue
+      item.q.answerBbox = { x: +nb.x.toFixed(4), y: +nb.y.toFixed(4), w: +nb.w.toFixed(4), h: +nb.h.toFixed(4) }
+      repairedCount++
+      logStaged(pipelineRunId, 'basic', `[FocusRepair] ${item.q.questionId} x=${old.x.toFixed(3)}→${item.q.answerBbox.x.toFixed(3)} (x重疊→${Math.round(newRatio * 100)}%)`)
+    }
+  }
+  logStaged(pipelineRunId, 'basic', `[FocusRepair] 完成:修復 ${repairedCount}/${flagged.length} 題(${groups.length} 組聚焦 call)`)
+}
+
 export async function cropInlineImageByBbox(imageBase64, mimeType, bbox, useActualBbox = false, customPad = null) {
   if (!bbox || !imageBase64) return null
   try {
@@ -9167,6 +9320,27 @@ export async function runStagedGradingPhaseA({
     }
   }
   // ── End Classify Quality Gate ─────────────────────────────────────────────
+
+  // ── 2026-08-01 聚焦重定位（見 applyClassifyFocusRepair 註）:QG 通過後、classify 定稿前 ──
+  //   只跑 wq_pdf(一般模式+PDF);precomputed context 路徑不在此分支、不會重複修。fail-open。
+  if (process.env.CLASSIFY_FOCUS_REPAIR !== '0'
+      && answerSheetMode !== 'answer_only'
+      && submissionSource === 'teacher_scan'
+      && Array.isArray(classifyAligned) && classifyAligned.length > 0) {
+    try {
+      await applyClassifyFocusRepair({
+        apiKey, model, payload, routeHint, pipelineRunId,
+        aligned: classifyAligned,
+        akQuestions: answerKeyQuestions,
+        pageBreaks,
+        inlineImage: inlineImages[0].inlineData,
+        getRemainingBudget,
+        stageResponses
+      })
+    } catch (e) {
+      logStaged(pipelineRunId, 'basic', `[FocusRepair] 失敗(fail-open、維持原框):${e?.message}`)
+    }
+  }
   } // 2026-05-17: 結束「!precomputedClassifyContext」分支（OCR + classify + bbox 後處理 + QG）
 
   // 2026-05-17: stopAfterClassify early-return（拆 classify 出獨立 HTTP call）
