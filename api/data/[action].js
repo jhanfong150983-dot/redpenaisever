@@ -2789,6 +2789,14 @@ async function handleSaveGrading(req, res) {
       // Phase A 失敗時、client 會帶 status='grading_failed' + gradingResult.pipelineFailure
       // 該情況不寫入 score / ai_score / graded_at（沒有實際批分）
       const isFailure = sub?.status === 'grading_failed'
+      // 2026-08-01 Step 10 改分紀錄(user 拍板:不做原因欄、只留最後一次):
+      //   client 每次人工編輯會蓋 _editedAt 並清掉 _editedBy;這裡用「已驗證的登入者」補上,
+      //   身分不採信 client(避免偽造誰改的)。行政/教師各改各的卷,但都留痕、雙方可唯讀。
+      if (!isFailure && Array.isArray(sub?.gradingResult?.details)) {
+        for (const d of sub.gradingResult.details) {
+          if (d && d._editedAt && !d._editedBy) d._editedBy = user.id
+        }
+      }
       const updateFields = isFailure
         ? {
             status: 'grading_failed',
