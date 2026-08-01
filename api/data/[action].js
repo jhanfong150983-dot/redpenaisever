@@ -3915,7 +3915,11 @@ async function handleSync(req, res) {
 
       // 2026-05-19: PostgREST 預設 cap 1000 筆、submissions 超量會被切（佳軒老師 1040 筆只回 1000、
       // 老師看到「有些學生顯示尚未繳交」其實學生已上傳）。fetchAllPaginated 用 .range() 分頁撈全。
-      // submissions 跟 deleted_records 已知會成長到 cap、用分頁；其他表格資料量小、保持單次 query。
+      // 2026-08-01（user 回報行政端批次批改「11 個班級只剩 23 位學生」）：
+      //   舊註解假設「其他表格資料量小、保持單次 query」——這個假設在行政端獨立模型下失效：
+      //   行政帳號要鏡像全校班級/學生（實測單一行政 owner students=2399、classrooms=74），
+      //   students 單次 query 被 cap 在 1000 筆 → 本機缺一大半學生 → 批改頁漏人、會漏批。
+      //   → 全表一律走 fetchAllPaginated（小表第一頁就結束、無額外成本）。
       const [
         classroomsResult,
         studentsResult,
@@ -3927,9 +3931,9 @@ async function handleSync(req, res) {
         answerKeyTemplatesResult,
         deletedResult
       ] = await Promise.all([
-        supabaseDb.from('classrooms').select('*').eq('owner_id', ownerId),
-        supabaseDb.from('students').select('*').eq('owner_id', ownerId),
-        supabaseDb.from('assignments').select('*').eq('owner_id', ownerId),
+        fetchAllPaginated(() => supabaseDb.from('classrooms').select('*').eq('owner_id', ownerId)),
+        fetchAllPaginated(() => supabaseDb.from('students').select('*').eq('owner_id', ownerId)),
+        fetchAllPaginated(() => supabaseDb.from('assignments').select('*').eq('owner_id', ownerId)),
         fetchAllPaginated(() => {
           let qb = supabaseDb
             .from('submissions')
@@ -3939,10 +3943,10 @@ async function handleSync(req, res) {
           if (sinceIso) qb = qb.gte('updated_at', sinceIso)
           return qb
         }),
-        supabaseDb.from('folders').select('*').eq('owner_id', ownerId),
-        supabaseDb.from('gradebook_custom_columns').select('*').eq('owner_id', ownerId),
-        supabaseDb.from('gradebook_custom_scores').select('*').eq('owner_id', ownerId),
-        supabaseDb.from('answer_key_templates').select('*').eq('owner_id', ownerId),
+        fetchAllPaginated(() => supabaseDb.from('folders').select('*').eq('owner_id', ownerId)),
+        fetchAllPaginated(() => supabaseDb.from('gradebook_custom_columns').select('*').eq('owner_id', ownerId)),
+        fetchAllPaginated(() => supabaseDb.from('gradebook_custom_scores').select('*').eq('owner_id', ownerId)),
+        fetchAllPaginated(() => supabaseDb.from('answer_key_templates').select('*').eq('owner_id', ownerId)),
         fetchAllPaginated(() => {
           let qb = supabaseDb
             .from('deleted_records')
