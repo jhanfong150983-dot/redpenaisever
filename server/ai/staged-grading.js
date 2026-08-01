@@ -712,19 +712,24 @@ async function applyClassifyFocusRepair({
   //   正常題重疊 65-100% 不誤觸;就算誤旗、聚焦重定位只會畫回同位置(成本=1 個小 call、無害)。
   const flagged = []
   let detectable = 0
+  let agreeCount = 0
   for (const q of aligned) {
     if (!q?.visible || !q?.answerBbox) continue
     const k = akById.get(q.questionId)
     if (!k) continue
     detectable++
     const yDiff = Math.abs((q.answerBbox.y + q.answerBbox.h / 2) - (k.y + k.h / 2))
-    if (yDiff > 0.05) continue // y 換算不可信 → 不旗標(fail-open)
+    if (yDiff > 0.05) continue // y 換算不可信 → 既不旗標、也不算對齊
     if (xOverlapRatio(q.answerBbox, k) < 0.5) flagged.push({ q, k })
+    else agreeCount++
   }
   if (flagged.length === 0) return
-  // 保險絲:>40% 的題同時旗標=座標換算或版面整體有問題、非個別偏位 → 整個放棄（維持現狀）
-  if (flagged.length / detectable > 0.4) {
-    logStaged(pipelineRunId, 'basic', `[FocusRepair] 旗標比例過高(${flagged.length}/${detectable})→ 放棄修復(疑座標換算/版面問題)`)
+  // ── 版面對齊驗證(2026-08-01 user 把關):答案卷框要當警報器、必須先被「多數題」證明
+  //   與學生卷同版面(≥60% 的可比題 x 重疊 ≥50% 且同列)。老師若用不同模板的答案卷 →
+  //   對齊率崩盤 → 整個機制自動停用、零修復零 call。這是「用尺之前先證明是同一把尺」。
+  //   (同時取代舊「旗標>40% 放棄」保險絲——本閘更嚴:y 全面對不上的版面也會被擋。)
+  if (agreeCount / detectable < 0.6) {
+    logStaged(pipelineRunId, 'basic', `[FocusRepair] 版面對齊驗證未過(對齊 ${agreeCount}/${detectable} <60%)→ 答案卷框不可信、全面停用修復`)
     return
   }
   logStaged(pipelineRunId, 'basic', `[FocusRepair] 偵測 ${flagged.length}/${detectable} 題框偏位(vs 答案卷 x 重疊<50%):${flagged.map((f) => f.q.questionId).join(',')}`)
