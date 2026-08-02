@@ -7875,6 +7875,45 @@ async function handleSchoolExams(req, res) {
         })
       }
     }
+    // 2026-08-03 修「編輯考卷時批改規則是空的」:規則存在各班 assignment 的 answer_key 裡。
+    //   前端沒帶入 → 老師重選一輪 → 送出時把既有規則覆蓋掉(英語標點/語序檢查會被靜默清空)。
+    //   ⚠ 只投影需要的 JSON 路徑,不整包撈 answer_key(那是大 JSONB)。
+    const firstAidByExam = new Map()
+    for (const [eid, list] of classesByExam.entries()) {
+      const aid = (list || []).map((c) => c.assignmentId).filter(Boolean)[0]
+      if (aid) firstAidByExam.set(eid, aid)
+    }
+    const settingsByAid = new Map()
+    const aidList = [...firstAidByExam.values()]
+    if (aidList.length) {
+      const { data: aRows, error: aErr } = await supabaseDb
+        .from('assignments')
+        .select(
+          'id, scoring_mode, domain, strictness:answer_key->>strictness, ' +
+            'fractionRule:answer_key->>fractionRule, unitErrorRule:answer_key->>unitErrorRule, ' +
+            'unitErrorDeduction:answer_key->>unitErrorDeduction, processCreditRule:answer_key->>processCreditRule, ' +
+            'processCreditDeduction:answer_key->>processCreditDeduction, englishRules:answer_key->englishRules'
+        )
+        .in('id', aidList)
+      if (aErr) console.warn('[school-exams] 讀批改規則失敗(編輯視窗會顯示空白):', aErr.message)
+      for (const a of aRows ?? []) {
+        const en = a.englishRules || {}
+        settingsByAid.set(a.id, {
+          strictness: a.strictness || 'standard',
+          scoringMode: a.scoring_mode === 'unscored' ? 'unscored' : 'scored',
+          fractionRule: a.fractionRule || 'require_simplified',
+          unitErrorRule: a.unitErrorRule || 'zero',
+          unitErrorDeduction: Number(a.unitErrorDeduction) || 1,
+          processCreditRule: a.processCreditRule || 'none',
+          processCreditDeduction: Number(a.processCreditDeduction) || 1,
+          enPunctuationCheck: !!en?.punctuationCheck?.enabled,
+          enPunctuationDeduction: Number(en?.punctuationCheck?.deductionPerError) || 1,
+          enWordOrderCheck: !!en?.wordOrderCheck?.enabled,
+          enWordOrderDeduction: Number(en?.wordOrderCheck?.deductionPerError) || 1
+        })
+      }
+    }
+
     res.status(200).json({
       exams: (exams ?? []).map((e) => ({
         id: e.id,
@@ -7883,7 +7922,8 @@ async function handleSchoolExams(req, res) {
         subject: e.subject || '',
         answerKeyTemplateId: e.answer_key_template_id || '',
         createdAt: e.created_at,
-        classes: classesByExam.get(e.id) || []
+        classes: classesByExam.get(e.id) || [],
+        settings: settingsByAid.get(firstAidByExam.get(e.id)) || null
       }))
     })
     return
