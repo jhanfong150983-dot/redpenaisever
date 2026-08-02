@@ -7712,8 +7712,13 @@ async function processSchoolJobSubmission({ supabaseDb, apiKey, job, sub, assign
 // 答案卷頁圖不複製(assignment.answer_sheet_image_paths 直接引用模板路徑,消費端本有 fallback)。
 // ============================================================
 async function resolveExamOwner(supabaseDb, schoolId, fallbackUserId) {
-  const { data: sc } = await supabaseDb
+  const { data: sc, error: scErr } = await supabaseDb
     .from('schools').select('exam_owner_profile_id').eq('id', schoolId).maybeSingle()
+  // 2026-08-02:這裡原本不看 error,查詢失敗會靜默 fallback 到當前使用者——
+  //   schools.exam_owner_profile_id 欄位缺失時剛好 fallback 到正確答案,
+  //   於是「建考卷/匯入/批改都正常」，卻讓名冊同步(select 帶此欄)整包查詢失敗、
+  //   對外回報成「找不到此學校」，掩蓋真因數週。缺欄位這種結構問題必須留痕。
+  if (scErr) console.error('[resolveExamOwner] schools 查詢失敗(將退回當前使用者):', scErr.message)
   let examOwner = sc?.exam_owner_profile_id || null
   if (!examOwner && fallbackUserId) {
     examOwner = fallbackUserId
@@ -8803,11 +8808,19 @@ async function handleSchoolRosterSync(req, res) {
     res.status(403).json({ error: 'Forbidden' })
     return
   }
-  const { data: school } = await supabaseAdmin
+  const { data: school, error: schoolErr } = await supabaseAdmin
     .from('schools')
     .select('id, name, provider_dsns, exam_owner_profile_id')
     .eq('id', schoolId)
     .maybeSingle()
+  // 2026-08-02:查詢失敗(例如欄位缺失)原本會落到下面的 !school 分支、
+  //   對外顯示「找不到此學校」——學校明明在、訊息卻指向錯誤方向,查了很久。
+  //   結構性錯誤要照實回報。
+  if (schoolErr) {
+    console.error('[roster-sync] schools 查詢失敗:', schoolErr.message)
+    res.status(500).json({ error: `讀取學校資料失敗:${schoolErr.message}` })
+    return
+  }
   if (!school) {
     res.status(404).json({ error: '找不到此學校' })
     return
