@@ -2886,6 +2886,78 @@ async function handleSaveFinalAnswers(req, res) {
   }
 }
 
+// 2026-08-02:把 handleClearGrading 的核心抽出來,讓行政端「換答案卷」能沿用**同一套語意**
+//   (user 要求行政端比照教師端)。ownerId 由呼叫端給——行政端的卷 owner 是考卷持有帳號、
+//   不是當下登入者。回傳受影響學生數,供 log/回報。
+async function clearGradingForAssignment(supabaseDb, { assignmentId, ownerId, reason }) {
+  const nowIso = new Date().toISOString()
+  const { data: gradedSubs, error: gradedSubsErr } = await supabaseDb
+    .from('submissions')
+    .select('student_id')
+    .eq('assignment_id', assignmentId)
+    .eq('owner_id', ownerId)
+    .not('grading_result', 'is', null)
+  if (gradedSubsErr) throw new Error(gradedSubsErr.message)
+  const affectedStudentIds = [...new Set((gradedSubs || []).map((r) => r.student_id).filter(Boolean))]
+
+  const { error } = await supabaseDb
+    .from('submissions')
+    .update({
+      status: 'synced',
+      score: null,
+      ai_score: null,
+      score_source: null,
+      feedback: null,
+      grading_result: null,
+      graded_at: null,
+      phase_a_state: null,
+      final_answers: null,
+      updated_at: nowIso
+    })
+    .eq('assignment_id', assignmentId)
+    .eq('owner_id', ownerId)
+    .or('grading_result.not.is.null,phase_a_state.not.is.null,final_answers.not.is.null')
+  if (error) throw new Error(error.message)
+
+  if (affectedStudentIds.length > 0) {
+    await supabaseDb
+      .from('assignment_student_state')
+      .update({ status: 'uploaded', last_status_reason: reason || '更換答案卷、批改與訂正狀態已清除', updated_at: nowIso })
+      .eq('owner_id', ownerId)
+      .eq('assignment_id', assignmentId)
+      .in('student_id', affectedStudentIds)
+  }
+  await supabaseDb
+    .from('correction_question_items')
+    .update({ status: 'skipped', updated_at: nowIso })
+    .eq('owner_id', ownerId)
+    .eq('assignment_id', assignmentId)
+    .in('status', ['open', 'disputed', 'resolved'])
+  return affectedStudentIds.length
+}
+
+// 2026-08-02:刪 submissions 時一併清 Storage 圖檔(比照教師端 applyDeletes 的行為)。
+//   行政端原本只刪 DB → 學校考卷動輒上千份,每刪一次就留下上千個孤兒檔案永久佔空間。
+async function removeSubmissionStorageObjects(supabaseDb, submissionIds) {
+  if (!Array.isArray(submissionIds) || submissionIds.length === 0) return 0
+  const bucket = supabaseDb.storage.from('homework-images')
+  let removed = 0
+  for (const chunk of chunkArray(submissionIds, 100)) {
+    const paths = chunk.flatMap((id) => [`submissions/${id}.webp`, `submissions/thumbs/${id}.webp`])
+    const { error } = await bucket.remove(paths)
+    if (error) {
+      // 批次失敗降級逐一刪(同教師端策略);Storage 失敗不中斷 DB 刪除
+      for (const p of paths) {
+        const { error: e1 } = await bucket.remove([p])
+        if (!e1) removed++
+      }
+    } else {
+      removed += paths.length
+    }
+  }
+  return removed
+}
+
 async function handleClearGrading(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
   const { user } = await getAuthUser(req, res)
@@ -8032,16 +8104,245 @@ async function handleSchoolExams(req, res) {
       res.status(500).json({ error: `更新考卷失敗:${error.message}` })
       return
     }
+
+    // ── 2026-08-02(user:比照教師端)換答案卷 / 改批改設定 / 增減班級 ──
+    //   教師端既有語意(AssignmentList.commitSettingsSave + clear-grading):
+    //     ① 換答案卷 = 全部重來 → 一律清批改(即使 0 份已批改)、連訂正/申訴一併失效
+    //     ② 只改設定(沒換卷)= 不清任何東西,嚴格度變更由前端提示「需重批才套用」
+    //   行政端一份考卷 fan-out 成 N 份班級作業,所以逐班套用同一套處理。
+    const newTemplateId = typeof body.templateId === 'string' ? body.templateId.trim() : ''
+    const rules = body.settings && typeof body.settings === 'object' ? body.settings : null
+    const nowIso2 = new Date().toISOString()
+    const { data: examClasses } = await supabaseDb
+      .from('school_exam_classes').select('assignment_id, campus_class_id').eq('exam_id', examId)
+    const assignmentIds = (examClasses || []).map((r) => r.assignment_id).filter(Boolean)
+    let clearedStudents = 0
+
     // 名稱同步到各班作業(教師端/批改頁顯示的是 assignment.title)
     if (patch.title) {
-      const { data: rows } = await supabaseDb
-        .from('school_exam_classes').select('assignment_id').eq('exam_id', examId)
-      const ids = (rows || []).map((r) => r.assignment_id).filter(Boolean)
-      for (const chunk of chunkArray(ids, 100)) {
-        await supabaseDb.from('assignments').update({ title: patch.title, updated_at: new Date().toISOString() }).in('id', chunk)
+      for (const chunk of chunkArray(assignmentIds, 100)) {
+        await supabaseDb.from('assignments').update({ title: patch.title, updated_at: nowIso2 }).in('id', chunk)
       }
     }
-    res.status(200).json({ ok: true })
+
+    if (newTemplateId || rules) {
+      const examOwner = await resolveExamOwner(supabaseDb, schoolId, user.id)
+      let tpl = null
+      if (newTemplateId) {
+        const { data: t } = await supabaseDb
+          .from('answer_key_templates')
+          .select('id, name, domain, doc_type, answer_sheet_mode, answer_key, answer_sheet_image_paths, question_booklet_image_paths, version')
+          .eq('id', newTemplateId)
+          .maybeSingle()
+        if (!t?.answer_key) {
+          res.status(400).json({ error: '找不到指定的答案卷' })
+          return
+        }
+        tpl = t
+      }
+      // 逐班更新 answer_key(換卷=用新模板;純改設定=沿用該班現有 answerKey 再覆蓋規則欄位)
+      for (const aid of assignmentIds) {
+        let baseAk = null
+        let domain = null
+        if (tpl) {
+          baseAk = JSON.parse(JSON.stringify(tpl.answer_key))
+          domain = tpl.domain
+        } else {
+          const { data: cur } = await supabaseDb
+            .from('assignments').select('answer_key, domain').eq('id', aid).maybeSingle()
+          if (!cur?.answer_key) continue
+          baseAk = typeof cur.answer_key === 'string' ? JSON.parse(cur.answer_key) : JSON.parse(JSON.stringify(cur.answer_key))
+          domain = cur.domain
+        }
+        if (rules) {
+          if (rules.strictness) baseAk.strictness = rules.strictness
+          if (domain === '數學') {
+            if (rules.fractionRule) baseAk.fractionRule = rules.fractionRule
+            if (rules.unitErrorRule) {
+              baseAk.unitErrorRule = rules.unitErrorRule
+              baseAk.unitErrorDeduction = Number(rules.unitErrorDeduction) || 1
+            }
+            if (rules.processCreditRule) {
+              baseAk.processCreditRule = rules.processCreditRule
+              baseAk.processCreditDeduction = Number(rules.processCreditDeduction) || 1
+            }
+          }
+          if (domain === '英語') {
+            baseAk.englishRules = {
+              ...(rules.enPunctuationCheck
+                ? { punctuationCheck: { enabled: true, deductionPerError: Number(rules.enPunctuationDeduction) || 1 } }
+                : {}),
+              ...(rules.enWordOrderCheck
+                ? { wordOrderCheck: { enabled: true, deductionPerError: Number(rules.enWordOrderDeduction) || 1 } }
+                : {})
+            }
+          }
+        }
+        const upd = { answer_key: baseAk, updated_at: nowIso2 }
+        if (rules?.scoringMode) upd.scoring_mode = rules.scoringMode === 'unscored' ? 'unscored' : 'scored'
+        if (tpl) {
+          const qs = Array.isArray(baseAk?.questions) ? baseAk.questions : []
+          upd.answer_key_template_id = tpl.id
+          upd.bound_answer_key_version = tpl.version ?? 1
+          upd.domain = tpl.domain || null
+          upd.doc_type = tpl.doc_type || null
+          upd.answer_sheet_mode = tpl.answer_sheet_mode || null
+          upd.answer_sheet_image_paths = tpl.answer_sheet_image_paths || null
+          upd.question_booklet_image_paths = tpl.question_booklet_image_paths || null
+          upd.total_questions = qs.length
+          upd.total_pages = Math.max(
+            1,
+            ...qs.map((q) => { const m = String(q?.id ?? '').match(/^(\d+)-/); return m ? parseInt(m[1], 10) : 1 })
+          )
+        }
+        await supabaseDb.from('assignments').update(upd).eq('id', aid)
+        // 換答案卷 → 該班批改全部作廢(教師端同語意:即使 0 份已批改也清)
+        if (tpl) {
+          clearedStudents += await clearGradingForAssignment(supabaseDb, {
+            assignmentId: aid,
+            ownerId: examOwner,
+            reason: '行政更換答案卷、批改與訂正狀態已清除'
+          })
+        }
+      }
+      if (tpl) {
+        await supabaseDb.from('school_exams')
+          .update({ answer_key_template_id: tpl.id, updated_at: nowIso2 })
+          .eq('id', examId).eq('school_id', schoolId)
+      }
+    }
+
+    console.log('[school-exams] updated', examId, {
+      title: !!patch.title, subject: patch.subject ?? null,
+      answerKeyChanged: !!newTemplateId, settingsChanged: !!rules, clearedStudents
+    })
+    res.status(200).json({ ok: true, clearedStudents })
+    return
+  }
+
+  // 2026-08-02(user:比照教師端「複製作業到其他班級」/ 刪作業):考卷的班級增減。
+  //   加班級 = fan-out 一份新 assignment(沿用同一個答案卷模板與現有設定,同教師端複製語意)
+  //   移除班級 = 刪該班 assignment + submissions(含 Storage);有批改成績時要 force
+  if (mode === 'classes') {
+    const examId = typeof body.examId === 'string' ? body.examId.trim() : ''
+    const addIds = Array.isArray(body.addCampusClassIds) ? [...new Set(body.addCampusClassIds.map(String))] : []
+    const removeIds = Array.isArray(body.removeCampusClassIds) ? [...new Set(body.removeCampusClassIds.map(String))] : []
+    const force = body.force === true
+    if (!examId || (addIds.length === 0 && removeIds.length === 0)) {
+      res.status(400).json({ error: '缺少考卷 id 或要增減的班級' })
+      return
+    }
+    try {
+      const examOwner = await resolveExamOwner(supabaseDb, schoolId, user.id)
+      const { data: exam } = await supabaseDb
+        .from('school_exams').select('id, title, answer_key_template_id').eq('id', examId).eq('school_id', schoolId).maybeSingle()
+      if (!exam) { res.status(404).json({ error: '找不到考卷' }); return }
+      const { data: existing } = await supabaseDb
+        .from('school_exam_classes').select('campus_class_id, assignment_id, class_name').eq('exam_id', examId)
+      const existingByCid = new Map((existing || []).map((r) => [String(r.campus_class_id), r]))
+
+      // ① 移除班級——先確認有沒有已批改成績
+      const removeTargets = removeIds.map((cid) => existingByCid.get(cid)).filter(Boolean)
+      const removeAids = removeTargets.map((r) => r.assignment_id).filter(Boolean)
+      let gradedInRemoved = 0
+      for (const chunk of chunkArray(removeAids, 100)) {
+        const { count } = await supabaseDb
+          .from('submissions').select('id', { count: 'exact', head: true })
+          .in('assignment_id', chunk).eq('status', 'graded')
+        gradedInRemoved += count ?? 0
+      }
+      if (gradedInRemoved > 0 && !force) {
+        res.status(409).json({ error: 'graded_exists', gradedCount: gradedInRemoved, classNames: removeTargets.map((r) => r.class_name) })
+        return
+      }
+      for (const chunk of chunkArray(removeAids, 100)) {
+        const { data: subs } = await supabaseDb.from('submissions').select('id').in('assignment_id', chunk)
+        await removeSubmissionStorageObjects(supabaseDb, (subs || []).map((s) => s.id))
+        await supabaseDb.from('submissions').delete().in('assignment_id', chunk)
+        await supabaseDb.from('assignments').delete().in('id', chunk)
+      }
+      if (removeIds.length > 0) {
+        await supabaseDb.from('school_exam_classes').delete().eq('exam_id', examId).in('campus_class_id', removeIds)
+      }
+
+      // ② 新增班級——沿用同一個答案卷模板 + 現有任一班的設定(同教師端「複製作業」語意)
+      let added = 0
+      const toAdd = addIds.filter((cid) => !existingByCid.has(cid))
+      if (toAdd.length > 0) {
+        const { data: tpl } = await supabaseDb
+          .from('answer_key_templates')
+          .select('id, name, domain, doc_type, answer_sheet_mode, answer_key, answer_sheet_image_paths, question_booklet_image_paths, version')
+          .eq('id', exam.answer_key_template_id)
+          .maybeSingle()
+        if (!tpl?.answer_key) { res.status(400).json({ error: '找不到這份考卷的答案卷,無法新增班級' }); return }
+        // 沿用既有班級的 answer_key(含已套用的批改規則),沒有才退回模板原始值
+        let baseAk = null
+        let scoringMode = 'scored'
+        const sampleAid = (existing || [])[0]?.assignment_id
+        if (sampleAid) {
+          const { data: sample } = await supabaseDb
+            .from('assignments').select('answer_key, scoring_mode').eq('id', sampleAid).maybeSingle()
+          if (sample?.answer_key) {
+            baseAk = typeof sample.answer_key === 'string' ? JSON.parse(sample.answer_key) : sample.answer_key
+            scoringMode = sample.scoring_mode || 'scored'
+          }
+        }
+        if (!baseAk) baseAk = tpl.answer_key
+        const questions = Array.isArray(baseAk?.questions) ? baseAk.questions : []
+        const totalPages = Math.max(
+          1,
+          ...questions.map((q) => { const m = String(q?.id ?? '').match(/^(\d+)-/); return m ? parseInt(m[1], 10) : 1 })
+        )
+        // 目標班級的鏡像 classroom(行政名下)
+        const { data: mirrors } = await supabaseDb
+          .from('classrooms').select('id, name, campus_class_id')
+          .eq('owner_id', examOwner).eq('school_id', schoolId).in('campus_class_id', toAdd)
+        const assignmentRows = []
+        const examClassRows = []
+        for (const m of mirrors || []) {
+          const aid = `sxa_${nodeCrypto.randomBytes(8).toString('hex')}`
+          assignmentRows.push({
+            id: aid,
+            owner_id: examOwner,
+            classroom_id: m.id,
+            title: exam.title,
+            domain: tpl.domain || null,
+            doc_type: tpl.doc_type || null,
+            folder: '學校考卷',
+            scoring_mode: scoringMode,
+            answer_key: JSON.parse(JSON.stringify(baseAk)),
+            total_questions: questions.length,
+            total_pages: totalPages,
+            answer_key_template_id: tpl.id,
+            bound_answer_key_version: tpl.version ?? 1,
+            student_upload_enabled: false,
+            allow_student_ai_grading: false,
+            answer_sheet_mode: tpl.answer_sheet_mode || null,
+            answer_sheet_image_paths: tpl.answer_sheet_image_paths || null,
+            question_booklet_image_paths: tpl.question_booklet_image_paths || null,
+            updated_at: new Date().toISOString()
+          })
+          examClassRows.push({
+            exam_id: examId,
+            campus_class_id: String(m.campus_class_id),
+            classroom_id: m.id,
+            assignment_id: aid,
+            class_name: m.name || ''
+          })
+        }
+        if (assignmentRows.length > 0) {
+          const { error: aErr } = await supabaseDb.from('assignments').insert(assignmentRows)
+          if (aErr) throw new Error(`新增班級作業失敗:${aErr.message}`)
+          const { error: cErr } = await supabaseDb.from('school_exam_classes').insert(examClassRows)
+          if (cErr) throw new Error(`建立班級關聯失敗:${cErr.message}`)
+          added = assignmentRows.length
+        }
+      }
+      console.log('[school-exams] classes', examId, { added, removed: removeAids.length, gradedInRemoved })
+      res.status(200).json({ ok: true, added, removed: removeAids.length, deletedGraded: gradedInRemoved })
+    } catch (err) {
+      res.status(500).json({ error: err?.message || '調整班級失敗' })
+    }
     return
   }
 
@@ -8070,7 +8371,12 @@ async function handleSchoolExams(req, res) {
       res.status(409).json({ error: 'graded_exists', gradedCount })
       return
     }
+    // 2026-08-02:先清 Storage 再刪 DB(比照教師端 applyDeletes)。
+    //   原本只刪 DB → 學校考卷動輒上千份,每刪一次就留下上千個孤兒圖檔永久佔空間。
     for (const chunk of chunkArray(assignmentIds, 100)) {
+      const { data: subs } = await supabaseDb
+        .from('submissions').select('id').in('assignment_id', chunk)
+      await removeSubmissionStorageObjects(supabaseDb, (subs || []).map((s) => s.id))
       await supabaseDb.from('submissions').delete().in('assignment_id', chunk)
       await supabaseDb.from('assignments').delete().in('id', chunk)
     }
