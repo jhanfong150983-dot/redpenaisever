@@ -8592,10 +8592,12 @@ async function handleTeacherSchoolExams(req, res) {
           .select('id, name, seat_number, classroom_id')
           .eq('classroom_id', assignment.classroom_id)
           .order('seat_number', { ascending: true }),
-        // 分數欄位是 score / ai_score;錯題數沒有獨立欄位,從 grading_result 投影出來
+        // 分數欄位是 score / ai_score。錯題數沒有獨立欄位,沿用首頁總覽那套權威算法:
+        //   只投影 grading_result 的 mistakes / details 兩段子陣列(不拉整顆大 JSONB),
+        //   再交給 parseMistakesFromGradingResult 算——它會處理 mistakes 缺漏時改從 details 推。
         supabaseDb
           .from('submissions')
-          .select('id, student_id, assignment_id, status, score, ai_score, score_source, graded_at, mistakeCount:grading_result->>mistakes')
+          .select('id, student_id, assignment_id, status, score, ai_score, score_source, graded_at, mistakes:grading_result->mistakes, details:grading_result->details')
           .eq('assignment_id', ec.assignment_id)
       ])
       if (stErr) throw stErr
@@ -8605,7 +8607,13 @@ async function handleTeacherSchoolExams(req, res) {
         className: ec.class_name || '',
         assignment: assignment || null,
         students: students || [],
-        submissions: subs || []
+        submissions: (subs || []).map(({ mistakes, details, ...rest }) => ({
+          ...rest,
+          mistakeCount:
+            rest.graded_at || rest.score != null
+              ? parseMistakesFromGradingResult({ mistakes, details }).length
+              : null
+        }))
       })
       return
     }
