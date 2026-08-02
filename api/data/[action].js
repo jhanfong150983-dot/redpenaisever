@@ -5961,7 +5961,7 @@ async function handleSchoolAdminOverview(req, res) {
       // 尚未跑過全校同步的學校退回舊 RPC(老師同步驅動、只有部分班級)
       const { data: refClasses, error: refErr } = await supabaseDb
         .from('school_classes')
-        .select('campus_class_id, class_name, grade_year, student_count')
+        .select('campus_class_id, class_name, grade_year, student_count, homeroom_teacher_name, homeroom_teacher_acc')
         .eq('school_id', schoolId)
         .order('class_name', { ascending: true })
       if (refErr) throw refErr
@@ -5970,7 +5970,9 @@ async function handleSchoolAdminOverview(req, res) {
           class_label: c.class_name || c.campus_class_id,
           grade: c.grade_year,
           student_count: c.student_count ?? 0,
-          campus_class_id: c.campus_class_id
+          campus_class_id: c.campus_class_id,
+          homeroom_teacher_name: c.homeroom_teacher_name || null,
+          homeroom_teacher_acc: c.homeroom_teacher_acc || null
         }))
         res.status(200).json({ classes })
         return
