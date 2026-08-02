@@ -56,3 +56,13 @@ alter table school_exams add column if not exists semester    int;
 
 create index if not exists idx_school_exams_subject
   on school_exams (school_id, subject);
+
+-- ── 手動指派任課(2026-08-02、user:讓非 1Campus/自建班級也能用)──
+-- 任課關係的資料來源:1campus=同步自 getCourse;admin=行政手動指派。
+-- ⚠ 同步只碰 source='1campus' 的列(手動指派的 course_name 用純科目名、與 1Campus 的
+--   「三年2班_國語文」不同,unique key 不會撞),行政指派不會被下次同步沖掉。
+alter table school_class_courses
+  add column if not exists source text not null default '1campus';
+
+create index if not exists idx_scc_source
+  on school_class_courses (school_id, source);

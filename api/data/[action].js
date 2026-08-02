@@ -8456,6 +8456,133 @@ async function handleSchoolSubjects(req, res) {
   res.status(200).json({ subjects })
 }
 
+// ─────────────────────────────────────────────────────────
+// handleSchoolTeacherCourses
+// GET  ?schoolId=&teacherAcc=   → 該老師的任課清單(含來源)
+// POST { mode:'assign'|'unassign', schoolId, teacherAcc, teacherName, subject, campusClassIds[] }
+// 2026-08-02(user:讓非 1Campus / 自建班級也能用):任課關係本來就存在 school_class_courses,
+//   1Campus 只是其中一種填表來源。這裡提供「行政手動指派」這條路,教師端唯讀的判定邏輯完全不用改。
+// ⚠ 手動列的 course_name 用純科目名(1Campus 的是「三年2班_國語文」),unique key 不會相撞,
+//   所以下次同步不會把行政指派的資料沖掉。
+// ─────────────────────────────────────────────────────────
+async function handleSchoolTeacherCourses(req, res) {
+  const supabaseDb = getSupabaseAdmin()
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const isGet = req.method === 'GET'
+  const body = isGet ? {} : parseJsonBody(req)
+  const schoolId = isGet
+    ? (typeof req.query?.schoolId === 'string' ? req.query.schoolId.trim() : '')
+    : (typeof body?.schoolId === 'string' ? body.schoolId.trim() : '')
+  if (!schoolId) {
+    res.status(400).json({ error: 'Missing schoolId' })
+    return
+  }
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseDb.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseDb.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const allowed =
+    profile?.role === 'admin' || (Array.isArray(saRows) && saRows.some((r) => r.school_id === schoolId))
+  if (!allowed) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+
+  if (isGet) {
+    const acc = typeof req.query?.teacherAcc === 'string' ? req.query.teacherAcc.trim() : ''
+    let qb = supabaseDb
+      .from('school_class_courses')
+      .select('campus_class_id, class_name, subject, course_name, teacher_acc, teacher_name, source')
+      .eq('school_id', schoolId)
+    if (acc) qb = qb.eq('teacher_acc', acc)
+    const { data, error } = await fetchAllPaginated(() => qb)
+    if (error) {
+      res.status(500).json({ error: error.message })
+      return
+    }
+    res.status(200).json({ courses: data || [] })
+    return
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const mode = typeof body?.mode === 'string' ? body.mode : 'assign'
+  const teacherAcc = typeof body?.teacherAcc === 'string' ? body.teacherAcc.trim() : ''
+  const subject = typeof body?.subject === 'string' ? body.subject.trim() : ''
+  const campusClassIds = Array.isArray(body?.campusClassIds)
+    ? [...new Set(body.campusClassIds.map((x) => String(x)))]
+    : []
+  if (!teacherAcc || !subject) {
+    res.status(400).json({ error: '缺少老師帳號或科目' })
+    return
+  }
+
+  if (mode === 'unassign') {
+    let qb = supabaseDb
+      .from('school_class_courses')
+      .delete()
+      .eq('school_id', schoolId)
+      .eq('teacher_acc', teacherAcc)
+      .eq('subject', subject)
+      .eq('source', 'admin') // 只刪手動指派的,1Campus 同步來的不可從這裡刪
+    if (campusClassIds.length > 0) qb = qb.in('campus_class_id', campusClassIds)
+    const { error } = await qb
+    if (error) {
+      res.status(500).json({ error: `取消指派失敗:${error.message}` })
+      return
+    }
+    res.status(200).json({ ok: true })
+    return
+  }
+
+  if (campusClassIds.length === 0) {
+    res.status(400).json({ error: '請選擇班級' })
+    return
+  }
+  const teacherName = typeof body?.teacherName === 'string' ? body.teacherName.trim() : ''
+  // 班級名稱與學年學期:向 school_classes 取(自建班級也在裡面)
+  const { data: clsRows } = await supabaseDb
+    .from('school_classes')
+    .select('campus_class_id, class_name, class_no, school_year, semester')
+    .eq('school_id', schoolId)
+    .in('campus_class_id', campusClassIds)
+  const clsById = new Map((clsRows || []).map((c) => [String(c.campus_class_id), c]))
+  const nowIso = new Date().toISOString()
+  const rows = campusClassIds.map((cid) => {
+    const c = clsById.get(cid)
+    return {
+      school_id: schoolId,
+      campus_class_id: cid,
+      class_no: c?.class_no ?? null,
+      class_name: c?.class_name ?? null,
+      course_name: subject, // 手動列用純科目名,與 1Campus 的「班級_科目」不撞
+      subject,
+      campus_teacher_id: `admin:${teacherAcc}`, // 手動指派沒有 1Campus teacherID,用帳號當鍵
+      teacher_acc: teacherAcc,
+      teacher_name: teacherName || null,
+      school_year: c?.school_year ?? null,
+      semester: c?.semester ?? null,
+      source: 'admin',
+      updated_at: nowIso
+    }
+  })
+  const { error } = await supabaseDb
+    .from('school_class_courses')
+    .upsert(rows, { onConflict: 'school_id,campus_class_id,course_name,campus_teacher_id,school_year,semester' })
+  if (error) {
+    res.status(500).json({ error: `指派失敗:${error.message}` })
+    return
+  }
+  console.log('[school-teacher-courses] assigned', teacherAcc, subject, `${rows.length} classes`)
+  res.status(200).json({ ok: true, assigned: rows.length })
+}
+
 // 2026-07-30 Step 5(獨立模型):班級鏡像——行政按鈕觸發,在「自己名下」建立全校班級+學生
 // (來源=全校名冊 SSoT;獨立模型:學校考卷 owner=行政帳號,教師端功能原生可用)。冪等可重按。
 async function handleSchoolMirrorClasses(req, res) {
@@ -10458,6 +10585,10 @@ const log = document.getElementById('log');
   }
   if (action === 'school-subjects') {
     await handleSchoolSubjects(req, res)
+    return
+  }
+  if (action === 'school-teacher-courses') {
+    await handleSchoolTeacherCourses(req, res)
     return
   }
   if (action === '1campus-debug') {

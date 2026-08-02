@@ -372,6 +372,7 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
           teacher_name: String(t.teacherName || '').trim() || null,
           school_year: toIntOrNull(c.schoolYear),
           semester: sem === 1 || sem === 2 ? sem : null,
+          source: '1campus',
           updated_at: nowIso
         })
       }
