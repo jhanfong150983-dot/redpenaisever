@@ -7879,6 +7879,7 @@ async function handleSchoolExams(req, res) {
         title: e.title,
         status: e.status,
         subject: e.subject || '',
+        answerKeyTemplateId: e.answer_key_template_id || '',
         createdAt: e.created_at,
         classes: classesByExam.get(e.id) || []
       }))
