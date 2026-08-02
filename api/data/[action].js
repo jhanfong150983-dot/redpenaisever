@@ -4022,8 +4022,11 @@ async function handleSync(req, res) {
         fetchAllPaginated(() => {
           let qb = supabaseDb
             .from('submissions')
-            // 2026-05-17: 加 phase_a_state + final_answers 進 sync select、給 client 卡片狀態計算用
-            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, graded_by, updated_at, grading_result, phase_a_state, final_answers, page_breaks')
+            // 2026-08-03 sync 瘦身:grading_result / phase_a_state / final_answers 三個大 JSONB
+            //   移出同步(單份 42KB→1KB、全校考卷 90MB→2MB),改由 submission-details 端點 on-demand。
+            //   卡片狀態需要的輕量值改吃 generated column:
+            //     has_grading_result(已批改判定)、phase_a_saved_at(isPhaseAStale)、mistakes_count(總覽 fallback)
+            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, graded_by, updated_at, page_breaks, has_grading_result, phase_a_saved_at, mistakes_count')
             .eq('owner_id', ownerId)
           if (sinceIso) qb = qb.gte('updated_at', sinceIso)
           return qb
@@ -4285,18 +4288,16 @@ async function handleSync(req, res) {
           aiScore: row.ai_score ?? undefined,
           scoreSource: row.score_source ?? undefined,
           feedback: row.feedback ?? undefined,
-          gradingResult: row.grading_result ?? undefined,
-          mistakesCount: Array.isArray(row.grading_result?.mistakes) && row.grading_result.mistakes.length > 0
-            ? row.grading_result.mistakes.length
+          mistakesCount: typeof row.mistakes_count === 'number' && row.mistakes_count > 0
+            ? row.mistakes_count
             : undefined,
           gradedAt: gradedAt ?? undefined,
           correctionCount: row.correction_count ?? undefined,
           updatedAt: updatedAt ?? undefined,
-          // 2026-05-18: 補上 Phase A / Phase B 分離設計的 cached state
-          // 之前 SELECT 有抓但 response map 漏出、導致 client 卡片 deriveCardStage
-          // 無法取得 phase_a_state、Phase A 完成的卡片回退顯示「已上傳」
-          phaseAState: row.phase_a_state ?? undefined,
-          finalAnswers: row.final_answers ?? undefined
+          // 2026-08-03:大 JSONB 不進 sync,只帶卡片狀態要用的兩個輕量值。
+          //   真正要逐題資料的畫面(批改頁/檢討單/學情報告)開啟時走 submission-details 補齊。
+          hasGradingResult: row.has_grading_result === true ? true : undefined,
+          phaseASavedAt: row.phase_a_saved_at ?? undefined
         })
       })
 
@@ -8698,6 +8699,80 @@ async function handleTeacherSchoolExams(req, res) {
 }
 
 // ─────────────────────────────────────────────────────────
+// handleSubmissionDetails(2026-08-03 sync 瘦身的另一半)
+// POST { assignmentIds?: string[], submissionIds?: string[] }
+//   → 回傳這些卷的三個大 JSONB(grading_result / phase_a_state / final_answers)
+//
+// sync 已經不帶這些欄位,需要逐題資料的畫面(批改頁/檢討單/學情報告/學生端)
+// 在開啟時呼叫這裡補齊,補完寫回 Dexie 快取,行為與原本一致。
+// 用 POST 是因為 id 陣列可能很長,塞 query string 會撞長度限制。
+// ─────────────────────────────────────────────────────────
+async function handleSubmissionDetails(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = parseJsonBody(req)
+  const assignmentIds = Array.isArray(body?.assignmentIds)
+    ? body.assignmentIds.filter((x) => typeof x === 'string' && x)
+    : []
+  const submissionIds = Array.isArray(body?.submissionIds)
+    ? body.submissionIds.filter((x) => typeof x === 'string' && x)
+    : []
+  if (assignmentIds.length === 0 && submissionIds.length === 0) {
+    res.status(400).json({ error: 'Missing assignmentIds / submissionIds' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const COLS =
+      'id, assignment_id, updated_at, grading_result, phase_a_state, final_answers'
+    const out = []
+    // ⚠ owner_id 過濾是這支端點唯一的權限邊界——老師只拿得到自己的卷。
+    //   學校考卷(owner=行政)走的是 teacher-school-exams,不從這裡出去。
+    for (const chunk of chunkArray(assignmentIds, 50)) {
+      const { data, error } = await fetchAllPaginated(() =>
+        supabaseDb.from('submissions').select(COLS).eq('owner_id', user.id).in('assignment_id', chunk)
+      )
+      if (error) throw new Error(error.message)
+      out.push(...(data || []))
+    }
+    for (const chunk of chunkArray(submissionIds, 200)) {
+      const { data, error } = await supabaseDb
+        .from('submissions')
+        .select(COLS)
+        .eq('owner_id', user.id)
+        .in('id', chunk)
+      if (error) throw new Error(error.message)
+      out.push(...(data || []))
+    }
+    const seen = new Set()
+    const details = []
+    for (const r of out) {
+      if (seen.has(r.id)) continue
+      seen.add(r.id)
+      details.push({
+        id: r.id,
+        assignmentId: r.assignment_id,
+        updatedAt: toMillis(r.updated_at) ?? undefined,
+        gradingResult: r.grading_result ?? null,
+        phaseAState: r.phase_a_state ?? null,
+        finalAnswers: r.final_answers ?? null
+      })
+    }
+    res.status(200).json({ details })
+  } catch (error) {
+    console.error('[submission-details] error:', error)
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' })
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // handleSchoolTeacherCourses
 // GET  ?schoolId=&teacherAcc=   → 該老師的任課清單(含來源)
 // POST { mode:'assign'|'unassign', schoolId, teacherAcc, teacherName, subject, campusClassIds[] }
@@ -10834,6 +10909,10 @@ const log = document.getElementById('log');
   }
   if (action === 'teacher-school-exams') {
     await handleTeacherSchoolExams(req, res)
+    return
+  }
+  if (action === 'submission-details') {
+    await handleSubmissionDetails(req, res)
     return
   }
   if (action === '1campus-debug') {
