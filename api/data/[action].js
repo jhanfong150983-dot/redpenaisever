@@ -7779,7 +7779,7 @@ async function handleSchoolExams(req, res) {
     // 考卷列表+各班
     const { data: exams } = await supabaseDb
       .from('school_exams')
-      .select('id, title, status, answer_key_template_id, created_at, updated_at')
+      .select('id, title, status, answer_key_template_id, subject, created_at, updated_at')
       .eq('school_id', schoolId)
       .order('created_at', { ascending: false })
       .limit(30)
@@ -7806,6 +7806,7 @@ async function handleSchoolExams(req, res) {
         id: e.id,
         title: e.title,
         status: e.status,
+        subject: e.subject || '',
         createdAt: e.created_at,
         classes: classesByExam.get(e.id) || []
       }))
@@ -7989,6 +7990,98 @@ async function handleSchoolExams(req, res) {
     } catch (err) {
       res.status(500).json({ error: err?.message || '建立考卷失敗' })
     }
+    return
+  }
+
+  // 2026-08-02(user 指出行政端建完考卷就改不了):補「改名稱 / 補科目」。
+  //   只動 metadata——不碰答案卷、批改設定、班級,所以對已匯入/已批改的資料零影響。
+  //   換答案卷/改設定/增減班級牽涉重批語意,另案處理。
+  if (mode === 'update') {
+    const examId = typeof body.examId === 'string' ? body.examId.trim() : ''
+    if (!examId) {
+      res.status(400).json({ error: '缺少考卷 id' })
+      return
+    }
+    const patch = { updated_at: new Date().toISOString() }
+    if (typeof body.title === 'string' && body.title.trim()) patch.title = body.title.trim()
+    if (typeof body.subject === 'string') {
+      const sub = body.subject.trim()
+      patch.subject = sub || null
+      // 科目改了 → 學年學期跟著對應的任課資料走(教師端唯讀查詢要用)
+      if (sub) {
+        const { data: c } = await supabaseDb
+          .from('school_class_courses')
+          .select('school_year, semester')
+          .eq('school_id', schoolId)
+          .eq('subject', sub)
+          .order('school_year', { ascending: false })
+          .limit(1)
+        patch.school_year = c?.[0]?.school_year ?? null
+        patch.semester = c?.[0]?.semester ?? null
+      } else {
+        patch.school_year = null
+        patch.semester = null
+      }
+    }
+    const { error } = await supabaseDb
+      .from('school_exams')
+      .update(patch)
+      .eq('id', examId)
+      .eq('school_id', schoolId)
+    if (error) {
+      res.status(500).json({ error: `更新考卷失敗:${error.message}` })
+      return
+    }
+    // 名稱同步到各班作業(教師端/批改頁顯示的是 assignment.title)
+    if (patch.title) {
+      const { data: rows } = await supabaseDb
+        .from('school_exam_classes').select('assignment_id').eq('exam_id', examId)
+      const ids = (rows || []).map((r) => r.assignment_id).filter(Boolean)
+      for (const chunk of chunkArray(ids, 100)) {
+        await supabaseDb.from('assignments').update({ title: patch.title, updated_at: new Date().toISOString() }).in('id', chunk)
+      }
+    }
+    res.status(200).json({ ok: true })
+    return
+  }
+
+  // 刪除考卷:連同各班作業一併移除。已有批改結果時必須帶 force=true(前端會先跳警告)。
+  if (mode === 'delete') {
+    const examId = typeof body.examId === 'string' ? body.examId.trim() : ''
+    const force = body.force === true
+    if (!examId) {
+      res.status(400).json({ error: '缺少考卷 id' })
+      return
+    }
+    const { data: rows } = await supabaseDb
+      .from('school_exam_classes').select('assignment_id').eq('exam_id', examId)
+    const assignmentIds = (rows || []).map((r) => r.assignment_id).filter(Boolean)
+    // 有沒有已批改的卷?(避免誤刪成績)
+    let gradedCount = 0
+    for (const chunk of chunkArray(assignmentIds, 100)) {
+      const { count } = await supabaseDb
+        .from('submissions')
+        .select('id', { count: 'exact', head: true })
+        .in('assignment_id', chunk)
+        .eq('status', 'graded')
+      gradedCount += count ?? 0
+    }
+    if (gradedCount > 0 && !force) {
+      res.status(409).json({ error: 'graded_exists', gradedCount })
+      return
+    }
+    for (const chunk of chunkArray(assignmentIds, 100)) {
+      await supabaseDb.from('submissions').delete().in('assignment_id', chunk)
+      await supabaseDb.from('assignments').delete().in('id', chunk)
+    }
+    await supabaseDb.from('school_exam_classes').delete().eq('exam_id', examId)
+    const { error } = await supabaseDb.from('school_exams').delete().eq('id', examId).eq('school_id', schoolId)
+    if (error) {
+      res.status(500).json({ error: `刪除考卷失敗:${error.message}` })
+      return
+    }
+    console.log('[school-exams] deleted', examId, `assignments=${assignmentIds.length} graded=${gradedCount}`)
+    res.status(200).json({ ok: true, deletedAssignments: assignmentIds.length, deletedGraded: gradedCount })
     return
   }
 
