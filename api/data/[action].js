@@ -7837,12 +7837,29 @@ async function handleSchoolExams(req, res) {
       ? [...new Set(body.campusClassIds.map((x) => String(x)))]
       : []
     const rules = body.settings && typeof body.settings === 'object' ? body.settings : {}
+    // 2026-08-02 Step 11:科目(對 school_class_courses.subject)決定哪些老師能唯讀這份考卷。
+    //   選填——沒選就是「不開放教師端檢視」,不擋建卷流程。
+    const subject = typeof body.subject === 'string' ? body.subject.trim() : ''
     if (!title || !templateId || campusClassIds.length === 0) {
       res.status(400).json({ error: '缺少考卷名稱、答案卷或班級' })
       return
     }
     try {
       const examOwner = await resolveExamOwner(supabaseDb, schoolId, user.id)
+      // 學年學期取自任課表(同步時由 1Campus 帶入);查不到就留 null、之後仍可用科目+班級比對
+      let schoolYear = null
+      let semester = null
+      if (subject) {
+        const { data: anyCourse } = await supabaseDb
+          .from('school_class_courses')
+          .select('school_year, semester')
+          .eq('school_id', schoolId)
+          .eq('subject', subject)
+          .order('school_year', { ascending: false })
+          .limit(1)
+        schoolYear = anyCourse?.[0]?.school_year ?? null
+        semester = anyCourse?.[0]?.semester ?? null
+      }
       const { data: tpl } = await supabaseDb
         .from('answer_key_templates')
         .select('*')
@@ -7957,7 +7974,12 @@ async function handleSchoolExams(req, res) {
         created_by: user.id,
         title,
         answer_key_template_id: tpl.id,
-        status: 'draft'
+        status: 'draft',
+        // 2026-08-02 Step 11:科目=教師端唯讀的判定依據(對 school_class_courses.subject)。
+        //   學年學期一併記下——1Campus 課程 API 只回當前學期,跨學期查權限要用考卷當時的學期。
+        subject: subject || null,
+        school_year: schoolYear,
+        semester: semester
       })
       if (eErr) throw new Error(`建立考卷失敗:${eErr.message}`)
       const { error: cErr } = await supabaseDb.from('school_exam_classes').insert(examClassRows)
@@ -7971,6 +7993,67 @@ async function handleSchoolExams(req, res) {
   }
 
   res.status(400).json({ error: 'Unknown mode' })
+}
+
+// ─────────────────────────────────────────────────────────
+// handleSchoolSubjects
+// GET /api/data/school-subjects?schoolId=...
+// 2026-08-02 Step 11 階段2:行政建考卷時的「科目」下拉來源。
+//   來自 school_class_courses.subject(1Campus getCourse 同步、實測 18 種純科目名),
+//   ⚠ 不可用 course_name——那是「三年2班_國語文」含班級前綴、實測 791 種,無法當選單。
+//   一併回每個科目涵蓋哪些班(campus_class_id),前端據此顯示「選了 N 班、其中 M 班有此科老師」。
+// ─────────────────────────────────────────────────────────
+async function handleSchoolSubjects(req, res) {
+  const supabaseDb = getSupabaseAdmin()
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const schoolId = typeof req.query?.schoolId === 'string' ? req.query.schoolId.trim() : ''
+  if (!schoolId) {
+    res.status(400).json({ error: 'Missing schoolId' })
+    return
+  }
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseDb.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseDb.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const allowed =
+    profile?.role === 'admin' || (Array.isArray(saRows) && saRows.some((r) => r.school_id === schoolId))
+  if (!allowed) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  const { data, error } = await fetchAllPaginated(() =>
+    supabaseDb
+      .from('school_class_courses')
+      .select('subject, campus_class_id, teacher_acc')
+      .eq('school_id', schoolId)
+      .not('subject', 'is', null)
+  )
+  if (error) {
+    res.status(500).json({ error: error.message })
+    return
+  }
+  const bySubject = new Map()
+  for (const r of data || []) {
+    const s = String(r.subject || '').trim()
+    if (!s) continue
+    if (!bySubject.has(s)) bySubject.set(s, { subject: s, classIds: new Set(), teachers: new Set() })
+    const e = bySubject.get(s)
+    if (r.campus_class_id) e.classIds.add(String(r.campus_class_id))
+    if (r.teacher_acc) e.teachers.add(String(r.teacher_acc))
+  }
+  const subjects = [...bySubject.values()]
+    .map((e) => ({
+      subject: e.subject,
+      classCount: e.classIds.size,
+      teacherCount: e.teachers.size,
+      campusClassIds: [...e.classIds]
+    }))
+    .sort((a, b) => b.classCount - a.classCount || a.subject.localeCompare(b.subject, 'zh-Hant'))
+  res.status(200).json({ subjects })
 }
 
 // 2026-07-30 Step 5(獨立模型):班級鏡像——行政按鈕觸發,在「自己名下」建立全校班級+學生
@@ -9971,6 +10054,10 @@ const log = document.getElementById('log');
   }
   if (action === 'school-exams') {
     await handleSchoolExams(req, res)
+    return
+  }
+  if (action === 'school-subjects') {
+    await handleSchoolSubjects(req, res)
     return
   }
   if (action === '1campus-debug') {

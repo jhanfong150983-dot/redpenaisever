@@ -46,3 +46,13 @@ alter table school_classes add column if not exists secondary_teacher_name text;
 
 create index if not exists idx_school_classes_homeroom_acc
   on school_classes (school_id, homeroom_teacher_acc);
+
+-- ── Step 11 階段 2(2026-08-02):考卷科目 ──
+-- 科目 = 教師端唯讀的判定依據(對 school_class_courses.subject)。
+-- 學年學期一併記:1Campus 課程 API 只回當前學期,跨學期查權限要用考卷當時的學期。
+alter table school_exams add column if not exists subject     text;
+alter table school_exams add column if not exists school_year int;
+alter table school_exams add column if not exists semester    int;
+
+create index if not exists idx_school_exams_subject
+  on school_exams (school_id, subject);
