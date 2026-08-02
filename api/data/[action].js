@@ -8628,9 +8628,11 @@ async function handleTeacherSchoolExams(req, res) {
         res.status(403).json({ error: 'Forbidden' })
         return
       }
+      // ⚠ 欄名以實際 schema 為準:assignments 沒有 total_score/question_count/subject,
+      //   滿分在 answer_key.totalScore(JSON 投影,不整包撈)、題數是 total_questions。
       const { data: assignment, error: aErr } = await supabaseDb
         .from('assignments')
-        .select('id, title, classroom_id, total_score, question_count, subject')
+        .select('id, title, classroom_id, domain, total_questions, totalScore:answer_key->>totalScore')
         .eq('id', ec.assignment_id)
         .maybeSingle()
       if (aErr) throw aErr
@@ -8644,9 +8646,10 @@ async function handleTeacherSchoolExams(req, res) {
           .select('id, name, seat_number, classroom_id')
           .eq('classroom_id', assignment.classroom_id)
           .order('seat_number', { ascending: true }),
+        // 分數欄位是 score / ai_score;錯題數沒有獨立欄位,從 grading_result 投影出來
         supabaseDb
           .from('submissions')
-          .select('id, student_id, assignment_id, status, total_score, graded_at, mistake_count')
+          .select('id, student_id, assignment_id, status, score, ai_score, score_source, graded_at, mistakeCount:grading_result->>mistakes')
           .eq('assignment_id', ec.assignment_id)
       ])
       if (stErr) throw stErr
