@@ -333,6 +333,68 @@ export async function fetchCampus1Courses(dsns, teacherID, accessToken) {
 }
 
 /**
+ * 2026-08-02 全校課程（Step 11 任課老師判定用、1Campus 官方回覆確認）：
+ *   getCourse 不帶參數＝全校所有課程。回傳每筆含
+ *   { courseName, subject, subjectLevel, schoolYear, semester,
+ *     class: { classID, classNo, className, gradeYear },
+ *     teacher: [{ teacherID, teacherAcc, teacherNo, teacherName }] }
+ *   → 這是「班級 × 課程 × 授課教師」的權威來源，取代靠課程名稱字串比對的脆弱作法。
+ *   ⚠ 官方說明：API 只回「當前學年學期」、不支援查歷史 → 落地時要帶 schoolYear/semester
+ *     並保留舊資料，否則學期一換、上學期考卷的檢視權會斷。
+ * @param {string} dsns
+ * @param {string} accessToken
+ * @returns {Promise<Array>} course 陣列
+ */
+export async function fetchCampus1AllCourses(dsns, accessToken) {
+  const base = getJasmineApiBase()
+  const url = `${base}/${dsns}/getCourse`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    // 全校課程量大（官方估 100~500 門），比照 getClassStudent 放寬
+    signal: AbortSignal.timeout(60000)
+  })
+  if (response.status === 404) return []
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    console.error('[1campus] fetchCampus1AllCourses error body:', text.slice(0, 400))
+    throw new Error(`Jasmine getCourse(all) failed ${response.status}: ${text.slice(0, 200)}`)
+  }
+  const json = await response.json()
+  const courses = json?.course ?? json?.data?.course ?? []
+  return Array.isArray(courses) ? courses : []
+}
+
+/**
+ * 2026-08-02 全校班級（含導師 / 副導師、Step 11 導師判定用）：
+ *   getClass 不帶參數＝全校所有班級。回傳每筆含
+ *   { classID, classNo, className, gradeYear,
+ *     teacher: { teacherID, teacherAcc, teacherNo, teacherName },            ← 班導師
+ *     secondaryTeacher: { teacherID, teacherAcc, teacherNo, teacherName } }  ← 副班導師
+ *   官方說明：角色不是用 roleType 欄位，而是「出現在哪個欄位」決定
+ *   （class.teacher=班導、class.secondaryTeacher=副導、course.teacher[]=科任）。
+ * @param {string} dsns
+ * @param {string} accessToken
+ * @returns {Promise<Array>} class 陣列
+ */
+export async function fetchCampus1ClassTeachers(dsns, accessToken) {
+  const base = getJasmineApiBase()
+  const url = `${base}/${dsns}/getClass`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(30000)
+  })
+  if (response.status === 404) return []
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    console.error('[1campus] fetchCampus1ClassTeachers error body:', text.slice(0, 400))
+    throw new Error(`Jasmine getClass failed ${response.status}: ${text.slice(0, 200)}`)
+  }
+  const json = await response.json()
+  const classes = json?.class ?? json?.data?.class ?? []
+  return Array.isArray(classes) ? classes : []
+}
+
+/**
  * 取得老師課程的學生列表（含 email）
  * 使用 getCourseStudent API，回傳結構：
  * { course: [{ courseID, class: { classID, className }, student: [{ seatNo, studentName, studentNumber, studentAcc, email }] }] }

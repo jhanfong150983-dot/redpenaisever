@@ -3,7 +3,9 @@ import {
   getJasmineAccessToken,
   fetchCampus1ClassStudents,
   fetchCampus1StudentDeparted,
-  fetchCampus1Teachers
+  fetchCampus1Teachers,
+  fetchCampus1AllCourses,
+  fetchCampus1ClassTeachers
 } from './_1campus.js'
 
 function toIntOrNull(v) {
@@ -335,6 +337,105 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
     console.warn('[roster-sync] teacher roster failed (non-blocking):', e?.message)
   }
 
+  // 6) 2026-08-02 Step 11(教師端唯讀學校考卷)的權限來源:
+  //    getCourse(全校課程)=「班級 × 課程 × 授課教師」;getClass=「班級 × 導師/副導師」。
+  //    取代原本想用課程名稱字串比對的脆弱作法(實測科目名稱 19 種、含 Eng401、98 班無後綴)。
+  //    ⚠ 1Campus 官方:兩支 API 只回「當前學年學期」、不支援查歷史 →
+  //      課程表帶 school_year/semester 並「只 upsert 不刪舊」,學期切換後上學期考卷的檢視權才不會斷。
+  let courseCount = 0
+  let homeroomCount = 0
+  try {
+    const courses = await fetchCampus1AllCourses(dsns, token)
+    const courseRows = []
+    const seenCourseKey = new Set()
+    for (const c of courses) {
+      const classId = String(c?.class?.classID ?? '').trim()
+      const courseName = String(c?.courseName || '').trim()
+      if (!classId || !courseName) continue
+      const teachers = Array.isArray(c.teacher) ? c.teacher : []
+      const sem = toIntOrNull(c.semester)
+      for (const t of teachers) {
+        const tid = t?.teacherID != null && String(t.teacherID).trim() ? String(t.teacherID).trim() : null
+        if (!tid) continue
+        const key = `${classId}|${courseName}|${tid}`
+        if (seenCourseKey.has(key)) continue
+        seenCourseKey.add(key)
+        courseRows.push({
+          school_id: schoolId,
+          campus_class_id: classId,
+          class_no: c?.class?.classNo != null ? String(c.class.classNo).trim() || null : null,
+          class_name: String(c?.class?.className || '').trim() || null,
+          course_name: courseName,
+          subject: String(c.subject || '').trim() || null,
+          campus_teacher_id: tid,
+          teacher_acc: String(t.teacherAcc || '').trim() || null,
+          teacher_name: String(t.teacherName || '').trim() || null,
+          school_year: toIntOrNull(c.schoolYear),
+          semester: sem === 1 || sem === 2 ? sem : null,
+          updated_at: nowIso
+        })
+      }
+    }
+    for (const chunk of chunkArray(courseRows, 200)) {
+      const { error } = await supabaseAdmin
+        .from('school_class_courses')
+        .upsert(chunk, { onConflict: 'school_id,campus_class_id,course_name,campus_teacher_id,school_year,semester' })
+      if (error) {
+        console.warn('[roster-sync] class courses upsert failed:', error.message)
+        break
+      }
+    }
+    courseCount = courseRows.length
+  } catch (e) {
+    console.warn('[roster-sync] getCourse failed (non-blocking):', e?.message)
+  }
+
+  try {
+    const classTeachers = await fetchCampus1ClassTeachers(dsns, token)
+    const hrRows = []
+    for (const cls of classTeachers) {
+      const classId = String(cls?.classID ?? '').trim()
+      if (!classId) continue
+      const hr = cls.teacher || null
+      const sec = cls.secondaryTeacher || null
+      if (!hr && !sec) continue
+      hrRows.push({
+        school_id: schoolId,
+        campus_class_id: classId,
+        homeroom_teacher_id: hr?.teacherID != null ? String(hr.teacherID).trim() || null : null,
+        homeroom_teacher_acc: String(hr?.teacherAcc || '').trim() || null,
+        homeroom_teacher_name: String(hr?.teacherName || '').trim() || null,
+        secondary_teacher_id: sec?.teacherID != null ? String(sec.teacherID).trim() || null : null,
+        secondary_teacher_acc: String(sec?.teacherAcc || '').trim() || null,
+        secondary_teacher_name: String(sec?.teacherName || '').trim() || null,
+        updated_at: nowIso
+      })
+    }
+    // school_classes 已由步驟 1 建好(getClassStudent)；這裡只補導師欄位、不新建列
+    for (const r of hrRows) {
+      const { error } = await supabaseAdmin
+        .from('school_classes')
+        .update({
+          homeroom_teacher_id: r.homeroom_teacher_id,
+          homeroom_teacher_acc: r.homeroom_teacher_acc,
+          homeroom_teacher_name: r.homeroom_teacher_name,
+          secondary_teacher_id: r.secondary_teacher_id,
+          secondary_teacher_acc: r.secondary_teacher_acc,
+          secondary_teacher_name: r.secondary_teacher_name,
+          updated_at: r.updated_at
+        })
+        .eq('school_id', r.school_id)
+        .eq('campus_class_id', r.campus_class_id)
+      if (error) {
+        console.warn('[roster-sync] homeroom update failed:', error.message)
+        break
+      }
+      homeroomCount++
+    }
+  } catch (e) {
+    console.warn('[roster-sync] getClass failed (non-blocking):', e?.message)
+  }
+
   const parentBound = [...studentByPid.values()].filter((s) => (s.parentCount ?? 0) > 0).length
   return {
     classes: classRows.length,
@@ -345,7 +446,9 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
     departedMarked,
     parentFieldPresent,
     parentBound,
-    teacherCount
+    teacherCount,
+    courseCount,
+    homeroomCount
   }
 }
 
