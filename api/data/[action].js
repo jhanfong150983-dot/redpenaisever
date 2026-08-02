@@ -8459,6 +8459,200 @@ async function handleSchoolSubjects(req, res) {
 }
 
 // ─────────────────────────────────────────────────────────
+// handleTeacherSchoolExams(Step 11 階段 3:教師端唯讀學校考卷)
+// GET ?mode=list             → 這位老師看得到的學校考卷(依任課/導師判定)
+// GET ?mode=grades&examId=&campusClassId= → 該班該卷的成績(唯讀)
+//
+// 可見性規則(兩條,任一成立即可見):
+//   ① 任課:school_class_courses 有 (teacher_acc, campus_class_id) 且 subject == 考卷科目
+//   ② 導師:school_classes.homeroom_teacher_acc == 本人 → 該班「所有科目」都看得到
+// ⚠ 考卷沒設 subject 時,規則①對不到任何人;只有導師看得到。建卷務必選科目。
+// 資料一律 server 現抓,不進老師的 sync(這些卷 owner 是行政、且 sync payload 已經是瓶頸)。
+// ─────────────────────────────────────────────────────────
+async function resolveTeacherCampusIdentity(supabaseDb, userId) {
+  // 老師的 1Campus 身分可能跨校(一人多校),回傳每個 dsns 對應的帳號 + school_id
+  const { data: idents, error } = await supabaseDb
+    .from('external_identities')
+    .select('provider_dsns, provider_account')
+    .eq('provider', 'campus1')
+    .eq('user_id', userId)
+  if (error) throw error
+  const rows = (idents ?? []).filter((it) => it.provider_dsns && it.provider_account)
+  if (rows.length === 0) return []
+  const dsnsList = [...new Set(rows.map((r) => String(r.provider_dsns)))]
+  const { data: schools, error: sErr } = await supabaseDb
+    .from('schools')
+    .select('id, name, provider_dsns')
+    .in('provider_dsns', dsnsList)
+  if (sErr) throw sErr
+  const schoolByDsns = new Map((schools ?? []).map((s) => [String(s.provider_dsns), s]))
+  const out = []
+  for (const r of rows) {
+    const s = schoolByDsns.get(String(r.provider_dsns))
+    if (!s) continue
+    out.push({ schoolId: s.id, schoolName: s.name || '', acc: String(r.provider_account).trim() })
+  }
+  return out
+}
+
+async function handleTeacherSchoolExams(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const identities = await resolveTeacherCampusIdentity(supabaseDb, user.id)
+    if (identities.length === 0) {
+      res.status(200).json({ exams: [], reason: 'no_campus_identity' })
+      return
+    }
+
+    // 這位老師在每所學校的可見範圍
+    const visibleByClass = new Map() // `${schoolId}|${campusClassId}` → Set(subject) | '*'(導師)
+    const schoolNameById = new Map()
+    for (const idn of identities) {
+      schoolNameById.set(idn.schoolId, idn.schoolName)
+      const [{ data: courseRows, error: cErr }, { data: hrRows, error: hErr }] = await Promise.all([
+        supabaseDb
+          .from('school_class_courses')
+          .select('campus_class_id, subject')
+          .eq('school_id', idn.schoolId)
+          .eq('teacher_acc', idn.acc),
+        supabaseDb
+          .from('school_classes')
+          .select('campus_class_id')
+          .eq('school_id', idn.schoolId)
+          .eq('homeroom_teacher_acc', idn.acc)
+      ])
+      if (cErr) throw cErr
+      if (hErr) throw hErr
+      for (const r of courseRows ?? []) {
+        if (!r.campus_class_id || !r.subject) continue
+        const k = `${idn.schoolId}|${r.campus_class_id}`
+        const cur = visibleByClass.get(k)
+        if (cur === '*') continue
+        if (cur instanceof Set) cur.add(String(r.subject))
+        else visibleByClass.set(k, new Set([String(r.subject)]))
+      }
+      for (const r of hrRows ?? []) {
+        if (!r.campus_class_id) continue
+        visibleByClass.set(`${idn.schoolId}|${r.campus_class_id}`, '*')
+      }
+    }
+    if (visibleByClass.size === 0) {
+      res.status(200).json({ exams: [], reason: 'no_courses' })
+      return
+    }
+
+    const schoolIds = [...new Set(identities.map((i) => i.schoolId))]
+    const { data: exams, error: eErr } = await supabaseDb
+      .from('school_exams')
+      .select('id, school_id, title, subject, status, created_at')
+      .in('school_id', schoolIds)
+      .order('created_at', { ascending: false })
+      .limit(60)
+    if (eErr) throw eErr
+    if (!exams || exams.length === 0) {
+      res.status(200).json({ exams: [] })
+      return
+    }
+    const { data: examClasses, error: ecErr } = await supabaseDb
+      .from('school_exam_classes')
+      .select('exam_id, campus_class_id, class_name, assignment_id')
+      .in('exam_id', exams.map((e) => e.id))
+    if (ecErr) throw ecErr
+
+    const canSee = (schoolId, campusClassId, subject) => {
+      const v = visibleByClass.get(`${schoolId}|${campusClassId}`)
+      if (!v) return false
+      if (v === '*') return true
+      return subject ? v.has(String(subject)) : false
+    }
+
+    const mode = typeof req.query?.mode === 'string' ? req.query.mode : 'list'
+
+    if (mode === 'grades') {
+      const examId = typeof req.query?.examId === 'string' ? req.query.examId.trim() : ''
+      const campusClassId = typeof req.query?.campusClassId === 'string' ? req.query.campusClassId.trim() : ''
+      const exam = exams.find((e) => e.id === examId)
+      const ec = (examClasses ?? []).find(
+        (c) => c.exam_id === examId && String(c.campus_class_id) === campusClassId
+      )
+      if (!exam || !ec || !canSee(exam.school_id, campusClassId, exam.subject)) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
+      const { data: assignment, error: aErr } = await supabaseDb
+        .from('assignments')
+        .select('id, title, classroom_id, total_score, question_count, subject')
+        .eq('id', ec.assignment_id)
+        .maybeSingle()
+      if (aErr) throw aErr
+      if (!assignment) {
+        res.status(404).json({ error: '這份考卷的班級作業已不存在' })
+        return
+      }
+      const [{ data: students, error: stErr }, { data: subs, error: sbErr }] = await Promise.all([
+        supabaseDb
+          .from('students')
+          .select('id, name, seat_number, classroom_id')
+          .eq('classroom_id', assignment.classroom_id)
+          .order('seat_number', { ascending: true }),
+        supabaseDb
+          .from('submissions')
+          .select('id, student_id, assignment_id, status, total_score, graded_at, mistake_count')
+          .eq('assignment_id', ec.assignment_id)
+      ])
+      if (stErr) throw stErr
+      if (sbErr) throw sbErr
+      res.status(200).json({
+        exam: { id: exam.id, title: exam.title, subject: exam.subject || '' },
+        className: ec.class_name || '',
+        assignment: assignment || null,
+        students: students || [],
+        submissions: subs || []
+      })
+      return
+    }
+
+    const byExam = new Map()
+    for (const c of examClasses ?? []) {
+      const exam = exams.find((e) => e.id === c.exam_id)
+      if (!exam) continue
+      if (!canSee(exam.school_id, String(c.campus_class_id), exam.subject)) continue
+      if (!byExam.has(exam.id)) byExam.set(exam.id, [])
+      byExam.get(exam.id).push({
+        campusClassId: String(c.campus_class_id),
+        className: c.class_name || String(c.campus_class_id),
+        assignmentId: c.assignment_id
+      })
+    }
+    res.status(200).json({
+      exams: exams
+        .filter((e) => byExam.has(e.id))
+        .map((e) => ({
+          id: e.id,
+          title: e.title,
+          subject: e.subject || '',
+          status: e.status,
+          createdAt: e.created_at,
+          schoolName: schoolNameById.get(e.school_id) || '',
+          classes: byExam.get(e.id).sort((a, b) => a.className.localeCompare(b.className, 'zh-Hant'))
+        }))
+    })
+  } catch (error) {
+    console.error('[teacher-school-exams] error:', error)
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' })
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // handleSchoolTeacherCourses
 // GET  ?schoolId=&teacherAcc=   → 該老師的任課清單(含來源)
 // POST { mode:'assign'|'unassign', schoolId, teacherAcc, teacherName, subject, campusClassIds[] }
@@ -10591,6 +10785,10 @@ const log = document.getElementById('log');
   }
   if (action === 'school-teacher-courses') {
     await handleSchoolTeacherCourses(req, res)
+    return
+  }
+  if (action === 'teacher-school-exams') {
+    await handleTeacherSchoolExams(req, res)
     return
   }
   if (action === '1campus-debug') {
