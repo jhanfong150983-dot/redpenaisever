@@ -1,5 +1,6 @@
 import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
+import { canTeacherViewSchoolExamAssignment } from '../../server/school-exam-visibility.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
 
 function resolveOwnerIdParam(req) {
@@ -393,7 +394,7 @@ export default async function handler(req, res) {
 
     const { data: submission, error: submissionError } = await supabaseDb
       .from('submissions')
-      .select('id, owner_id, student_id, thumb_url')
+      .select('id, owner_id, student_id, thumb_url, assignment_id')
       .eq('id', submissionId)
       .maybeSingle()
 
@@ -439,6 +440,21 @@ export default async function handler(req, res) {
               .eq('owner_id', student.owner_id)
           }
         }
+      }
+    }
+
+    // 2026-08-03 Step 11 階段 3b:學校考卷的作答照片,任課老師/導師可唯讀檢視。
+    //   卷的 owner 是行政帳號,上面的 owner 比對一定不成立,所以另開這條分支。
+    //   判定與成績查詢共用 school-exam-visibility.js,避免兩邊寬嚴不一致。
+    if (!hasAccess && submission?.assignment_id) {
+      try {
+        hasAccess = await canTeacherViewSchoolExamAssignment(
+          supabaseDb,
+          user.id,
+          submission.assignment_id
+        )
+      } catch (err) {
+        console.warn('[storage/download] 學校考卷唯讀判定失敗:', err?.message)
       }
     }
 

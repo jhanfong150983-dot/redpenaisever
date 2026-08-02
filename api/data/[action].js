@@ -21,6 +21,11 @@ import { MODEL_PRO } from '../../server/ai/model-config.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import { trackingContext } from '../../server/ink-usage-tracker.js'
 import {
+  resolveTeacherCampusIdentity,
+  buildTeacherVisibility,
+  canSeeClassSubject
+} from '../../server/school-exam-visibility.js'
+import {
   isValidDsns,
   getJasmineAccessToken,
   fetchCampus1Courses,
@@ -8509,32 +8514,6 @@ async function handleSchoolSubjects(req, res) {
 // ⚠ 考卷沒設 subject 時,規則①對不到任何人;只有導師看得到。建卷務必選科目。
 // 資料一律 server 現抓,不進老師的 sync(這些卷 owner 是行政、且 sync payload 已經是瓶頸)。
 // ─────────────────────────────────────────────────────────
-async function resolveTeacherCampusIdentity(supabaseDb, userId) {
-  // 老師的 1Campus 身分可能跨校(一人多校),回傳每個 dsns 對應的帳號 + school_id
-  const { data: idents, error } = await supabaseDb
-    .from('external_identities')
-    .select('provider_dsns, provider_account')
-    .eq('provider', 'campus1')
-    .eq('user_id', userId)
-  if (error) throw error
-  const rows = (idents ?? []).filter((it) => it.provider_dsns && it.provider_account)
-  if (rows.length === 0) return []
-  const dsnsList = [...new Set(rows.map((r) => String(r.provider_dsns)))]
-  const { data: schools, error: sErr } = await supabaseDb
-    .from('schools')
-    .select('id, name, provider_dsns')
-    .in('provider_dsns', dsnsList)
-  if (sErr) throw sErr
-  const schoolByDsns = new Map((schools ?? []).map((s) => [String(s.provider_dsns), s]))
-  const out = []
-  for (const r of rows) {
-    const s = schoolByDsns.get(String(r.provider_dsns))
-    if (!s) continue
-    out.push({ schoolId: s.id, schoolName: s.name || '', acc: String(r.provider_account).trim() })
-  }
-  return out
-}
-
 async function handleTeacherSchoolExams(req, res) {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -8553,38 +8532,9 @@ async function handleTeacherSchoolExams(req, res) {
       return
     }
 
-    // 這位老師在每所學校的可見範圍
-    const visibleByClass = new Map() // `${schoolId}|${campusClassId}` → Set(subject) | '*'(導師)
-    const schoolNameById = new Map()
-    for (const idn of identities) {
-      schoolNameById.set(idn.schoolId, idn.schoolName)
-      const [{ data: courseRows, error: cErr }, { data: hrRows, error: hErr }] = await Promise.all([
-        supabaseDb
-          .from('school_class_courses')
-          .select('campus_class_id, subject')
-          .eq('school_id', idn.schoolId)
-          .eq('teacher_acc', idn.acc),
-        supabaseDb
-          .from('school_classes')
-          .select('campus_class_id')
-          .eq('school_id', idn.schoolId)
-          .eq('homeroom_teacher_acc', idn.acc)
-      ])
-      if (cErr) throw cErr
-      if (hErr) throw hErr
-      for (const r of courseRows ?? []) {
-        if (!r.campus_class_id || !r.subject) continue
-        const k = `${idn.schoolId}|${r.campus_class_id}`
-        const cur = visibleByClass.get(k)
-        if (cur === '*') continue
-        if (cur instanceof Set) cur.add(String(r.subject))
-        else visibleByClass.set(k, new Set([String(r.subject)]))
-      }
-      for (const r of hrRows ?? []) {
-        if (!r.campus_class_id) continue
-        visibleByClass.set(`${idn.schoolId}|${r.campus_class_id}`, '*')
-      }
-    }
+    // 這位老師在每所學校的可見範圍(判定邏輯與圖片下載端點共用同一份)
+    const schoolNameById = new Map(identities.map((i) => [i.schoolId, i.schoolName]))
+    const visibleByClass = await buildTeacherVisibility(supabaseDb, identities)
     if (visibleByClass.size === 0) {
       res.status(200).json({ exams: [], reason: 'no_courses' })
       return
@@ -8608,12 +8558,8 @@ async function handleTeacherSchoolExams(req, res) {
       .in('exam_id', exams.map((e) => e.id))
     if (ecErr) throw ecErr
 
-    const canSee = (schoolId, campusClassId, subject) => {
-      const v = visibleByClass.get(`${schoolId}|${campusClassId}`)
-      if (!v) return false
-      if (v === '*') return true
-      return subject ? v.has(String(subject)) : false
-    }
+    const canSee = (schoolId, campusClassId, subject) =>
+      canSeeClassSubject(visibleByClass, schoolId, campusClassId, subject)
 
     const mode = typeof req.query?.mode === 'string' ? req.query.mode : 'list'
 
@@ -8660,6 +8606,54 @@ async function handleTeacherSchoolExams(req, res) {
         assignment: assignment || null,
         students: students || [],
         submissions: subs || []
+      })
+      return
+    }
+
+    if (mode === 'detail') {
+      // 逐題唯讀檢視:只撈「被點開的那一份」的完整批改資料 + 該班答案卷。
+      //   大 JSONB 只在這裡動,清單/成績表都不碰。
+      const examId = typeof req.query?.examId === 'string' ? req.query.examId.trim() : ''
+      const campusClassId = typeof req.query?.campusClassId === 'string' ? req.query.campusClassId.trim() : ''
+      const submissionId = typeof req.query?.submissionId === 'string' ? req.query.submissionId.trim() : ''
+      const exam = exams.find((e) => e.id === examId)
+      const ec = (examClasses ?? []).find(
+        (c) => c.exam_id === examId && String(c.campus_class_id) === campusClassId
+      )
+      if (!exam || !ec || !canSee(exam.school_id, campusClassId, exam.subject)) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
+      const { data: sub, error: subErr } = await supabaseDb
+        .from('submissions')
+        .select('id, assignment_id, student_id, status, score, ai_score, score_source, graded_at, grading_result, phase_a_state, final_answers, page_breaks, image_url, thumb_url')
+        .eq('id', submissionId)
+        .eq('assignment_id', ec.assignment_id)
+        .maybeSingle()
+      if (subErr) throw subErr
+      if (!sub) {
+        res.status(404).json({ error: '找不到這份作答' })
+        return
+      }
+      const [{ data: asg, error: asgErr }, { data: stu, error: stuErr }] = await Promise.all([
+        supabaseDb
+          .from('assignments')
+          .select('id, title, scoring_mode, domain, answer_key')
+          .eq('id', ec.assignment_id)
+          .maybeSingle(),
+        supabaseDb
+          .from('students')
+          .select('id, name, seat_number')
+          .eq('id', sub.student_id)
+          .maybeSingle()
+      ])
+      if (asgErr) throw asgErr
+      if (stuErr) throw stuErr
+      res.status(200).json({
+        submission: sub,
+        assignment: asg || null,
+        student: stu || null,
+        className: ec.class_name || ''
       })
       return
     }
