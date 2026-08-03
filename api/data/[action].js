@@ -2917,6 +2917,10 @@ async function clearGradingForAssignment(supabaseDb, { assignmentId, ownerId, re
       graded_at: null,
       phase_a_state: null,
       final_answers: null,
+      // 2026-08-03 墓碑:sync 合併是 local-first,server 送 null 會被本機舊值接住。
+      //   蓋一個時間戳,client 比對後才知道「這是刻意清空、不是還沒有資料」。
+      //   用時間戳而非布林——布林無法分辨第二次清除。
+      grading_cleared_at: nowIso,
       updated_at: nowIso
     })
     .eq('assignment_id', assignmentId)
@@ -4026,7 +4030,7 @@ async function handleSync(req, res) {
             //   移出同步(單份 42KB→1KB、全校考卷 90MB→2MB),改由 submission-details 端點 on-demand。
             //   卡片狀態需要的輕量值改吃 generated column:
             //     has_grading_result(已批改判定)、phase_a_saved_at(isPhaseAStale)、mistakes_count(總覽 fallback)
-            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, graded_by, updated_at, page_breaks, has_grading_result, phase_a_saved_at, mistakes_count')
+            .select('id, assignment_id, student_id, status, created_at, image_url, thumb_url, score, ai_score, score_source, feedback, graded_at, correction_count, source, round, parent_submission_id, actor_user_id, graded_by, updated_at, page_breaks, has_grading_result, phase_a_saved_at, mistakes_count, grading_cleared_at')
             .eq('owner_id', ownerId)
           if (sinceIso) qb = qb.gte('updated_at', sinceIso)
           return qb
@@ -4297,7 +4301,9 @@ async function handleSync(req, res) {
           // 2026-08-03:大 JSONB 不進 sync,只帶卡片狀態要用的兩個輕量值。
           //   真正要逐題資料的畫面(批改頁/檢討單/學情報告)開啟時走 submission-details 補齊。
           hasGradingResult: row.has_grading_result === true ? true : undefined,
-          phaseASavedAt: row.phase_a_saved_at ?? undefined
+          phaseASavedAt: row.phase_a_saved_at ?? undefined,
+          // 清除墓碑:client 比對後把本機殘留的批改一起清掉(跨裝置才傳得過去)
+          gradingClearedAt: toMillis(row.grading_cleared_at) ?? undefined
         })
       })
 
