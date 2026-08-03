@@ -32,16 +32,15 @@ function buildBboxMap(phaseAState) {
 }
 
 async function cropOne(buf, meta, b) {
-  // 2026-08-03 修「選擇題的 crop 怎麼會這麼大」(user 實測回報):
-  //   padding 原本是各軸取 0.008 的比例。多頁卷是直向合併的長圖(3 頁 A4 → 高約寬的 4.2 倍),
-  //   同樣 0.008 在垂直方向換算成像素是水平的 4 倍多 → 對單選題那種小框(w=0.040 h=0.008)
-  //   padding 直接主宰尺寸,裁出來變成「瘦高」而不是貼著答案。
-  //   改成以寬度為基準的等向 padding(實際留白在四邊像素數相同),與頁數無關。
-  const padPx = Math.max(2, Math.round(0.008 * meta.width))
-  const cx = Math.max(0, Math.round(b.x * meta.width) - padPx)
-  const cy = Math.max(0, Math.round(b.y * meta.height) - padPx)
-  const cw = Math.min(meta.width - cx, Math.round(b.w * meta.width) + padPx * 2)
-  const ch = Math.min(meta.height - cy, Math.round(b.h * meta.height) + padPx * 2)
+  // 2026-08-03(user 拍板:現在沒有人工審查了,crop 直接用 classify bbox):
+  //   零 padding。padding 本來是給人看上下文用的,審查流程拿掉之後就沒有理由再放大——
+  //   而且原本各軸取 0.008 比例,在直向合併的長圖(3 頁 A4 → 高約寬的 4.2 倍)上,
+  //   垂直 padding 換算成像素是水平的 4 倍多,小框(單選題 w=0.040 h=0.008)會被 padding
+  //   主宰、裁成瘦高一大塊。用原框最貼答案,也不會吃到鄰列。
+  const cx = Math.max(0, Math.round(b.x * meta.width))
+  const cy = Math.max(0, Math.round(b.y * meta.height))
+  const cw = Math.min(meta.width - cx, Math.round(b.w * meta.width))
+  const ch = Math.min(meta.height - cy, Math.round(b.h * meta.height))
   if (!(cw > 0 && ch > 0)) return null
   let im = sharp(buf).extract({ left: cx, top: cy, width: cw, height: ch })
   if (cw < 640) im = im.resize({ width: Math.min(640, cw * 2) })
