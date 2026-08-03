@@ -7866,6 +7866,30 @@ async function handleSchoolExams(req, res) {
     const examIds = (exams ?? []).map((e) => e.id)
     let classesByExam = new Map()
     if (examIds.length) {
+      // 2026-08-03(user 提:老師名字應該自動化)家長報告抬頭的老師 = 該班該科的任課老師。
+      //   任課資料已經在 school_class_courses(1Campus 同步或行政手動指派),不必再叫行政手填。
+      //   協同教學會有多位 → 用、串起來;查不到就留空(報告上不顯示老師)。
+      const subjectByExam = new Map((exams ?? []).map((e) => [e.id, e.subject || '']))
+      const wantedSubjects = [...new Set([...subjectByExam.values()].filter(Boolean))]
+      const teacherByClassSubject = new Map()
+      if (wantedSubjects.length > 0) {
+        const { data: courseRows, error: crErr } = await fetchAllPaginated(() =>
+          supabaseDb
+            .from('school_class_courses')
+            .select('campus_class_id, subject, teacher_name')
+            .eq('school_id', schoolId)
+            .in('subject', wantedSubjects)
+        )
+        if (crErr) console.warn('[school-exams] 讀任課老師失敗(報告抬頭會留空):', crErr.message)
+        for (const r of courseRows ?? []) {
+          const name = String(r.teacher_name || '').trim()
+          if (!name) continue
+          const k = `${r.campus_class_id}|${r.subject}`
+          const cur = teacherByClassSubject.get(k)
+          if (!cur) teacherByClassSubject.set(k, [name])
+          else if (!cur.includes(name)) cur.push(name)
+        }
+      }
       const { data: cls } = await supabaseDb
         .from('school_exam_classes')
         .select('exam_id, campus_class_id, classroom_id, assignment_id, class_name')
@@ -7873,11 +7897,14 @@ async function handleSchoolExams(req, res) {
       classesByExam = new Map()
       for (const c of cls ?? []) {
         if (!classesByExam.has(c.exam_id)) classesByExam.set(c.exam_id, [])
+        const subject = subjectByExam.get(c.exam_id) || ''
+        const names = subject ? teacherByClassSubject.get(`${c.campus_class_id}|${subject}`) : null
         classesByExam.get(c.exam_id).push({
           campusClassId: c.campus_class_id,
           classroomId: c.classroom_id,
           assignmentId: c.assignment_id,
-          className: c.class_name || ''
+          className: c.class_name || '',
+          teacherName: Array.isArray(names) && names.length > 0 ? names.join('、') : ''
         })
       }
     }
@@ -8694,6 +8721,90 @@ async function handleTeacherSchoolExams(req, res) {
     })
   } catch (error) {
     console.error('[teacher-school-exams] error:', error)
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' })
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// handleSchoolReportSettings(2026-08-03:家長報告抬頭改學校級)
+// GET  ?schoolId=            → { schoolName, crestDataUrl }
+// POST { schoolId, schoolName?, crestDataUrl? }  → 存檔(school_admin/admin 才能寫)
+//
+// 為什麼不留在 localStorage:行政帳號可能多人共用或換電腦,per-device 設定會讓
+//   同一所學校印出兩種抬頭。校名預設吃 schools.name(1Campus 正式校名),
+//   report_school_name 只在要印不同名稱時才覆寫。
+// 校徽存 data URI:家長報告 PDF 由 headless Chrome 渲染,那支端點只放行 data: 與
+//   Google Fonts(防 SSRF),外部圖片 URL 會被 abort。
+// ─────────────────────────────────────────────────────────
+const CREST_MAX_BYTES = 512 * 1024
+
+async function handleSchoolReportSettings(req, res) {
+  const { user } = await getAuthUser(req, res)
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const isGet = req.method === 'GET'
+  if (!isGet && req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' })
+    return
+  }
+  const body = isGet ? {} : parseJsonBody(req)
+  const schoolId = isGet
+    ? (typeof req.query?.schoolId === 'string' ? req.query.schoolId.trim() : '')
+    : (typeof body?.schoolId === 'string' ? body.schoolId.trim() : '')
+  if (!schoolId) {
+    res.status(400).json({ error: 'Missing schoolId' })
+    return
+  }
+  const supabaseDb = getSupabaseAdmin()
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseDb.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseDb.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const allowed =
+    profile?.role === 'admin' || (Array.isArray(saRows) && saRows.some((r) => r.school_id === schoolId))
+  if (!allowed) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+
+  try {
+    if (isGet) {
+      const { data, error } = await supabaseDb
+        .from('schools')
+        .select('name, report_school_name, report_crest_data_url')
+        .eq('id', schoolId)
+        .maybeSingle()
+      if (error) throw error
+      res.status(200).json({
+        schoolName: data?.report_school_name || data?.name || '',
+        // 有沒有覆寫過(UI 要顯示「目前用的是 1Campus 正式校名」)
+        schoolNameOverridden: !!data?.report_school_name,
+        crestDataUrl: data?.report_crest_data_url || ''
+      })
+      return
+    }
+
+    const patch = { updated_at: new Date().toISOString() }
+    if (typeof body.schoolName === 'string') patch.report_school_name = body.schoolName.trim() || null
+    if (typeof body.crestDataUrl === 'string') {
+      const v = body.crestDataUrl.trim()
+      if (v && !v.startsWith('data:image/')) {
+        res.status(400).json({ error: '校徽必須是圖片檔' })
+        return
+      }
+      if (v.length > CREST_MAX_BYTES) {
+        res.status(400).json({ error: `校徽檔案過大(上限 ${Math.floor(CREST_MAX_BYTES / 1024)} KB),請換小一點的圖` })
+        return
+      }
+      patch.report_crest_data_url = v || null
+    }
+    const { error } = await supabaseDb.from('schools').update(patch).eq('id', schoolId)
+    if (error) throw error
+    res.status(200).json({ ok: true })
+  } catch (error) {
+    console.error('[school-report-settings] error:', error)
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' })
   }
 }
@@ -10913,6 +11024,10 @@ const log = document.getElementById('log');
   }
   if (action === 'submission-details') {
     await handleSubmissionDetails(req, res)
+    return
+  }
+  if (action === 'school-report-settings') {
+    await handleSchoolReportSettings(req, res)
     return
   }
   if (action === '1campus-debug') {
