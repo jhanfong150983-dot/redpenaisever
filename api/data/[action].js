@@ -8727,8 +8727,12 @@ async function handleTeacherSchoolExams(req, res) {
 
 // ─────────────────────────────────────────────────────────
 // handleSchoolReportSettings(2026-08-03:家長報告抬頭改學校級)
-// GET  ?schoolId=            → { schoolName, crestDataUrl }
+// GET  ?schoolId=  → { schoolName, crestDataUrl }(行政:指定學校)
+// GET  (不帶參數)  → 教師模式:自動解析本人的 1Campus 學校,另回 viewerName(本人姓名)
 // POST { schoolId, schoolName?, crestDataUrl? }  → 存檔(school_admin/admin 才能寫)
+//
+// user 拍板:學校有設定就**取代**老師的個人設定——校徽是學校識別不是老師的,
+//   家長可能同時收到各科老師的報告,不該長得不一樣。個人用戶(非 1Campus 學校)不受影響。
 //
 // 為什麼不留在 localStorage:行政帳號可能多人共用或換電腦,per-device 設定會讓
 //   同一所學校印出兩種抬頭。校名預設吃 schools.name(1Campus 正式校名),
@@ -8753,11 +8757,48 @@ async function handleSchoolReportSettings(req, res) {
   const schoolId = isGet
     ? (typeof req.query?.schoolId === 'string' ? req.query.schoolId.trim() : '')
     : (typeof body?.schoolId === 'string' ? body.schoolId.trim() : '')
+  const supabaseDb = getSupabaseAdmin()
+
+  // 教師模式:不帶 schoolId 的 GET = 「我的學校的報告抬頭 + 我的姓名」。
+  //   只讀自己學校的品牌設定,不需要行政權限;個人用戶解析不到學校就回空。
+  if (isGet && !schoolId) {
+    try {
+      const [{ data: prof }, identities] = await Promise.all([
+        supabaseDb.from('profiles').select('name').eq('id', user.id).maybeSingle(),
+        resolveTeacherCampusIdentity(supabaseDb, user.id)
+      ])
+      const viewerName = String(prof?.name || '').trim()
+      if (identities.length === 0) {
+        res.status(200).json({ schoolName: '', crestDataUrl: '', viewerName })
+        return
+      }
+      const { data: rows, error } = await supabaseDb
+        .from('schools')
+        .select('id, name, report_school_name, report_crest_data_url')
+        .in('id', [...new Set(identities.map((i) => i.schoolId))])
+      if (error) throw error
+      // 一人多校時,優先挑「真的設過抬頭」的那一所
+      const picked =
+        (rows ?? []).find((r) => r.report_school_name || r.report_crest_data_url) ?? (rows ?? [])[0]
+      res.status(200).json({
+        schoolId: picked?.id || '',
+        schoolName: picked?.report_school_name || picked?.name || '',
+        crestDataUrl: picked?.report_crest_data_url || '',
+        // 學校是否真的設定過(沒設過就不該覆蓋老師的個人設定)
+        configured: !!(picked?.report_school_name || picked?.report_crest_data_url),
+        viewerName
+      })
+    } catch (error) {
+      console.error('[school-report-settings] viewer mode error:', error)
+      res.status(200).json({ schoolName: '', crestDataUrl: '', viewerName: '' })
+    }
+    return
+  }
+
   if (!schoolId) {
     res.status(400).json({ error: 'Missing schoolId' })
     return
   }
-  const supabaseDb = getSupabaseAdmin()
   const [{ data: profile }, { data: saRows }] = await Promise.all([
     supabaseDb.from('profiles').select('role').eq('id', user.id).maybeSingle(),
     supabaseDb.from('school_admins').select('school_id').eq('profile_id', user.id)
