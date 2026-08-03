@@ -12201,13 +12201,26 @@ async function handlePdfClassifyTemplate(req, res) {
         .eq('answer_key_template_id', data.answer_key_template_id)
         .neq('id', assignmentId)
         .not('pdf_classify_template', 'is', null)
-        .limit(5)
+        .limit(50)
       if (!sibErr && Array.isArray(sibs) && sibs.length > 0) {
-        // 取 savedAt 最新的一份（範本 JSON 內帶 savedAt、缺就當 0）
-        const best = sibs.reduce((a, b) =>
-          (Number(b?.pdf_classify_template?.savedAt) || 0) > (Number(a?.pdf_classify_template?.savedAt) || 0) ? b : a)
+        // 2026-08-03 修:原本取 savedAt 最新的一份,但 client 的 K 升級門檻是比「樣本數」——
+        //   借到一份「比較新但樣本數低」的範本(例如某班只批 3 份就存了 K=3),
+        //   門檻會判定 3 < 本批可達 8 → 整段 classify 重抽,共用等於白做。
+        //   改成挑 sampleCount 最高的(同分再取新的),讓後面的班一次借到最好的那份。
+        //   legacy 無 sampleCount 欄位 → 視為 1(與 client 的判定一致)。
+        const kOf = (t) => Math.max(1, Number(t?.sampleCount) || 1)
+        const tsOf = (t) => Number(t?.savedAt) || 0
+        const best = sibs.reduce((a, b) => {
+          const ka = kOf(a?.pdf_classify_template)
+          const kb = kOf(b?.pdf_classify_template)
+          if (kb !== ka) return kb > ka ? b : a
+          return tsOf(b?.pdf_classify_template) > tsOf(a?.pdf_classify_template) ? b : a
+        })
         if (best?.pdf_classify_template) {
-          console.log(`[pdf-classify-template][get] ${assignmentId} 無範本、借用兄弟作業 ${best.id}（同 template ${data.answer_key_template_id}）`)
+          console.log(
+            `[pdf-classify-template][get] ${assignmentId} 無範本、借用兄弟作業 ${best.id}` +
+            `(同 template ${data.answer_key_template_id}、樣本數 ${kOf(best.pdf_classify_template)}、候選 ${sibs.length} 份)`
+          )
           res.status(200).json({ template: best.pdf_classify_template, borrowedFrom: best.id })
           return
         }
