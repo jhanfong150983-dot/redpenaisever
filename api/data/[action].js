@@ -29,6 +29,7 @@ import {
   FLAT_BILLING_ENABLED,
   gradingActionPoints,
   resolveBillingTarget,
+  resolveBillingTargetsByAssignment,
   chargeFlatPoints,
   RECHECK_POINTS
 } from '../../server/action-billing.js'
@@ -2004,7 +2005,7 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
   //   兩個呼叫端(自動訂正檢查/學生送訂正)共用本函式=單一收費點。billing 打到 owner(老師/學校)。
   try {
     if (FLAT_BILLING_ENABLED) {
-      const target = await resolveBillingTarget(supabaseDb, submission.owner_id)
+      const target = await resolveBillingTarget(supabaseDb, submission.owner_id, submission.assignment_id)
       const charge = await chargeFlatPoints(supabaseDb, {
         target, points: RECHECK_POINTS, actorProfileId: submission.owner_id, reason: 'recheck_action',
         metadata: { submissionId: submission.id, assignmentId: assignment?.id ?? null }
@@ -2907,23 +2908,39 @@ async function handleSaveGrading(req, res) {
           const { data: asgs } = await supabaseDb
             .from('assignments').select('id, total_questions').in('id', aids)
           const qById = new Map((asgs ?? []).map((a) => [a.id, a.total_questions]))
-          let totalPoints = 0
-          for (const r of toCharge) totalPoints += gradingActionPoints(qById.get(r.assignment_id))
-          const target = await resolveBillingTarget(supabaseDb, user.id)
-          const charge = await chargeFlatPoints(supabaseDb, {
-            target, points: totalPoints, actorProfileId: user.id, reason: 'grading_action',
-            metadata: { papers: toCharge.length, assignmentIds: aids }
-          })
-          if (charge.ok) {
-            for (const r of toCharge) {
-              await supabaseDb.from('submissions')
-                .update({ charged_graded_at: gradedAtById.get(r.id) })
-                .eq('id', r.id).eq('owner_id', user.id)
+          // 2026-08-04 修正:計費對象按「考卷」解析(學校考卷→校錢包、其餘→個人),
+          //   同一次儲存混到兩種 scope 時分組各扣各的。
+          const targets = await resolveBillingTargetsByAssignment(supabaseDb, user.id, aids)
+          const groups = new Map()
+          for (const r of toCharge) {
+            const t = targets.get(r.assignment_id) ?? { scope: 'personal', id: user.id }
+            const k = `${t.scope}:${t.id}`
+            const g = groups.get(k) ?? { target: t, points: 0, rows: [] }
+            g.points += gradingActionPoints(qById.get(r.assignment_id))
+            g.rows.push(r)
+            groups.set(k, g)
+          }
+          let totalPoints = 0, papersCharged = 0, lastScope = null, lastBalance = null
+          for (const g of groups.values()) {
+            const charge = await chargeFlatPoints(supabaseDb, {
+              target: g.target, points: g.points, actorProfileId: user.id, reason: 'grading_action',
+              metadata: { papers: g.rows.length, assignmentIds: [...new Set(g.rows.map((r) => r.assignment_id))] }
+            })
+            if (charge.ok) {
+              for (const r of g.rows) {
+                await supabaseDb.from('submissions')
+                  .update({ charged_graded_at: gradedAtById.get(r.id) })
+                  .eq('id', r.id).eq('owner_id', user.id)
+              }
+              totalPoints += g.points; papersCharged += g.rows.length
+              lastScope = g.target.scope; lastBalance = charge.balance
+              console.log(`[save-grading] flat-billed ${g.points} pts (${g.rows.length} papers, ${g.target.scope})`)
+            } else {
+              console.warn('[save-grading] flat charge failed (fail-open, will retry next round)')
             }
-            billing = { points: totalPoints, papers: toCharge.length, scope: charge.scope, balanceAfter: charge.balance }
-            console.log(`[save-grading] flat-billed ${totalPoints} pts (${toCharge.length} papers, ${charge.scope})`)
-          } else {
-            console.warn('[save-grading] flat charge failed (fail-open, will retry next round)')
+          }
+          if (papersCharged > 0) {
+            billing = { points: totalPoints, papers: papersCharged, scope: lastScope, balanceAfter: lastBalance }
           }
         } else {
           billing = { points: 0, papers: 0, scope: null, alreadyCharged: true }
@@ -10923,7 +10940,7 @@ async function handleStudentFinalizeGrading(req, res) {
         const { data: chk } = await supabaseDb
           .from('submissions').select('charged_graded_at').eq('id', submissionId).maybeSingle()
         if (Number(chk?.charged_graded_at || 0) !== Number(gradedAt)) {
-          const target = await resolveBillingTarget(supabaseDb, ownerId)
+          const target = await resolveBillingTarget(supabaseDb, ownerId, assignmentId)
           const charge = await chargeFlatPoints(supabaseDb, {
             target, points: RECHECK_POINTS, actorProfileId: ownerId, reason: 'student_self_grading',
             metadata: { submissionId, assignmentId }

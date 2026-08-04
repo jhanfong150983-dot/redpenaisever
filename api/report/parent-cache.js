@@ -142,7 +142,7 @@ export default async function handler(req, res) {
           await import('../../server/action-billing.js')
         if (FLAT_BILLING_ENABLED && rows.length > 0) {
           const points = rows.length * PARENT_REPORT_POINTS_PER_STUDENT
-          const target = await resolveBillingTarget(supabaseAdmin, user.id)
+          const target = await resolveBillingTarget(supabaseAdmin, user.id, assignmentId)
           const charge = await chargeFlatPoints(supabaseAdmin, {
             target, points, actorProfileId: user.id, reason: 'parent_report_action',
             metadata: { assignmentId, students: rows.length }
