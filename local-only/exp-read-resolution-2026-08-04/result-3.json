@@ -1,0 +1,32 @@
+[
+  {
+    "label": "HIGH",
+    "calls": 2,
+    "imgTok": 3723,
+    "txtTok": 690,
+    "outTok": 341,
+    "thTok": 591,
+    "cost": 0.16835940000000002,
+    "match": 8,
+    "diff": [],
+    "missing": 0
+  },
+  {
+    "label": "LOW ",
+    "calls": 2,
+    "imgTok": 2075,
+    "txtTok": 690,
+    "outTok": 341,
+    "thTok": 591,
+    "cost": 0.08678340000000001,
+    "match": 7,
+    "diff": [
+      {
+        "qid": "3-E-6",
+        "gt": "Thier are eight hundred and si",
+        "got": "Thier are eight hundred and sv"
+      }
+    ],
+    "missing": 0
+  }
+]

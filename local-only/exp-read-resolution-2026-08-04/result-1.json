@@ -1,0 +1,26 @@
+[
+  {
+    "label": "HIGH",
+    "calls": 3,
+    "imgTok": 23599,
+    "txtTok": 1101,
+    "outTok": 888,
+    "thTok": 0,
+    "cost": 1.486386,
+    "match": 22,
+    "diff": [],
+    "missing": 0
+  },
+  {
+    "label": "LOW ",
+    "calls": 3,
+    "imgTok": 5867,
+    "txtTok": 1101,
+    "outTok": 914,
+    "thTok": 0,
+    "cost": 0.616374,
+    "match": 22,
+    "diff": [],
+    "missing": 0
+  }
+]

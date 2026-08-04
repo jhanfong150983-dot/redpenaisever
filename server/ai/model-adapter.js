@@ -193,6 +193,13 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
   throw timeoutError
 }
 
+// 2026-08-04:mediaResolution 是 Gemini 3.x 專屬(read 圖片檔位降本),非 3.x 模型要 strip 掉避免 400
+function stripMediaResolution(payload) {
+  if (!payload?.generationConfig?.mediaResolution) return payload
+  const { mediaResolution: _m, ...restGen } = payload.generationConfig
+  return { ...payload, generationConfig: restGen }
+}
+
 function stripThinkingConfig(payload) {
   const tc = payload?.generationConfig?.thinkingConfig
   if (!tc) return payload
@@ -234,7 +241,9 @@ export async function callGeminiGenerateContent({
   for (let i = 0; i < allModels.length; i++) {
     const currentModel = allModels[i]
     const shouldStrip = i > 0 || !supportsThinkingLevel(currentModel)
-    const effectivePayload = shouldStrip ? stripThinkingConfig(payload) : payload
+    let effectivePayload = shouldStrip ? stripThinkingConfig(payload) : payload
+    // mediaResolution 只有 Gemini 3.x 吃;fallback 或非 3.x 一律拔掉
+    if (i > 0 || !/gemini-3/i.test(String(currentModel))) effectivePayload = stripMediaResolution(effectivePayload)
     if (i > 0) {
       console.warn(
         `[ai-model-adapter] 503-fallback switching to model=${currentModel} fallbackIndex=${i}`

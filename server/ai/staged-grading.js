@@ -51,6 +51,14 @@ const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 // "solving" or "normalizing" student answers across runs.
 // thinking_level=MINIMAL: gemini-3-flash-preview defaults to HIGH which is slow;
 // fallback models (e.g. gemini-2.5-flash) will have thinkingConfig stripped automatically.
+// 2026-08-04 read 圖片解析度檔位(exp-read-resolution-2026-08-04):Gemini 3.x 對「每張圖」收固定
+//   token(HIGH≈1120/MEDIUM≈560/LOW≈280)、與像素大小無關——read 裁圖只有 ~330px 寬、卻按 HIGH 計費,
+//   圖片 input 佔 read 線成本 73%。沙盒(英語 wq_pdf 全卷 48 題×3 輪、GT=production 最終讀值):
+//   LOW 與 HIGH 讀值一致(唯一搖擺題 HIGH 自己也錯、屬既有難字噪音)、read 單趟 NT$2.11→0.91。
+//   env READ_MEDIA_RES=low|medium|high 啟用;未設=不帶(維持現狀)。⚠ 只在 3.x 模型生效
+//   (model-adapter 對非 3.x strip);國語(注音/字形小目標)尚未驗證,啟用前先跑國語沙盒。
+const READ_MEDIA_RES = { low: 'MEDIA_RESOLUTION_LOW', medium: 'MEDIA_RESOLUTION_MEDIUM', high: 'MEDIA_RESOLUTION_HIGH' }[String(process.env.READ_MEDIA_RES || '').toLowerCase()] || null
+
 export const READ_ANSWER_GENERATION_CONFIG = {
   generationConfig: {
     // 2026-06-30：read temp 預設改 0（治「每次批改不一致」）。
@@ -60,7 +68,8 @@ export const READ_ANSWER_GENERATION_CONFIG = {
     temperature: Number.isFinite(Number(process.env.READ_TEMP)) ? Number(process.env.READ_TEMP) : 0,
     thinkingConfig: {
       thinking_level: 'MINIMAL'
-    }
+    },
+    ...(READ_MEDIA_RES ? { mediaResolution: READ_MEDIA_RES } : {})
   }
 }
 
