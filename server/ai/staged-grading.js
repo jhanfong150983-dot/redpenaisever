@@ -79,6 +79,18 @@ export const READ_ANSWER_GENERATION_CONFIG = {
   }
 }
 
+// 2026-08-04 判官/小目標專用 config(medium 事故修正):READ_MEDIA_RES=medium 上線後,
+//   注音三判官/調號覆核/單選字跡兜底/VJ lazy 兜底因共用 READ_ANSWER_GENERATION_CONFIG
+//   被連帶降到 medium——這些是「筆畫級/單字級」判定,解析度砍半 → 國字注音改錯升高、
+//   判官 2:1 分歧變多(user 實測回報)。沙盒當初照 production 規則跳過了 gz 格,沒測到判官=盲區。
+//   此 config 明確鎖 HIGH(即使日後預設再變也不受影響);非 3.x 模型由 adapter strip。
+export const JUDGE_HIGHRES_GENERATION_CONFIG = {
+  generationConfig: {
+    ...READ_ANSWER_GENERATION_CONFIG.generationConfig,
+    mediaResolution: 'MEDIA_RESOLUTION_HIGH'
+  }
+}
+
 // 2026-07-05: accessor（計分）temp 預設 0——培英全班兩輪對照實測「同一答案跨輪判定翻盤」
 //   （1-1-5 等價式一輪判對一輪判錯、兩方向都出現）＝accessor 未設溫度（Gemini 預設 1.0）的隨機性。
 //   比照 read（2026-06-30 temp 0 治批改不一致）與 VJ grade（temp 0 治 1/5 變異）。回退：ACCESSOR_TEMP=1。
@@ -13064,7 +13076,7 @@ export async function runStagedGradingPhaseB({
               const cropMime = q.cropImagePath.endsWith('.jpg') ? 'image/jpeg' : 'image/webp'
               const refB64 = Buffer.from(await blob.arrayBuffer()).toString('base64')
               const resp = await executeStage({
-                apiKey, model: phaseBModel, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                apiKey, model: phaseBModel, payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                 timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_RUBRIC,
                 stageContents: [{ role: 'user', parts: [{ text: buildVjRubricPrompt(q.questionCategory, q.referenceAnswer || q.answer) }, { inlineData: { mimeType: cropMime, data: refB64 } }] }]
               })
@@ -13096,7 +13108,7 @@ export async function runStagedGradingPhaseB({
             const crop = await cropInlineImageByBbox(studentImg.data, studentImg.mimeType, inflateBboxForType(classifyRow.answerBbox, classifyRow.questionType || q.questionCategory), true, 0.01)
             if (crop) {
               const resp = await executeStage({
-                apiKey, model: phaseBModel, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                apiKey, model: phaseBModel, payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                 timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_BLANK,
                 stageContents: [{ role: 'user', parts: [{ text: buildVjBlankPrompt(itemLabels) }, { inlineData: crop }] }]
               })
@@ -13334,7 +13346,7 @@ export async function runStagedGradingPhaseB({
             const parts = [{ text: txt }, { inlineData: stuCrop }]
             const resp = await executeStage({
               apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
-              payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+              payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
               // 2026-07-12 事故修：單 call 上限 20s——3.5 慢尾（240s+ 前科）不可吃掉 Phase B 共用預算
               //  （07-11 國語卷實測：串行 14 call 無上限 → 一個慢尾 → accessor 零預算 → 503×8）
               timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
@@ -13374,7 +13386,7 @@ export async function runStagedGradingPhaseB({
                 const parts = [{ text: txt }, { text: '【標準答案圖】' }, { inlineData: zyRefCrop }, { text: '【學生作答圖】' }, { inlineData: stuCrop }]
                 const resp = await executeStage({
                   apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
-                  payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                  payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                   timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
                   routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
                   stageContents: [{ role: 'user', parts }]
@@ -13430,7 +13442,7 @@ export async function runStagedGradingPhaseB({
               const callToneReview = async () => {
                 const resp = await executeStage({
                   apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
-                  payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                  payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                   timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
                   routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
                   stageContents: [{ role: 'user', parts: toneReviewParts }]
@@ -13618,7 +13630,7 @@ export async function runStagedGradingPhaseB({
           const callSc = async () => {
             const resp = await executeStage({
               apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
-              payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+              payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
               timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
               routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
               stageContents: [{ role: 'user', parts: [{ text: scPrompt }, { inlineData: crop }] }]
