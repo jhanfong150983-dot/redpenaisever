@@ -1,0 +1,85 @@
+[
+  {
+    "label": "MED  #1",
+    "calls": 3,
+    "imgTok": 26264,
+    "outTok": 1939,
+    "thTok": 0,
+    "cost": 1.9456965,
+    "match": 50,
+    "total": 50,
+    "diff": [],
+    "missing": 0
+  },
+  {
+    "label": "LOW  #1",
+    "calls": 3,
+    "imgTok": 13355,
+    "outTok": 1939,
+    "thTok": 0,
+    "cost": 1.306701,
+    "match": 50,
+    "total": 50,
+    "diff": [],
+    "missing": 0
+  },
+  {
+    "label": "MED  #2",
+    "calls": 3,
+    "imgTok": 26264,
+    "outTok": 1939,
+    "thTok": 0,
+    "cost": 1.9456965,
+    "match": 50,
+    "total": 50,
+    "diff": [],
+    "missing": 0
+  },
+  {
+    "label": "LOW  #2",
+    "calls": 3,
+    "imgTok": 13355,
+    "outTok": 1939,
+    "thTok": 0,
+    "cost": 1.306701,
+    "match": 48,
+    "total": 50,
+    "diff": [
+      {
+        "qid": "1-2-2",
+        "gt": "急速的盤旋而上",
+        "got": "急速地盤旋而上"
+      },
+      {
+        "qid": "1-2-7",
+        "gt": "春天,草木繁茂呈青綠色.",
+        "got": "春天,草木繁茂呈青綠色"
+      }
+    ],
+    "missing": 0
+  },
+  {
+    "label": "MED  #3",
+    "calls": 3,
+    "imgTok": 26264,
+    "outTok": 1939,
+    "thTok": 0,
+    "cost": 1.9456965,
+    "match": 50,
+    "total": 50,
+    "diff": [],
+    "missing": 0
+  },
+  {
+    "label": "LOW  #3",
+    "calls": 3,
+    "imgTok": 13355,
+    "outTok": 1939,
+    "thTok": 0,
+    "cost": 1.306701,
+    "match": 50,
+    "total": 50,
+    "diff": [],
+    "missing": 0
+  }
+]
