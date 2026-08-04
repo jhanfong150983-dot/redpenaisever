@@ -68,15 +68,15 @@ export async function resolveBillingTarget(supabaseAdmin, ownerId, assignmentId 
 }
 
 // 個人扣點:樂觀鎖 ×4、地板 0(入口以 balance>0 守門;單動作造成的透支吸收)
+// 2026-08-04 user 拍板:admin 也照扣(原免扣 bypass 移除)——測試要還原實際扣點行為,點數自己加。
 async function debitPersonalInk(supabaseAdmin, { profileId, points }) {
   if (!points || points <= 0) return { ok: true, balance: null }
   for (let attempt = 0; attempt < 4; attempt++) {
     const { data: profile } = await supabaseAdmin
       .from('profiles')
-      .select('ink_balance, role')
+      .select('ink_balance')
       .eq('id', profileId)
       .maybeSingle()
-    if (profile?.role === 'admin') return { ok: true, balance: profile?.ink_balance ?? null, adminBypass: true }
     const before = typeof profile?.ink_balance === 'number' ? profile.ink_balance : 0
     const after = Math.max(0, before - points)
     const { data: updated, error } = await supabaseAdmin
