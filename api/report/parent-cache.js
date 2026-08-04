@@ -134,7 +134,24 @@ export default async function handler(req, res) {
         .from('parent_reports')
         .upsert(rows, { onConflict: 'assignment_id,student_id' })
       if (error) { res.status(500).json({ error: error.message }); return }
-      res.status(200).json({ saved: rows.length })
+      // 2026-08-04 固定扣除:家長報告進階版每生 2 點(儲存成功才扣;重生=新動作照扣)。
+      //   AI 呼叫本身在 FLAT_BILLING 下不再 per-call 扣款,這裡是唯一收費點。
+      let billing = null
+      try {
+        const { FLAT_BILLING_ENABLED, PARENT_REPORT_POINTS_PER_STUDENT, resolveBillingTarget, chargeFlatPoints } =
+          await import('../../server/action-billing.js')
+        if (FLAT_BILLING_ENABLED && rows.length > 0) {
+          const points = rows.length * PARENT_REPORT_POINTS_PER_STUDENT
+          const target = await resolveBillingTarget(supabaseAdmin, user.id)
+          const charge = await chargeFlatPoints(supabaseAdmin, {
+            target, points, actorProfileId: user.id, reason: 'parent_report_action',
+            metadata: { assignmentId, students: rows.length }
+          })
+          if (charge.ok) billing = { points, students: rows.length, scope: charge.scope, balanceAfter: charge.balance }
+          else console.warn('[parent-cache] flat charge failed (fail-open)')
+        }
+      } catch (e) { console.warn('[parent-cache] flat billing error (fail-open):', e?.message) }
+      res.status(200).json({ saved: rows.length, ...(billing ? { billing } : {}) })
       return
     }
 

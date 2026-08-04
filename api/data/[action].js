@@ -29,7 +29,8 @@ import {
   FLAT_BILLING_ENABLED,
   gradingActionPoints,
   resolveBillingTarget,
-  chargeFlatPoints
+  chargeFlatPoints,
+  RECHECK_POINTS
 } from '../../server/action-billing.js'
 import {
   isValidDsns,
@@ -1998,6 +1999,19 @@ async function runRecheckGrading({ supabaseDb, submission, assignment, correctio
   const stillWrong = normalizedResults.filter((r) => r?.passed !== true)
   const passedCount = normalizedResults.filter((r) => r?.passed === true).length
   const totalChecked = normalizedResults.length
+
+  // 2026-08-04 固定扣除:學生訂正重批=每次 1 點(pipeline 成功才到這裡;失敗 throw 不扣)。
+  //   兩個呼叫端(自動訂正檢查/學生送訂正)共用本函式=單一收費點。billing 打到 owner(老師/學校)。
+  try {
+    if (FLAT_BILLING_ENABLED) {
+      const target = await resolveBillingTarget(supabaseDb, submission.owner_id)
+      const charge = await chargeFlatPoints(supabaseDb, {
+        target, points: RECHECK_POINTS, actorProfileId: submission.owner_id, reason: 'recheck_action',
+        metadata: { submissionId: submission.id, assignmentId: assignment?.id ?? null }
+      })
+      if (!charge.ok) console.warn('[recheck] flat charge failed (fail-open)')
+    }
+  } catch (e) { console.warn('[recheck] flat billing error (fail-open):', e?.message) }
 
   return {
     totalScore: totalChecked > 0 ? Math.round((passedCount / totalChecked) * 100) : 0,
@@ -10902,6 +10916,25 @@ async function handleStudentFinalizeGrading(req, res) {
       .eq('owner_id', ownerId)
       .eq('student_id', studentContext.id)
     if (updErr) throw new Error(updErr.message)
+
+    // 2026-08-04 固定扣除:學生自助批改=每次 1 點(billing 打到 owner;冪等靠 charged_graded_at)。
+    try {
+      if (FLAT_BILLING_ENABLED) {
+        const { data: chk } = await supabaseDb
+          .from('submissions').select('charged_graded_at').eq('id', submissionId).maybeSingle()
+        if (Number(chk?.charged_graded_at || 0) !== Number(gradedAt)) {
+          const target = await resolveBillingTarget(supabaseDb, ownerId)
+          const charge = await chargeFlatPoints(supabaseDb, {
+            target, points: RECHECK_POINTS, actorProfileId: ownerId, reason: 'student_self_grading',
+            metadata: { submissionId, assignmentId }
+          })
+          if (charge.ok) {
+            await supabaseDb.from('submissions')
+              .update({ charged_graded_at: gradedAt }).eq('id', submissionId).eq('owner_id', ownerId)
+          } else console.warn('[student-finalize] flat charge failed (fail-open)')
+        }
+      }
+    } catch (e) { console.warn('[student-finalize] flat billing error (fail-open):', e?.message) }
 
     // 觸發狀態機：自動派發訂正（studentSelfGrade）。寫 correction_question_items + 設 correction_required。
     const row = {
