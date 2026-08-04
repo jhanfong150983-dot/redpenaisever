@@ -55,9 +55,15 @@ const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 //   token(HIGH≈1120/MEDIUM≈560/LOW≈280)、與像素大小無關——read 裁圖只有 ~330px 寬、卻按 HIGH 計費,
 //   圖片 input 佔 read 線成本 73%。沙盒(英語 wq_pdf 全卷 48 題×3 輪、GT=production 最終讀值):
 //   LOW 與 HIGH 讀值一致(唯一搖擺題 HIGH 自己也錯、屬既有難字噪音)、read 單趟 NT$2.11→0.91。
-//   env READ_MEDIA_RES=low|medium|high 啟用;未設=不帶(維持現狀)。⚠ 只在 3.x 模型生效
-//   (model-adapter 對非 3.x strip);國語(注音/字形小目標)尚未驗證,啟用前先跑國語沙盒。
-const READ_MEDIA_RES = { low: 'MEDIA_RESOLUTION_LOW', medium: 'MEDIA_RESOLUTION_MEDIUM', high: 'MEDIA_RESOLUTION_HIGH' }[String(process.env.READ_MEDIA_RES || '').toLowerCase()] || null
+//   2026-08-04 國語沙盒補驗(50 題×5 輪):MEDIUM 5/5 全對;LOW 出現「的→地」系統性誤讀
+//   (用字錯誤 A 類判分點、兩讀同錯升級鏈救不到)→ **預設 medium**(user 拍板)。
+//   READ_MEDIA_RES=off 回復不帶(=HIGH 計費)、low 僅限日後單科驗證後使用。
+//   ⚠ 只在 3.x 模型生效(model-adapter 對非 3.x strip);VJ 判官/classify 不走此 config、維持原樣。
+const READ_MEDIA_RES = (() => {
+  const v = String(process.env.READ_MEDIA_RES || 'medium').toLowerCase()
+  if (v === 'off' || v === '0' || v === 'none') return null
+  return { low: 'MEDIA_RESOLUTION_LOW', medium: 'MEDIA_RESOLUTION_MEDIUM', high: 'MEDIA_RESOLUTION_HIGH' }[v] || 'MEDIA_RESOLUTION_MEDIUM'
+})()
 
 export const READ_ANSWER_GENERATION_CONFIG = {
   generationConfig: {
