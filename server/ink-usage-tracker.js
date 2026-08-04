@@ -64,7 +64,10 @@ export async function recordTokenUsage({ usageMetadata, routeKey, modelName }) {
   // schoolCost 累加器——不逐 call 寫 DB(一卷 20-40 個 AI call 會灌爆 ledger),
   // 由 job worker 每卷結束後一次性扣 schools.ink_balance + 寫一筆 school_ink_ledger。
   // 個人/session 計費路徑(無 billingScope)完全不受影響。
-  if (ctx.billingScope === 'school' && ctx.schoolCost && typeof ctx.schoolCost.points === 'number') {
+  // 2026-08-04 固定扣除:啟用時學校端不再 per-call 累加扣款(usage 照記),
+  //   批改扣款改在 save-grading 依題數整筆扣學校錢包。
+  const flatBilling = process.env.FLAT_BILLING === '1'
+  if (!flatBilling && ctx.billingScope === 'school' && ctx.schoolCost && typeof ctx.schoolCost.points === 'number') {
     try {
       const cost = computeInkPointsFromTokens({ inputTokens, outputTokens, totalTokens })
       ctx.schoolCost.points += cost?.points || 0

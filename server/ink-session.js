@@ -42,6 +42,17 @@ export async function settleInkSession({
   userId,
   sessionId
 }) {
+  // 2026-08-04 固定扣除:啟用時 session 不再按 token 結算(usage 照記=毛利監控),
+  //   扣款改在動作完成點(save-grading 等)整筆發生。回零額結算讓 caller 正常關 session。
+  const { FLAT_BILLING_ENABLED } = await import('./action-billing.js')
+  if (FLAT_BILLING_ENABLED) {
+    return {
+      inkSummary: { chargedPoints: 0, balanceBefore: 0, balanceAfter: 0, applied: true, skipped: 'flat_billing' },
+      cost: { points: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, baseUsd: 0, baseTwd: 0, baseTwdRounded: 0, platformFee: 0 },
+      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      usageCount: 0
+    }
+  }
   const { data: usageRows, error: usageError } = await supabaseAdmin
     .from('ink_session_usage')
     .select('input_tokens, output_tokens, total_tokens')

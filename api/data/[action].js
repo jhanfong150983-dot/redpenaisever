@@ -26,6 +26,12 @@ import {
   canSeeClassSubject
 } from '../../server/school-exam-visibility.js'
 import {
+  FLAT_BILLING_ENABLED,
+  gradingActionPoints,
+  resolveBillingTarget,
+  chargeFlatPoints
+} from '../../server/action-billing.js'
+import {
   isValidDsns,
   getJasmineAccessToken,
   fetchCampus1Courses,
@@ -2769,6 +2775,7 @@ async function handleSaveGrading(req, res) {
   const submissions = Array.isArray(body?.submissions) ? body.submissions : []
   if (submissions.length === 0) { res.status(400).json({ error: 'Missing submissions' }); return }
   const supabaseDb = getSupabaseAdmin()
+  const chargeCands = []
   try {
     // 2026-06-02: 老師端尊重學生「先批先贏」鎖——若該卷正由學生自助批改中（鎖新鮮），
     // 老師一般批改略過（不覆蓋）。學生批完鎖已釋放→老師可正常重批（事後、非競態）。
@@ -2825,7 +2832,17 @@ async function handleSaveGrading(req, res) {
         .update(compactObject(updateFields))
         .eq('id', sub.id)
         .eq('owner_id', user.id)
-      if (!error) updated++
+      if (!error) {
+        updated++
+        // 固定扣除的扣款候選:AI 輪完成(非失敗、非人工改分)才算「動作」。
+        //   人工改分/還原走同端點但 scoreSource='manual' 或 fromManualScoreEdit → 不扣。
+        if (
+          FLAT_BILLING_ENABLED && !isFailure && sub.gradingResult &&
+          (sub.scoreSource ?? 'ai') !== 'manual' && body?.fromManualScoreEdit !== true
+        ) {
+          chargeCands.push({ id: sub.id, gradedAt: Number(updateFields.graded_at) || 0 })
+        }
+      }
     }
     if (skippedLocked.length) {
       console.log(`[save-grading] 略過 ${skippedLocked.length} 卷（學生自助批改中）:`, skippedLocked)
@@ -2855,7 +2872,53 @@ async function handleSaveGrading(req, res) {
         console.warn('[save-grading] applySubmissionStateTransitions failed (non-fatal):', err?.message)
       }
     }
-    res.status(200).json({ success: true, updated })
+    // ── 2026-08-04 固定扣除:AI 輪完成整筆扣(冪等靠 charged_graded_at)──
+    //   同輪重存(graded_at 沒變)不重扣;重批(graded_at 變新)再扣一次。
+    //   扣款失敗 fail-open(不擋存檔、不標記 → 下輪 AI 完成時會再試)。
+    let billing = null
+    if (FLAT_BILLING_ENABLED && chargeCands.length > 0) {
+      try {
+        const candIds = chargeCands.map((c) => c.id)
+        const { data: rows } = await supabaseDb
+          .from('submissions')
+          .select('id, assignment_id, charged_graded_at')
+          .eq('owner_id', user.id)
+          .in('id', candIds)
+        const gradedAtById = new Map(chargeCands.map((c) => [c.id, c.gradedAt]))
+        const toCharge = (rows ?? []).filter(
+          (r) => gradedAtById.get(r.id) && Number(r.charged_graded_at || 0) !== gradedAtById.get(r.id)
+        )
+        if (toCharge.length > 0) {
+          const aids = [...new Set(toCharge.map((r) => r.assignment_id).filter(Boolean))]
+          const { data: asgs } = await supabaseDb
+            .from('assignments').select('id, total_questions').in('id', aids)
+          const qById = new Map((asgs ?? []).map((a) => [a.id, a.total_questions]))
+          let totalPoints = 0
+          for (const r of toCharge) totalPoints += gradingActionPoints(qById.get(r.assignment_id))
+          const target = await resolveBillingTarget(supabaseDb, user.id)
+          const charge = await chargeFlatPoints(supabaseDb, {
+            target, points: totalPoints, actorProfileId: user.id, reason: 'grading_action',
+            metadata: { papers: toCharge.length, assignmentIds: aids }
+          })
+          if (charge.ok) {
+            for (const r of toCharge) {
+              await supabaseDb.from('submissions')
+                .update({ charged_graded_at: gradedAtById.get(r.id) })
+                .eq('id', r.id).eq('owner_id', user.id)
+            }
+            billing = { points: totalPoints, papers: toCharge.length, scope: charge.scope, balanceAfter: charge.balance }
+            console.log(`[save-grading] flat-billed ${totalPoints} pts (${toCharge.length} papers, ${charge.scope})`)
+          } else {
+            console.warn('[save-grading] flat charge failed (fail-open, will retry next round)')
+          }
+        } else {
+          billing = { points: 0, papers: 0, scope: null, alreadyCharged: true }
+        }
+      } catch (err) {
+        console.warn('[save-grading] flat billing error (fail-open):', err?.message)
+      }
+    }
+    res.status(200).json({ success: true, updated, ...(billing ? { billing } : {}) })
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : '儲存失敗' })
   }
