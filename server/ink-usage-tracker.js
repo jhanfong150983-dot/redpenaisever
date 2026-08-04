@@ -66,7 +66,7 @@ export async function recordTokenUsage({ usageMetadata, routeKey, modelName }) {
   // 個人/session 計費路徑(無 billingScope)完全不受影響。
   // 2026-08-04 固定扣除:啟用時學校端不再 per-call 累加扣款(usage 照記),
   //   批改扣款改在 save-grading 依題數整筆扣學校錢包。
-  const flatBilling = process.env.FLAT_BILLING === '1'
+  const flatBilling = process.env.FLAT_BILLING !== '0'  // 預設開(user 拍板)
   if (!flatBilling && ctx.billingScope === 'school' && ctx.schoolCost && typeof ctx.schoolCost.points === 'number') {
     try {
       const cost = computeInkPointsFromTokens({ inputTokens, outputTokens, totalTokens })

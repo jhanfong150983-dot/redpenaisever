@@ -13,7 +13,8 @@
 //   (usage 照記、不扣點),扣款只在動作完成點發生。預設關=行為與舊制完全相同。
 //   「旁路」與「完成扣」必須同版部署後才能開,否則出現免費空窗。
 
-export const FLAT_BILLING_ENABLED = process.env.FLAT_BILLING === '1'
+// 2026-08-04 user 拍板:預設開。回退=FLAT_BILLING='0'(client 同步 VITE_FLAT_BILLING='0')
+export const FLAT_BILLING_ENABLED = process.env.FLAT_BILLING !== '0'
 
 // 題數級距(定價報表 2026-08 定案;0/未知題數保守當標準卷,避免免費漏洞)
 export function gradingActionPoints(totalQuestions) {

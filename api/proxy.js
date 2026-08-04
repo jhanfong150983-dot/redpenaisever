@@ -892,7 +892,7 @@ export default async function handler(req, res) {
 
         // 2026-08-04 固定扣除:啟用時個人 per-call 即時扣款旁路(usage 照記);
         //   扣款只在動作完成點(save-grading 等)整筆發生。
-        if (!inkSummary && process.env.FLAT_BILLING === '1') {
+        if (!inkSummary && process.env.FLAT_BILLING !== '0') {  // 預設開(user 拍板)
           inkSummary = { chargedPoints: 0, balanceBefore: currentBalance, balanceAfter: currentBalance, applied: true, flatBilling: true }
         }
         if (!inkSummary) {
