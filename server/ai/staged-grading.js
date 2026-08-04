@@ -1,7 +1,7 @@
 import { getPipeline } from './pipelines.js'
 import { callGeminiGenerateContent } from './model-adapter.js'
 import { AI_ROUTE_KEYS } from './routes.js'
-import { STAGE_MODEL, MODEL_PRO, MODEL_FLASH, FALLBACK_CHAIN, resolveStageModel } from './model-config.js'
+import { STAGE_MODEL, MODEL_PRO, MODEL_FLASH, JUDGE_MODEL, FALLBACK_CHAIN, resolveStageModel } from './model-config.js'
 import { recordTokenUsage, extractModelNameFromResult } from '../ink-usage-tracker.js'
 import {
   QG_SEVERITY,
@@ -13076,7 +13076,7 @@ export async function runStagedGradingPhaseB({
               const cropMime = q.cropImagePath.endsWith('.jpg') ? 'image/jpeg' : 'image/webp'
               const refB64 = Buffer.from(await blob.arrayBuffer()).toString('base64')
               const resp = await executeStage({
-                apiKey, model: phaseBModel, payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
+                apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL, payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                 timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_RUBRIC,
                 stageContents: [{ role: 'user', parts: [{ text: buildVjRubricPrompt(q.questionCategory, q.referenceAnswer || q.answer) }, { inlineData: { mimeType: cropMime, data: refB64 } }] }]
               })
@@ -13108,7 +13108,7 @@ export async function runStagedGradingPhaseB({
             const crop = await cropInlineImageByBbox(studentImg.data, studentImg.mimeType, inflateBboxForType(classifyRow.answerBbox, classifyRow.questionType || q.questionCategory), true, 0.01)
             if (crop) {
               const resp = await executeStage({
-                apiKey, model: phaseBModel, payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
+                apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL, payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                 timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_BLANK,
                 stageContents: [{ role: 'user', parts: [{ text: buildVjBlankPrompt(itemLabels) }, { inlineData: crop }] }]
               })
@@ -13345,7 +13345,7 @@ export async function runStagedGradingPhaseB({
           const callJudge = async (txt) => {
             const parts = [{ text: txt }, { inlineData: stuCrop }]
             const resp = await executeStage({
-              apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+              apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL,
               payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
               // 2026-07-12 事故修：單 call 上限 20s——3.5 慢尾（240s+ 前科）不可吃掉 Phase B 共用預算
               //  （07-11 國語卷實測：串行 14 call 無上限 → 一個慢尾 → accessor 零預算 → 503×8）
@@ -13385,7 +13385,7 @@ export async function runStagedGradingPhaseB({
               const callJudgeRef = async (txt) => {
                 const parts = [{ text: txt }, { text: '【標準答案圖】' }, { inlineData: zyRefCrop }, { text: '【學生作答圖】' }, { inlineData: stuCrop }]
                 const resp = await executeStage({
-                  apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+                  apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL,
                   payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                   timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
                   routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
@@ -13441,7 +13441,7 @@ export async function runStagedGradingPhaseB({
               ]
               const callToneReview = async () => {
                 const resp = await executeStage({
-                  apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+                  apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL,
                   payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                   timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
                   routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,
@@ -13629,7 +13629,7 @@ export async function runStagedGradingPhaseB({
 只輸出 JSON：{"choice":"選項代號或blank","seen":"看到的筆畫（15字內）"}`
           const callSc = async () => {
             const resp = await executeStage({
-              apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+              apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL,
               payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
               timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
               routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER,

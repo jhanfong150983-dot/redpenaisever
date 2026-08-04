@@ -25,6 +25,13 @@ import { AI_ROUTE_KEYS } from './routes.js'
 export const MODEL_PRO = process.env.MODEL_PRO || 'gemini-3.6-flash'
 export const MODEL_FLASH = process.env.MODEL_FLASH || 'gemini-2.5-flash'
 
+// 2026-08-04 判官家族 pin 3.5（user 拍板）：B班國語 A/B 實錘（exp-judge-35v36、61 格×2 model×2 輪）
+//   3.6 判官＝丟零星 d 票被「一票殺」放大成誤殺（翻盤格同 7 月 13/29）、兩輪自翻 3/29、
+//   格外作答判 blank（3.5 看得到）；3.5＝全 61 格兩輪零翻動、同 7 月 23/29、
+//   真錯誤 19/20 照殺（放水零代價）、且單價便宜 5 倍。一票殺規則本來就是在 3.5 票行為上校準的（V11）。
+//   範圍＝判官家族 6 個 call site（與 JUDGE_HIGHRES 同組），classify/read/extract 維持 MODEL_PRO 3.6。
+export const JUDGE_MODEL = process.env.JUDGE_MODEL || 'gemini-3.5-flash'
+
 // 2026-06-30：移除降階換模型（FALLBACK_CHAIN 清空）。
 //   決策：批改要「跨次精準度一致」，降階到不同 model 會產生不同結果 → 違反目標。
 //   503/504/429/網路斷線一律「同模型退避重試」(model-adapter)，不切換到別的 model。
