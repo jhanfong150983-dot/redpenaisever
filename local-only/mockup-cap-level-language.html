@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>會考三等級語言 mockup — 家長報告「精熟程度總覽」</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI","Noto Sans TC",sans-serif;background:#20242b;color:#e8eaed;padding:32px 20px;line-height:1.6}
+  .head{max-width:1180px;margin:0 auto 26px}
+  .head h1{font-size:21px;font-weight:700;margin-bottom:8px}
+  .head p{font-size:14px;color:#9aa3ad}
+  .wrap{display:flex;gap:26px;justify-content:center;flex-wrap:wrap;align-items:flex-start;max-width:1180px;margin:0 auto}
+  .col{flex:1 1 460px;max-width:540px}
+  .tag{font-size:13px;color:#c3cad2;margin-bottom:9px;display:flex;align-items:center;gap:8px}
+  .tag b{font-weight:600;color:#fff}
+  .chip{font-size:11px;padding:2px 8px;border-radius:99px}
+  .chip.now{background:#3a3f47;color:#b8c0c8}
+  .chip.new{background:#14532d;color:#86efac}
+
+  /* ── 模擬家長報告紙本樣式(白底、與實際 PDF 相近) ── */
+  .paper{background:#fff;color:#2b3138;border-radius:10px;padding:22px 24px}
+  .sect{font-size:15px;font-weight:700;color:#1f2933;border-left:4px solid #2f6f4f;padding-left:9px;margin-bottom:12px}
+  .legend{font-size:11.5px;color:#6b7684;margin-bottom:14px}
+  .lgd{display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:middle;margin:0 4px 0 8px}
+
+  .mgroup{margin-bottom:15px;padding-bottom:13px;border-bottom:1px solid #eef1f4}
+  .mgroup:last-child{border-bottom:none}
+  .mtopic{font-size:14px;font-weight:600;color:#1f2933;display:flex;align-items:center;gap:9px;margin-bottom:7px}
+  .badge{font-size:11px;font-weight:600;padding:2px 9px;border-radius:99px}
+  .badge-green{background:#e3f2ea;color:#256B4C}
+  .badge-amber{background:#fbf0dc;color:#9A5B00}
+  .badge-red{background:#fbe6e3;color:#B0301C}
+  .cgrid{display:flex;flex-wrap:wrap;gap:5px}
+  .cell{font-size:11.5px;padding:3px 9px;border-radius:5px}
+  .cell.expert{background:#e3f2ea;color:#256B4C}
+  .cell.basic{background:#fbf0dc;color:#9A5B00}
+  .cell.weak{background:#fbe6e3;color:#B0301C}
+
+  /* ── 新增:等級描述句 ── */
+  .capdesc{margin:7px 0 9px;padding:9px 11px;background:#f7f9fa;border-left:3px solid #cfd8dd;border-radius:0 6px 6px 0}
+  .capdesc .ln{font-size:12.5px;color:#3d4650;display:flex;gap:7px;margin-bottom:3px}
+  .capdesc .ln:last-child{margin-bottom:0}
+  .capdesc .k{flex:0 0 auto;font-weight:600;color:#6b7684}
+  .capdesc .next{color:#8a939c}
+  .disclaimer{margin-top:13px;font-size:10.5px;color:#98a2ab;border-top:1px dashed #e2e7eb;padding-top:9px}
+
+  .note{max-width:1180px;margin:30px auto 0;background:#191d23;border-radius:10px;padding:18px 22px;font-size:13.5px;color:#c3cad2;line-height:1.95}
+  .note b{color:#fff}
+  .note h3{font-size:14px;color:#fff;margin:14px 0 6px}
+  .note h3:first-child{margin-top:0}
+  .note code{background:#2b3138;padding:1px 6px;border-radius:4px;font-size:12.5px;color:#a5d6a7}
+  .warn{color:#f0b37e}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>會考三等級語言 — 家長報告「精熟程度總覽」改版對照</h1>
+  <p>左=目前線上版本(標籤已經是精熟/基礎/待加強,但沒有說明)　右=補上會考官方能力等級描述</p>
+</div>
+
+<div class="wrap">
+
+  <!-- 現況 -->
+  <div class="col">
+    <div class="tag"><b>現況</b><span class="chip now">已上線</span></div>
+    <div class="paper">
+      <div class="sect">精熟程度總覽</div>
+      <div class="legend">每一格是一個知識點,顏色代表掌握狀態:<span class="lgd" style="background:#256B4C"></span>精熟<span class="lgd" style="background:#9A5B00"></span>基礎<span class="lgd" style="background:#B0301C"></span>待加強</div>
+
+      <div class="mgroup">
+        <div class="mtopic">因式分解<span class="badge badge-amber">基礎</span></div>
+        <div class="cgrid">
+          <span class="cell expert">提出公因式</span>
+          <span class="cell basic">十字交乘</span>
+          <span class="cell weak">配方法</span>
+          <span class="cell basic">乘法公式還原</span>
+        </div>
+      </div>
+
+      <div class="mgroup">
+        <div class="mtopic">一元二次方程式<span class="badge badge-red">待加強</span></div>
+        <div class="cgrid">
+          <span class="cell weak">公式解</span>
+          <span class="cell weak">應用問題列式</span>
+          <span class="cell basic">判別式</span>
+        </div>
+      </div>
+
+      <div class="mgroup">
+        <div class="mtopic">數列與級數<span class="badge badge-green">精熟</span></div>
+        <div class="cgrid">
+          <span class="cell expert">等差數列通項</span>
+          <span class="cell expert">等差級數求和</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 提案 -->
+  <div class="col">
+    <div class="tag"><b>提案</b><span class="chip new">加會考等級描述 + 免責</span></div>
+    <div class="paper">
+      <div class="sect">精熟程度總覽</div>
+      <div class="legend">每一格是一個知識點,顏色代表掌握狀態:<span class="lgd" style="background:#256B4C"></span>精熟<span class="lgd" style="background:#9A5B00"></span>基礎<span class="lgd" style="background:#B0301C"></span>待加強</div>
+
+      <div class="mgroup">
+        <div class="mtopic">因式分解<span class="badge badge-amber">基礎</span></div>
+        <div class="capdesc">
+          <div class="ln"><span class="k">這一級是</span><span>理解基本的數學概念,能操作算則或程序</span></div>
+          <div class="ln next"><span class="k">再上一級</span><span>能分析複雜、不明顯的數學訊息,並發展解題策略</span></div>
+        </div>
+        <div class="cgrid">
+          <span class="cell expert">提出公因式</span>
+          <span class="cell basic">十字交乘</span>
+          <span class="cell weak">配方法</span>
+          <span class="cell basic">乘法公式還原</span>
+        </div>
+      </div>
+
+      <div class="mgroup">
+        <div class="mtopic">一元二次方程式<span class="badge badge-red">待加強</span></div>
+        <div class="capdesc">
+          <div class="ln"><span class="k">這一級是</span><span>僅認識部分基本的數學概念,僅能操作部分的算則</span></div>
+          <div class="ln next"><span class="k">再上一級</span><span>理解基本的數學概念,能操作算則或程序</span></div>
+        </div>
+        <div class="cgrid">
+          <span class="cell weak">公式解</span>
+          <span class="cell weak">應用問題列式</span>
+          <span class="cell basic">判別式</span>
+        </div>
+      </div>
+
+      <div class="mgroup">
+        <div class="mtopic">數列與級數<span class="badge badge-green">精熟</span></div>
+        <div class="capdesc">
+          <div class="ln"><span class="k">這一級是</span><span>能分析複雜、不明顯的數學訊息,並發展解題策略</span></div>
+        </div>
+        <div class="cgrid">
+          <span class="cell expert">等差數列通項</span>
+          <span class="cell expert">等差級數求和</span>
+        </div>
+      </div>
+
+      <div class="disclaimer">
+        ※ 等級用語參照「國中教育會考」能力等級描述,協助家長理解孩子目前的學習位置。
+        本報告依本次段考結果推估,<b>非官方檢測結果</b>,亦不代表會考成績預測。
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="note">
+  <h3>為什麼這個改動幾乎零成本</h3>
+  「精熟／基礎／待加強」這三個標籤<b>現在就已經在用了</b>(<code>parentReport.ts</code> 的
+  <code>badgeText</code>,門檻 <code>levelOf</code>:得分率 ≥0.8 精熟、≥0.5 基礎、其餘待加強)。
+  這次要加的只是<b>三句固定文字</b>(每科三級 = 六科十八句常數表)＋一段免責,
+  純字串組裝、不呼叫 AI。
+
+  <h3>兩個必須處理的細節</h3>
+  <span class="warn">① 免責不可省</span> — 會考等級是標準參照、切點由心測中心逐年決定,
+  不是固定百分比。我們是「用它的語言描述」,不是「給出官方等級」,文案必須說清楚。<br>
+  <span class="warn">② 門檻要可調</span> — 目前 0.8／0.5 是寫死的。既然要對標會考,
+  這兩個數字應該抽成設定(未來若要按科目或按年級調整才不用改 code)。
+
+  <h3>還可以選的變體(要不要做請你決定)</h3>
+  ・<b>只顯示現在這一級</b>(不顯示「再上一級」)— 版面更短,但少了「往哪裡努力」的指引<br>
+  ・<b>只在整份報告開頭放一次總表</b>(而非每個主題都放)— 最省版面,但關聯性較弱<br>
+  ・<b>科目層級也給一個總等級</b>(例:數學整體=基礎)— 家長最想看的一句話,但要小心被當成官方成績
+</div>
+
+</body>
+</html>
