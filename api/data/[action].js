@@ -2783,12 +2783,20 @@ async function handleGetGradebookScores(req, res) {
 // ── 清除作業的批改結果 ────────────────────────────────────────────────────
 // ── 直接儲存批改結果到 Supabase（不依賴 sync push）────────────────────
 async function handleSaveGrading(req, res) {
+  // 2026-08-08 分段計時：批改完成後結果 modal 會等這支端點回來才顯示（user 拍板「等結算完一次出現」），
+  //   user 回報有可感知的停頓。這支端點是一長串序列往返，先量出各段耗時再決定要優化哪一段——
+  //   不要盲修。timings 同時 log 到 server 並回在 response（前端 console 印出來、免開 Vercel）。
+  const T0 = Date.now()
+  const marks = {}
+  const mark = (k) => { marks[k] = Date.now() - T0 }
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
   const { user } = await getAuthUser(req, res)
   if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  mark('auth')
   const body = parseJsonBody(req)
   const submissions = Array.isArray(body?.submissions) ? body.submissions : []
   if (submissions.length === 0) { res.status(400).json({ error: 'Missing submissions' }); return }
+  const bodyBytes = (() => { try { return JSON.stringify(body).length } catch { return -1 } })()
   const supabaseDb = getSupabaseAdmin()
   const chargeCands = []
   try {
@@ -2804,6 +2812,7 @@ async function handleSaveGrading(req, res) {
         .in('id', subIds)
       for (const r of lockRows || []) lockBySubId.set(r.id, r.grading_lock)
     }
+    mark('lock')
     let updated = 0
     const skippedLocked = []
     for (const sub of submissions) {
@@ -2859,6 +2868,7 @@ async function handleSaveGrading(req, res) {
         }
       }
     }
+    mark('update')
     if (skippedLocked.length) {
       console.log(`[save-grading] 略過 ${skippedLocked.length} 卷（學生自助批改中）:`, skippedLocked)
     }
@@ -2872,6 +2882,7 @@ async function handleSaveGrading(req, res) {
           .select('id, assignment_id, student_id, status, graded_at, grading_result, source')
           .eq('owner_id', user.id)
           .in('id', updatedIds)
+        mark('readback')   // ⚠ 這一段把剛寫入的整份 grading_result JSONB 又讀回來（body 裡本來就有）
         if (updatedSubs && updatedSubs.length > 0) {
           // 2026-05-28: 手動改分數時、強制 rebuild correction state（不 skip 已在訂正流程的學生）
           // 否則「老師加分回該題」/「老師扣分」這種變動沒同步到學生端訂正清單
@@ -2886,6 +2897,7 @@ async function handleSaveGrading(req, res) {
       } catch (err) {
         console.warn('[save-grading] applySubmissionStateTransitions failed (non-fatal):', err?.message)
       }
+      mark('transitions')
     }
     // ── 2026-08-04 固定扣除:AI 輪完成整筆扣(冪等靠 charged_graded_at)──
     //   同輪重存(graded_at 沒變)不重扣;重批(graded_at 變新)再扣一次。
@@ -2899,6 +2911,7 @@ async function handleSaveGrading(req, res) {
           .select('id, assignment_id, charged_graded_at')
           .eq('owner_id', user.id)
           .in('id', candIds)
+        mark('chargeSelect')
         const gradedAtById = new Map(chargeCands.map((c) => [c.id, c.gradedAt]))
         const toCharge = (rows ?? []).filter(
           (r) => gradedAtById.get(r.id) && Number(r.charged_graded_at || 0) !== gradedAtById.get(r.id)
@@ -2908,9 +2921,11 @@ async function handleSaveGrading(req, res) {
           const { data: asgs } = await supabaseDb
             .from('assignments').select('id, total_questions').in('id', aids)
           const qById = new Map((asgs ?? []).map((a) => [a.id, a.total_questions]))
+          mark('asgSelect')
           // 2026-08-04 修正:計費對象按「考卷」解析(學校考卷→校錢包、其餘→個人),
           //   同一次儲存混到兩種 scope 時分組各扣各的。
           const targets = await resolveBillingTargetsByAssignment(supabaseDb, user.id, aids)
+          mark('targets')
           const groups = new Map()
           for (const r of toCharge) {
             const t = targets.get(r.assignment_id) ?? { scope: 'personal', id: user.id }
@@ -2926,12 +2941,15 @@ async function handleSaveGrading(req, res) {
               target: g.target, points: g.points, actorProfileId: user.id, reason: 'grading_action',
               metadata: { papers: g.rows.length, assignmentIds: [...new Set(g.rows.map((r) => r.assignment_id))] }
             })
+            mark('debit')
             if (charge.ok) {
+              // ⚠ 逐卷序列 UPDATE：31 卷就是 31 次往返（可改成按 gradedAt 分組後 .in() 批次更新）
               for (const r of g.rows) {
                 await supabaseDb.from('submissions')
                   .update({ charged_graded_at: gradedAtById.get(r.id) })
                   .eq('id', r.id).eq('owner_id', user.id)
               }
+              mark('stampCharged')
               totalPoints += g.points; papersCharged += g.rows.length
               lastScope = g.target.scope; lastBalance = charge.balance
               console.log(`[save-grading] flat-billed ${g.points} pts (${g.rows.length} papers, ${g.target.scope})`)
@@ -2949,7 +2967,11 @@ async function handleSaveGrading(req, res) {
         console.warn('[save-grading] flat billing error (fail-open):', err?.message)
       }
     }
-    res.status(200).json({ success: true, updated, ...(billing ? { billing } : {}) })
+    mark('total')
+    // 分段耗時（累計毫秒，相鄰兩段相減＝該段耗時）。papers/bodyKB 一起帶，才知道是不是量的問題。
+    const timings = { papers: submissions.length, bodyKB: Math.round(bodyBytes / 1024), ...marks }
+    console.log('[save-grading] timings', JSON.stringify(timings))
+    res.status(200).json({ success: true, updated, timings, ...(billing ? { billing } : {}) })
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : '儲存失敗' })
   }
