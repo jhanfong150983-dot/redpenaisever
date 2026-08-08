@@ -91,6 +91,22 @@ export const JUDGE_HIGHRES_GENERATION_CONFIG = {
   }
 }
 
+// 2026-08-08 國字判官降 MEDIUM(降本沙盒 #1、exp-judge-imgtoken-2026-08-08):
+//   判官佔全系統成本 58%(每份 NT$3.22)、其中圖片輸入佔判官 75%。
+//   ⭐能降的關鍵前提:**國字 crop production 本來就放大 ×3(≤600px)**,放大補償了解析度
+//   → 沙盒(3 卷 × 21 國字格 × 3 判官 × 2 輪)HIGH↔MEDIUM **判定差異 0 格**、誤殺 0、放水不增,
+//     判官圖片 tok -21%、判官成本 -15%。
+//   ⛔ 注音維持 HIGH:注音明文禁止放大(放大會放走缺調號的真錯誤)→ 無放大補償、
+//     且 8/04 medium 事故的誤殺升高與注音路徑相關 → 不動。
+//   回退:JUDGE_GLYPH_MEDIA_RES='high'
+export const JUDGE_GLYPH_GENERATION_CONFIG = {
+  generationConfig: {
+    ...READ_ANSWER_GENERATION_CONFIG.generationConfig,
+    mediaResolution: String(process.env.JUDGE_GLYPH_MEDIA_RES || 'medium').toLowerCase() === 'high'
+      ? 'MEDIA_RESOLUTION_HIGH' : 'MEDIA_RESOLUTION_MEDIUM'
+  }
+}
+
 // 2026-07-05: accessor（計分）temp 預設 0——培英全班兩輪對照實測「同一答案跨輪判定翻盤」
 //   （1-1-5 等價式一輪判對一輪判錯、兩方向都出現）＝accessor 未設溫度（Gemini 預設 1.0）的隨機性。
 //   比照 read（2026-06-30 temp 0 治批改不一致）與 VJ grade（temp 0 治 1/5 變異）。回退：ACCESSOR_TEMP=1。
@@ -13462,11 +13478,12 @@ export async function runStagedGradingPhaseB({
 1. analysis：由上而下列出學生實際寫的每一個注音符號；然後檢查聲調記號——**先定位**：符號右側或上方有沒有一筆「獨立的短斜筆/勾/點」？有→寫出位置與形狀再認定調號；沒有→一聲。⚠不可把注音符號自身筆畫或雜點當成調號。
 2. verdict：符號序列與聲調記號都一致 → "same"；任一符號或聲調（含有無）不同 → "different"；格內完全沒有手寫筆跡（只有印刷）→ "blank"
 只輸出 JSON：{"analysis":"符號清單＋調號定位（60字內）","verdict":"same|different|blank","reason":"20字內結論"}`
-          const callJudge = async (txt) => {
+          // genCfg 預設 HIGH(注音 fallback 雙判官用);國字三票傳 JUDGE_GLYPH_GENERATION_CONFIG(MEDIUM)
+          const callJudge = async (txt, genCfg = JUDGE_HIGHRES_GENERATION_CONFIG) => {
             const parts = [{ text: txt }, { inlineData: stuCrop }]
             const resp = await executeStage({
               apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL,
-              payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
+              payload: { ...payload, ...genCfg },
               // 2026-07-12 事故修：單 call 上限 20s——3.5 慢尾（240s+ 前科）不可吃掉 Phase B 共用預算
               //  （07-11 國語卷實測：串行 14 call 無上限 → 一個慢尾 → accessor 零預算 → 503×8）
               timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
@@ -13588,7 +13605,7 @@ export async function runStagedGradingPhaseB({
             //   （user 拍板 2026-07-12：放水零容忍 > churn 誤殺；V11 全量票型重建實測：真錯誤全部
             //   住 DDD、混票區 2/106 格全是誤殺候選——一票殺的代價=偶發誤殺回歸、由標記＋申訴兜底，
             //   換到的是混票區理論上的抖動型真錯誤零漏放）。
-            const votes = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPrompt), callJudge(glyphPrompt)])
+            const votes = await Promise.all([callJudge(glyphPrompt, JUDGE_GLYPH_GENERATION_CONFIG), callJudge(glyphPrompt, JUDGE_GLYPH_GENERATION_CONFIG), callJudge(glyphPrompt, JUDGE_GLYPH_GENERATION_CONFIG)])
             const valid = votes.filter((v) => v?.verdict === 'same' || v?.verdict === 'different')
             // 2026-07-12 觀測補洞（user 問「三抽都有理由嗎」）：三票各有完整 blocks+reason、
             //   之前只存被採用那票 → 全票持久化（S/D + 理由摘要），事後稽核看得到票型（如 SSD 邊界格）
