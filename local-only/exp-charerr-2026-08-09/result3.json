@@ -1,0 +1,750 @@
+[
+ {
+  "ref": "由下急速地盤旋而上",
+  "stu": "由下極速盤旋而上。",
+  "max": 2,
+  "src": "翻0組",
+  "expect": null,
+  "cnt": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "stable": true,
+  "which": "極應為急",
+  "fmtOk": true
+ },
+ {
+  "ref": "由下急速地盤旋而上",
+  "stu": "由下極速地盤旋而上",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 1,
+  "cnt": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "stable": true,
+  "which": "極應為急",
+  "fmtOk": true
+ },
+ {
+  "ref": "無不、都是",
+  "stu": "無不者是",
+  "max": 2,
+  "src": "翻0組",
+  "expect": null,
+  "cnt": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "stable": true,
+  "which": "者應為都",
+  "fmtOk": true
+ },
+ {
+  "ref": "由下急速地盤旋而上",
+  "stu": "由下急速的盤旋而上",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 1,
+  "cnt": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "stable": true,
+  "which": "的應為地",
+  "fmtOk": true
+ },
+ {
+  "ref": "盡情歌唱",
+  "stu": "盡情的唱歌",
+  "max": 2,
+  "src": "翻0組",
+  "expect": null,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "盡情飲酒",
+  "stu": "盡情的飲酒",
+  "max": 2,
+  "src": "翻0組",
+  "expect": null,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "由下急速地盤旋而上",
+  "stu": "由下急速的盤旋而上。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 1,
+  "cnt": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "stable": true,
+  "which": "的應為地",
+  "fmtOk": true
+ },
+ {
+  "ref": "盡情歌唱",
+  "stu": "進情唱歌。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 1,
+  "cnt": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "stable": true,
+  "which": "進應為盡",
+  "fmtOk": true
+ },
+ {
+  "ref": "盡情飲酒",
+  "stu": "進情喝酒",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 1,
+  "cnt": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "stable": true,
+  "which": "進應為盡",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "因春天草木繁茂而呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "因春天草木繁茂呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天, 因春天草木繁茂呈青綠色。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,因春天草木茂繁而呈現的青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 1,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天，因春天草木繁茂，呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,因春天草木繁茂,呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天，因春天草木繁茂呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天，因春天草木繁茂呈青綠色。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,因春天草木繁茂呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天，因春天草木繁茂呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天，因春天草木繁茂呈現青綠色。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天，因春天草木繁茂呈現綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,指春天因草木繁茂呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,草木繁茂的樣子",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天因草木繁茂而呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天, 因春天草木繁茂 呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天,因春天草木繁茂而呈現青綠色。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天,因春天草木繁茂呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天，因草木繁茂而呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天，指春天草木繁盛而呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天,春天因草木繁茂而呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天，草木繁茂呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天指草木繁茂呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "因春天草木繁多呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天, 因春天草木繁茂呈現青綠色.",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天，因春天草木繁多呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,因春天草木繁呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 1,
+  "cnt": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "stable": true,
+  "which": "繁少寫部件應為繁",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,因春天草木繁茂,呈現青綠色。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,因春天草木繁茂而呈現出來的。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天，因為春天草木繁，呈青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天,因草木繁盛而呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "指春天/因春天草木繁茂，呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天，因春天草木繁茂而呈現青綠色。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天，因春天草木繁茂呈現青綠色",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ },
+ {
+  "ref": "指春天，因春天草木繁茂呈現青綠色",
+  "stu": "春天，因春天草木繁茂呈現青綠色。",
+  "max": 2,
+  "src": "score>0組",
+  "expect": 0,
+  "cnt": [
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "stable": true,
+  "which": "",
+  "fmtOk": true
+ }
+]
