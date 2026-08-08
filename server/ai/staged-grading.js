@@ -14297,6 +14297,25 @@ export async function runStagedGradingPhaseB({
   }
 
   // ── 🆕 2026-07-21 國語 short_answer 錯字覆核（加法式、只會扣分；user 拍板）────────────
+  // ⭐ 2026-08-09 改成「逐字扣分」而非「翻 0」（user 拍板扣分表）─────────────────────
+  //   問題：舊版抓到錯字就 sc.score=0，而「用意思相近的詞」完全忽略 → 同一題全班尺度矛盾。
+  //   實錘（A班國語 1-2-2、正解「由下急速地盤旋而上」）：
+  //     「由下**快速**地盤旋而上」→ 2/2（換整個詞、視為近義，不扣）
+  //     「由下急速**的**盤旋而上」→ 0/2（一個虛字別字、翻零）
+  //   更嚴重的是**跨班矛盾**：同樣八個字「由下急速的盤旋而上」，A班 0/2（8/08 覆核有跑）
+  //     vs B班 2/2（7/13 覆核沒抓到）——同一份答案在不同班拿 0 分和 2 分。
+  //   user 拍板的扣分表（兩軸）：
+  //     語意軸（accessor 現有判斷，無法迴避）：保留=滿分／部分保留=部分分／改變=0
+  //     錯字軸（本覆核）：**每個錯字扣 1 分、累加、下限 0，不因題目分數低而例外**
+  //   最終分數 = 語意基礎分 − 錯字數（≥0）。「增字」由語意軸吸收（不影響語意的贅字不扣）。
+  //   錯字定義從「舉例」改成「原則」：音近或形近的別字（的/地、極/急、在/再）；
+  //     換成不同音不同形的同義詞（快速/急速、從/由）不算——這條線讓判定有原則可循。
+  //   沙盒 exp-charerr-2026-08-09（A班+B班 528 格去重 129 種寫法 × 5 輪 × 新舊 prompt）：
+  //     穩定度 舊 0/129 不穩、新 1/129 不穩（唯一不穩是「草木茂繁」詞序，count 在 1/0 跳）；
+  //     全庫影響 19 格＝11 格 0→1（平反的/地、極/急、者/都）+ 5 格 2→1（B班漏抓補上）
+  //     + 3 格 1→0（部分分與錯字疊加）。成本 NT$20.40。
+  //   ⚠ 覆核範圍同時從「已判對」擴到「score>0」，否則部分分格的錯字不會被扣（扣分表要求疊加）。
+  //   ⚠ 舊覆核本身是完全穩定的（5 輪 0/129 不穩）→ 先前量到的 accessor 跨輪變異不是它造成的。
   // 背景：accessor 對國語詞語解釋／簡答判「語意等價」太寬，錯別字／注音代國字／用錯字詞仍給滿分（放水）。
   //   培英A班沙盒：現對格 280 → 加法式覆核翻 8 格、全 A 類（極速/急速、的/地）、零附帶（不動 B 疊加/C 不完整/近義）、
   //   3 輪穩定 8/8（1 格 0.36% 邊界抖）。user 拍板「只扣用字錯誤（A）、組合/不完整/近義不扣」。
@@ -14309,7 +14328,9 @@ export async function runStagedGradingPhaseB({
       const saTargets = accessorResult.scores.filter((sc) => {
         const q = akQById.get(ensureString(sc?.questionId).trim())
         if (q?.questionCategory !== 'short_answer') return false
-        if (sc?.isCorrect !== true) return false  // 只覆核「已判對」——加法式，永遠只會現對→錯，不放寬語意錯的
+        // 2026-08-09 範圍從「已判對」擴到「score>0」：扣分表要求「部分保留 − 錯字」也能疊加到 0
+        //   （例：「進情唱歌」accessor 判部分分 1、進/盡 錯字 1 → 0）。仍是加法式：只會往下扣。
+        if (!(toFiniteNumber(sc?.score) > 0)) return false
         const ref = ensureString(q?.referenceAnswer ?? q?.answer, '').trim()
         const stu = ensureString(sc?.studentFinalAnswer, '').trim()
         return ref && stu && stu !== '未作答' && stu !== '無法辨識'
@@ -14324,11 +14345,22 @@ export async function runStagedGradingPhaseB({
             const q = akQById.get(ensureString(sc.questionId).trim())
             const ref = ensureString(q?.referenceAnswer ?? q?.answer, '').trim()
             const stu = ensureString(sc.studentFinalAnswer, '').trim()
-            const cePrompt = `國語科用字覆核。標準答案：「${ref}」。學生作答（已判定語意正確）：「${stu}」。
-只檢查「用字錯誤」，其餘一律忽略：
-✅要抓（hasError=true）：錯別字（字或部件寫錯）、以注音符號代替國字、把標準的關鍵字詞寫成不同的字（如「急速」寫成「極速」、「地」寫成「的」）。
-❌一律忽略、不算錯：答案不完整／漏字、只答部分、把多個可接受答案併寫、用意思相近的詞、標點差異、簡繁體。
-只輸出 JSON：{"hasError":true|false,"which":"若有，指出哪個字寫錯（20字內）"}`
+            const cePrompt = `國語科用字覆核。標準答案：「${ref}」。學生作答：「${stu}」。
+數出學生作答裡有幾個「用字錯誤」。
+
+用字錯誤的定義（只有這一種）：
+✅ **音近或形近的別字**——學生想寫的是標準答案裡那個字，但寫成了同音／近音字或形似字。
+   例：「地」寫成「的」、「急速」寫成「極速」、「在」寫成「再」、部件寫錯。
+✅ 以注音符號代替國字。
+
+一律不算錯、不要計入：
+❌ 換成另一個「不同音也不同形」的同義詞（例：「急速」寫成「快速」、「由」寫成「從」）。
+❌ 漏字、缺字、答案不完整、只答部分。
+❌ 多寫字、贅字、標點差異、簡繁體。
+❌ 改用自己的話表達但意思相同。
+
+count = 錯字的個數（0 表示沒有用字錯誤）。同一個字重複寫錯只算 1 個。
+只輸出 JSON：{"count":0,"which":"逐一列出哪些字寫錯（30字內），沒有則空字串"}`
             const resp = await executeStage({
               apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
               payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
@@ -14339,12 +14371,16 @@ export async function runStagedGradingPhaseB({
             if (resp) stageResponses.push(resp)
             if (!resp?.ok) continue
             const parsed = parseCandidateJson(resp.data)
-            if (parsed?.hasError === true) {
+            // 2026-08-09 改成減法：每個錯字扣 1 分、累加、下限 0（user 拍板的扣分表）
+            const cnt = Math.max(0, Math.floor(toFiniteNumber(parsed?.count) ?? 0))
+            if (cnt > 0) {
               const which = ensureString(parsed?.which, '').slice(0, 30)
-              sc.isCorrect = false
-              sc.score = 0
-              sc.errorType = 'concept'
-              sc.scoringReason = `用字錯誤：${which || '出現錯別字'}（意思雖對，國語卷用字計分）`
+              const before = toFiniteNumber(sc.score) ?? 0
+              const maxSc = toFiniteNumber(sc.maxScore) ?? (toFiniteNumber(akQById.get(ensureString(sc.questionId).trim())?.maxScore) ?? 0)
+              sc.score = Math.max(0, before - cnt)
+              sc.isCorrect = maxSc > 0 && sc.score === maxSc
+              if (!sc.isCorrect) sc.errorType = 'concept'
+              sc.scoringReason = `用字錯誤 ${cnt} 處：${which || '出現錯別字'}（每處扣 1 分，${before}→${sc.score}）`
               sc.needExplain = false
               sc._charErrOverride = true
               ceFlipped++

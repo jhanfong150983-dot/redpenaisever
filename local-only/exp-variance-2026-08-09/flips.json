@@ -1,0 +1,202 @@
+[
+ {
+  "seat": 5,
+  "qid": "1-2-2",
+  "isGz": false,
+  "a": {
+   "ok": true,
+   "score": 2,
+   "ans": "由下急速盤 而上。",
+   "conf": 70,
+   "j": "知答鏈:L0_agree"
+  },
+  "b": {
+   "ok": false,
+   "score": 1,
+   "ans": "由下急速盤 而上。",
+   "conf": 85,
+   "j": "知答鏈:L0_agree"
+  },
+  "sameAns": true
+ },
+ {
+  "seat": 11,
+  "qid": "1-2-2",
+  "isGz": false,
+  "a": {
+   "ok": true,
+   "score": 2,
+   "ans": "由下急速地盤旋而上",
+   "conf": 5,
+   "j": "知答鏈:informed_majority"
+  },
+  "b": {
+   "ok": false,
+   "score": 0,
+   "ans": "由下極速地盤旋而上",
+   "conf": 5,
+   "j": "知答鏈:informed_nonkey"
+  },
+  "sameAns": false
+ },
+ {
+  "seat": 12,
+  "qid": "1-1-4",
+  "isGz": true,
+  "a": {
+   "ok": false,
+   "score": 0,
+   "ans": "圖像辨識",
+   "conf": 95,
+   "j": "字形全票攔"
+  },
+  "b": {
+   "ok": true,
+   "score": 1,
+   "ans": "圖像辨識",
+   "conf": 100,
+   "j": "字形判官全票放行"
+  },
+  "sameAns": true
+ },
+ {
+  "seat": 14,
+  "qid": "1-1-2",
+  "isGz": true,
+  "a": {
+   "ok": false,
+   "score": 0,
+   "ans": "圖像辨識",
+   "conf": 95,
+   "j": "字形全票攔"
+  },
+  "b": {
+   "ok": true,
+   "score": 1,
+   "ans": "圖像辨識",
+   "conf": 100,
+   "j": "字形判官全票放行"
+  },
+  "sameAns": true
+ },
+ {
+  "seat": 14,
+  "qid": "1-2-6",
+  "isGz": false,
+  "a": {
+   "ok": true,
+   "score": 2,
+   "ans": "盡情喝酒。",
+   "conf": 5,
+   "j": "知答鏈:L0_agree"
+  },
+  "b": {
+   "ok": false,
+   "score": 0,
+   "ans": "盡情唱酒。",
+   "conf": 5,
+   "j": "知答鏈:L0_agree"
+  },
+  "sameAns": false
+ },
+ {
+  "seat": 16,
+  "qid": "1-2-2",
+  "isGz": false,
+  "a": {
+   "ok": true,
+   "score": 2,
+   "ans": "在下急速盤旋直上",
+   "conf": 100,
+   "j": "兩讀一致→accessor語意"
+  },
+  "b": {
+   "ok": false,
+   "score": 1,
+   "ans": "在下急速盤旋直上",
+   "conf": 4,
+   "j": "兩讀一致→accessor語意"
+  },
+  "sameAns": true
+ },
+ {
+  "seat": 17,
+  "qid": "1-1-4",
+  "isGz": true,
+  "a": {
+   "ok": false,
+   "score": 0,
+   "ans": "圖像辨識",
+   "conf": 70,
+   "j": "字形邊界攔"
+  },
+  "b": {
+   "ok": true,
+   "score": 1,
+   "ans": "圖像辨識",
+   "conf": 100,
+   "j": "字形判官全票放行"
+  },
+  "sameAns": true
+ },
+ {
+  "seat": 17,
+  "qid": "1-2-2",
+  "isGz": false,
+  "a": {
+   "ok": true,
+   "score": 2,
+   "ans": "由下急速盤旋而上",
+   "conf": 4,
+   "j": "知答鏈:L0_agree"
+  },
+  "b": {
+   "ok": false,
+   "score": 0,
+   "ans": "由下急速盤旋而成",
+   "conf": 70,
+   "j": "知答鏈:informed_nonkey"
+  },
+  "sameAns": false
+ },
+ {
+  "seat": 21,
+  "qid": "1-3-9",
+  "isGz": false,
+  "a": {
+   "ok": false,
+   "score": 0,
+   "ans": "7",
+   "conf": 90,
+   "j": "兩讀分歧經鏈→單選值域救援"
+  },
+  "b": {
+   "ok": true,
+   "score": 1,
+   "ans": "J",
+   "conf": 100,
+   "j": "兩讀一致→選擇題code直判"
+  },
+  "sameAns": false
+ },
+ {
+  "seat": 23,
+  "qid": "1-1-5",
+  "isGz": true,
+  "a": {
+   "ok": false,
+   "score": 0,
+   "ans": "圖像辨識",
+   "conf": 95,
+   "j": "字形全票攔"
+  },
+  "b": {
+   "ok": true,
+   "score": 1,
+   "ans": "圖像辨識",
+   "conf": 100,
+   "j": "字形判官全票放行"
+  },
+  "sameAns": true
+ }
+]
