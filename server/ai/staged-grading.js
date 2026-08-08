@@ -1827,7 +1827,24 @@ export function computeEscalationDecision({ r1, r2, r1p, r2p, key }) {
 //     ③ 標準值至少一次 → 採標準（單次非標準＝看走眼、防誤殺）
 //     ④ 真分裂 → 低信心（45）+ 暫定最多票 → 前端 badge / 老師申訴
 //   reads=知答讀值陣列（'' =空白、null=失敗）。
-export function computeInformedDecision(reads, key) {
+//
+// 2026-08-08 規則①的平手洞（user 追問挖出來、A班座17 1-2-2 實錘）─────────────────
+//   規則① 取 topNonKey = entries 依票數遞減排序後的第一個非正解值。**兩個不同的非正解值各 2 票時
+//   排序不會動它們**（sort 穩定）→ 維持 Map 插入序 = 四票的出現順序 → 由「哪個值先回來」定案，
+//   而且掛信心 80（無黃燈）。規則④「平手→45」的條件是 keyVotes>=2，看不到「非正解 vs 非正解」平手。
+//   實測 A班座17 1-2-2：四票=[而成, 而上, 而上, 而成]、正解 0 票（正解多一個「地」）
+//     → 採「而成」conf 80 → accessor 判 0/2，而學生實際寫「而上」＝誤殺，且無任何黃燈。
+//     ia/ib 回傳內容對調就會判 2 分。
+//   修法：平手時改用 witnesses（原生 r1 盲讀 + r2 知答校對）當破平手票。這兩個讀值在鏈的裁決裡
+//     原本被完全丟掉——鏈只吃自己那四票，而那四票共用同一個 informedPrompt＝共用同一個朝正解的偏誤。
+//   為什麼安全（結構性、非統計）：
+//     ① witnesses 只能在「知答四票自己吐出的候選」裡指認，不能引入新值
+//        → 當年 blindguard 把印刷國字採進來的 77/77 誤殺不可能重演。
+//     ② 平手兩邊都 ≠ 正解（否則走③④）→ 指哪邊都不會把答案推向正解 → 不可能製造放水。
+//   r1 也採信（不只 r2）：r1 是唯一沒看到正解的讀者，拿它「背書一個既有候選」是最乾淨的證據；
+//     兩者各指一邊、或都對不上 → 不破平手、保留原挑選，但一律降到 45 掛黃燈。
+//   回歸實測（全庫 34 格知答制鏈紀錄）：觸發 1 格＝座17，改對；0 格原本正確的被動到。
+export function computeInformedDecision(reads, key, witnesses = []) {
   const fold = (x) => normalizeAnswerForComparison(deLatexMathText(ensureString(x, '')))
   const keyN = fold(key)
   const vals = (reads || []).filter((v) => v != null)
@@ -1839,7 +1856,23 @@ export function computeInformedDecision(reads, key) {
   const topNonKey = entries.find(([k]) => k !== keyN)  // 最高票的非標準值
   const nonKeyVotes = topNonKey ? topNonKey[1] : 0
   // ① 非標準值 ≥2 且「嚴格多於」標準票 → 採信（學生真的寫錯）。平手不採（見④，避免誤殺）。
-  if (nonKeyVotes >= 2 && nonKeyVotes > keyVotes) return { adopted: rawByNorm.get(topNonKey[0]), level: 'informed_nonkey', illegible: false, chainConfidence: 80 }
+  if (nonKeyVotes >= 2 && nonKeyVotes > keyVotes) {
+    // 2026-08-08 平手洞（見函式上方說明）：兩個不同的非正解值同票 → 原本由陣列順序擲硬幣且掛 80。
+    //   四票最多只可能兩值各 2（2+2=4），不會有三方平手。
+    const nonKeyEntries = entries.filter(([k]) => k !== keyN)
+    const runnerUp = nonKeyEntries[1]
+    if (runnerUp && runnerUp[1] === nonKeyVotes) {
+      const tied = [nonKeyEntries[0][0], runnerUp[0]]
+      const hits = [...new Set((witnesses || []).filter((w) => w != null).map(fold).filter((w) => tied.includes(w)))]
+      const picked = hits.length === 1 ? hits[0] : topNonKey[0]
+      return {
+        adopted: rawByNorm.get(picked),
+        level: hits.length === 1 ? 'informed_nonkey_tie_witness' : 'informed_nonkey_tie',
+        illegible: true, chainConfidence: 45
+      }
+    }
+    return { adopted: rawByNorm.get(topNonKey[0]), level: 'informed_nonkey', illegible: false, chainConfidence: 80 }
+  }
   // ② 某值 ≥3 多數
   const maj = entries.find(([, c]) => c >= 3)
   if (maj) return { adopted: rawByNorm.get(maj[0]), level: 'informed_majority', illegible: false, chainConfidence: 80 }
@@ -1849,6 +1882,37 @@ export function computeInformedDecision(reads, key) {
   if (keyVotes >= 2) return { adopted: rawByNorm.get(keyN) ?? key, level: 'informed_tie', illegible: true, chainConfidence: 45 }
   // ⑤ 無標準票的散裂 → 低信心 + 暫定最多票
   return { adopted: rawByNorm.get(entries[0][0]), level: 'informed_split', illegible: true, chainConfidence: 45 }
+}
+
+// 2026-08-08 幻覺閘（舊鏈 L3a「幻覺區」守則的字面重生版；user 拍板）───────────────────
+//   知答制改版時把 L3a 一起拔了（因為它綁 blindguard、在國字注音上 77/77 誤殺）。但國字注音現在
+//   已 VJ 化、整批不進鏈，L3a 的守備理由對現在的範圍重新成立——而它的缺席會產生放水：
+//   A班座7 1-2-2 實錘：r1「由下急軟盤旋向上」、r2「由下急數盤旋而上」（＝學生真正寫的），
+//     鏈的知答讀 ia=ib=「由下急速地盤旋而上」＝**正解一字不差，連沒有任何其他讀值見過的「地」都有**
+//     → L0_agree conf 92 → accessor 判 2/2 ＝放水（user 肉眼確認學生寫「急數」）。
+//   條件刻意寫成「字面」而非「比較」：採用值 fold 後**逐字等於正解**，且 r1、r2 都不等於正解。
+//   ⛔ 為什麼不用編輯距離：我先做過「採用值比 r1 和 r2 都更接近正解」版，全庫回歸實測**弄壞 3 格
+//     社會長答題**（把「蔗糖茶葉或樟腦」換成 r2 的「木章腦」、「斯文豪」換成「其斯文豪」、
+//     「晚上開燈…就會得到更多利益」換成「日免上開…才曾得到更多利是」）——因為長答題「讀得更準」
+//     天生就「更接近正解」，距離條件根本不是幻覺指紋。教訓：可滑動的語意會誤傷，字面條件不會。
+//   退回 r2（不是 r1）：條件已證明 r2 ≠ 正解＝它頂著正解提示仍照筆跡抄，是可信的非正解票；
+//     r2 為空或缺 → 只降信心不改值（不敢把答案改成空白）。
+//   殘餘風險：學生真的一字不差寫出正解、而 r1 和 r2 兩個都讀錯 → 誤觸＝誤殺。方向符合
+//     「誤殺可申訴、放水不可」，且改完掛 45 黃燈看得到。逃生門（任一原生讀值＝正解就不算幻覺）
+//     實測擋住 7 格短正解裡唯一命中的那格（座17 1-2-5：r2 也讀出「盡情歌唱」）。
+//   ⚠ 未驗區：全庫知答制鏈紀錄只來自國語×2＋社會×1 三個作業，**英語/數學零樣本**。短正解（數字、
+//     單字）「剛好等於正解」的巧合率較高，靠逃生門擋；觸發時一律寫 log，英語/數學批完要撈 log 覆核。
+//   回歸實測（全庫 34 格）：觸發 1 格＝座7，改成 r2＝user 肉眼答案；0 格原本正確的被動到。
+export function applyHallucinationGate(decision, r1, r2, key) {
+  if (!decision || decision.adopted == null) return decision
+  const fold = (x) => normalizeAnswerForComparison(deLatexMathText(ensureString(x, '')))
+  const keyN = fold(key)
+  if (!keyN) return decision
+  if (fold(decision.adopted) !== keyN) return decision                 // 採用值不是逐字正解 → 不是幻覺形狀
+  if (fold(r1) === keyN || fold(r2) === keyN) return decision           // 原生讀值有背書 → 不是幻覺
+  const fallback = ensureString(r2, '')
+  if (!fallback) return { ...decision, level: `${decision.level}_halluc_flag`, illegible: true, chainConfidence: 45 }
+  return { ...decision, adopted: r2, level: `${decision.level}_halluc_gate`, illegible: true, chainConfidence: 45 }
 }
 
 // 層級鏈執行器（兩個 Phase A 入口共用：runStagedGradingPhaseA 單體路徑＋runStagedGradingPhaseAArbiter split 路徑）。
@@ -1971,7 +2035,12 @@ export async function applyEscalationChain({
           const meta0 = { r1p: ia.value, r2p: ib.value, r1pMs: ia.ms, r2pMs: ib.ms, r1pStatus: ia.status, r2pStatus: ib.status, key }
           if (ia.value == null && ib.value == null) { results.push({ qr, adopted: null, level: 'read_fail', illegible: false, ...meta0 }); continue }
           if (ecSame(ia.value, ib.value)) {
-            results.push({ qr, adopted: ia.value, level: 'L0_agree', illegible: false, chainConfidence: ecKeyEq(ia.value, key) ? 92 : 88, ...meta0 })
+            // 幻覺閘也要蓋 L0_agree：座7 就是在這裡出去的（ia=ib=正解逐字、r1/r2 都不是）
+            const l0 = applyHallucinationGate(
+              { adopted: ia.value, level: 'L0_agree', illegible: false, chainConfidence: ecKeyEq(ia.value, key) ? 92 : 88 },
+              r1, r2, key
+            )
+            results.push({ qr, ...l0, ...meta0 })
             continue
           }
           // 裁決 L1：再知答 ×2（湊四票）
@@ -1979,7 +2048,11 @@ export async function applyEscalationChain({
             readOnce(qr, informedPrompt(qr.questionId, key), 0),
             readOnce(qr, informedPrompt(qr.questionId, key), 0.6)
           ])
-          const decision = computeInformedDecision([ia.value, ib.value, ic.value, id.value], key)
+          // witnesses=[r1, r2]：原生雙讀當「非正解值平手」的破平手票（見 computeInformedDecision 說明）
+          const decision = applyHallucinationGate(
+            computeInformedDecision([ia.value, ib.value, ic.value, id.value], key, [r1, r2]),
+            r1, r2, key
+          )
           results.push({ qr, ...decision, r1p: ia.value, r2p: ib.value, r3p: ic.value, r4p: id.value, r1pMs: ia.ms, r2pMs: ib.ms, r1pStatus: ia.status, r2pStatus: ib.status, key })
           continue
         }
@@ -2028,6 +2101,15 @@ export async function applyEscalationChain({
       }))
     }
     logStaged(pipelineRunId, 'basic', `[escalation-chain] 結果 mode=${mode} totalMs=${totalMs}`, { summary })
+    // 2026-08-08 幻覺閘／平手破解＝低觸發率(全庫回歸 2/33)的新分支，逐格留 log 供覆核：
+    //   英語/數學在落地時是零樣本（既有鏈紀錄只有國語×2＋社會×1），批完那些科目要撈這行確認沒誤觸。
+    for (const r of results) {
+      if (!/_halluc_gate$|_halluc_flag$|_tie_witness$|informed_nonkey_tie$/.test(String(r.level))) continue
+      logStaged(pipelineRunId, 'basic', `[escalation-chain] ⚑ ${r.level} ${r.qr.questionId}`, {
+        key: r.key, r1: ecVal(r.qr.readAnswer1), r2: ecVal(r.qr.readAnswer2),
+        votes: [r.r1p, r.r2p, r.r3p, r.r4p].filter((v) => v !== undefined), adopted: r.adopted, chainConfidence: r.chainConfidence
+      })
+    }
     if (mode === '1') {
       for (const r of results) {
         if (r.adopted == null || r.level == null || r.level === 'read_fail') continue  // fail-open 維持送審
