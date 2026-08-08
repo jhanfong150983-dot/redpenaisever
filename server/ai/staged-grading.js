@@ -695,6 +695,88 @@ export async function cropWithMarkByBbox(imageBase64, mimeType, bbox, padX = 0.0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 2026-08-07 合成圖 read（contact sheet）：把 N 張裁圖排成 1 張「紅框＋題號」大圖。
+//
+// 為什麼：Gemini 3.x 的圖片是「每個 image part 固定 token、與像素無關」
+//   （MEDIUM≈560/張；實測 detail_read 8,860 圖 tok/call ÷560 ≈ 16 張裁圖 ✓）。
+//   → 縮小裁圖無效（已知負結果），唯一能省的是「減少 image part 的數量」。
+//   50 張裁圖 = 50 parts；合成成 3 張（每張 20 格）= 3 parts → 圖片 token −94%。
+//
+// 沙盒實證（exp-imgtoken-2026-08-07、國語 6 卷跨分數帶 26~92、每卷每臂 2 輪）：
+//   對 GT 一致數 6/6 卷與現行完全持平、缺題 0/6 卷（題號零錯位）、
+//   自我一致性合成圖 3/6 卷 > 現行 2/6 卷（比現況更穩）、成本 NT$17.5→7.4（−58%）。
+//   附帶紅利：每格統一 resize 到 460px＝放大，與國字判官「放大×3 治感知誤讀」同效應
+//   （1-4-3 案：現行盲讀 5/5 讀 B、知答被答案帶走讀 D＝洩漏；合成圖盲讀 5/5 讀 D＝零洩漏）。
+//
+// ⚠ 只驗過國語（涵蓋其 92% read 量：single_choice＋short_answer；fill_blank 7.9% 未測）。
+//   其他科機制相同但未實證 → 出事就用 kill switch 或 READ_SHEET_DOMAINS 限科。
+// kill switch: READ_SHEET='0'（回退逐張裁圖）；限科: READ_SHEET_DOMAINS='國語,英語'
+const READ_SHEET_ENABLED = process.env.READ_SHEET !== '0'
+const READ_SHEET_MAX_CELLS = Math.max(2, Number(process.env.READ_SHEET_MAX_CELLS) || 20) // 沙盒驗到 20 格/張
+const SHEET_CELL_W = 460, SHEET_LABEL_H = 30, SHEET_GAP = 8
+
+export function readSheetEnabledFor(domainHint) {
+  if (!READ_SHEET_ENABLED) return false
+  const only = String(process.env.READ_SHEET_DOMAINS || '').trim()
+  if (!only) return true
+  const d = String(domainHint || '')
+  return only.split(',').map((s) => s.trim()).filter(Boolean).some((k) => d.includes(k))
+}
+
+/**
+ * 把 [{ questionId, crop:{data,mimeType} }] 合成若干張大圖。
+ * @returns Array<{ inlineData:{data,mimeType}, ids:string[] }>；任何失敗 → 回 null（呼叫端 fail-open 走逐張）
+ */
+export async function buildReadSheets(items) {
+  try {
+    const { default: sharp } = await import('sharp')
+    const sheets = []
+    for (let s = 0; s < items.length; s += READ_SHEET_MAX_CELLS) {
+      const chunk = items.slice(s, s + READ_SHEET_MAX_CELLS)
+      const cells = []
+      for (const it of chunk) {
+        const buf = Buffer.from(it.crop.data, 'base64')
+        const meta = await sharp(buf).metadata()
+        if (!meta?.width || !meta?.height) continue
+        const h = Math.max(24, Math.round((meta.height / meta.width) * SHEET_CELL_W))
+        // 單格過高（整段作答）→ 限高避免整張圖被壓扁
+        const hh = Math.min(h, 900)
+        cells.push({ qid: String(it.questionId), buf: await sharp(buf).resize({ width: SHEET_CELL_W, height: hh, fit: 'fill' }).toBuffer(), h: hh })
+      }
+      if (!cells.length) return null
+      const totalH = cells.reduce((a, c) => a + c.h + SHEET_LABEL_H + SHEET_GAP, 0) + SHEET_GAP
+      const W = SHEET_CELL_W + SHEET_GAP * 2
+      const comps = []
+      const svg = [`<rect width="${W}" height="${totalH}" fill="white"/>`]
+      let y = SHEET_GAP
+      for (const c of cells) {
+        svg.push(`<text x="${SHEET_GAP + 4}" y="${y + 21}" font-size="20" font-family="sans-serif" font-weight="bold" fill="#c00">${escapeXml(c.qid)}</text>`)
+        const top = y + SHEET_LABEL_H
+        svg.push(`<rect x="${SHEET_GAP - 2}" y="${top - 2}" width="${SHEET_CELL_W + 4}" height="${c.h + 4}" fill="none" stroke="#c00" stroke-width="3"/>`)
+        comps.push({ input: c.buf, left: SHEET_GAP, top })
+        y = top + c.h + SHEET_GAP
+      }
+      const base = await sharp(Buffer.from(`<svg width="${W}" height="${totalH}">${svg.join('')}</svg>`)).png().toBuffer()
+      const out = await sharp(base).composite(comps).jpeg({ quality: 92 }).toBuffer()
+      sheets.push({ inlineData: { data: out.toString('base64'), mimeType: 'image/jpeg' }, ids: cells.map((c) => c.qid) })
+    }
+    return sheets.length ? sheets : null
+  } catch (err) {
+    console.warn('[staged-grading] buildReadSheets failed（fail-open 走逐張裁圖）:', err?.message)
+    return null
+  }
+}
+
+function escapeXml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+/** 合成圖的說明句（沙盒驗證版逐字）；labels 已含「（正確答案：X）」時即為 AI2 版 */
+function sheetNoteOf(labels) {
+  return `\n⚠ 這是一張「合成圖」：由多格作答區上下排列組成，每格左上角有紅色題號、外圍有紅框。請逐格處理，題號依序為：${labels.join('、')}。`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 2026-08-01 聚焦重定位（classify focus repair、[[classify-sample-k-experiment]]）:
 //   3.6-flash 對「題號.( 答 ) 緊貼題目文字」版面整欄系統性右偏（44 次全偏、取樣中位數無解、
 //   prompt 修法沙盒失敗且有副作用）；但同模型在聚焦小圖上 20/20 全中 → 偵測到偏位就裁小圖重定位。
@@ -9744,6 +9826,8 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
           // 合題（partValues）SPEC：本批含合題才附加（見 tsPartsRule）
           const partsQsInBatch = batch.filter((q) => tsPartsMeta(q))
           if (partsQsInBatch.length > 0) parts.push({ text: tsPartsRule(partsQsInBatch) })
+          // 先把本批的 crop 與答案提示收齊（合成圖與逐張兩條路共用）
+          const cells = []
           for (const q of batch) {
             // freshCrop：改用「單題緊框」重切(如 ordering)，不用 allQuestionCropMap 的 crop
             //   (沙盒實證 ordering 用 tight 0.02 crop 兩讀一致 97%、用 pipeline 寬 crop 只 ~50%)
@@ -9756,8 +9840,21 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
             const giveAns = role === 'review' && !cfg.blindRead2
             const ak = akMapForAi2.get(q.questionId)
             const ans = giveAns ? tsAnswerHint(q, ak) : ''
-            parts.push({ text: `--- 題目 ${q.questionId}${ans ? `（正確答案：${ans}）` : ''} ---` })
-            parts.push({ inlineData: crop })
+            cells.push({ questionId: String(q.questionId), crop, label: `${q.questionId}${ans ? `（正確答案：${ans}）` : ''}` })
+          }
+          // ── 2026-08-07 合成圖 read：N 張裁圖 → 少數幾張大圖（圖片 token −94%、見 buildReadSheets 註解）──
+          //   ordering(freshCrop、batch 1) 與單格批次不合成；任何失敗 fail-open 走逐張。
+          const sheets = (readSheetEnabledFor(internalContext?.domainHint) && !cfg.freshCrop && cells.length >= 2)
+            ? await buildReadSheets(cells) : null
+          if (sheets) {
+            const labelById = new Map(cells.map((c) => [c.questionId, c.label]))
+            parts[0] = { text: tsReadHead(cfg.family, role) + sheetNoteOf(sheets.flatMap((s) => s.ids.map((id) => labelById.get(id) || id))) }
+            for (const s of sheets) parts.push({ inlineData: s.inlineData })
+          } else {
+            for (const c of cells) {
+              parts.push({ text: `--- 題目 ${c.label} ---` })
+              parts.push({ inlineData: c.crop })
+            }
           }
           // ⚠ executeStage 只認 modelOverride（否則走 resolveStageModel=FLASH），會忽略 model 參數。
           //   per-type model 必須當 modelOverride 傳、否則 TYPE_READ_CONFIG 的 PRO/英語升級全失效(一直跑 2.5)。
@@ -9856,7 +9953,30 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       includeQuestionIds: ai1IncludeIds.length > 0 ? ai1IncludeIds : undefined,
       answerKeyQuestions, domainHint: internalContext?.domainHint
     })
-    const ai1Parts = [{ text: ai1TextPrompt }]
+    const globalReadPrompt = buildReviewReadPrompt(classifyResult, { answerKeyQuestions, domainHint: internalContext?.domainHint })
+    // 2026-08-07 合成圖模式：把逐張裁圖合成 N 張大圖（圖片 token −94%）。
+    //   任一步失敗 → sheets=null → 自動走下方原本的逐張裁圖路徑（fail-open）。
+    const sheetItems = []
+    for (const q of classifyAligned) {
+      if (!q.visible || gzIsVjCell(q.questionId)) continue
+      const crop = allQuestionCropMap.get(q.questionId)
+      if (!crop) continue
+      const akQ = akMapForAi2.get(q.questionId)
+      const correctAnswer = ensureString(akQ?.answer || akQ?.referenceAnswer, '').trim()
+      const hideAnswer = ORDERING_AI2_BLIND && q.questionType === 'ordering'
+      sheetItems.push({ questionId: String(q.questionId), crop, ai2Suffix: (correctAnswer && !hideAnswer) ? `（正確答案：${correctAnswer}）` : '' })
+    }
+    const sheets = (readSheetEnabledFor(internalContext?.domainHint) && sheetItems.length >= 2)
+      ? await buildReadSheets(sheetItems) : null
+    let ai1Parts, ai2Parts
+    if (sheets) {
+      const sufById = new Map(sheetItems.map((it) => [it.questionId, it.ai2Suffix]))
+      ai1Parts = [{ text: ai1TextPrompt + sheetNoteOf(sheets.flatMap((s) => s.ids)) }]
+      ai2Parts = [{ text: globalReadPrompt + sheetNoteOf(sheets.flatMap((s) => s.ids.map((id) => `${id}${sufById.get(id) || ''}`))) }]
+      for (const s of sheets) { ai1Parts.push({ inlineData: s.inlineData }); ai2Parts.push({ inlineData: s.inlineData }) }
+      logStaged(pipelineRunId, 'basic', `[A2] 合成圖 read：${sheetItems.length} 格 → ${sheets.length} 張大圖（圖片 part ${sheetItems.length}→${sheets.length}）`)
+    } else {
+    ai1Parts = [{ text: ai1TextPrompt }]
     for (const q of classifyAligned) {
       if (!q.visible || gzIsVjCell(q.questionId)) continue
       const crop = allQuestionCropMap.get(q.questionId)
@@ -9864,8 +9984,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       ai1Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}）---` })
       ai1Parts.push({ inlineData: crop })
     }
-    const globalReadPrompt = buildReviewReadPrompt(classifyResult, { answerKeyQuestions, domainHint: internalContext?.domainHint })
-    const ai2Parts = [{ text: globalReadPrompt }]
+    ai2Parts = [{ text: globalReadPrompt }]
     for (const q of classifyAligned) {
       if (!q.visible || gzIsVjCell(q.questionId)) continue
       const crop = allQuestionCropMap.get(q.questionId)
@@ -9877,7 +9996,8 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       ai2Parts.push({ text: `--- 題目 ${q.questionId}（類型：${q.questionType}${answerLabel}）---` })
       ai2Parts.push({ inlineData: crop })
     }
-    logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', { ai1CropCount: ai1IncludeIds.length, ai2CropCount: ai2Parts.filter((p) => p.inlineData).length })
+    }
+    logStaged(pipelineRunId, stagedLogLevel, '3-AI read mode', { ai1CropCount: ai1IncludeIds.length, ai2CropCount: ai2Parts.filter((p) => p.inlineData).length, sheetMode: Boolean(sheets) })
     parallelCalls = [
       executeStage({ apiKey, model: readModel, modelOverride: readModelOverride, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_DETAIL_READ, stageContents: [{ role: 'user', parts: ai1Parts }] }),
       executeStage({ apiKey, model: readModel, modelOverride: readModelOverride, payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG }, timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER, stageContents: [{ role: 'user', parts: ai2Parts }] })
