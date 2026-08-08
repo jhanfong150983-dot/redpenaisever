@@ -1,4 +1,7 @@
 {
+  "regions": [
+    "sin1"
+  ],
   "functions": {
     "api/proxy.js": {
       "memory": 1024,

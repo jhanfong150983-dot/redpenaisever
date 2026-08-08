@@ -9740,8 +9740,24 @@ export async function runStagedGradingPhaseA({
         //   沒吃到緊框修法的（前兩役只修 ao 與 wq_photo）→ 密集列 crop 蓋 1.5 列 → off-by-one/
         //   撈錯列/切字。改用寬 pad＋紅框標本題（沙盒 8 疑點格全治、幾何緊框反而切字）。
         //   kill switch WQPDF_MARK_READ='0'。
+        // 2026-08-09 密集勾記表夾 pad（英語「更新後測試」實錘）：上面那條 wq_pdf 紅框寬裁對**所有題型
+        //   一視同仁**（早退），而當初的沙盒是「8 疑點格」＝填空/簡答類，沒測到密集勾記表。
+        //   實測該卷 true_false 格寬只有 0.068~0.114，padX 0.012 等於左右各 +11~18%（共 +21~35%）
+        //   → 紅框右緣切進鄰格 → 模型看到兩個 ○/✗ → 兩讀皆 unreadable → double_unreadable_zero 判 0。
+        //   裁圖實證：座11 1-A-1 學生明明寫 X，框內同時出現隔壁格的 ○。
+        //   修法＝只對「勾記類」把 padX/padY 依格寬高夾住（比照既有 choiceAwareCropPad 的精神），
+        //   紅框與 prompt 條款完全不動——紅框對文字題有效，對 tiny 記號則需要幾何上先排除鄰格。
+        //   kill switch：WQPDF_MARK_TIGHT_CHOICE='0' 回復一律寬 pad。
         if (modeKey === 'wq_pdf' && process.env.WQPDF_MARK_READ !== '0') {
-          const marked = await cropWithMarkByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, 0.012, +(0.048 / totalPages).toFixed(4))
+          const MARK_TIGHT = new Set(['single_choice', 'multi_choice', 'true_false'])
+          const tight = process.env.WQPDF_MARK_TIGHT_CHOICE !== '0' && MARK_TIGHT.has(q.questionType)
+          const bw = Number(q.answerBbox?.w) || 0
+          const bh = Number(q.answerBbox?.h) || 0
+          const padX = tight && bw > 0 ? +Math.min(0.012, bw * 0.12).toFixed(4) : 0.012
+          const padY = tight && bh > 0
+            ? +Math.min(0.048 / totalPages, bh * 0.35).toFixed(4)
+            : +(0.048 / totalPages).toFixed(4)
+          const marked = await cropWithMarkByBbox(inlineImage.inlineData.data, inlineImage.inlineData.mimeType, q.answerBbox, padX, padY)
           if (marked) return { questionId: q.questionId, cropData: marked }
         }
         let bboxToUse, cropPad
