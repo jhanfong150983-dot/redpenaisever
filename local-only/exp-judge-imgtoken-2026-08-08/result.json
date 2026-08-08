@@ -1,0 +1,1478 @@
+[
+ {
+  "arm": "BASE",
+  "cells": [
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "same",
+    "votes": "sds",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   }
+  ],
+  "calls": 108,
+  "img": 164502,
+  "cost": 11.140766999999991,
+  "run": 1
+ },
+ {
+  "arm": "BASE",
+  "cells": [
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "same",
+    "votes": "sds",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   }
+  ],
+  "calls": 108,
+  "img": 164502,
+  "cost": 11.138687999999995,
+  "run": 2
+ },
+ {
+  "arm": "GZMED",
+  "cells": [
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   }
+  ],
+  "calls": 108,
+  "img": 129654,
+  "cost": 9.495090000000006,
+  "run": 1
+ },
+ {
+  "arm": "GZMED",
+  "cells": [
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15(66分 5對/5錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13(84分 6對/4錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-1",
+    "kind": "glyph",
+    "key": "堤",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-2",
+    "kind": "glyph",
+    "key": "鞏",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-3",
+    "kind": "glyph",
+    "key": "喚",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-4",
+    "kind": "glyph",
+    "key": "羈",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-5",
+    "kind": "glyph",
+    "key": "堰",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-6",
+    "kind": "zhuyin",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-7",
+    "kind": "zhuyin",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-8",
+    "kind": "zhuyin",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-9",
+    "kind": "zhuyin",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-1-10",
+    "kind": "zhuyin",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-2-3",
+    "kind": "glyph",
+    "key": "深藍",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05(26分 1對/9錯)",
+    "qid": "1-2-8",
+    "kind": "glyph",
+    "key": "回頭",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   }
+  ],
+  "calls": 108,
+  "img": 129654,
+  "cost": 9.494199000000007,
+  "run": 2
+ }
+]

@@ -93,7 +93,8 @@ async function runArm(label, mediaRes) {
       const u = r?.data?.usageMetadata ?? {}
       imgTok += (u.promptTokensDetails ?? []).find(d => d.modality === 'IMAGE')?.tokenCount ?? 0
       outTok += u.candidatesTokenCount ?? 0; thTok += u.thoughtsTokenCount ?? 0
-      cost += ((u.promptTokenCount ?? 0) / 1e6 * 1.5 + ((u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0)) / 1e6 * 9) * 33
+      // ⛔ 2026-08-08 修:本檔 model=3.6-flash,輸出價 7.50(原寫 9 = 3.5-flash 的價、高估 20%)。費率權威 ../_rates.mjs
+      cost += ((u.promptTokenCount ?? 0) / 1e6 * 1.5 + ((u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0)) / 1e6 * 7.5) * 33
       for (const a of parseAnswers(r?.data) ?? []) got.set(String(a.questionId), a)
     }
   }

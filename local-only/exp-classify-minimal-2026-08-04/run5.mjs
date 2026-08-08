@@ -87,8 +87,9 @@ async function arm(label, payload) {
     runs.push(bb)
   }
   const medScore = scoreRun(medianBox(runs))
-  const cost = (inTok / 1e6 * 1.5 + (outTok + thTok) / 1e6 * 9) * 33
-  console.log(`  [${label}] median-of-${N} 統一框命中 ${medScore.hits}/${medScore.total}、平均 ${Math.round(ms / N / 1000)}s/次、${N} 次共 NT$${cost.toFixed(1)}(thoughts NT$${(thTok / 1e6 * 9 * 33).toFixed(1)})\n`)
+  // ⛔ 2026-08-08 修:classify=3.6-flash,輸出價 7.50(原寫 9)。費率權威 ../_rates.mjs
+  const cost = (inTok / 1e6 * 1.5 + (outTok + thTok) / 1e6 * 7.5) * 33
+  console.log(`  [${label}] median-of-${N} 統一框命中 ${medScore.hits}/${medScore.total}、平均 ${Math.round(ms / N / 1000)}s/次、${N} 次共 NT$${cost.toFixed(1)}(thoughts NT$${(thTok / 1e6 * 7.5 * 33).toFixed(1)})\n`)
   return { runs: runs.map(r => r ? Object.fromEntries(r) : null), medScore, inTok, outTok, thTok, cost }
 }
 

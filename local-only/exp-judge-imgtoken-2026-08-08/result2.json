@@ -1,0 +1,1154 @@
+[
+ {
+  "arm": "ZYBASE",
+  "cells": [
+   {
+    "tag": "座15",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   }
+  ],
+  "calls": 45,
+  "img": 96336,
+  "cost": 5.986926,
+  "run": 1
+ },
+ {
+  "arm": "ZYBASE",
+  "cells": [
+   {
+    "tag": "座15",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "same",
+    "votes": "sds",
+    "ok": true
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   }
+  ],
+  "calls": 45,
+  "img": 96336,
+  "cost": 5.978312999999999,
+  "run": 2
+ },
+ {
+  "arm": "ZYMED",
+  "cells": [
+   {
+    "tag": "座15",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "dss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   }
+  ],
+  "calls": 45,
+  "img": 47610,
+  "cost": 3.612707999999999,
+  "run": 1
+ },
+ {
+  "arm": "ZYMED",
+  "cells": [
+   {
+    "tag": "座15",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "different",
+    "votes": "dsd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "different",
+    "votes": "dsd",
+    "ok": false
+   }
+  ],
+  "calls": 45,
+  "img": 47610,
+  "cost": 3.621321,
+  "run": 2
+ },
+ {
+  "arm": "ZYPAIR",
+  "cells": [
+   {
+    "tag": "座15",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "dsd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   }
+  ],
+  "calls": 45,
+  "img": 48600,
+  "cost": 3.6891855000000002,
+  "run": 1
+ },
+ {
+  "arm": "ZYPAIR",
+  "cells": [
+   {
+    "tag": "座15",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "ssd",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "dsd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   }
+  ],
+  "calls": 45,
+  "img": 48600,
+  "cost": 3.6885915000000002,
+  "run": 2
+ },
+ {
+  "arm": "ZYPAIRMED",
+  "cells": [
+   {
+    "tag": "座15",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "same",
+    "votes": "sds",
+    "ok": true
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   }
+  ],
+  "calls": 45,
+  "img": 23940,
+  "cost": 2.4795045,
+  "run": 1
+ },
+ {
+  "arm": "ZYPAIRMED",
+  "cells": [
+   {
+    "tag": "座15",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座15",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": true,
+    "verdict": "same",
+    "votes": "sss",
+    "ok": true
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座13",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": false,
+    "verdict": "same",
+    "votes": "sds",
+    "ok": true
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-6",
+    "key": "ㄗㄜˋ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "sdd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-7",
+    "key": "ㄎㄢˋ",
+    "prodOk": false,
+    "verdict": "blank",
+    "votes": "bbb",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-8",
+    "key": "ㄆㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-9",
+    "key": "ㄔㄨㄥ",
+    "prodOk": false,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   },
+   {
+    "tag": "座05",
+    "qid": "1-1-10",
+    "key": "ㄑㄩ",
+    "prodOk": true,
+    "verdict": "different",
+    "votes": "ddd",
+    "ok": false
+   }
+  ],
+  "calls": 45,
+  "img": 23940,
+  "cost": 2.4667334999999997,
+  "run": 2
+ }
+]
