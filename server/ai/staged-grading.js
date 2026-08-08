@@ -1910,6 +1910,18 @@ export function applyHallucinationGate(decision, r1, r2, key) {
   if (!keyN) return decision
   if (fold(decision.adopted) !== keyN) return decision                 // 採用值不是逐字正解 → 不是幻覺形狀
   if (fold(r1) === keyN || fold(r2) === keyN) return decision           // 原生讀值有背書 → 不是幻覺
+  // 2026-08-09 包含關係守門（英語首次曝光就誤殺、實錘修正）──────────────────────
+  //   幻覺的定義是「鏈憑空生出原生讀值裡沒有的內容」。若正解**完整包含在** r1 或 r2 裡，
+  //   代表鏈只是把多出來的字裁掉——那是正確行為，不是幻覺。
+  //   實錘 英語「更新後測試」座11 2-G-4：版面是「___ in the ______ .」，**「in the」是印刷字**，
+  //     學生只在空格寫「dining room」＝一字不差等於正解。鏈兩票「dining room」是對的；
+  //     r1「n the dining room.」/ r2「in the dining room.」**都把印刷引導詞抄進去了**
+  //     → 舊條件開火、改採 r2 → accessor 判「內容錯誤」0/3 ＝ 誤殺。
+  //   這不是隨機模型失誤，是系統性版型問題（英語 fill_blank 的印刷引導詞落在作答框內，
+  //   兩讀會一起抄進去），在英語卷會反覆發生。
+  //   對照國語座7（閘做對的那次）：正解「由下急速地盤旋而上」不包含於 r1「急軟…向上」
+  //   或 r2「急數…」→ 仍會開火。故此守門精準分辨兩者，不必按科目關閘。
+  if (fold(r1).includes(keyN) || fold(r2).includes(keyN)) return decision
   const fallback = ensureString(r2, '')
   if (!fallback) return { ...decision, level: `${decision.level}_halluc_flag`, illegible: true, chainConfidence: 45 }
   return { ...decision, adopted: r2, level: `${decision.level}_halluc_gate`, illegible: true, chainConfidence: 45 }
