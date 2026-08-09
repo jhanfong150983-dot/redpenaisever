@@ -89,6 +89,7 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
   let attempts401 = 0
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    const attemptStartedAt = Date.now()   // 2026-08-09 診斷：量測每次嘗試耗時（見下方 fetch failed 註解）
     const controller = hasTimeout ? new AbortController() : null
     const timeoutHandle = hasTimeout
       ? setTimeout(() => {
@@ -118,9 +119,16 @@ async function callSingleModel({ apiKey, model, contents, payload, timeoutMs }) 
       }
       // 2026-06-30: 網路層 "fetch failed"（ECONNRESET / socket hang up / 連線被斷）= 暫時性 → 比照 504 重試。
       //   高併發時偶發連線斷掉，不重試會讓整份卷的 read 失敗(500)。耗盡 504 retry budget 才丟。
+      // 2026-08-09 診斷（user 觀察：每輪批改「卡在 0/30 很久、警告集中出現、1/30 一過全順」）：
+      //   假說＝冷啟動連線風暴——批改開始 30 卷同時打 proxy → Vercel 冷啟一批實例 → 各實例對
+      //   Gemini 的連線池是冷的 → TLS 握手同時發起、部分掛住 → 每次掛滿 undici 預設連線逾時
+      //   （~10s，佐證：log 上第二次嘗試在 +11s 失敗＝800ms backoff + ~10s）才吐 fetch failed；
+      //   熬過第一波後 keep-alive 連線重用 → 全順零警告。三次觀察皆在 sin1 遷移後（觀察點）。
+      //   elapsedMs 就是要確證「失敗的嘗試都是 ~10s 整」；確證後再決定要不要引入 undici 依賴
+      //   把 connect timeout 縮到 ~4s（少等 6 秒/次）——先量再改，不加沒有數字支持的依賴。
       if (attempt < retryCount) {
         const backoffMs = Math.min(baseBackoffMs * 2 ** attempt, 8000)
-        console.warn(`[ai-model-adapter] fetch failed model=${model} retry=${attempt + 1}/${retryCount} waitMs=${backoffMs} err=${error?.message || error}`)
+        console.warn(`[ai-model-adapter] fetch failed model=${model} retry=${attempt + 1}/${retryCount} waitMs=${backoffMs} elapsedMs=${Date.now() - attemptStartedAt} err=${error?.message || error}`)
         if (timeoutHandle) clearTimeout(timeoutHandle)
         await sleep(backoffMs)
         continue
