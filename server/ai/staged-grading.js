@@ -763,11 +763,18 @@ export async function buildReadSheets(items) {
       measured.push({ qid: String(it.questionId), buf, w: meta.width, h: meta.height })
     }
     if (!measured.length) return null
-    if (!stretch) measured.sort((a, b) => a.w - b.w)   // 寬度相近的分到同一張
+    // ⛔ 2026-08-09 撤掉「按寬度排序」——座7 實錘 +1 位移事故：裁圖裡含**印刷題號**
+    //   （「5.( A )」「6.( B )」…），原始順序時紅色標籤與格內印刷題號同步遞增、模型對得穩；
+    //   排序打亂後標籤與印刷號碼不同步 → 標籤對格滑行 → 整段答案 +1 位移（2-B-5~8 讀成下一格的值、
+    //   3-E-7 複製 3-E-6 的內容）。座7 沙盒三臂 ×3 輪：排序 15/18、**原始順序 18/18**、逐張 16/18。
+    //   production 的 type-split read 本來就按題型分批（同張 sheet 同 family、寬度天然相近），
+    //   排序純屬多餘、還付出正確性。
     const sheets = []
     for (let s = 0; s < measured.length; s += READ_SHEET_MAX_CELLS) {
       const chunk = measured.slice(s, s + READ_SHEET_MAX_CELLS)
-      const cellW = stretch ? SHEET_CELL_W : Math.max(48, Math.min(SHEET_CELL_W, ...chunk.map((c) => c.w)))
+      // 2026-08-09 修：原本誤寫成「取最窄格」(Math.min 展開)——寬格會被縮小。應取「最寬格、上限 460」，
+      //   小格置中補白（不拉伸）、寬格最多縮到 460。
+      const cellW = stretch ? SHEET_CELL_W : Math.max(48, Math.min(SHEET_CELL_W, Math.max(...chunk.map((c) => c.w))))
       const cells = []
       for (const c of chunk) {
         let cellBuf, cellH
