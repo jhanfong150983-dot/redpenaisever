@@ -741,45 +741,71 @@ export function readSheetEnabledFor(domainHint) {
 export async function buildReadSheets(items) {
   try {
     const { default: sharp } = await import('sharp')
+    // ⭐ 2026-08-09 每張合成圖的寬度跟著它的裁圖走（英語 single_choice 實錘）─────────────
+    //   原本一律把每格 resize({ width: 460, fit: 'fill' })，不管原圖多小。實測裁圖寬（中位）：
+    //     英語 single_choice **87px**｜single_check 297｜fill_blank 630｜ordering 1285
+    //     國語 short_answer 673｜fill_blank 284｜single_choice 155
+    //   → 英語選擇格被硬拉 5.3 倍 ⇒ 模糊 ⇒ 無法辨識 1→6、single_choice 翻盤 24 格、平均分 −1.07。
+    //   國語驗得過不是科目差異，是它的格子寬（0.7~1.6×、幾乎不放大）。
+    //   ⚠ 中途否決的第一版修法「只縮不放 + 置中補白」：字變清晰但只佔 460px 寬的 20%，
+    //     整張圖大半是白的 ⇒ 拿「模糊但大」換「清晰但小」，沒有真正解決。
+    //   定版：① 先量所有裁圖寬度、按寬度排序後分張（寬度相近的同一張）
+    //         ② 每張的寬度 = 該張裡最寬的那格（上限 SHEET_CELL_W）
+    //         ③ 格子只縮不放、置中 ⇒ 同一張裡幾乎不需要補白，也不拉伸
+    //   Gemini 3.x 每個 image part 固定 token、與像素無關 → 零成本代價。
+    //   回退：READ_SHEET_STRETCH='1' 回舊的硬拉伸行為。
+    const stretch = process.env.READ_SHEET_STRETCH === '1'
+    const measured = []
+    for (const it of items) {
+      const buf = Buffer.from(it.crop.data, 'base64')
+      const meta = await sharp(buf).metadata()
+      if (!meta?.width || !meta?.height) continue
+      measured.push({ qid: String(it.questionId), buf, w: meta.width, h: meta.height })
+    }
+    if (!measured.length) return null
+    if (!stretch) measured.sort((a, b) => a.w - b.w)   // 寬度相近的分到同一張
     const sheets = []
-    for (let s = 0; s < items.length; s += READ_SHEET_MAX_CELLS) {
-      const chunk = items.slice(s, s + READ_SHEET_MAX_CELLS)
+    for (let s = 0; s < measured.length; s += READ_SHEET_MAX_CELLS) {
+      const chunk = measured.slice(s, s + READ_SHEET_MAX_CELLS)
+      const cellW = stretch ? SHEET_CELL_W : Math.max(48, Math.min(SHEET_CELL_W, ...chunk.map((c) => c.w)))
       const cells = []
-      for (const it of chunk) {
-        const buf = Buffer.from(it.crop.data, 'base64')
-        const meta = await sharp(buf).metadata()
-        if (!meta?.width || !meta?.height) continue
-        const h = Math.max(24, Math.round((meta.height / meta.width) * SHEET_CELL_W))
-        // 單格過高（整段作答）→ 限高避免整張圖被壓扁
-        const hh = Math.min(h, 900)
-        cells.push({ qid: String(it.questionId), buf: await sharp(buf).resize({ width: SHEET_CELL_W, height: hh, fit: 'fill' }).toBuffer(), h: hh })
+      for (const c of chunk) {
+        let cellBuf, cellH
+        if (stretch) {
+          const h = Math.max(24, Math.round((c.h / c.w) * cellW))
+          cellH = Math.min(h, 900)
+          cellBuf = await sharp(c.buf).resize({ width: cellW, height: cellH, fit: 'fill' }).toBuffer()
+        } else {
+          // 只縮不放，等比塞進 cellW；本張最寬的那格剛好滿版、其餘小幅補白
+          const fitBuf = await sharp(c.buf).resize({ width: cellW, height: 900, fit: 'inside', withoutEnlargement: true }).toBuffer()
+          const fm = await sharp(fitBuf).metadata()
+          cellH = Math.max(24, fm?.height || 24)
+          cellBuf = await sharp({ create: { width: cellW, height: cellH, channels: 3, background: '#ffffff' } })
+            .composite([{ input: fitBuf, gravity: 'center' }]).png().toBuffer()
+        }
+        cells.push({ qid: c.qid, buf: cellBuf, h: cellH })
       }
       if (!cells.length) return null
       const totalH = cells.reduce((a, c) => a + c.h + SHEET_LABEL_H + SHEET_GAP, 0) + SHEET_GAP
-      const W = SHEET_CELL_W + SHEET_GAP * 2
+      const W = cellW + SHEET_GAP * 2
       const comps = []
       const svg = [`<rect width="${W}" height="${totalH}" fill="white"/>`]
       let y = SHEET_GAP
       for (const c of cells) {
-        svg.push(`<text x="${SHEET_GAP + 4}" y="${y + 21}" font-size="20" font-family="sans-serif" font-weight="bold" fill="#c00">${escapeXml(c.qid)}</text>`)
+        svg.push(`<text x="${SHEET_GAP}" y="${y + 20}" font-family="sans-serif" font-size="20" font-weight="bold" fill="#c00">${c.qid}</text>`)
         const top = y + SHEET_LABEL_H
-        svg.push(`<rect x="${SHEET_GAP - 2}" y="${top - 2}" width="${SHEET_CELL_W + 4}" height="${c.h + 4}" fill="none" stroke="#c00" stroke-width="3"/>`)
         comps.push({ input: c.buf, left: SHEET_GAP, top })
+        svg.push(`<rect x="${SHEET_GAP - 2}" y="${top - 2}" width="${cellW + 4}" height="${c.h + 4}" fill="none" stroke="#c00" stroke-width="3"/>`)
         y = top + c.h + SHEET_GAP
       }
       const base = await sharp(Buffer.from(`<svg width="${W}" height="${totalH}">${svg.join('')}</svg>`)).png().toBuffer()
       const out = await sharp(base).composite(comps).jpeg({ quality: 92 }).toBuffer()
-      sheets.push({ inlineData: { data: out.toString('base64'), mimeType: 'image/jpeg' }, ids: cells.map((c) => c.qid) })
+      sheets.push({ inlineData: { mimeType: 'image/jpeg', data: out.toString('base64') }, ids: cells.map((c) => c.qid) })
     }
     return sheets.length ? sheets : null
-  } catch (err) {
-    console.warn('[staged-grading] buildReadSheets failed（fail-open 走逐張裁圖）:', err?.message)
+  } catch {
     return null
   }
-}
-
-function escapeXml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
 /** 合成圖的說明句（沙盒驗證版逐字）；labels 已含「（正確答案：X）」時即為 AI2 版 */
