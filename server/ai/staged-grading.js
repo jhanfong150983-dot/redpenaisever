@@ -734,11 +734,17 @@ const SHEET_CELL_W = 460, SHEET_LABEL_H = 30, SHEET_GAP = 8
 //   3-E-6「dollars」讀成「dollers」。fill_blank 240 格翻盤 15、方向 13 對→錯。
 //   → text/compound/ordering/draw 一律回逐張（每格獨享預算），只有 choice/check 家族合成。
 //   成本代價：英語 +~NT$0.4/份、國語 +~NT$0.5/份（short_answer 10 格），read 淨省仍 −60% 上下。
-export const SHEET_SAFE_FAMILIES = new Set(['choice', 'check'])
-export const SHEET_SAFE_TYPES = new Set([
-  'single_choice', 'multi_choice', 'true_false',
-  'single_check', 'multi_check', 'circle_select_one', 'circle_select_many'
-])
+// ⭐⭐ 2026-08-09 R4 終局：白名單縮到只剩 check ───────────────────────────────
+//   R4（choice+check 合成）驗收：choice 仍有殘留錯位——座26 一卷 6 格旋轉錯位
+//   （2-C-2/3/4 讀值 A,B,C→C,A,B）＋ B→D 字形混淆跨 5 卷；對→錯 21 vs 錯→對 9、平均分 −1.03。
+//   同時帳單揭露關鍵事實：**choice 家族的 read 模型是 2.5-flash（MODEL_FLASH）＝按像素計費**，
+//   R4 choice 兩讀合計只 NT$0.07/份——**choice 合成圖從頭到尾就沒省到錢**（省錢的只有
+//   3.x 按張固定計費的家族）。逐張小裁圖送 2.5-flash ≈ 免費。
+//   → choice 回逐張＝品質風險歸零、成本幾乎不動（+~NT$0.06/份）。
+//   只留 check（single_check/multi_check、模型 PRO=3.6、真省錢）：勾記 ✓ 是最耐低解析度的
+//   內容，R4 實測 630 格翻盤 2＝噪音級。
+export const SHEET_SAFE_FAMILIES = new Set(['check'])
+export const SHEET_SAFE_TYPES = new Set(['single_check', 'multi_check'])
 
 export function readSheetEnabledFor(domainHint) {
   if (!READ_SHEET_ENABLED) return false
