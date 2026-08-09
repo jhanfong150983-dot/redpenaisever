@@ -577,14 +577,25 @@ export default async function handler(req, res) {
     actorUserId = billing.actorUserId
     isStudentActor = billing.isStudent
 
-    const { data: profile, error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .select('ink_balance, role')
-      .eq('id', billingUserId)
-      .maybeSingle()
+    // 2026-08-09 前置 profile 讀取加重試（英語 28/30 事故實錘）─────────────────────────
+    //   每一次 AI 呼叫都會先讀這筆 profile。實測一輪批改 605 次呼叫、其中 2 次前置檢查瞬時失敗
+    //   （一次 profile 讀取、一次 auth 401）→ 回 500 → 前端丟 CLIENT_EXCEPTION → 那份卷的
+    //   Phase A 整個中斷、phase_a_state 沒寫 → 後續 Phase B fromCache 再報「找不到 phase_a_state」。
+    //   2/605 = 0.33%，對「瀏覽器 → redpenai edge → redpenaisever function → Supabase」
+    //   這條四段鏈是正常抖動率；但一次抖動賠掉一整份卷的 Phase A 不能接受。
+    //   ⚠ 原本被誤判為「登入逾時」——若真是逾時，同一輪的另外 28 份不會成功。
+    //   這是唯讀查詢、可安全重試。區域對齊後單次往返約 30ms，重試成本可忽略。
+    let profile = null, profileError = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const r = await supabaseAdmin.from('profiles').select('ink_balance, role').eq('id', billingUserId).maybeSingle()
+      profile = r.data; profileError = r.error
+      if (!profileError) break
+      console.warn(`${logPrefix} profile-read-retry ${attempt + 1}/3`, profileError?.message || profileError)
+      await new Promise((res2) => setTimeout(res2, 120 * (attempt + 1)))
+    }
 
     if (profileError) {
-      console.error(`${logPrefix} profile-read-failed`, profileError?.message || profileError)
+      console.error(`${logPrefix} profile-read-failed（已重試 3 次）`, profileError?.message || profileError)
       res.status(500).json({ error: '讀取使用者點數失敗' })
       return
     }
