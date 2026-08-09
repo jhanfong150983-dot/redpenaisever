@@ -10076,8 +10076,13 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
           //   國語卷 readModelOverride(整體 PRO) 優先，其餘用本型算出的 model。
           // 2026-07-06: 拖尾斷開（沙盒 E4）：3.5 偶發 240-274s straggler、最終都會成功——60s 斷開讓
           //   既有「退避重試→逐題兜底」接手，把拖尾上限壓到 ~90s。回退：READ_CALL_TIMEOUT_MS=0（=不設限）。
-          // 2026-08-10 英語 text → HIGH 檔位(見 TEXT_HIGHRES_GENERATION_CONFIG 說明)
-          const readGenCfg = (cfg.family === 'text' && domainIsEnglish && process.env.ENG_TEXT_READ_HIGHRES !== '0')
+          // ⛔ 2026-08-10 英語 text HIGH **上線數小時後撤回**(user 兩次質疑逼出正確形狀的實驗):
+          //   我上 HIGH 的依據是「單圖單呼叫」的檔位梯度(MEDIUM 2/4 劣化)——但 production 是
+          //   「批次呼叫」(8 圖一 call)。補跑 production 同款批次 MEDIUM vs HIGH(6 卷×8 格×3 輪):
+          //   逗號 MEDIUM 5/5 ×3 全對(HIGH 零增量)、跨輪穩定 MEDIUM 29/48 > HIGH 20/48(HIGH 看到
+          //   更多印刷細節、整行合併的抄錄範圍反而更飄)、成本 HIGH 1.7 倍。
+          //   → 單圖劣化 ≠ 批次劣化;批次上下文改變模型行為。ENG_TEXT_READ_HIGHRES='1' 可重開。
+          const readGenCfg = (cfg.family === 'text' && domainIsEnglish && process.env.ENG_TEXT_READ_HIGHRES === '1')
             ? TEXT_HIGHRES_GENERATION_CONFIG : READ_ANSWER_GENERATION_CONFIG
           const readCallCap = Number(process.env.READ_CALL_TIMEOUT_MS ?? 60000)
           const readTimeout = () => readCallCap > 0 ? Math.min(getRemainingBudget(), readCallCap) : getRemainingBudget()
