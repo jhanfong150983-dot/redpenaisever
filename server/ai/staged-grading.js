@@ -9888,8 +9888,13 @@ export async function runStagedGradingPhaseA({
   const useTypeSplit = process.env.TYPE_SPLIT_READ !== '0'  // 2026-07-02 改預設開(user 直接上線測)；回退設 TYPE_SPLIT_READ=0
   const TYPE_READ_CONFIG = {
     ordering:                     { model: 'PRO',   batch: 1,  blindRead2: true,  family: 'ordering' },
-    single_choice:                { model: 'FLASH', batch: 20, blindRead2: false, family: 'choice' },
-    true_false:                   { model: 'FLASH', batch: 30, blindRead2: false, family: 'choice' },
+    // 2026-08-09 single_choice/true_false 升 PRO（user 追問「2.5讀單格 vs 3.6讀合併哪個好」逼出的四臂 A/B）：
+    //   座7+座26 各 18 格 GT × 3 輪：2.5逐張 16/18 穩定漏 2（緊裁鄰格殘片騙 2.5）、
+    //   2.5合成 18/18 但 production 有間歇滑格（R2 座7 +1 位移、R4 座26 旋轉、沙盒重現不出=temp0 非決定性）、
+    //   **3.6 合成/逐張皆 18/18**。3.6+合成 = 國語同款組態（整卷 override 3.6、2,480+ 格量產零滑格）。
+    //   成本：升 3.6 後 sheetModelEligible 通過 → 走合成圖 2 parts ≈ +NT$0.06/份，可忽略。
+    single_choice:                { model: 'PRO',   batch: 20, blindRead2: false, family: 'choice' },
+    true_false:                   { model: 'PRO',   batch: 30, blindRead2: false, family: 'choice' },
     single_check:                 { model: 'PRO',   batch: 15, blindRead2: false, family: 'check' },
     multi_check:                  { model: 'PRO',   batch: 15, blindRead2: false, family: 'check' },
     // 2026-07-06: fill_blank batch 15→30（提速沙盒 E4）：3.5 有偶發 240-274s 拖尾 call、小批多 call 多曝險；
