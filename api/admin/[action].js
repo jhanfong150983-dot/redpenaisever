@@ -4053,30 +4053,239 @@ async function handleSchoolAdmins(req, res, supabaseAdmin) {
 // /api/admin/quality?mode=submissions&assignmentId=xxx
 // /api/admin/quality?mode=submission_detail&submissionId=xxx
 
-async function handleQuality(req, res, supabaseAdmin) {
-  const mode = String(req.query?.mode || 'assignments')
-  const assignmentId = req.query?.assignmentId ? String(req.query.assignmentId) : null
-  const submissionId = req.query?.submissionId ? String(req.query.submissionId) : null
-  const pipelineRunId = req.query?.pipelineRunId ? String(req.query.pipelineRunId) : null
-  // date: YYYY-MM-DD（哪一天有批改、未帶預設今天、UTC 解讀）
-  const dateStr = req.query?.date ? String(req.query.date) : null
+// ═══ 批改品質 v2(2026-08-10、0 人工審查版;A/B/C 模型,user 拍板)═══════════════════
+//   A=單輪健康度(每份作業、環節燈號 classify→read/VJ→accessor)
+//   B=跨輪一致性(作業有 ≥2 輪快照自動顯示、L3 門檻:選擇 99.9%/判官 99.5%/手寫唯一答案 99%)
+//   C=不一致格附 crop 給 admin 眼球裁決 → grading_run_verdicts 累積誤殺/放水統計
+//   資料來源=grading_run_history(每 AI 輪逐格快照);舊人工審查品質 API 已整組替換。
+const Q2_THRESHOLDS = { choice: 0.001, judge: 0.005, text_unique: 0.01 }
+const Q2_CHOICE_TYPES = new Set(['single_choice', 'true_false', 'multi_choice', 'circle_select_one', 'circle_select_many', 'single_check', 'multi_check'])
+function q2CellClass(cell) {
+  if (Array.isArray(cell?.votes) && cell.votes.length > 0) return 'judge'          // 國字注音判官
+  if (Q2_CHOICE_TYPES.has(String(cell?.type))) return 'choice'
+  if (String(cell?.type) === 'short_answer') return 'subjective'                    // 語意軸=user 可接受桶(±2 分)
+  return 'text_unique'                                                              // fill_blank 等唯一答案手寫
+}
+function q2VoteSplit(votes) {
+  // glyphVotes 格式 "1:s:理由" → 取第 2 段當票;全同=一致
+  const vs = (votes || []).map((v) => String(v).split(':')[1] ?? '?')
+  return vs.length >= 2 && new Set(vs).size > 1
+}
+function q2IsUnreadable(cell) {
+  return String(cell?.ans) === '無法辨識' || cell?.errType === 'unreadable'
+    || cell?.r1?.st === 'unreadable' || cell?.r2?.st === 'unreadable'
+}
+function q2Pairs(runs) {
+  const sorted = [...runs].sort((a, b) => Number(a.graded_at) - Number(b.graded_at))
+  const pairs = []
+  for (let i = 1; i < sorted.length; i++) pairs.push([sorted[i - 1], sorted[i]])
+  return pairs
+}
+function q2SameConfig(a, b) {
+  return a.git_sha === b.git_sha && JSON.stringify(a.config ?? {}) === JSON.stringify(b.config ?? {})
+}
 
+async function q2Assignments(supabaseAdmin) {
+  // 輕量欄位掃 60 天內的快照 → 依作業分組(不拉 cells)
+  const since = new Date(Date.now() - 60 * 86400000).toISOString()
+  const rows = []
+  for (let p = 0; ; p++) {
+    const { data, error } = await supabaseAdmin.from('grading_run_history')
+      .select('assignment_id, submission_id, graded_at, created_at')
+      .gte('created_at', since).order('created_at', { ascending: false }).range(p * 1000, p * 1000 + 999)
+    if (error) throw new Error(error.message)
+    rows.push(...(data || []))
+    if ((data || []).length < 1000) break
+  }
+  const byAsg = new Map()
+  for (const r of rows) {
+    const g = byAsg.get(r.assignment_id) ?? { subs: new Set(), snapshots: 0, times: [], last: 0 }
+    g.subs.add(r.submission_id); g.snapshots++; g.times.push(Number(r.graded_at)); g.last = Math.max(g.last, Number(r.graded_at))
+    byAsg.set(r.assignment_id, g)
+  }
+  const ids = [...byAsg.keys()]
+  const titleById = new Map()
+  if (ids.length) {
+    const { data: asgs } = await supabaseAdmin.from('assignments').select('id, title, domain, classroom_id').in('id', ids)
+    const crIds = [...new Set((asgs || []).map((a) => a.classroom_id).filter(Boolean))]
+    const { data: crs } = crIds.length ? await supabaseAdmin.from('classrooms').select('id, name').in('id', crIds) : { data: [] }
+    const crById = new Map((crs || []).map((c) => [c.id, c.name]))
+    for (const a of asgs || []) { titleById.set(a.id, { title: a.title, domain: a.domain, classroom: crById.get(a.classroom_id) ?? '' }) }
+  }
+  const list = [...byAsg.entries()].map(([id, g]) => {
+    // 輪數=graded_at 依 10 分鐘空檔聚類
+    const ts = [...g.times].sort((a, b) => a - b)
+    let rounds = ts.length ? 1 : 0
+    for (let i = 1; i < ts.length; i++) if (ts[i] - ts[i - 1] > 10 * 60000) rounds++
+    return { id, ...(titleById.get(id) ?? { title: id, domain: '', classroom: '' }), papers: g.subs.size, snapshots: g.snapshots, rounds, lastGradedAt: g.last }
+  }).sort((a, b) => b.lastGradedAt - a.lastGradedAt)
+  return { assignments: list }
+}
+
+async function q2Detail(supabaseAdmin, assignmentId) {
+  const rows = []
+  for (let p = 0; ; p++) {
+    const { data, error } = await supabaseAdmin.from('grading_run_history')
+      .select('id, submission_id, graded_at, graded_by, git_sha, config, total_score, cells')
+      .eq('assignment_id', assignmentId).order('graded_at', { ascending: true }).range(p * 200, p * 200 + 199)
+    if (error) throw new Error(error.message)
+    rows.push(...(data || []))
+    if ((data || []).length < 200) break
+  }
+  if (!rows.length) return { empty: true }
+  const subIds = [...new Set(rows.map((r) => r.submission_id))]
+  const { data: subs } = await supabaseAdmin.from('submissions').select('id, student_id').in('id', subIds)
+  const stuIds = [...new Set((subs || []).map((s) => s.student_id).filter(Boolean))]
+  const { data: studs } = stuIds.length ? await supabaseAdmin.from('students').select('id, seat_number, name').in('id', stuIds) : { data: [] }
+  const stuById = new Map((studs || []).map((s) => [s.id, s]))
+  const seatBySub = new Map((subs || []).map((s) => [s.id, stuById.get(s.student_id)?.seat_number ?? null]))
+  const { data: asg } = await supabaseAdmin.from('assignments').select('title, domain, total_questions').eq('id', assignmentId).maybeSingle()
+  const expectedCells = Number(asg?.total_questions) || null
+
+  const bySub = new Map()
+  for (const r of rows) { const a = bySub.get(r.submission_id) ?? []; a.push(r); bySub.set(r.submission_id, a) }
+
+  // ── A 層:健康度(每卷取最新一輪)──
+  const latest = [...bySub.values()].map((runs) => runs[runs.length - 1])
+  const health = {
+    papers: latest.length, cells: 0, missingCellPapers: 0,
+    unreadable: 0, unstable: 0, lowConf: 0, chainCells: 0,
+    judgeCells: 0, judgeSplit: 0, codeJudged: 0,
+    perQuestionAnomalies: [], contradictions: []
+  }
+  const byQidAns = new Map()
+  const byQidUnread = new Map()
+  for (const run of latest) {
+    const cells = Array.isArray(run.cells) ? run.cells : []
+    health.cells += cells.length
+    if (expectedCells && cells.length < expectedCells) health.missingCellPapers++
+    for (const c of cells) {
+      if (q2IsUnreadable(c)) { health.unreadable++; byQidUnread.set(c.qid, (byQidUnread.get(c.qid) || 0) + 1) }
+      if (c.cons === 'unstable') health.unstable++
+      if (Number(c.sysConf) < 70) health.lowConf++
+      if (c.chain || /知答鏈/.test(String(c.journey ?? ''))) health.chainCells++
+      if (Array.isArray(c.votes) && c.votes.length) { health.judgeCells++; if (q2VoteSplit(c.votes)) health.judgeSplit++ }
+      if (/直判/.test(String(c.journey ?? ''))) health.codeJudged++
+      const ansKey = String(c.ans ?? '').replace(/[\s。，、,.!?！？]/gu, '')
+      if (ansKey && c.ans !== '未作答' && c.ans !== '無法辨識') {
+        const k = `${c.qid}|${ansKey}`
+        const arr = byQidAns.get(k) ?? []
+        arr.push({ sub: run.submission_id, seat: seatBySub.get(run.submission_id), score: c.score, qid: c.qid, ans: c.ans })
+        byQidAns.set(k, arr)
+      }
+    }
+  }
+  for (const [qid, n] of byQidUnread) if (latest.length >= 5 && n / latest.length >= 0.6) health.perQuestionAnomalies.push({ qid, unreadable: n, papers: latest.length })
+  for (const [, arr] of byQidAns) {
+    if (arr.length < 2) continue
+    const scores = new Set(arr.map((x) => Number(x.score)))
+    if (scores.size > 1) health.contradictions.push({ qid: arr[0].qid, ans: String(arr[0].ans).slice(0, 40), cases: arr.map((x) => ({ seat: x.seat, score: x.score })) })
+  }
+  const lights = {
+    classify: health.perQuestionAnomalies.length > 0 || health.missingCellPapers > 0 ? 'red' : 'green',
+    read: (health.unreadable / Math.max(1, health.cells)) > 0.01 || (health.judgeCells > 0 && health.judgeSplit / Math.max(1, health.judgeCells) > 0.15) ? 'yellow' : 'green',
+    accessor: health.contradictions.length > 0 ? 'red' : 'green'
+  }
+  lights.overall = [lights.classify, lights.read, lights.accessor].includes('red') ? 'red'
+    : [lights.classify, lights.read, lights.accessor].includes('yellow') ? 'yellow' : 'green'
+
+  // ── B 層:跨輪一致性(每卷相鄰快照對)──
+  const crossTypes = {}
+  const flippedCells = []
+  let pairCount = 0, sameConfigPairs = 0
+  for (const [subId, runs] of bySub) {
+    if (runs.length < 2) continue
+    for (const [ra, rb] of q2Pairs(runs)) {
+      pairCount++
+      const same = q2SameConfig(ra, rb); if (same) sameConfigPairs++
+      const cbById = new Map((rb.cells || []).map((c) => [c.qid, c]))
+      for (const ca of (ra.cells || [])) {
+        const cb = cbById.get(ca.qid); if (!cb) continue
+        const cls = q2CellClass(cb)
+        const t = crossTypes[cls] ?? (crossTypes[cls] = { pairs: 0, flips: 0, scoreChanges: 0 })
+        t.pairs++
+        const flip = ca.ok !== cb.ok
+        if (flip) t.flips++
+        if (Number(ca.score) !== Number(cb.score)) t.scoreChanges++
+        if (flip || (cls === 'subjective' && Math.abs(Number(ca.score) - Number(cb.score)) > 2)) {
+          flippedCells.push({
+            submissionId: subId, seat: seatBySub.get(subId), qid: ca.qid, type: cb.type, cls, sameConfig: same,
+            a: { gradedAt: Number(ra.graded_at), ok: ca.ok, score: ca.score, ans: ca.ans, journey: ca.journey, votes: ca.votes ?? null, reason: ca.reason },
+            b: { gradedAt: Number(rb.graded_at), ok: cb.ok, score: cb.score, ans: cb.ans, journey: cb.journey, votes: cb.votes ?? null, reason: cb.reason },
+            bbox: cb.bbox ?? ca.bbox ?? null
+          })
+        }
+      }
+    }
+  }
+  const crossRun = pairCount === 0 ? null : {
+    pairCount, sameConfigPairs,
+    types: Object.fromEntries(Object.entries(crossTypes).map(([k, v]) => {
+      const rate = v.pairs ? v.flips / v.pairs : 0
+      const threshold = Q2_THRESHOLDS[k] ?? null
+      return [k, { ...v, rate, threshold, pass: threshold == null ? null : rate <= threshold }]
+    })),
+    flippedCells: flippedCells.slice(0, 200)
+  }
+  const { data: verdicts } = await supabaseAdmin.from('grading_run_verdicts')
+    .select('submission_id, question_id, run_a_graded_at, run_b_graded_at, verdict, note').eq('assignment_id', assignmentId)
+  return {
+    assignment: { id: assignmentId, title: asg?.title, domain: asg?.domain, expectedCells },
+    health, lights, crossRun,
+    verdicts: (verdicts || [])
+  }
+}
+
+async function q2Crop(supabaseAdmin, body, res) {
+  const submissionId = String(body?.submissionId ?? '')
+  const bbox = body?.bbox
+  if (!submissionId || !bbox || typeof bbox.x !== 'number') return res.status(400).json({ error: 'submissionId/bbox required' })
+  const { data: file, error } = await supabaseAdmin.storage.from('homework-images').download(`submissions/${submissionId}.webp`)
+  if (error || !file) return res.status(404).json({ error: '找不到卷面圖' })
+  const sharp = (await import('sharp')).default
+  const buf = Buffer.from(await file.arrayBuffer())
+  const meta = await sharp(buf).metadata()
+  const W = meta.width, H = meta.height
+  const padX = 0.03, padY = 0.02
+  const x0 = Math.max(0, Math.floor((bbox.x - padX) * W)), y0 = Math.max(0, Math.floor((bbox.y - padY) * H))
+  const x1 = Math.min(W, Math.ceil((bbox.x + bbox.w + padX) * W)), y1 = Math.min(H, Math.ceil((bbox.y + bbox.h + padY) * H))
+  if (x1 - x0 < 4 || y1 - y0 < 4) return res.status(400).json({ error: 'bbox 過小' })
+  const fx = Math.floor((bbox.x) * W) - x0, fy = Math.floor((bbox.y) * H) - y0
+  const fw = Math.ceil(bbox.w * W), fh = Math.ceil(bbox.h * H)
+  const svg = Buffer.from(`<svg width="${x1 - x0}" height="${y1 - y0}"><rect x="${fx}" y="${fy}" width="${fw}" height="${fh}" fill="none" stroke="#d00" stroke-width="3"/></svg>`)
+  const out = await sharp(buf).extract({ left: x0, top: y0, width: x1 - x0, height: y1 - y0 })
+    .composite([{ input: svg, left: 0, top: 0 }]).jpeg({ quality: 88 }).toBuffer()
+  return res.status(200).json({ image: `data:image/jpeg;base64,${out.toString('base64')}` })
+}
+
+async function q2Verdict(supabaseAdmin, body, res) {
+  const { submissionId, assignmentId, questionId, runA, runB, verdict, note } = body ?? {}
+  const OK = ['a_correct', 'b_correct', 'both_correct', 'both_wrong', 'unclear']
+  if (!submissionId || !assignmentId || !questionId || !runA || !runB || !OK.includes(verdict)) {
+    return res.status(400).json({ error: 'missing/invalid fields' })
+  }
+  const { error } = await supabaseAdmin.from('grading_run_verdicts').upsert({
+    submission_id: submissionId, assignment_id: assignmentId, question_id: questionId,
+    run_a_graded_at: Number(runA), run_b_graded_at: Number(runB), verdict, note: note ? String(note).slice(0, 200) : null
+  }, { onConflict: 'submission_id,question_id,run_a_graded_at,run_b_graded_at' })
+  if (error) return res.status(500).json({ error: error.message })
+  return res.status(200).json({ ok: true })
+}
+
+async function handleQuality(req, res, supabaseAdmin) {
   try {
-    if (mode === 'assignments') {
-      const day = parseDateForDay(dateStr)
-      return res.status(200).json(await qualityAssignmentList(supabaseAdmin, day))
+    if (req.method === 'POST') {
+      const body = parseJsonBody(req, res)
+      if (body?.op === 'crop') return await q2Crop(supabaseAdmin, body, res)
+      if (body?.op === 'verdict') return await q2Verdict(supabaseAdmin, body, res)
+      return res.status(400).json({ error: 'Unknown op' })
     }
-    if (mode === 'timing') {
-      const day = parseDateForDay(dateStr)
-      return res.status(200).json(await qualityTiming(supabaseAdmin, day))
-    }
-    if (mode === 'submissions') {
+    const mode = String(req.query?.mode || 'assignments')
+    if (mode === 'assignments') return res.status(200).json(await q2Assignments(supabaseAdmin))
+    if (mode === 'detail') {
+      const assignmentId = req.query?.assignmentId ? String(req.query.assignmentId) : null
       if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' })
-      return res.status(200).json(await qualitySubmissionList(supabaseAdmin, assignmentId))
-    }
-    if (mode === 'submission_detail') {
-      if (!submissionId) return res.status(400).json({ error: 'submissionId required' })
-      return res.status(200).json(await qualitySubmissionDetail(supabaseAdmin, submissionId, pipelineRunId))
+      return res.status(200).json(await q2Detail(supabaseAdmin, assignmentId))
     }
     return res.status(400).json({ error: 'Unknown mode' })
   } catch (err) {
