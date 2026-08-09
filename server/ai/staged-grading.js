@@ -91,6 +91,25 @@ export const JUDGE_HIGHRES_GENERATION_CONFIG = {
   }
 }
 
+// ⭐ 2026-08-10 英語 text read 鎖 HIGH(user 逐假說追查定案；同 JUDGE_HIGHRES 的模式)────────
+//   英語 fill_blank「Yes, it is.」讀成「Yes it is」冤枉扣分事故——五個假說逐一對照排除:
+//   ✗ bbox(眼球:紅框完整蓋住手寫、含跨行) ✗ 合成圖(production 兩模式都丟:R3 合成 9 卷、R4 逐張 7 卷)
+//   ✗ 後處理(儲存值含逗號) ✗ prompt(原版 prompt 沙盒兩模式 8/8)
+//   ✓ 真凶=READ_MEDIA_RES=medium(8/04 上線、只用國語 50 題驗過):
+//     檔位梯度沙盒(4 卷 3-E-7、直打 API、圖tok 證明檔位生效 252/558/1075):
+//     LOW 3/4 退化成抄印刷題目、MEDIUM 2/4 同病、HIGH 4/4 完美含逗號。
+//     時間線:7月(HIGH)逗號 29-30/30、8/04 後(MEDIUM)兩輪都掉到 21-23/30。
+//   英文手寫(小字母+微小標點)在 MEDIUM 解析不穩→模型退而抄印刷字/丟小記號;中文方塊字扛得住。
+//   成本:text 8 格×2讀×(1077-560)tok ≈ +NT$0.41/份。kill switch: ENG_TEXT_READ_HIGHRES='0'。
+//   ⚠ 未解殘留(誠實記錄):沙盒 MEDIUM(批次+原版prompt)8/8 但 production MEDIUM 丟 7-9/30——
+//     Vertex 服務端差異嫌疑、本機無 SA 憑證無法驗;HIGH 修法繞過此未知(7月=HIGH=production 級證據)。
+export const TEXT_HIGHRES_GENERATION_CONFIG = {
+  generationConfig: {
+    ...READ_ANSWER_GENERATION_CONFIG.generationConfig,
+    mediaResolution: 'MEDIA_RESOLUTION_HIGH'
+  }
+}
+
 // ⛔ 2026-08-08 已否決:國字判官降 MEDIUM(降本沙盒 exp-judge-imgtoken-2026-08-08)。
 //   誘因:判官佔全系統成本 58%、其中圖片輸入佔判官 75%;國字 crop 本來就放大 ×3(≤600px),
 //   本以為放大能補償解析度。小沙盒(3 卷 21 國字格 × 3 判官 × 2 輪)判定差異 0 格 → 上線。
@@ -10057,11 +10076,14 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
           //   國語卷 readModelOverride(整體 PRO) 優先，其餘用本型算出的 model。
           // 2026-07-06: 拖尾斷開（沙盒 E4）：3.5 偶發 240-274s straggler、最終都會成功——60s 斷開讓
           //   既有「退避重試→逐題兜底」接手，把拖尾上限壓到 ~90s。回退：READ_CALL_TIMEOUT_MS=0（=不設限）。
+          // 2026-08-10 英語 text → HIGH 檔位(見 TEXT_HIGHRES_GENERATION_CONFIG 說明)
+          const readGenCfg = (cfg.family === 'text' && domainIsEnglish && process.env.ENG_TEXT_READ_HIGHRES !== '0')
+            ? TEXT_HIGHRES_GENERATION_CONFIG : READ_ANSWER_GENERATION_CONFIG
           const readCallCap = Number(process.env.READ_CALL_TIMEOUT_MS ?? 60000)
           const readTimeout = () => readCallCap > 0 ? Math.min(getRemainingBudget(), readCallCap) : getRemainingBudget()
           const runBatchCall = () => executeStage({
             apiKey, model, modelOverride: readModelOverride || model,
-            payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+            payload: { ...payload, ...readGenCfg },
             timeoutMs: readTimeout(), routeHint,
             routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
             stageContents: [{ role: 'user', parts }]
@@ -10104,7 +10126,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
                 ]
                 const r = await executeStage({
                   apiKey, model, modelOverride: readModelOverride || model,
-                  payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                  payload: { ...payload, ...readGenCfg },
                   timeoutMs: readTimeout(), routeHint,
                   routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
                   stageContents: [{ role: 'user', parts: singleParts }]
