@@ -734,17 +734,25 @@ const SHEET_CELL_W = 460, SHEET_LABEL_H = 30, SHEET_GAP = 8
 //   3-E-6「dollars」讀成「dollers」。fill_blank 240 格翻盤 15、方向 13 對→錯。
 //   → text/compound/ordering/draw 一律回逐張（每格獨享預算），只有 choice/check 家族合成。
 //   成本代價：英語 +~NT$0.4/份、國語 +~NT$0.5/份（short_answer 10 格），read 淨省仍 −60% 上下。
-// ⭐⭐ 2026-08-09 R4 終局：白名單縮到只剩 check ───────────────────────────────
-//   R4（choice+check 合成）驗收：choice 仍有殘留錯位——座26 一卷 6 格旋轉錯位
-//   （2-C-2/3/4 讀值 A,B,C→C,A,B）＋ B→D 字形混淆跨 5 卷；對→錯 21 vs 錯→對 9、平均分 −1.03。
-//   同時帳單揭露關鍵事實：**choice 家族的 read 模型是 2.5-flash（MODEL_FLASH）＝按像素計費**，
-//   R4 choice 兩讀合計只 NT$0.07/份——**choice 合成圖從頭到尾就沒省到錢**（省錢的只有
-//   3.x 按張固定計費的家族）。逐張小裁圖送 2.5-flash ≈ 免費。
-//   → choice 回逐張＝品質風險歸零、成本幾乎不動（+~NT$0.06/份）。
-//   只留 check（single_check/multi_check、模型 PRO=3.6、真省錢）：勾記 ✓ 是最耐低解析度的
-//   內容，R4 實測 630 格翻盤 2＝噪音級。
-export const SHEET_SAFE_FAMILIES = new Set(['check'])
-export const SHEET_SAFE_TYPES = new Set(['single_check', 'multi_check'])
+// ⭐⭐ 2026-08-09 終版：合成圖 ＝ family ∈ {choice, check} 且**該批次實際模型是 3.x** ─────────
+//   演進：R1 全合成+拉伸 → R2 撤排序 → R3 排除長文 → R4 抓到 choice 殘留滑格（座26 一卷 6 格、
+//   bbox 經眼球確認無誤、字跡清楚＝合成圖對格滑掉）→ 一度全域踢掉 choice →
+//   **user 質疑「國語明明好好的」→ 查帳翻案**：
+//   read 模型有三層分流（不是統一 3.6）——
+//     國語卷：整卷 readModelOverride 強制 3.6（2026-06-02 手寫國字幻覺）
+//     其他科：choice=MODEL_FLASH(2.5、按像素計費)、check/ordering=3.6、text=英語/數學升 3.6
+//   ⇒ 英語 choice(2.5)：合成圖**從來就沒省到錢**（R4 實測兩讀合計 NT$0.07/份）→ 逐張＝免費+零風險
+//   ⇒ 國語 choice(3.6)：合成圖**真省 ~NT$2/份**（40 格 80 parts×560tok），且實證乾淨
+//     （快照對照 1,550 格翻盤 6＝0.4%、零座26 式集中滑格；155px 格 vs 英語 87px）→ 留
+//   規則寫成「按計費模型」而非「按科目」：3.x 按張固定計費才有錢可省；2.5 按像素、合成無意義。
+//   殘餘風險（明示）：國語 choice 合成圖仍有理論滑格風險，實證 2,480+ 格未發生，接受並由
+//   快照對照持續監控。text 家族維持逐張（R3 逗號/拼字實錘、與模型無關的品質決定）。
+export const SHEET_SAFE_FAMILIES = new Set(['choice', 'check'])
+export const SHEET_SAFE_TYPES = new Set([
+  'single_choice', 'multi_choice', 'true_false',
+  'single_check', 'multi_check', 'circle_select_one', 'circle_select_many'
+])
+export const sheetModelEligible = (m) => /gemini-3\./.test(String(m || ''))
 
 export function readSheetEnabledFor(domainHint) {
   if (!READ_SHEET_ENABLED) return false
@@ -10025,7 +10033,9 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
           // ── 2026-08-07 合成圖 read：N 張裁圖 → 少數幾張大圖（圖片 token −94%、見 buildReadSheets 註解）──
           //   ordering(freshCrop、batch 1) 與單格批次不合成；任何失敗 fail-open 走逐張。
           const sheets = (readSheetEnabledFor(internalContext?.domainHint) && !cfg.freshCrop
-              && SHEET_SAFE_FAMILIES.has(cfg.family) && cells.length >= 2)   // 2026-08-09 長文家族回逐張（見 SHEET_SAFE_FAMILIES）
+              && SHEET_SAFE_FAMILIES.has(cfg.family)
+              && sheetModelEligible(readModelOverride || model)   // 2.5 按像素計費＝合成無錢可省 → 逐張（見 SHEET_SAFE_FAMILIES）
+              && cells.length >= 2)
             ? await buildReadSheets(cells) : null
           if (sheets) {
             const labelById = new Map(cells.map((c) => [c.questionId, c.label]))
@@ -10151,7 +10161,9 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     const typeById = new Map(classifyAligned.map((q) => [String(q.questionId), q.questionType]))
     const sheetSafeItems = sheetItems.filter((it) => SHEET_SAFE_TYPES.has(typeById.get(it.questionId)))
     const looseItems = sheetItems.filter((it) => !SHEET_SAFE_TYPES.has(typeById.get(it.questionId)))
-    const sheets = (readSheetEnabledFor(internalContext?.domainHint) && sheetSafeItems.length >= 2)
+    const sheets = (readSheetEnabledFor(internalContext?.domainHint)
+        && sheetModelEligible(readModelOverride || readModel)   // 2.5 按像素＝合成無意義（見 SHEET_SAFE_FAMILIES）
+        && sheetSafeItems.length >= 2)
       ? await buildReadSheets(sheetSafeItems) : null
     let ai1Parts, ai2Parts
     if (sheets) {
