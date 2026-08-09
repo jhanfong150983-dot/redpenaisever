@@ -7229,6 +7229,12 @@ ${isHighSchool
     🚨 SCOPE: This rule ONLY applies when Domain is "社會" or "自然".
     For other domains (especially 國語注釋題 where referenceAnswer itself is 2-4 chars like "深藍"、"回頭"、"盡情歌唱"),
     this rule MUST be skipped — short reference answers are NORMAL and a literal match deserves full score.
+    🚨 2026-08-09（國語 domain 專用，防跨域洩漏）：本節與下方 RUBRIC 鐵則的「表達不扣分／錯字不扣分」
+      **只適用社會/自然**。國語卷的用字由「後續獨立階段」處理，因此：
+      - 你在這裡只判**語意**（保留＝滿分／部分保留＝部分分／語意改變＝0），錯字**不影響你的給分**；
+      - 但 🚨 **絕對不要在 scoringReason 裡寫「錯字不扣分」「符合國語錯字不扣分原則」之類的說法** ——
+        那是錯的（後續階段每個錯字會扣 1 分），寫出來會直接誤導老師與家長。
+      - 若學生有錯字，理由只需描述語意是否正確，不要對用字下結論。
     Even if the core concept is correct, the student must express it as a reasonably complete thought — not a bare fragment.
     CHECK THIS RULE FIRST before applying any strictness-based evaluation.
     FAIL standard (HARD CAP: score MUST NOT exceed 50% of maxScore — do NOT give full marks even if concept matches):
@@ -14379,18 +14385,38 @@ export async function runStagedGradingPhaseB({
 count = 錯字個數（0 = 沒有用字錯誤）。同一個字重複寫錯只算 1 個。
 which = 每個錯字寫成「X 應為 Y」，多個用「、」分隔；沒有則空字串。不要寫解釋、不要超過 30 字。
 只輸出 JSON：{"count":0,"which":""}`
-            const resp = await executeStage({
-              apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
-              payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-              timeoutMs: Math.min(getRemainingBudget(), 15_000), routeHint,
-              routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
-              stageContents: [{ role: 'user', parts: [{ text: cePrompt }] }]
-            })
-            if (resp) stageResponses.push(resp)
-            if (!resp?.ok) continue
-            const parsed = parseCandidateJson(resp.data)
-            // 2026-08-09 改成減法：每個錯字扣 1 分、累加、下限 0（user 拍板的扣分表）
-            const cnt = Math.max(0, Math.floor(toFiniteNumber(parsed?.count) ?? 0))
+            // 2026-08-09 三票多數決（沿用三判官的成功模式）：temp 0 在這個 prompt 上**不是決定性的**
+            //   ——同一個 (正解, 學生答案) 沙盒 5/5 判 count=1、production 卻判 0（座5「進情唱歌。」實錘）。
+            //   已排除組態差異：filterPayloadForGemini 只放行 Gemini 合法欄位、前端沒送 systemInstruction，
+            //   沙盒與 production 的請求差別僅一個對純文字無作用的 mediaResolution → 是真實非決定性。
+            //   本輪變異量測的旁證：三判官票變動 64% 但多數決把判定翻盤吸收到 0 格 → 多數決對這類
+            //   「個別呼叫吵、正確答案唯一」的任務有效。純文字短 prompt，×3 的成本可忽略。
+            //   kill switch：CHARERR_VOTES=1 回單票。
+            const voteN = Math.max(1, Math.min(5, Number(process.env.CHARERR_VOTES) || 3))
+            const votes = await Promise.all(Array.from({ length: voteN }, async () => {
+              const resp = await executeStage({
+                apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+                payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                timeoutMs: Math.min(getRemainingBudget(), 15_000), routeHint,
+                routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+                stageContents: [{ role: 'user', parts: [{ text: cePrompt }] }]
+              })
+              if (resp) stageResponses.push(resp)
+              if (!resp?.ok) return null
+              const pj = parseCandidateJson(resp.data)
+              if (pj == null) return null
+              return { count: Math.max(0, Math.floor(toFiniteNumber(pj?.count) ?? 0)), which: ensureString(pj?.which, '') }
+            }))
+            const ok = votes.filter((v) => v != null)
+            if (ok.length === 0) continue                       // 全失敗 → fail-open 保留 accessor 判定
+            // 多數決；平手取較小者（加法式的精神：不確定時少扣）
+            const tally = new Map()
+            for (const v of ok) tally.set(v.count, (tally.get(v.count) || 0) + 1)
+            const cnt = [...tally.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0]
+            const parsed = ok.find((v) => v.count === cnt) ?? ok[0]
+            if (ok.length >= 2 && tally.size > 1) {
+              logStaged(pipelineRunId, 'basic', `[B-CharErr] 票不一致 ${sc.questionId}：${ok.map((v) => v.count).join('/')} → 採 ${cnt}`)
+            }
             if (cnt > 0) {
               const which = ensureString(parsed?.which, '').slice(0, 30)
               const before = toFiniteNumber(sc.score) ?? 0
