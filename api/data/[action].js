@@ -2782,6 +2782,111 @@ async function handleGetGradebookScores(req, res) {
 
 // ── 清除作業的批改結果 ────────────────────────────────────────────────────
 // ── 直接儲存批改結果到 Supabase（不依賴 sync push）────────────────────
+// ═══ 批改輪歷史快照(2026-08-10、批改品質 dashboard 資料層)═══════════════════════
+//   A/B/C 模型(user 拍板):A=單輪健康度、B=跨輪一致性、C=不一致格眼球裁決。
+//   重批會覆蓋 grading_result/phase_a_state → B/C 的唯一資料來源就是這裡存的逐格快照。
+//   每卷保留最近 HISTORY_KEEP 輪、寫入 fail-open(絕不影響批改儲存)。DDL 見 local-only/ddl-grading-run-history.sql。
+const HISTORY_KEEP = 5
+const HISTORY_CONFIG_KEYS = [
+  'READ_SHEET', 'READ_MEDIA_RES', 'TYPE_SPLIT_READ', 'ENG_TEXT_READ_HIGHRES',
+  'ESCALATION_CHAIN', 'ZERO_REVIEW_TAIL', 'GLYPH_JUDGE_ALL', 'GZ_SKIP_READ',
+  'MODEL_PRO', 'MODEL_FLASH', 'JUDGE_MODEL', 'WQPDF_MARK_READ', 'WQPDF_MARK_TIGHT_CHOICE',
+  'CHARERR_VOTES', 'SHORTANS_CHARERR', 'ENGLISH_TEXT_READ_PRO', 'MATH_TEXT_READ_PRO'
+]
+function historyConfigFingerprint() {
+  const cfg = {}
+  for (const k of HISTORY_CONFIG_KEYS) { const v = process.env[k]; if (v !== undefined && v !== '') cfg[k] = String(v) }
+  return cfg
+}
+function historyReadOf(ra) {
+  if (!ra || typeof ra !== 'object') return null
+  const out = { v: String(ra.studentAnswer ?? ra.studentAnswerRaw ?? '').slice(0, 120), st: String(ra.status ?? '') }
+  if (Array.isArray(ra.partValues) && ra.partValues.length > 0) {
+    out.p = ra.partValues.slice(0, 12).map((x) => ({ s: String(x?.subId ?? ''), v: String(x?.student ?? '').slice(0, 40) }))
+  }
+  return out
+}
+function historyCellOf(d, chainByQid) {
+  const qid = String(d?.questionId ?? '')
+  const cell = {
+    qid,
+    type: d?.questionType ?? null,
+    ok: d?.isCorrect === true,
+    score: Number.isFinite(Number(d?.score)) ? Number(d.score) : null,
+    max: Number.isFinite(Number(d?.maxScore)) ? Number(d.maxScore) : null,
+    ans: String(d?.studentAnswer ?? '').slice(0, 120),
+    r1: historyReadOf(d?.readAnswer1),
+    r2: historyReadOf(d?.readAnswer2),
+    cons: d?.consistencyStatus ?? null,
+    conf: Number.isFinite(Number(d?.confidence)) ? Number(d.confidence) : null,
+    sysConf: Number.isFinite(Number(d?.systemConfidence)) ? Number(d.systemConfidence) : null,
+    journey: d?.confidenceJourney ? String(d.confidenceJourney).slice(0, 60) : null,
+    bbox: d?.answerBbox ?? null,
+    errType: d?.errorType ?? null,
+    reason: d?.reason ? String(d.reason).slice(0, 100) : null
+  }
+  if (Array.isArray(d?.glyphVotes) && d.glyphVotes.length > 0) cell.votes = d.glyphVotes.slice(0, 6).map((v) => String(v).slice(0, 40))
+  const ch = chainByQid?.get?.(qid)
+  if (ch) {
+    cell.chain = {
+      level: String(ch.level ?? ''),
+      adopted: String(ch.adopted ?? '').slice(0, 60),
+      picks: [ch.r1p, ch.r2p, ch.r3p, ch.r4p].filter((x) => x !== undefined).map((x) => String(x ?? '').slice(0, 40)),
+      conf: ch.chainConfidence ?? null
+    }
+  }
+  return cell
+}
+// entries: [{ submissionId, assignmentId, ownerId, gradedAt, gradedBy, totalScore, gradingResult }]
+async function saveGradingRunHistory(supabaseDb, entries) {
+  try {
+    const valid = (entries || []).filter((e) => e?.submissionId && e?.assignmentId && Array.isArray(e?.gradingResult?.details) && e.gradingResult.details.length > 0)
+    if (valid.length === 0) return
+    // 鏈裁決摘要(NR 格才有):JSON path 只抓 escalationChain、不拉整個 phase_a_state
+    const chainBySub = new Map()
+    try {
+      const { data: chainRows } = await supabaseDb
+        .from('submissions')
+        .select('id, phase_a_state->escalationChain')
+        .in('id', valid.map((e) => e.submissionId))
+      for (const r of chainRows || []) {
+        const recs = r?.escalationChain?.records
+        if (Array.isArray(recs) && recs.length > 0) chainBySub.set(r.id, new Map(recs.map((x) => [String(x.questionId), x])))
+      }
+    } catch (e) { console.warn('[run-history] chain fetch failed (non-fatal):', e?.message) }
+    const gitSha = String(process.env.VERCEL_GIT_COMMIT_SHA || '').slice(0, 7) || null
+    const config = historyConfigFingerprint()
+    const rows = valid.map((e) => ({
+      submission_id: e.submissionId,
+      assignment_id: e.assignmentId,
+      owner_id: e.ownerId ?? null,
+      graded_at: Number(e.gradedAt) || Date.now(),
+      graded_by: e.gradedBy ?? 'teacher',
+      total_score: Number.isFinite(Number(e.totalScore)) ? Number(e.totalScore) : null,
+      git_sha: gitSha,
+      config,
+      cells: e.gradingResult.details.map((d) => historyCellOf(d, chainBySub.get(e.submissionId)))
+    }))
+    const { error: insErr } = await supabaseDb.from('grading_run_history').insert(rows)
+    if (insErr) { console.warn('[run-history] insert failed (non-fatal):', insErr.message); return }
+    // 汰舊:每卷只留最近 HISTORY_KEEP 輪
+    for (const e of valid) {
+      try {
+        const { data: old } = await supabaseDb
+          .from('grading_run_history')
+          .select('id')
+          .eq('submission_id', e.submissionId)
+          .order('graded_at', { ascending: false })
+          .range(HISTORY_KEEP, HISTORY_KEEP + 49)
+        if (old?.length) await supabaseDb.from('grading_run_history').delete().in('id', old.map((x) => x.id))
+      } catch (e2) { console.warn('[run-history] retention failed (non-fatal):', e2?.message) }
+    }
+    console.log(`[run-history] 已存 ${rows.length} 卷批改輪快照`)
+  } catch (e) {
+    console.warn('[run-history] failed (non-fatal):', e?.message)
+  }
+}
+
 async function handleSaveGrading(req, res) {
   // 2026-08-08 分段計時：批改完成後結果 modal 會等這支端點回來才顯示（user 拍板「等結算完一次出現」），
   //   user 回報有可感知的停頓。這支端點是一長串序列往返，先量出各段耗時再決定要優化哪一段——
@@ -2966,6 +3071,31 @@ async function handleSaveGrading(req, res) {
       } catch (err) {
         console.warn('[save-grading] flat billing error (fail-open):', err?.message)
       }
+    }
+    // ── 批改輪歷史快照(fail-open;判準同 chargeCands=「AI 輪完成」,手動改分不記)──
+    if (chargeCands.length > 0) {
+      try {
+        const { data: metaRows } = await supabaseDb
+          .from('submissions')
+          .select('id, assignment_id')
+          .eq('owner_id', user.id)
+          .in('id', chargeCands.map((c) => c.id))
+        const aidById = new Map((metaRows || []).map((r) => [r.id, r.assignment_id]))
+        const bodyById = new Map(submissions.filter((x) => x?.id).map((x) => [x.id, x]))
+        await saveGradingRunHistory(supabaseDb, chargeCands.map((c) => {
+          const src = bodyById.get(c.id)
+          return {
+            submissionId: c.id,
+            assignmentId: aidById.get(c.id),
+            ownerId: user.id,
+            gradedAt: c.gradedAt,
+            gradedBy: 'teacher',
+            totalScore: src?.score,
+            gradingResult: src?.gradingResult
+          }
+        }))
+      } catch (e) { console.warn('[run-history] save-grading hook failed (non-fatal):', e?.message) }
+      mark('history')
     }
     mark('total')
     // 分段耗時（累計毫秒，相鄰兩段相減＝該段耗時）。papers/bodyKB 一起帶，才知道是不是量的問題。
@@ -10955,6 +11085,12 @@ async function handleStudentFinalizeGrading(req, res) {
       .eq('owner_id', ownerId)
       .eq('student_id', studentContext.id)
     if (updErr) throw new Error(updErr.message)
+
+    // 批改輪歷史快照(學生自助批改也是 AI 輪;fail-open)
+    await saveGradingRunHistory(supabaseDb, [{
+      submissionId, assignmentId, ownerId,
+      gradedAt, gradedBy: 'student', totalScore: score, gradingResult
+    }])
 
     // 2026-08-04 固定扣除:學生自助批改=每次 1 點(billing 打到 owner;冪等靠 charged_graded_at)。
     try {
