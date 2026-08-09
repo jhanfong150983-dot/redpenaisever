@@ -4207,12 +4207,15 @@ async function q2Detail(supabaseAdmin, assignmentId) {
       for (const ca of (ra.cells || [])) {
         const cb = cbById.get(ca.qid); if (!cb) continue
         const cls = q2CellClass(cb)
-        const t = crossTypes[cls] ?? (crossTypes[cls] = { pairs: 0, flips: 0, scoreChanges: 0 })
+        const t = crossTypes[cls] ?? (crossTypes[cls] = { pairs: 0, flips: 0, scoreChanges: 0, exceed: 0 })
         t.pairs++
         const flip = ca.ok !== cb.ok
         if (flip) t.flips++
         if (Number(ca.score) !== Number(cb.score)) t.scoreChanges++
-        if (flip || (cls === 'subjective' && Math.abs(Number(ca.score) - Number(cb.score)) > 2)) {
+        // exceed=超出容忍的格次:對錯翻盤一律算;簡答另加分差>2(±2 分=user 可接受的語意浮動)
+        const exceed = flip || (cls === 'subjective' && Math.abs(Number(ca.score) - Number(cb.score)) > 2)
+        if (exceed) t.exceed++
+        if (exceed) {
           flippedCells.push({
             submissionId: subId, seat: seatBySub.get(subId), qid: ca.qid, type: cb.type, cls, sameConfig: same,
             a: { gradedAt: Number(ra.graded_at), ok: ca.ok, score: ca.score, ans: ca.ans, journey: ca.journey, votes: ca.votes ?? null, reason: ca.reason },
@@ -4228,7 +4231,9 @@ async function q2Detail(supabaseAdmin, assignmentId) {
     types: Object.fromEntries(Object.entries(crossTypes).map(([k, v]) => {
       const rate = v.pairs ? v.flips / v.pairs : 0
       const threshold = Q2_THRESHOLDS[k] ?? null
-      return [k, { ...v, rate, threshold, pass: threshold == null ? null : rate <= threshold }]
+      // 簡答無翻盤率門檻,但判定明確:零翻盤且零分差>2 → 過
+      const pass = threshold != null ? rate <= threshold : v.exceed === 0
+      return [k, { ...v, rate, threshold, pass }]
     })),
     flippedCells: flippedCells.slice(0, 200)
   }
