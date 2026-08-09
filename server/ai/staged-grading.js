@@ -726,6 +726,20 @@ const READ_SHEET_ENABLED = process.env.READ_SHEET !== '0'
 const READ_SHEET_MAX_CELLS = Math.max(2, Number(process.env.READ_SHEET_MAX_CELLS) || 20) // 沙盒驗到 20 格/張
 const SHEET_CELL_W = 460, SHEET_LABEL_H = 30, SHEET_GAP = 8
 
+// ⭐ 2026-08-09 合成圖只收「印刷記號類」家族（英語 3-E-7 逗號事故定案）─────────────────
+//   Gemini 3.x 每個 image part 是**固定 token 預算**：逐張時每格獨享 560 tok（MEDIUM），
+//   合成圖是 N 格共享同一份 → 每格有效解析度 ≈ 1/N。印刷大字母（A/B/C、✓）扛得住
+//   （座7 沙盒 18/18）；**手寫長文的標點與拼字細節扛不住**——英語 R3 實錘：
+//   3-E-7「Yes, it is.」被讀成「Yes it is」（逗號消失、同一題 9 卷、accessor 依標點扣分＝冤枉），
+//   3-E-6「dollars」讀成「dollers」。fill_blank 240 格翻盤 15、方向 13 對→錯。
+//   → text/compound/ordering/draw 一律回逐張（每格獨享預算），只有 choice/check 家族合成。
+//   成本代價：英語 +~NT$0.4/份、國語 +~NT$0.5/份（short_answer 10 格），read 淨省仍 −60% 上下。
+export const SHEET_SAFE_FAMILIES = new Set(['choice', 'check'])
+export const SHEET_SAFE_TYPES = new Set([
+  'single_choice', 'multi_choice', 'true_false',
+  'single_check', 'multi_check', 'circle_select_one', 'circle_select_many'
+])
+
 export function readSheetEnabledFor(domainHint) {
   if (!READ_SHEET_ENABLED) return false
   const only = String(process.env.READ_SHEET_DOMAINS || '').trim()
@@ -10004,7 +10018,8 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
           }
           // ── 2026-08-07 合成圖 read：N 張裁圖 → 少數幾張大圖（圖片 token −94%、見 buildReadSheets 註解）──
           //   ordering(freshCrop、batch 1) 與單格批次不合成；任何失敗 fail-open 走逐張。
-          const sheets = (readSheetEnabledFor(internalContext?.domainHint) && !cfg.freshCrop && cells.length >= 2)
+          const sheets = (readSheetEnabledFor(internalContext?.domainHint) && !cfg.freshCrop
+              && SHEET_SAFE_FAMILIES.has(cfg.family) && cells.length >= 2)   // 2026-08-09 長文家族回逐張（見 SHEET_SAFE_FAMILIES）
             ? await buildReadSheets(cells) : null
           if (sheets) {
             const labelById = new Map(cells.map((c) => [c.questionId, c.label]))
@@ -10126,15 +10141,27 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       const hideAnswer = ORDERING_AI2_BLIND && q.questionType === 'ordering'
       sheetItems.push({ questionId: String(q.questionId), crop, ai2Suffix: (correctAnswer && !hideAnswer) ? `（正確答案：${correctAnswer}）` : '' })
     }
-    const sheets = (readSheetEnabledFor(internalContext?.domainHint) && sheetItems.length >= 2)
-      ? await buildReadSheets(sheetItems) : null
+    // 2026-08-09 長文題型回逐張（見 SHEET_SAFE_TYPES）：sheet 只收印刷記號類、其餘附獨立 crop part
+    const typeById = new Map(classifyAligned.map((q) => [String(q.questionId), q.questionType]))
+    const sheetSafeItems = sheetItems.filter((it) => SHEET_SAFE_TYPES.has(typeById.get(it.questionId)))
+    const looseItems = sheetItems.filter((it) => !SHEET_SAFE_TYPES.has(typeById.get(it.questionId)))
+    const sheets = (readSheetEnabledFor(internalContext?.domainHint) && sheetSafeItems.length >= 2)
+      ? await buildReadSheets(sheetSafeItems) : null
     let ai1Parts, ai2Parts
     if (sheets) {
       const sufById = new Map(sheetItems.map((it) => [it.questionId, it.ai2Suffix]))
       ai1Parts = [{ text: ai1TextPrompt + sheetNoteOf(sheets.flatMap((s) => s.ids)) }]
       ai2Parts = [{ text: globalReadPrompt + sheetNoteOf(sheets.flatMap((s) => s.ids.map((id) => `${id}${sufById.get(id) || ''}`))) }]
       for (const s of sheets) { ai1Parts.push({ inlineData: s.inlineData }); ai2Parts.push({ inlineData: s.inlineData }) }
-      logStaged(pipelineRunId, 'basic', `[A2] 合成圖 read：${sheetItems.length} 格 → ${sheets.length} 張大圖（圖片 part ${sheetItems.length}→${sheets.length}）`)
+      // 長文題逐張附在合成圖之後（與 else 分支同格式）
+      for (const it of looseItems) {
+        const t = typeById.get(it.questionId)
+        ai1Parts.push({ text: `--- 題目 ${it.questionId}（類型：${t}）---` })
+        ai1Parts.push({ inlineData: it.crop })
+        ai2Parts.push({ text: `--- 題目 ${it.questionId}（類型：${t}${it.ai2Suffix ? `，正確答案：${it.ai2Suffix.replace(/^（正確答案：|）$/g, '')}` : ''}）---` })
+        ai2Parts.push({ inlineData: it.crop })
+      }
+      logStaged(pipelineRunId, 'basic', `[A2] 合成圖 read：記號類 ${sheetSafeItems.length} 格 → ${sheets.length} 張大圖、長文逐張 ${looseItems.length} 格`)
     } else {
     ai1Parts = [{ text: ai1TextPrompt }]
     for (const q of classifyAligned) {
