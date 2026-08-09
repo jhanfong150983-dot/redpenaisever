@@ -4099,8 +4099,10 @@ async function q2Assignments(supabaseAdmin) {
   }
   const byAsg = new Map()
   for (const r of rows) {
-    const g = byAsg.get(r.assignment_id) ?? { subs: new Set(), snapshots: 0, times: [], last: 0 }
-    g.subs.add(r.submission_id); g.snapshots++; g.times.push(Number(r.graded_at)); g.last = Math.max(g.last, Number(r.graded_at))
+    const g = byAsg.get(r.assignment_id) ?? { subRuns: new Map(), snapshots: 0, last: 0 }
+    const runs = g.subRuns.get(r.submission_id) ?? new Set()
+    runs.add(Number(r.graded_at)); g.subRuns.set(r.submission_id, runs)
+    g.snapshots++; g.last = Math.max(g.last, Number(r.graded_at))
     byAsg.set(r.assignment_id, g)
   }
   const ids = [...byAsg.keys()]
@@ -4113,11 +4115,14 @@ async function q2Assignments(supabaseAdmin) {
     for (const a of asgs || []) { titleById.set(a.id, { title: a.title, domain: a.domain, classroom: crById.get(a.classroom_id) ?? '' }) }
   }
   const list = [...byAsg.entries()].map(([id, g]) => {
-    // 輪數=graded_at 依 10 分鐘空檔聚類
-    const ts = [...g.times].sort((a, b) => a - b)
-    let rounds = ts.length ? 1 : 0
-    for (let i = 1; i < ts.length; i++) if (ts[i] - ts[i - 1] > 10 * 60000) rounds++
-    return { id, ...(titleById.get(id) ?? { title: id, domain: '', classroom: '' }), papers: g.subs.size, snapshots: g.snapshots, rounds, lastGradedAt: g.last }
+    // 輪數=單卷最多幾個不同 graded_at(跟 B 層「同卷相鄰快照對」判準一致;
+    //   時間聚類會把 10 分鐘內的兩次重批併成一輪 → 明明可比卻顯示 1,已棄用)
+    let rounds = 0, comparablePapers = 0
+    for (const runs of g.subRuns.values()) {
+      rounds = Math.max(rounds, runs.size)
+      if (runs.size >= 2) comparablePapers++
+    }
+    return { id, ...(titleById.get(id) ?? { title: id, domain: '', classroom: '' }), papers: g.subRuns.size, snapshots: g.snapshots, rounds, comparablePapers, lastGradedAt: g.last }
   }).sort((a, b) => b.lastGradedAt - a.lastGradedAt)
   return { assignments: list }
 }
