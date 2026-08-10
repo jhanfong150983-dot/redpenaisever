@@ -2786,6 +2786,58 @@ export function gradeMultiFillLetterSet(q, studentAnswerRaw, status) {
   }
 }
 
+// 2026-08-10 勾選/圈選題確定性計分（single_check / multi_check / circle_select_one）。
+// 依據：90 天全庫盤點（local-only/exp-code-gradable-audit.mjs）——single_check 517 格解析 100%/與 AI 一致 100%、
+//   multi_check 297 格 99.7%/100%、circle_select_one 714 格 95%/99.9%（唯一不一致=學生「b」標答「b」被 accessor
+//   誤殺 0 分、code 判對）→ accessor 在這三型上零語意價值、只有雜訊。判分方法分類=①完全比對/②集合比對。
+// gate：讀值與正解都要能化成同 kind 的 canonical token（字母集合 / ①②③/第X個/數字序號集合）；
+//   化不成（含 ?/無法辨識/位置詞）→ 不收編、照舊交 accessor。single/circle_select_one 兩側都須恰好 1 個 token。
+// multi_check＝集合全等（全有全無；盤點資料中 AI 現判即如此、無部分給分先例）。
+// kill switch: CHECKSELECT_DETERMINISTIC_ENABLED='false'。
+const CS_CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩'
+function checkSelectTokens(rawInput) {
+  const s = ensureString(rawInput, '').trim()
+  if (!s || s.includes('?')) return null
+  // 純字母（集合）："B"、"A,C"、"AC"、"A、C"
+  const letters = s.toUpperCase().replace(/[\s,，、;；.．]+/g, '')
+  if (/^[A-J]{1,6}$/.test(letters)) return { kind: 'letters', set: [...new Set([...letters])].sort() }
+  // 圈選序號：①③ / 第1個、第 3 個 / "1,3"
+  let nums = []
+  for (const ch of s) { const i = CS_CIRCLED.indexOf(ch); if (i >= 0) nums.push(i + 1) }
+  const seq = s.match(/第\s*(\d+)\s*個/g)
+  if (seq) nums.push(...seq.map((x) => Number(x.match(/\d+/)[0])))
+  if (!nums.length && /^[\d\s,，、]+$/.test(s)) nums = s.split(/[\s,，、]+/).filter(Boolean).map(Number)
+  nums = [...new Set(nums)].filter((n) => Number.isInteger(n) && n >= 1 && n <= 20)
+  if (nums.length) return { kind: 'nums', set: nums.sort((a, b) => a - b).map(String) }
+  return null
+}
+export function gradeCheckSelectDeterministic(q, studentAnswerRaw, status) {
+  const cat = q?.questionCategory ?? q?.questionType
+  // ⚠️ multi_check 暫不收編:回放反向檢查發現 production accessor 對它有「部分給分」（46/297 格），
+  //   且規則自相矛盾（對1錯1→1分、對2錯1→也1分）——部分給分規則需 user 拍板後另立（比照 multi_fill 慣例候選）。
+  if (cat !== 'single_check' && cat !== 'circle_select_one') return { gradable: false }
+  const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+  const key = ensureString(q?.answer, '').trim()
+  if (!maxScore || !key) return { gradable: false }
+  if (status === 'blank') return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'blank', scoringReason: '學生未作答' }
+  if (status === 'unreadable') return { gradable: false }
+  const kv = checkSelectTokens(key)
+  if (!kv) return { gradable: false }
+  const sv = checkSelectTokens(studentAnswerRaw)
+  if (!sv || sv.kind !== kv.kind) return { gradable: false }
+  const single = cat !== 'multi_check'
+  if (single && (kv.set.length !== 1 || sv.set.length !== 1)) return { gradable: false }
+  const ok = sv.set.length === kv.set.length && sv.set.every((t, i) => t === kv.set[i])
+  const fmt = (v) => v.set.join(',')
+  return {
+    gradable: true, isCorrect: ok, score: ok ? maxScore : 0, maxScore,
+    errorType: ok ? 'none' : 'concept',
+    scoringReason: ok
+      ? `學生選「${fmt(sv)}」，答案正確`
+      : `學生選「${fmt(sv)}」，正確答案為「${fmt(kv)}」，勾選錯誤`
+  }
+}
+
 export function gradeObjectiveDeterministic(q, studentAnswerRaw, status) {
   const cat = q?.questionCategory
   const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
@@ -13142,6 +13194,42 @@ export async function runStagedGradingPhaseB({
     }
     if (odCount > 0) {
       logStaged(pipelineRunId, 'basic', `[B-Phase0b3] ordering 錯格扣分 code-bypass（不送 Accessor）`, { count: odCount })
+    }
+  }
+
+  // Phase 0b-4 (2026-08-10)：勾選/圈選題（single_check / multi_check / circle_select_one）code 直判、不送 Accessor。
+  //   依據=90 天全庫回放：兩型收編 1,168 格、1,167 格與現判同分、唯一變分=補一格舊資料缺分（正確答案 undefined→滿分）。
+  //   multi_check 因部分給分規則未拍板、暫不收（見 gradeCheckSelectDeterministic 註解）。
+  //   gate 全在 gradeCheckSelectDeterministic 內（雙側 canonical token 同 kind 才收；位置詞/混寫→照舊 accessor）。
+  //   kill switch: CHECKSELECT_DETERMINISTIC_ENABLED='false'。
+  if (process.env.CHECKSELECT_DETERMINISTIC_ENABLED !== 'false') {
+    let csCount = 0
+    for (const ans of finalReadAnswerResult.answers) {
+      const qid = ensureString(ans?.questionId).trim()
+      if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
+      const q = akQById.get(qid)
+      if (!q) continue
+      const res = gradeCheckSelectDeterministic(q, ans.studentAnswerRaw, ans.status)
+      if (!res.gradable) continue
+      objectiveBypassIds.add(qid)
+      csCount++
+      deterministicScores.push({
+        questionId: qid,
+        isCorrect: res.isCorrect,
+        score: res.score,
+        maxScore: res.maxScore,
+        errorType: res.errorType,
+        reason: res.scoringReason,
+        scoringReason: res.scoringReason,
+        confidence: 100,
+        scoreConfidence: 100,
+        studentFinalAnswer: ensureString(ans.studentAnswerRaw, ''),
+        needExplain: !res.isCorrect && res.errorType !== 'blank',
+        _objectiveBypass: true
+      })
+    }
+    if (csCount > 0) {
+      logStaged(pipelineRunId, 'basic', `[B-Phase0b4] 勾選/圈選 code-bypass（不送 Accessor）`, { count: csCount })
     }
   }
 
