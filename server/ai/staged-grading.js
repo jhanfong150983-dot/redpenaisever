@@ -2813,9 +2813,7 @@ function checkSelectTokens(rawInput) {
 }
 export function gradeCheckSelectDeterministic(q, studentAnswerRaw, status) {
   const cat = q?.questionCategory ?? q?.questionType
-  // ⚠️ multi_check 暫不收編:回放反向檢查發現 production accessor 對它有「部分給分」（46/297 格），
-  //   且規則自相矛盾（對1錯1→1分、對2錯1→也1分）——部分給分規則需 user 拍板後另立（比照 multi_fill 慣例候選）。
-  if (cat !== 'single_check' && cat !== 'circle_select_one') return { gradable: false }
+  if (cat !== 'single_check' && cat !== 'circle_select_one' && cat !== 'multi_check') return { gradable: false }
   const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
   const key = ensureString(q?.answer, '').trim()
   if (!maxScore || !key) return { gradable: false }
@@ -2825,10 +2823,26 @@ export function gradeCheckSelectDeterministic(q, studentAnswerRaw, status) {
   if (!kv) return { gradable: false }
   const sv = checkSelectTokens(studentAnswerRaw)
   if (!sv || sv.kind !== kv.kind) return { gradable: false }
-  const single = cat !== 'multi_check'
-  if (single && (kv.set.length !== 1 || sv.set.length !== 1)) return { gradable: false }
-  const ok = sv.set.length === kv.set.length && sv.set.every((t, i) => t === kv.set[i])
   const fmt = (v) => v.set.join(',')
+  if (cat === 'multi_check') {
+    // 2026-08-10 user 拍板「比照 multi_fill 慣例」：對一項給該項配分（maxScore/正解項數）、
+    //   錯勾一項扣 1 分、下限 0。取代 accessor 時代自相矛盾的部分給分（對1錯1→1分、對2錯1→也1分同卷並存）。
+    const keySet = new Set(kv.set)
+    const hits = sv.set.filter((t) => keySet.has(t))
+    const wrongs = sv.set.filter((t) => !keySet.has(t))
+    const per = maxScore / keySet.size
+    const score = Math.max(0, Math.min(maxScore, roundToTenth(hits.length * per - wrongs.length)))
+    const isCorrect = hits.length === keySet.size && wrongs.length === 0
+    return {
+      gradable: true, isCorrect, score, maxScore,
+      errorType: isCorrect ? 'none' : 'concept',
+      scoringReason: isCorrect
+        ? `學生勾選「${fmt(sv)}」，答案正確`
+        : `學生勾選「${fmt(sv)}」，正解「${fmt(kv)}」：答對 ${hits.length} 項（+${roundToTenth(hits.length * per)} 分）${wrongs.length ? `、錯勾 ${wrongs.length} 項（−${wrongs.length} 分）` : ''}→ ${score} 分`
+    }
+  }
+  if (kv.set.length !== 1 || sv.set.length !== 1) return { gradable: false }
+  const ok = sv.set[0] === kv.set[0]
   return {
     gradable: true, isCorrect: ok, score: ok ? maxScore : 0, maxScore,
     errorType: ok ? 'none' : 'concept',
@@ -13199,7 +13213,7 @@ export async function runStagedGradingPhaseB({
 
   // Phase 0b-4 (2026-08-10)：勾選/圈選題（single_check / multi_check / circle_select_one）code 直判、不送 Accessor。
   //   依據=90 天全庫回放：兩型收編 1,168 格、1,167 格與現判同分、唯一變分=補一格舊資料缺分（正確答案 undefined→滿分）。
-  //   multi_check 因部分給分規則未拍板、暫不收（見 gradeCheckSelectDeterministic 註解）。
+  //   multi_check 部分給分規則 2026-08-10 user 拍板「比照 multi_fill 慣例」後一併收編（對一項給該項配分、錯勾扣1、下限0）。
   //   gate 全在 gradeCheckSelectDeterministic 內（雙側 canonical token 同 kind 才收；位置詞/混寫→照舊 accessor）。
   //   kill switch: CHECKSELECT_DETERMINISTIC_ENABLED='false'。
   if (process.env.CHECKSELECT_DETERMINISTIC_ENABLED !== 'false') {

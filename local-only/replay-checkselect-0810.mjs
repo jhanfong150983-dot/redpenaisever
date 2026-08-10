@@ -43,4 +43,4 @@ for (const a of asgs || []) {
   }
 }
 console.log(`格數 ${stat.cells}・收編 ${stat.gradable}(${(100 * stat.gradable / stat.cells).toFixed(1)}%)・同分 ${stat.same}・變分 ${stat.changed.length}`)
-const byCat={}; for (const c of stat.changed) byCat[c.cat]=(byCat[c.cat]||0)+1; console.log('變分分佈:',JSON.stringify(byCat)); for (const c of stat.changed.filter(x=>x.cat!=='multi_check')) console.log(` ✦[${c.asg}]${c.qid}(${c.cat}) 學生「${c.stu}」標答「${c.key}」 ${c.old} → ${c.neu} 分`)
+const byCat={}; for (const c of stat.changed) byCat[c.cat]=(byCat[c.cat]||0)+1; console.log('變分分佈:',JSON.stringify(byCat)); const mv={}; for (const c of stat.changed.filter(x=>x.cat==='multi_check')) { const k=c.old+'→'+c.neu; mv[k]=(mv[k]||0)+1 } console.log('multi_check 變分樣態:',JSON.stringify(mv)); for (const c of stat.changed.filter(x=>x.cat!=='multi_check')) console.log(` ✦[${c.asg}]${c.qid}(${c.cat}) 學生「${c.stu}」標答「${c.key}」 ${c.old} → ${c.neu} 分`)
