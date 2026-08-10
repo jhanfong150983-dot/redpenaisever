@@ -2852,6 +2852,67 @@ export function gradeCheckSelectDeterministic(q, studentAnswerRaw, status) {
   }
 }
 
+// 2026-08-11 數學終答確定性計分(word_problem / calculation)。
+// 依據:90 天全庫回放(local-only/exp-math-final-answer-code.mjs)——收編 70.1%、與 production 同分 96.8%、
+//   58 格差異全數 code 更對(27 格 accessor 違反二元判分自由扣過程分/單位分、12 格 cm³=立方公分被誤殺、17 格缺單位照政策歸零)。
+// gate(化不成 → 照舊交 accessor):
+//   - 標答帶「約」(估算題、容差=裁量區)、多值複合答案、非「數值+單位」形狀 → 不收
+//   - processCreditRule 開啟且學生數值錯 → 不收(過程分救濟要走 accessor 窄判定流程)
+// 單位同義表:cm³=立方公分 等;標答無單位 → 學生單位不比。kill switch: MATHFINAL_DETERMINISTIC_ENABLED='false'。
+const MATH_UNIT_GROUPS = [
+  ['cm3', '立方公分', '立方厘米', 'cm³'], ['m3', '立方公尺', 'm³'],
+  ['cm2', '平方公分', '平方厘米', 'cm²'], ['m2', '平方公尺', 'm²'], ['km2', '平方公里', 'km²'],
+  ['cm', '公分', '厘米'], ['m', '公尺', '米'], ['km', '公里', '千米'], ['mm', '毫米', '公釐'],
+  ['kg', '公斤', '千克'], ['g', '公克', '克'],
+  ['l', '公升', '升', 'L'], ['ml', '毫升', 'mL', 'cc'],
+  ['元', '塊', '塊錢'], ['分鐘', '分', 'min'], ['小時', '時', 'hr', 'h'], ['秒', 's', 'sec'],
+]
+const MATH_UNIT_CANON = (() => {
+  const m = new Map()
+  for (const g of MATH_UNIT_GROUPS) for (const u of g) m.set(u.toLowerCase(), g[0])
+  return m
+})()
+function parseMathFinal(rawInput) {
+  let s = ensureString(rawInput, '').trim()
+  if (!s || s === '未作答' || s === '無法辨識') return null
+  const isApprox = /^約|^大約|≈/.test(s)
+  s = s.replace(/^[Aa][:：]\s*/, '').replace(/^答[:：]?\s*/, '').replace(/^約|^大約/g, '').trim()
+  s = s.replace(/[，,]/g, '')
+  const m = s.match(/^(-?\d+(?:\.\d+)?)\s*(.*)$/)
+  if (!m) return null
+  const num = Number(m[1])
+  const unitRaw = m[2].trim().replace(/[。.\s]+$/g, '').replace(/後$/, '')
+  if (/[()（）:：=+\-×x*÷/]/.test(unitRaw) || /\d/.test(unitRaw) || unitRaw.length > 6) return null
+  const unit = unitRaw ? (MATH_UNIT_CANON.get(unitRaw.toLowerCase()) ?? unitRaw.toLowerCase()) : ''
+  return { num, unit, hadUnit: !!unitRaw, isApprox }
+}
+export function gradeMathFinalDeterministic(q, studentAnswerRaw, status, answerKey) {
+  const cat = q?.questionCategory ?? q?.questionType
+  if (cat !== 'word_problem' && cat !== 'calculation') return { gradable: false }
+  const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+  if (!maxScore) return { gradable: false }
+  const kv = parseMathFinal(q?.answer ?? q?.referenceAnswer)
+  if (!kv || kv.isApprox) return { gradable: false }
+  if (status === 'blank') return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'blank', scoringReason: '學生未作答' }
+  if (status === 'unreadable') return { gradable: false }
+  const sv = parseMathFinal(studentAnswerRaw)
+  if (!sv) return { gradable: false }
+  const raw = ensureString(studentAnswerRaw, '').trim()
+  const keyText = ensureString(q?.answer ?? q?.referenceAnswer, '').trim()
+  if (sv.num !== kv.num) {
+    // 數值錯:過程分規則開啟時交 accessor 走窄判定救濟,否則 0
+    if (ensureString(answerKey?.processCreditRule, 'none') !== 'none') return { gradable: false }
+    return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'calculation', scoringReason: `學生答句「${raw}」，正確答案為「${keyText}」，答案數值錯誤` }
+  }
+  if (kv.hadUnit && sv.unit !== kv.unit) {
+    const rule = ensureString(answerKey?.unitErrorRule, 'zero')
+    const score = rule === 'half' ? roundToTenth(maxScore / 2) : rule === 'deduct' ? Math.max(0, maxScore - (toFiniteNumber(answerKey?.unitErrorDeduction) ?? 1)) : 0
+    const kind = sv.hadUnit ? '單位錯誤' : '缺少單位'
+    return { gradable: true, isCorrect: false, score, maxScore, errorType: 'unit', scoringReason: `學生答句「${raw}」數值正確，但${kind}（正確答案「${keyText}」）` }
+  }
+  return { gradable: true, isCorrect: true, score: maxScore, maxScore, errorType: 'none', scoringReason: `答句「${raw}」正確` }
+}
+
 export function gradeObjectiveDeterministic(q, studentAnswerRaw, status) {
   const cat = q?.questionCategory
   const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
@@ -13244,6 +13305,41 @@ export async function runStagedGradingPhaseB({
     }
     if (csCount > 0) {
       logStaged(pipelineRunId, 'basic', `[B-Phase0b4] 勾選/圈選 code-bypass（不送 Accessor）`, { count: csCount })
+    }
+  }
+
+  // Phase 0b-5 (2026-08-11)：數學終答 code 直判（word_problem / calculation、不送 Accessor）。
+  //   起因=回放抓到 accessor 違反二元判分自由扣分 58 格（過程扣1/缺單位扣1 同卷雙標）+ cm³ 誤殺 12 格。
+  //   gate 全在 gradeMathFinalDeterministic（估算題/複合答案/processCreditRule 且數值錯 → 照舊 accessor）。
+  //   kill switch: MATHFINAL_DETERMINISTIC_ENABLED='false'。
+  if (process.env.MATHFINAL_DETERMINISTIC_ENABLED !== 'false') {
+    let mfdCount = 0
+    for (const ans of finalReadAnswerResult.answers) {
+      const qid = ensureString(ans?.questionId).trim()
+      if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
+      const q = akQById.get(qid)
+      if (!q) continue
+      const res = gradeMathFinalDeterministic(q, ans.studentAnswerRaw, ans.status, answerKey)
+      if (!res.gradable) continue
+      objectiveBypassIds.add(qid)
+      mfdCount++
+      deterministicScores.push({
+        questionId: qid,
+        isCorrect: res.isCorrect,
+        score: res.score,
+        maxScore: res.maxScore,
+        errorType: res.errorType,
+        reason: res.scoringReason,
+        scoringReason: res.scoringReason,
+        confidence: 100,
+        scoreConfidence: 100,
+        studentFinalAnswer: ensureString(ans.studentAnswerRaw, ''),
+        needExplain: !res.isCorrect && res.errorType !== 'blank',
+        _objectiveBypass: true
+      })
+    }
+    if (mfdCount > 0) {
+      logStaged(pipelineRunId, 'basic', `[B-Phase0b5] 數學終答 code-bypass（不送 Accessor）`, { count: mfdCount })
     }
   }
 
