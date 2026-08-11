@@ -14349,9 +14349,9 @@ export async function runStagedGradingPhaseB({
   //   kill switch: SEMANTIC_TABLE_ENABLED='false'。
   // ⚠️ 2026-08-11 事故修正:本 stage 原排在字形判官「之前」,首建表投票把 Phase B 時間預算燒光,
   //   判官階段(預算 <90s 即跳過)整批被跳過 → 注音格 fallback accessor 拿「圖像辨識」佔位字串判 0 分。
-  //   修法:①搬到所有影像/判官 stage 之後、accessor 之前 ②預設關(SEMANTIC_TABLE_ENABLED='1' 才開)
-  //   ③deadline 不得吃掉 accessor 餘裕。
-  if (process.env.SEMANTIC_TABLE_ENABLED === '1') {
+  //   修法:①搬到所有影像/判官 stage 之後、accessor 之前 ②deadline 不得吃掉 accessor 餘裕。
+  //   2026-08-11 user 拍板恢復預設開(誤殺修+順序修後、單份先測)。kill switch:='false'。
+  if (process.env.SEMANTIC_TABLE_ENABLED !== 'false') {
     const semDomainOk = ensureString(payload?.domain ?? internalContext?.domainHint, '').includes('國')
     if (semDomainOk) {
       try {
