@@ -44,6 +44,7 @@ import {
   aggregateVjScore
 } from './visual-judgment-grader.js'
 import { getSupabaseAdmin } from '../_supabase.js'
+import { normSemanticValue, resolveSemanticScopeKey, loadSemanticTable, judgeAndFreezeValue, composeCellFromEntry } from './semantic-score-table.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -2891,7 +2892,11 @@ export function gradeMathFinalDeterministic(q, studentAnswerRaw, status, answerK
   if (cat !== 'word_problem' && cat !== 'calculation') return { gradable: false }
   const maxScore = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
   if (!maxScore) return { gradable: false }
-  const kv = parseMathFinal(q?.answer ?? q?.referenceAnswer)
+  // 標答含「答:」「=」→ 交給既有的程式化覆核(buildFinalGradingResult 8367 起、extractFinalAnswerFromCalc 形狀)
+  //   ——兩套終答機制各管一種答案形狀,避免邊角重疊(對+無步驟→0 的抄答案政策屬那一套)。
+  const keyShape = ensureString(q?.answer ?? q?.referenceAnswer, '')
+  if (/[=]|答[:：]/.test(keyShape)) return { gradable: false }
+  const kv = parseMathFinal(keyShape)
   if (!kv || kv.isApprox) return { gradable: false }
   if (status === 'blank') return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'blank', scoringReason: '學生未作答' }
   if (status === 'unreadable') return { gradable: false }
@@ -8497,6 +8502,7 @@ function buildFinalGradingResult({
       let base = 88, journey = 'accessor語意'
       if (row.finalAnswerSource === 'manual') { base = 100; journey = '人工輸入直判' }
       else if (row.studentAnswer === '無法辨識' && row.score === 0) { base = 65; journey = '雙無法辨識歸零' }
+      else if (score?._semanticTable) { base = score._semanticLowConf ? 65 : 90; journey = '語意查表' }
       else if (score?._objectiveBypass) { base = 99; journey = '選擇題code直判' }
       else if (score?._clozeBypass) { base = 99; journey = '克漏字code直判' }
       else if (score?._glyphCompose) { base = 95; journey = '部件重組code直判' }
@@ -13340,6 +13346,88 @@ export async function runStagedGradingPhaseB({
     }
     if (mfdCount > 0) {
       logStaged(pipelineRunId, 'basic', `[B-Phase0b5] 數學終答 code-bypass（不送 Accessor）`, { count: mfdCount })
+    }
+  }
+
+  // Phase 0b-6 (2026-08-11)：值→分數表(查表制)pilot——國語 short_answer(帶 rubricsDimensions)。
+  //   同答同分同理由:查表命中→凍結結果(含錯字快取)直接用、零 AI;未命中→投票評分(2+平手加賽)→凍入表。
+  //   表掛 answer_key_template 跨班共用;重批不重建。全設計+沙盒依據=memory project_value_score_table_design_2026-08-11。
+  //   fail-open 原則:任何失敗(DDL 未跑/超時/預算不足)→ 該格照舊交 accessor,行為=現行。
+  //   kill switch: SEMANTIC_TABLE_ENABLED='false'。
+  if (process.env.SEMANTIC_TABLE_ENABLED !== 'false') {
+    const semDomainOk = ensureString(payload?.domain ?? internalContext?.domainHint, '').includes('國')
+    if (semDomainOk) {
+      try {
+        const semTargets = []
+        for (const ans of finalReadAnswerResult.answers) {
+          const qid = ensureString(ans?.questionId).trim()
+          if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
+          const q = akQById.get(qid)
+          if (!q || q.questionCategory !== 'short_answer') continue
+          if (!Array.isArray(q.rubricsDimensions) || q.rubricsDimensions.length === 0) continue
+          if (ans.status !== 'read') continue
+          const raw = ensureString(ans.studentAnswerRaw, '').trim()
+          if (!raw || raw === '未作答' || raw === '無法辨識') continue
+          semTargets.push({ q, qid, raw })
+        }
+        if (semTargets.length > 0 && getRemainingBudget() > 20_000) {
+          const supabaseSem = getSupabaseAdmin()
+          const semAssignmentId = internalContext?.assignmentId || payload?.assignmentId || null
+          const scopeKey = await resolveSemanticScopeKey(supabaseSem, semAssignmentId)
+          if (scopeKey) {
+            const table = await loadSemanticTable(supabaseSem, scopeKey, semTargets.map((t) => t.qid))
+            const mkAskJson = (pro) => async (promptText) => {
+              const resp = await executeStage({
+                apiKey, model: phaseBModel,
+                ...(pro ? { modelOverride: MODEL_PRO } : {}),   // charerr=判官家族、pin PRO(鏡像 B-CharErr)
+                payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
+                routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+                stageContents: [{ role: 'user', parts: [{ text: promptText }] }]
+              })
+              if (resp) stageResponses.push(resp)
+              if (!resp?.ok) return null
+              return parseCandidateJson(resp.data)
+            }
+            const askJson = mkAskJson(false)
+            const askJsonPro = mkAskJson(true)
+            let semHits = 0, semNew = 0
+            const misses = []
+            for (const t of semTargets) {
+              const entry = table.get(t.qid)?.get(normSemanticValue(t.raw))
+              if (entry) {
+                deterministicScores.push(composeCellFromEntry(entry, t.q, t.raw))
+                objectiveBypassIds.add(t.qid)
+                semHits++
+              } else {
+                misses.push(t)
+              }
+            }
+            const semDeadline = Date.now() + 90_000
+            let mi = 0
+            await Promise.all(Array.from({ length: Math.min(3, misses.length) }, async () => {
+              while (mi < misses.length) {
+                if (Date.now() > semDeadline || getRemainingBudget() < 15_000) return
+                const t = misses[mi++]
+                const anchors = [...(table.get(t.qid)?.values() ?? [])].slice(0, 12)
+                const entry = await judgeAndFreezeValue({
+                  supabase: supabaseSem, askJson, askJsonPro, scopeKey, q: t.q, raw: t.raw, anchors,
+                  model: phaseBModel, config: { src: 'phase0b6' }
+                })
+                if (!entry) continue
+                deterministicScores.push(composeCellFromEntry(entry, t.q, t.raw))
+                objectiveBypassIds.add(t.qid)
+                semNew++
+              }
+            }))
+            if (semHits + semNew > 0) {
+              logStaged(pipelineRunId, 'basic', `[B-Phase0b6] 語意查表(國語 short_answer)：命中 ${semHits}、新凍 ${semNew}、交 accessor ${semTargets.length - semHits - semNew}`)
+            }
+          }
+        }
+      } catch (e) {
+        logStaged(pipelineRunId, 'basic', `[B-Phase0b6] 語意查表失敗(fail-open 交 accessor)：${e?.message}`)
+      }
     }
   }
 
