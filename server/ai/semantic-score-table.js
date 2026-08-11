@@ -162,7 +162,16 @@ async function voteCharErr({ askJson, ref, stu, voteN = 3 }) {
 export async function judgeAndFreezeValue({ supabase, askJson, askJsonPro, scopeKey, q, raw, anchors, model, config }) {
   const valueNorm = normSemanticValue(raw)
   if (!valueNorm) return null
-  const sem = await voteSemantic({ askJson, q, raw, anchors })
+  // 字面吻合 code 短路(2026-08-11):正規化後與參考答案相同 → 滿分、零 AI。
+  //   實測證明必需:prompt 已有 HARD RULE+滿分錨點,2.5-flash 單值判仍會對「盡情飲酒。」扣表達分。
+  const refNorm = normSemanticValue(q.referenceAnswer ?? q.answer)
+  let sem
+  if (refNorm && valueNorm === refNorm) {
+    const dims = (q.rubricsDimensions || []).map((d) => ({ dimension: d.name, score: Number(d.maxScore) || 0, maxScore: Number(d.maxScore) || 0, reason: '與參考答案一致' }))
+    sem = { score: dims.reduce((acc, d) => acc + d.score, 0), rubricScores: dims, votes: [], verdict: 'unanimous', lowConf: false }
+  } else {
+    sem = await voteSemantic({ askJson, q, raw, anchors })
+  }
   if (!sem) return null
   const ref = String(q.referenceAnswer ?? q.answer ?? '').trim()
   const ce = sem.score > 0 ? await voteCharErr({ askJson: askJsonPro ?? askJson, ref, stu: raw }) : { count: 0, which: '' }
