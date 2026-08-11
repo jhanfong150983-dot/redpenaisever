@@ -164,9 +164,13 @@ export async function judgeAndFreezeValue({ supabase, askJson, askJsonPro, scope
   if (!valueNorm) return null
   // 字面吻合 code 短路(2026-08-11):正規化後與參考答案相同 → 滿分、零 AI。
   //   實測證明必需:prompt 已有 HARD RULE+滿分錨點,2.5-flash 單值判仍會對「盡情飲酒。」扣表達分。
-  const refNorm = normSemanticValue(q.referenceAnswer ?? q.answer)
+  // 頓號列舉(seat1 第二輪抓到):ref「依序、依次」=列舉可接受寫法、命中任一即滿分——
+  //   只切「、」(頓號=列舉慣例);「,」「，」不切(青青「指春天，因…」是複合成分、不是列舉)。
+  const refRaw = String(q.referenceAnswer ?? q.answer ?? '')
+  const refNorm = normSemanticValue(refRaw)
+  const refAlts = refRaw.includes('、') ? refRaw.split('、').map((x) => normSemanticValue(x)).filter(Boolean) : []
   let sem
-  if (refNorm && valueNorm === refNorm) {
+  if (refNorm && (valueNorm === refNorm || refAlts.includes(valueNorm))) {
     const dims = (q.rubricsDimensions || []).map((d) => ({ dimension: d.name, score: Number(d.maxScore) || 0, maxScore: Number(d.maxScore) || 0, reason: '與參考答案一致' }))
     sem = { score: dims.reduce((acc, d) => acc + d.score, 0), rubricScores: dims, votes: [], verdict: 'unanimous', lowConf: false }
   } else {

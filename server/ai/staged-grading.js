@@ -14749,6 +14749,9 @@ export async function runStagedGradingPhaseB({
   if (process.env.SHORTANS_CHARERR !== '0' && !precomputedAccessorContext && glyphDomainOk && Array.isArray(accessorResult?.scores)) {
     try {
       const saTargets = accessorResult.scores.filter((sc) => {
+        // 2026-08-11 seat1 實測抓到雙重扣錯字:語意查表格自帶 char_err 快取(建表時 3 票 PRO 判過)、
+        //   已在 composeCellFromEntry 扣完 → live charerr 不得再扣一次(「極速」2→1→0 案)。
+        if (sc?._semanticTable) return false
         const q = akQById.get(ensureString(sc?.questionId).trim())
         if (q?.questionCategory !== 'short_answer') return false
         // 2026-08-09 範圍從「已判對」擴到「score>0」：扣分表要求「部分保留 − 錯字」也能疊加到 0
