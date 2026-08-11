@@ -2762,11 +2762,13 @@ async function handleImportTemplate(req, res) {
 }
 
 // ═══ 同卷跨班比較(2026-08-11 任務②:跨 owner 唯讀匿名匯總) ═══════════════════
-// POST { assignmentId } → { classCount, byCode, byQuestion, answers } — 同卷全體(含呼叫者本班)的「匿名彙總」:
+// POST { assignmentId } → { classCount, byCode, byQuestion, answers, responses } — 同卷全體(含呼叫者本班)的「匿名彙總」:
 //   byCode     = 逐課綱指標 {full,partial,wrong,total,label}(概念雷達疊圖)
-//   byQuestion = 逐題 {full,partial,wrong,blank,total}(試題分析全體答對率)
+//   byQuestion = 逐題 {full,partial,wrong,blank,total}
 //   answers    = 逐題答案值分布 [{value,score,count}](樣態分析全體視角;每題 cap 60 種)
-// ⚠ 隱私(user 拍板):不回任何班級名稱/作業名稱/學生資料——除了總班數之外無法推論資料來源。
+//   responses  = 匿名作答向量 [{details:[{q,s,m,c,v}]}](試題分析全體重算用:P/D/高低分組/α 把多班當一個母體;
+//                無任何 id、列順序已打亂——除了總班數之外無法推論資料來源)
+// ⚠ 隱私(user 拍板):不回任何班級名稱/作業名稱/學生識別。
 // 授權:呼叫者必須是錨點作業 owner;跨 owner 只納入「與呼叫者同校(school_teachers active)」老師的同卷作業。
 // 同卷=answer_key_template 血緣家族(根+全部複製品);血緣 DDL 未跑 → 家族=自己(fail-open)。
 async function handleExamCompare(req, res) {
@@ -2827,6 +2829,7 @@ async function handleExamCompare(req, res) {
     const BLANKS = new Set(['', '未作答', '無法辨識'])
     const byCode = {}
     const byQuestion = {}
+    const responses = [] // 匿名作答向量(試題分析全體重算用);最後打亂順序、無任何識別
     const ansAcc = new Map() // qid → Map(`value\u0000score` → count)
     let classCount = 0
 
@@ -2856,6 +2859,7 @@ async function handleExamCompare(req, res) {
         if (sub.source === 'student_correction') continue
         let gr = sub.grading_result
         if (typeof gr === 'string') { try { gr = JSON.parse(gr) } catch { continue } }
+        const vector = []
         for (const d of gr?.details ?? []) {
           const qid = String(d?.questionId ?? '')
           if (!qid) continue
@@ -2882,6 +2886,9 @@ async function handleExamCompare(req, res) {
           am.set(ak2, (am.get(ak2) ?? 0) + 1)
           ansAcc.set(qid, am)
 
+          // 匿名作答向量(q=題號/s=得分/m=配分/c=是否全對/v=讀值)
+          vector.push({ q: qid, s: score, m: max, c: isFull, v: rawVal })
+
           // 逐指標彙總
           const concept = d?.conceptCode && d?.conceptLabel
             ? { code: d.conceptCode, label: d.conceptLabel }
@@ -2893,8 +2900,15 @@ async function handleExamCompare(req, res) {
           else if (isPartial) e.partial++
           else e.wrong++
         }
+        if (vector.length && responses.length < 2000) responses.push({ details: vector })
       }
       if (counted) classCount++
+    }
+
+    // 打亂列順序:去掉「逐班連續區塊」的可推論性(向量本身無任何識別欄位)
+    for (let i = responses.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[responses[i], responses[j]] = [responses[j], responses[i]]
     }
 
     const answers = {}
@@ -2907,7 +2921,7 @@ async function handleExamCompare(req, res) {
         .sort((x, y) => y.count - x.count)
         .slice(0, 60)
     }
-    res.status(200).json({ classCount, byCode, byQuestion, answers })
+    res.status(200).json({ classCount, byCode, byQuestion, answers, responses })
   } catch (err) {
     console.error('[exam-compare] failed:', err?.message)
     res.status(500).json({ error: err instanceof Error ? err.message : 'exam-compare failed' })
