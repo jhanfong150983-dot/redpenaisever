@@ -50,9 +50,10 @@ export async function loadSemanticTable(supabase, scopeKey, questionIds) {
 // 語意評分單值 prompt(鏡像沙盒驗證版+整數約束;anchors=既有表當量尺錨點)
 function buildSemanticJudgePrompt(q, raw, anchors) {
   const dims = (q.rubricsDimensions || []).map((d) => `  - ${d.name}(${d.maxScore} 分):${d.criteria}`).join('\n')
-  const anchorText = anchors.length
-    ? `\n【既有量尺(同題其他寫法的定案分數,評分時保持同一把尺)】\n${anchors.map((a) => `- 「${a.value_raw}」→ ${a.score} 分`).join('\n')}\n`
-    : ''
+  // 參考答案永遠當滿分錨點:空表時單值判也有量尺頂端(修首建表「嚴厲人格」誤殺)
+  const refAnchor = { value_raw: String(q.referenceAnswer ?? q.answer ?? ''), score: q.maxScore }
+  const allAnchors = [refAnchor, ...anchors]
+  const anchorText = `\n【既有量尺(定案分數,評分時保持同一把尺)】\n${allAnchors.map((a) => `- 「${a.value_raw}」→ ${a.score} 分`).join('\n')}\n`
   return `你是國小國語科的批改老師。請依 rubric 維度為以下學生作答評分。
 
 【題目資訊】
@@ -66,7 +67,8 @@ ${anchorText}
 - Grade by key concept presence using rubricsDimensions only. Do NOT use rubric 4-level fallback.
 - criteria 中「準確提及「X」」等描述的是「目標概念」而非逐字要求,不做關鍵字比對——只判斷學生答案是否表達相同意義。
 - referenceAnswer 是「範例答案」不是必要覆蓋清單。
-- 國語注釋題:referenceAnswer 本身 2-4 字(如「深藍」「回頭」)是正常的,字面吻合即應滿分,不因答案短而扣分。
+- 國語注釋題:referenceAnswer 本身 2-4 字(如「深藍」「回頭」)是正常的,不因答案短而扣分。
+- 🚨 HARD RULE:學生作答與參考答案「字面相同或僅標點/空白差異」→ 所有維度一律滿分,禁止以「釋義不完整」等理由扣分——參考答案本身就是滿分標準。
 - 你只判**語意**(保留=滿分/部分保留=部分分/語意改變=0),錯字**不影響你的給分**;
 - 🚨 絕對不要在 reason 裡寫「錯字不扣分」之類的說法;若學生有錯字,理由只需描述語意是否正確,不要對用字下結論。
 - 每個維度只依自己的 criteria 獨立判分,禁止連坐。
