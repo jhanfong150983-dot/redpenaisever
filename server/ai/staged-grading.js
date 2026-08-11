@@ -13349,87 +13349,6 @@ export async function runStagedGradingPhaseB({
     }
   }
 
-  // Phase 0b-6 (2026-08-11)：值→分數表(查表制)pilot——國語 short_answer(帶 rubricsDimensions)。
-  //   同答同分同理由:查表命中→凍結結果(含錯字快取)直接用、零 AI;未命中→投票評分(2+平手加賽)→凍入表。
-  //   表掛 answer_key_template 跨班共用;重批不重建。全設計+沙盒依據=memory project_value_score_table_design_2026-08-11。
-  //   fail-open 原則:任何失敗(DDL 未跑/超時/預算不足)→ 該格照舊交 accessor,行為=現行。
-  //   kill switch: SEMANTIC_TABLE_ENABLED='false'。
-  if (process.env.SEMANTIC_TABLE_ENABLED !== 'false') {
-    const semDomainOk = ensureString(payload?.domain ?? internalContext?.domainHint, '').includes('國')
-    if (semDomainOk) {
-      try {
-        const semTargets = []
-        for (const ans of finalReadAnswerResult.answers) {
-          const qid = ensureString(ans?.questionId).trim()
-          if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
-          const q = akQById.get(qid)
-          if (!q || q.questionCategory !== 'short_answer') continue
-          if (!Array.isArray(q.rubricsDimensions) || q.rubricsDimensions.length === 0) continue
-          if (ans.status !== 'read') continue
-          const raw = ensureString(ans.studentAnswerRaw, '').trim()
-          if (!raw || raw === '未作答' || raw === '無法辨識') continue
-          semTargets.push({ q, qid, raw })
-        }
-        if (semTargets.length > 0 && getRemainingBudget() > 20_000) {
-          const supabaseSem = getSupabaseAdmin()
-          const semAssignmentId = internalContext?.assignmentId || payload?.assignmentId || null
-          const scopeKey = await resolveSemanticScopeKey(supabaseSem, semAssignmentId)
-          if (scopeKey) {
-            const table = await loadSemanticTable(supabaseSem, scopeKey, semTargets.map((t) => t.qid))
-            const mkAskJson = (pro) => async (promptText) => {
-              const resp = await executeStage({
-                apiKey, model: phaseBModel,
-                ...(pro ? { modelOverride: MODEL_PRO } : {}),   // charerr=判官家族、pin PRO(鏡像 B-CharErr)
-                payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-                timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
-                routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
-                stageContents: [{ role: 'user', parts: [{ text: promptText }] }]
-              })
-              if (resp) stageResponses.push(resp)
-              if (!resp?.ok) return null
-              return parseCandidateJson(resp.data)
-            }
-            const askJson = mkAskJson(false)
-            const askJsonPro = mkAskJson(true)
-            let semHits = 0, semNew = 0
-            const misses = []
-            for (const t of semTargets) {
-              const entry = table.get(t.qid)?.get(normSemanticValue(t.raw))
-              if (entry) {
-                deterministicScores.push(composeCellFromEntry(entry, t.q, t.raw))
-                objectiveBypassIds.add(t.qid)
-                semHits++
-              } else {
-                misses.push(t)
-              }
-            }
-            const semDeadline = Date.now() + 90_000
-            let mi = 0
-            await Promise.all(Array.from({ length: Math.min(3, misses.length) }, async () => {
-              while (mi < misses.length) {
-                if (Date.now() > semDeadline || getRemainingBudget() < 15_000) return
-                const t = misses[mi++]
-                const anchors = [...(table.get(t.qid)?.values() ?? [])].slice(0, 12)
-                const entry = await judgeAndFreezeValue({
-                  supabase: supabaseSem, askJson, askJsonPro, scopeKey, q: t.q, raw: t.raw, anchors,
-                  model: phaseBModel, config: { src: 'phase0b6' }
-                })
-                if (!entry) continue
-                deterministicScores.push(composeCellFromEntry(entry, t.q, t.raw))
-                objectiveBypassIds.add(t.qid)
-                semNew++
-              }
-            }))
-            if (semHits + semNew > 0) {
-              logStaged(pipelineRunId, 'basic', `[B-Phase0b6] 語意查表(國語 short_answer)：命中 ${semHits}、新凍 ${semNew}、交 accessor ${semTargets.length - semHits - semNew}`)
-            }
-          }
-        }
-      } catch (e) {
-        logStaged(pipelineRunId, 'basic', `[B-Phase0b6] 語意查表失敗(fail-open 交 accessor)：${e?.message}`)
-      }
-    }
-  }
 
   // ── Phase 0c：句子克漏字（fill_blank 單一整句）確定性批改、不送 Accessor ─────────
   // 英語閱讀／聽力問答題答句整句、印刷字一定對 → 逐詞 LCS、分數=配分−錯詞數。詳見 gradeSentenceClozeDeterministic。
@@ -14422,6 +14341,92 @@ export async function runStagedGradingPhaseB({
 
   // 2026-05-20: manualBypassIds 由下方 Accessor input filter 處理
   // 不動 finalReadAnswerResult.answers 本身、保持完整、給 downstream（mergeResults / cross-stage QG）用
+
+  // Phase 0b-6 (2026-08-11)：值→分數表(查表制)pilot——國語 short_answer(帶 rubricsDimensions)。
+  //   同答同分同理由:查表命中→凍結結果(含錯字快取)直接用、零 AI;未命中→投票評分(2+平手加賽)→凍入表。
+  //   表掛 answer_key_template 跨班共用;重批不重建。全設計+沙盒依據=memory project_value_score_table_design_2026-08-11。
+  //   fail-open 原則:任何失敗(DDL 未跑/超時/預算不足)→ 該格照舊交 accessor,行為=現行。
+  //   kill switch: SEMANTIC_TABLE_ENABLED='false'。
+  // ⚠️ 2026-08-11 事故修正:本 stage 原排在字形判官「之前」,首建表投票把 Phase B 時間預算燒光,
+  //   判官階段(預算 <90s 即跳過)整批被跳過 → 注音格 fallback accessor 拿「圖像辨識」佔位字串判 0 分。
+  //   修法:①搬到所有影像/判官 stage 之後、accessor 之前 ②預設關(SEMANTIC_TABLE_ENABLED='1' 才開)
+  //   ③deadline 不得吃掉 accessor 餘裕。
+  if (process.env.SEMANTIC_TABLE_ENABLED === '1') {
+    const semDomainOk = ensureString(payload?.domain ?? internalContext?.domainHint, '').includes('國')
+    if (semDomainOk) {
+      try {
+        const semTargets = []
+        for (const ans of finalReadAnswerResult.answers) {
+          const qid = ensureString(ans?.questionId).trim()
+          if (!qid || manualBypassIds.has(qid) || objectiveBypassIds.has(qid)) continue
+          const q = akQById.get(qid)
+          if (!q || q.questionCategory !== 'short_answer') continue
+          if (!Array.isArray(q.rubricsDimensions) || q.rubricsDimensions.length === 0) continue
+          if (ans.status !== 'read') continue
+          const raw = ensureString(ans.studentAnswerRaw, '').trim()
+          if (!raw || raw === '未作答' || raw === '無法辨識') continue
+          semTargets.push({ q, qid, raw })
+        }
+        if (semTargets.length > 0 && getRemainingBudget() > 20_000) {
+          const supabaseSem = getSupabaseAdmin()
+          const semAssignmentId = internalContext?.assignmentId || payload?.assignmentId || null
+          const scopeKey = await resolveSemanticScopeKey(supabaseSem, semAssignmentId)
+          if (scopeKey) {
+            const table = await loadSemanticTable(supabaseSem, scopeKey, semTargets.map((t) => t.qid))
+            const mkAskJson = (pro) => async (promptText) => {
+              const resp = await executeStage({
+                apiKey, model: phaseBModel,
+                ...(pro ? { modelOverride: MODEL_PRO } : {}),   // charerr=判官家族、pin PRO(鏡像 B-CharErr)
+                payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+                timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
+                routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+                stageContents: [{ role: 'user', parts: [{ text: promptText }] }]
+              })
+              if (resp) stageResponses.push(resp)
+              if (!resp?.ok) return null
+              return parseCandidateJson(resp.data)
+            }
+            const askJson = mkAskJson(false)
+            const askJsonPro = mkAskJson(true)
+            let semHits = 0, semNew = 0
+            const misses = []
+            for (const t of semTargets) {
+              const entry = table.get(t.qid)?.get(normSemanticValue(t.raw))
+              if (entry) {
+                deterministicScores.push(composeCellFromEntry(entry, t.q, t.raw))
+                objectiveBypassIds.add(t.qid)
+                semHits++
+              } else {
+                misses.push(t)
+              }
+            }
+            const semDeadline = Date.now() + Math.max(10_000, Math.min(60_000, getRemainingBudget() - 45_000))
+            let mi = 0
+            await Promise.all(Array.from({ length: Math.min(3, misses.length) }, async () => {
+              while (mi < misses.length) {
+                if (Date.now() > semDeadline || getRemainingBudget() < 15_000) return
+                const t = misses[mi++]
+                const anchors = [...(table.get(t.qid)?.values() ?? [])].slice(0, 12)
+                const entry = await judgeAndFreezeValue({
+                  supabase: supabaseSem, askJson, askJsonPro, scopeKey, q: t.q, raw: t.raw, anchors,
+                  model: phaseBModel, config: { src: 'phase0b6' }
+                })
+                if (!entry) continue
+                deterministicScores.push(composeCellFromEntry(entry, t.q, t.raw))
+                objectiveBypassIds.add(t.qid)
+                semNew++
+              }
+            }))
+            if (semHits + semNew > 0) {
+              logStaged(pipelineRunId, 'basic', `[B-Phase0b6] 語意查表(國語 short_answer)：命中 ${semHits}、新凍 ${semNew}、交 accessor ${semTargets.length - semHits - semNew}`)
+            }
+          }
+        }
+      } catch (e) {
+        logStaged(pipelineRunId, 'basic', `[B-Phase0b6] 語意查表失敗(fail-open 交 accessor)：${e?.message}`)
+      }
+    }
+  }
 
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
