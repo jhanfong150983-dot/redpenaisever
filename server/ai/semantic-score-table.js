@@ -23,7 +23,19 @@ export async function resolveSemanticScopeKey(supabase, assignmentId) {
   if (!assignmentId) return null
   try {
     const { data } = await supabase.from('assignments').select('answer_key_template_id').eq('id', assignmentId).maybeSingle()
-    return data?.answer_key_template_id || assignmentId
+    const tplId = data?.answer_key_template_id
+    if (!tplId) return assignmentId
+    // 2026-08-11 跨班公平性:分享碼匯入=複製新 id → 血緣「根」才是跨 owner 共同的鍵。
+    //   解析到根=全校同卷共一張值→分數表(同答同分同理由跨老師成立)。
+    //   fail-open:DDL 未跑/查失敗 → 退回 template id(原行為;同 owner 跨班共用不受影響)。
+    try {
+      const { data: tpl } = await supabase
+        .from('answer_key_templates').select('source_template_id')
+        .eq('id', tplId).maybeSingle()
+      return tpl?.source_template_id || tplId
+    } catch {
+      return tplId
+    }
   } catch {
     return assignmentId
   }

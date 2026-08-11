@@ -2660,6 +2660,17 @@ async function handleImportTemplate(req, res) {
     const newId = `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`
     const nowIso = new Date().toISOString()
 
+    // 2026-08-11 血緣根鍵（跨班公平性）：複製品記住「根」模板 id——來源自己也是複製品就沿用它的根。
+    //   semantic_score_tables 的 scope 解析到根 → 全校同卷（不同 owner 的複製品）共用同一張值→分數表。
+    //   fail-open：DDL 未跑（欄位不存在）→ 查不到就當 null、insert 失敗會重試不帶欄位，匯入不受影響。
+    let lineageRootId = null
+    try {
+      const { data: lin } = await supabaseDb
+        .from('answer_key_templates').select('source_template_id')
+        .eq('id', source.id).maybeSingle()
+      lineageRootId = lin?.source_template_id || source.id
+    } catch { lineageRootId = source.id }
+
     // 2026-06-01: 把原圖（答案卷頁面 + 題本）複製一份到匯入者名下（path 把 entityId 段換成 newId）。
     const newAnswerSheetPaths = await copyTemplateStorageImages(supabaseDb, source.answer_sheet_image_paths, newId)
     const newBookletPaths = await copyTemplateStorageImages(supabaseDb, source.question_booklet_image_paths, newId)
@@ -2699,27 +2710,31 @@ async function handleImportTemplate(req, res) {
       console.warn('[import-template] crop copy failed (non-fatal):', e?.message)
     }
 
-    const { error: insertErr } = await supabaseDb
-      .from('answer_key_templates')
-      .insert({
-        id: newId,
-        owner_id: user.id,
-        name: source.name,
-        domain: source.domain,
-        doc_type: source.doc_type,
-        answer_key: copiedAnswerKey,
-        question_count: source.question_count,
-        total_score: source.total_score,
-        share_code: newShareCode,
-        page_orientations: source.page_orientations,
-        answer_sheet_mode: source.answer_sheet_mode,
-        answer_sheet_image_paths: newAnswerSheetPaths.length ? newAnswerSheetPaths : null,
-        question_booklet_image_paths: newBookletPaths.length ? newBookletPaths : null,
-        school_id: importSchoolId,
-        created_at: nowIso,
-        updated_at: nowIso
-      })
-
+    const insertRow = {
+      id: newId,
+      owner_id: user.id,
+      name: source.name,
+      domain: source.domain,
+      doc_type: source.doc_type,
+      answer_key: copiedAnswerKey,
+      question_count: source.question_count,
+      total_score: source.total_score,
+      share_code: newShareCode,
+      page_orientations: source.page_orientations,
+      answer_sheet_mode: source.answer_sheet_mode,
+      answer_sheet_image_paths: newAnswerSheetPaths.length ? newAnswerSheetPaths : null,
+      question_booklet_image_paths: newBookletPaths.length ? newBookletPaths : null,
+      school_id: importSchoolId,
+      source_template_id: lineageRootId,
+      created_at: nowIso,
+      updated_at: nowIso
+    }
+    let { error: insertErr } = await supabaseDb.from('answer_key_templates').insert(insertRow)
+    if (insertErr && /source_template_id/.test(insertErr.message || '')) {
+      // DDL 未跑的 fail-open：拿掉血緣欄位重試（匯入照常、只是血緣暫不記錄）
+      const { source_template_id: _drop, ...withoutLineage } = insertRow
+      ;({ error: insertErr } = await supabaseDb.from('answer_key_templates').insert(withoutLineage))
+    }
     if (insertErr) throw new Error(insertErr.message)
 
     res.status(200).json({
