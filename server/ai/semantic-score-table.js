@@ -11,11 +11,16 @@
 //     兩判例 user 眼球裁決批次版勝出:半答案=部分分、一次次=0)
 
 // 正規化:全半形標點/空白折疊、頭尾標點去除——**一字不折**(錯字是 charerr 的事,不可被正規化吞掉)
+// 2026-08-12 加「CJK 內部分隔標點折疊」(user 拍板+production 實證:「靠著、依傍」2分 vs「靠著.依傍」1分
+//   =同答不同分事故,根因 AI read 對頓號/逗號/句點漂移):半形化後的 , . ; : 兩側緊鄰皆中文字→移除;
+//   數字鄰接(3.5/1:2/1,000)不符合→原樣保留。既有凍結列已同規則遷移(migrate-punct-norm-0812)。
+//   ⚠ 鏡像:client answerStats.normAnswerValue 同一套——動這裡記得同步那邊。
 export function normSemanticValue(raw) {
   return String(raw ?? '')
     .trim()
     .replace(/\s+/g, '')
     .replace(/，/g, ',').replace(/。/g, '.').replace(/；/g, ';').replace(/：/g, ':').replace(/、/g, ',')
+    .replace(/([一-鿿])[,.;:]+(?=[一-鿿])/g, '$1')
     .replace(/^[,.;:!?，。；：、！？\s]+|[,.;:!?，。；：、！？\s]+$/g, '')
 }
 
