@@ -2761,6 +2761,131 @@ async function handleImportTemplate(req, res) {
   }
 }
 
+// ═══ 同卷跨班比較(2026-08-11 任務②:跨 owner 唯讀匯總) ═══════════════════════
+// POST { assignmentId } → { classes:[{assignmentId, className, isMine, byCode:{code:{full,partial,wrong,total,label}}}] }
+// 授權:呼叫者必須是錨點作業 owner;跨 owner 只納入「與呼叫者同校(school_teachers active)」老師的同卷作業。
+// 隱私:只回班級級聚合(逐指標答對率統計),不含學生名單/個別成績(2026-08-11 討論的隱私立場)。
+// 同卷=answer_key_template 血緣家族(根+全部複製品);血緣 DDL 未跑 → 家族=自己、跨 owner 自然為空(fail-open)。
+async function handleExamCompare(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const assignmentId = String(body?.assignmentId ?? '').trim()
+  if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const { data: anchor } = await supabaseDb
+      .from('assignments').select('id, owner_id, answer_key_template_id')
+      .eq('id', assignmentId).maybeSingle()
+    if (!anchor || anchor.owner_id !== user.id) { res.status(403).json({ error: 'Forbidden' }); return }
+    if (!anchor.answer_key_template_id) { res.status(200).json({ classes: [] }); return }
+
+    // 血緣家族:根 + 所有指向根的複製品
+    let rootId = anchor.answer_key_template_id
+    try {
+      const { data: tpl } = await supabaseDb
+        .from('answer_key_templates').select('source_template_id')
+        .eq('id', rootId).maybeSingle()
+      if (tpl?.source_template_id) rootId = tpl.source_template_id
+    } catch { /* 血緣欄位未建 → 家族=自己 */ }
+    let familyIds = [rootId]
+    try {
+      const { data: fam } = await supabaseDb
+        .from('answer_key_templates').select('id').eq('source_template_id', rootId).limit(50)
+      familyIds = [...new Set([rootId, ...(fam ?? []).map((r) => r.id)])]
+    } catch { /* fail-open */ }
+
+    const { data: asgsRaw } = await supabaseDb
+      .from('assignments')
+      .select('id, owner_id, classroom_id, title, answer_key, concept_tags')
+      .in('answer_key_template_id', familyIds)
+      .limit(30)
+    const asgs = asgsRaw ?? []
+
+    // 同校閘:跨 owner 只留與呼叫者同校的 active 老師
+    const crossOwners = [...new Set(asgs.map((a) => a.owner_id).filter((o) => o && o !== user.id))]
+    const allowedOwners = new Set([user.id])
+    if (crossOwners.length) {
+      const { data: mine } = await supabaseDb
+        .from('school_teachers').select('school_id')
+        .eq('teacher_user_id', user.id).eq('status', 'active')
+      const mySchools = (mine ?? []).map((r) => r.school_id)
+      if (mySchools.length) {
+        const { data: peers } = await supabaseDb
+          .from('school_teachers').select('teacher_user_id')
+          .in('school_id', mySchools).in('teacher_user_id', crossOwners).eq('status', 'active')
+        for (const p of peers ?? []) allowedOwners.add(p.teacher_user_id)
+      }
+    }
+    const kept = asgs.filter((a) => allowedOwners.has(a.owner_id))
+    if (kept.length === 0) { res.status(200).json({ classes: [] }); return }
+
+    const classroomIds = [...new Set(kept.map((a) => a.classroom_id).filter(Boolean))]
+    const { data: rooms } = await supabaseDb
+      .from('classrooms').select('id, name').in('id', classroomIds)
+    const roomName = new Map((rooms ?? []).map((r) => [r.id, r.name]))
+
+    const classes = []
+    for (const a of kept) {
+      // 題號→指標:凍結 detail 層最優先(迴圈內判)、conceptTags(舊制) > answer_key analysis.code(新制)
+      const qMap = new Map()
+      const tags = a.concept_tags && typeof a.concept_tags === 'object' ? a.concept_tags : {}
+      for (const [qid, t] of Object.entries(tags)) {
+        if (t?.code) qMap.set(String(qid), { code: t.code, label: t.label || t.code })
+      }
+      let akQs = []
+      try {
+        const ak = typeof a.answer_key === 'string' ? JSON.parse(a.answer_key) : a.answer_key
+        akQs = Array.isArray(ak?.questions) ? ak.questions : []
+      } catch { /* ignore */ }
+      for (const q of akQs) {
+        const qid = String(q?.id ?? '')
+        const code = q?.analysis?.code
+        if (qid && code && !qMap.has(qid)) qMap.set(qid, { code, label: q?.analysis?.topic || code })
+      }
+
+      const { data: subs } = await supabaseDb
+        .from('submissions').select('grading_result, source')
+        .eq('assignment_id', a.id)
+      const byCode = {}
+      for (const sub of subs ?? []) {
+        if (sub.source === 'student_correction') continue
+        let gr = sub.grading_result
+        if (typeof gr === 'string') { try { gr = JSON.parse(gr) } catch { continue } }
+        for (const d of gr?.details ?? []) {
+          const qid = String(d?.questionId ?? '')
+          if (!qid) continue
+          const concept = d?.conceptCode && d?.conceptLabel
+            ? { code: d.conceptCode, label: d.conceptLabel }
+            : qMap.get(qid)
+          if (!concept) continue
+          const e = byCode[concept.code] ?? (byCode[concept.code] = { full: 0, partial: 0, wrong: 0, total: 0, label: concept.label })
+          e.total++
+          const score = Number(d?.score) || 0
+          const maxRaw = Number(d?.maxScore)
+          const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null
+          const isFull = d?.isCorrect === true || (max !== null && score >= max)
+          if (isFull) e.full++
+          else if (max !== null && score > 0 && score < max) e.partial++
+          else e.wrong++
+        }
+      }
+      if (!Object.keys(byCode).length) continue
+      classes.push({
+        assignmentId: a.id,
+        className: roomName.get(a.classroom_id) || a.title || a.id,
+        isMine: a.owner_id === user.id,
+        byCode,
+      })
+    }
+    res.status(200).json({ classes })
+  } catch (err) {
+    console.error('[exam-compare] failed:', err?.message)
+    res.status(500).json({ error: err instanceof Error ? err.message : 'exam-compare failed' })
+  }
+}
+
 // ── 成績統計：直接從 Supabase 取分數 ────────────────────────────────────
 async function handleGetGradebookScores(req, res) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'Method Not Allowed' }); return }
@@ -11281,6 +11406,10 @@ const log = document.getElementById('log');
   }
   if (action === 'import-template') {
     await handleImportTemplate(req, res)
+    return
+  }
+  if (action === 'exam-compare') {
+    await handleExamCompare(req, res)
     return
   }
   if (action === 'manual-grade') {
