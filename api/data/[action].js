@@ -2761,11 +2761,14 @@ async function handleImportTemplate(req, res) {
   }
 }
 
-// ═══ 同卷跨班比較(2026-08-11 任務②:跨 owner 唯讀匯總) ═══════════════════════
-// POST { assignmentId } → { classes:[{assignmentId, className, isMine, byCode:{code:{full,partial,wrong,total,label}}}] }
+// ═══ 同卷跨班比較(2026-08-11 任務②:跨 owner 唯讀匿名匯總) ═══════════════════
+// POST { assignmentId } → { classCount, byCode, byQuestion, answers } — 同卷全體(含呼叫者本班)的「匿名彙總」:
+//   byCode     = 逐課綱指標 {full,partial,wrong,total,label}(概念雷達疊圖)
+//   byQuestion = 逐題 {full,partial,wrong,blank,total}(試題分析全體答對率)
+//   answers    = 逐題答案值分布 [{value,score,count}](樣態分析全體視角;每題 cap 60 種)
+// ⚠ 隱私(user 拍板):不回任何班級名稱/作業名稱/學生資料——除了總班數之外無法推論資料來源。
 // 授權:呼叫者必須是錨點作業 owner;跨 owner 只納入「與呼叫者同校(school_teachers active)」老師的同卷作業。
-// 隱私:只回班級級聚合(逐指標答對率統計),不含學生名單/個別成績(2026-08-11 討論的隱私立場)。
-// 同卷=answer_key_template 血緣家族(根+全部複製品);血緣 DDL 未跑 → 家族=自己、跨 owner 自然為空(fail-open)。
+// 同卷=answer_key_template 血緣家族(根+全部複製品);血緣 DDL 未跑 → 家族=自己(fail-open)。
 async function handleExamCompare(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
   const { user } = await getAuthUser(req, res)
@@ -2819,14 +2822,14 @@ async function handleExamCompare(req, res) {
       }
     }
     const kept = asgs.filter((a) => allowedOwners.has(a.owner_id))
-    if (kept.length === 0) { res.status(200).json({ classes: [] }); return }
+    if (kept.length === 0) { res.status(200).json({ classCount: 0 }); return }
 
-    const classroomIds = [...new Set(kept.map((a) => a.classroom_id).filter(Boolean))]
-    const { data: rooms } = await supabaseDb
-      .from('classrooms').select('id, name').in('id', classroomIds)
-    const roomName = new Map((rooms ?? []).map((r) => [r.id, r.name]))
+    const BLANKS = new Set(['', '未作答', '無法辨識'])
+    const byCode = {}
+    const byQuestion = {}
+    const ansAcc = new Map() // qid → Map(`value\u0000score` → count)
+    let classCount = 0
 
-    const classes = []
     for (const a of kept) {
       // 題號→指標:凍結 detail 層最優先(迴圈內判)、conceptTags(舊制) > answer_key analysis.code(新制)
       const qMap = new Map()
@@ -2848,7 +2851,7 @@ async function handleExamCompare(req, res) {
       const { data: subs } = await supabaseDb
         .from('submissions').select('grading_result, source')
         .eq('assignment_id', a.id)
-      const byCode = {}
+      let counted = false
       for (const sub of subs ?? []) {
         if (sub.source === 'student_correction') continue
         let gr = sub.grading_result
@@ -2856,30 +2859,55 @@ async function handleExamCompare(req, res) {
         for (const d of gr?.details ?? []) {
           const qid = String(d?.questionId ?? '')
           if (!qid) continue
+          counted = true
+          const score = Number(d?.score) || 0
+          const maxRaw = Number(d?.maxScore)
+          const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null
+          const isFull = d?.isCorrect === true || (max !== null && score >= max)
+          const isPartial = !isFull && max !== null && score > 0 && score < max
+          const rawVal = String(d?.studentAnswer ?? d?.studentFinalAnswer ?? '').trim().slice(0, 60)
+          const isBlank = BLANKS.has(rawVal)
+
+          // 逐題彙總
+          const q = byQuestion[qid] ?? (byQuestion[qid] = { full: 0, partial: 0, wrong: 0, blank: 0, total: 0 })
+          q.total++
+          if (isFull) q.full++
+          else if (isPartial) q.partial++
+          else if (isBlank) q.blank++
+          else q.wrong++
+
+          // 答案值分布(匿名:值+分數+人數而已)
+          const am = ansAcc.get(qid) ?? new Map()
+          const ak2 = `${rawVal}\u0000${score}`
+          am.set(ak2, (am.get(ak2) ?? 0) + 1)
+          ansAcc.set(qid, am)
+
+          // 逐指標彙總
           const concept = d?.conceptCode && d?.conceptLabel
             ? { code: d.conceptCode, label: d.conceptLabel }
             : qMap.get(qid)
           if (!concept) continue
           const e = byCode[concept.code] ?? (byCode[concept.code] = { full: 0, partial: 0, wrong: 0, total: 0, label: concept.label })
           e.total++
-          const score = Number(d?.score) || 0
-          const maxRaw = Number(d?.maxScore)
-          const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null
-          const isFull = d?.isCorrect === true || (max !== null && score >= max)
           if (isFull) e.full++
-          else if (max !== null && score > 0 && score < max) e.partial++
+          else if (isPartial) e.partial++
           else e.wrong++
         }
       }
-      if (!Object.keys(byCode).length) continue
-      classes.push({
-        assignmentId: a.id,
-        className: roomName.get(a.classroom_id) || a.title || a.id,
-        isMine: a.owner_id === user.id,
-        byCode,
-      })
+      if (counted) classCount++
     }
-    res.status(200).json({ classes })
+
+    const answers = {}
+    for (const [qid, am] of ansAcc) {
+      answers[qid] = [...am.entries()]
+        .map(([k, count]) => {
+          const sep = k.lastIndexOf('\u0000')
+          return { value: k.slice(0, sep), score: Number(k.slice(sep + 1)) || 0, count }
+        })
+        .sort((x, y) => y.count - x.count)
+        .slice(0, 60)
+    }
+    res.status(200).json({ classCount, byCode, byQuestion, answers })
   } catch (err) {
     console.error('[exam-compare] failed:', err?.message)
     res.status(500).json({ error: err instanceof Error ? err.message : 'exam-compare failed' })
