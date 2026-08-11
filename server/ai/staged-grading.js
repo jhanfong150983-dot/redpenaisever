@@ -14378,7 +14378,7 @@ export async function runStagedGradingPhaseB({
                 apiKey, model: phaseBModel,
                 ...(pro ? { modelOverride: MODEL_PRO } : {}),   // charerr=判官家族、pin PRO(鏡像 B-CharErr)
                 payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
-                timeoutMs: Math.min(getRemainingBudget(), 20_000), routeHint,
+                timeoutMs: Math.min(getRemainingBudget(), 30_000), routeHint,   // 2026-08-11: 20s→30s,1-2-7(最長 criteria)連四輪超時進不了表
                 routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
                 stageContents: [{ role: 'user', parts: [{ text: promptText }] }]
               })
@@ -14411,7 +14411,7 @@ export async function runStagedGradingPhaseB({
                   supabase: supabaseSem, askJson, askJsonPro, scopeKey, q: t.q, raw: t.raw, anchors,
                   model: phaseBModel, config: { src: 'phase0b6' }
                 })
-                if (!entry) continue
+                if (!entry) { logStaged(pipelineRunId, 'basic', `[B-Phase0b6] 值評分失敗 fail-open 交 accessor：${t.qid}「${t.raw.slice(0, 12)}」`); continue }
                 deterministicScores.push(composeCellFromEntry(entry, t.q, t.raw))
                 objectiveBypassIds.add(t.qid)
                 semNew++
