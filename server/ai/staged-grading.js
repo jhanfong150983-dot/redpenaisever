@@ -13640,6 +13640,10 @@ export async function runStagedGradingPhaseB({
               const resp = await executeStage({
                 apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL, payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
                 timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_RUBRIC,
+                // ⚠️ 2026-08-14 與 client 端 A0 的差異：client（建答案卷時）會額外把題本圖一起餵，
+                //   讓判準能引用題幹的原始要求（例：「先以直線 L 為對稱軸、再以 M」）。
+                //   這裡是批改當下的 lazy fallback，題本不在手邊（要另外下載 question-booklets/*），
+                //   所以只用 crop——本來就是降級路徑。正常情況答案卷建立時就已有 vjRubric，不會走到這。
                 stageContents: [{ role: 'user', parts: [{ text: buildVjRubricPrompt(q.questionCategory, q.referenceAnswer || q.answer) }, { inlineData: { mimeType: cropMime, data: refB64 } }] }]
               })
               if (resp?.ok) vjRubric = parseVjRubricResult(extractCandidateText(resp.data) || '')
