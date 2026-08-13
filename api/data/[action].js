@@ -2771,6 +2771,100 @@ async function handleImportTemplate(req, res) {
 // ⚠ 隱私(user 拍板):不回任何班級名稱/作業名稱/學生識別。
 // 授權:呼叫者必須是錨點作業 owner;跨 owner 只納入「與呼叫者同校(school_teachers active)」老師的同卷作業。
 // 同卷=answer_key_template 血緣家族(根+全部複製品);血緣 DDL 未跑 → 家族=自己(fail-open)。
+// 2026-08-13 答案卷內容指紋。血緣家族只保證「同一份卷的後代」，不保證內容仍相同——
+// 任一方重新解析或改題號／配分後，逐題聚合會把不同的題當同一題合併（byQuestion 拿題號當 key），而且無聲。
+// 現算不存欄位：存起來的指紋會走鐘，現算的永遠等於答案卷當下的內容。
+//
+// 取「判分標準」＝題號／正解／配分／題型。
+//   含配分：試題分析把所有班級當同一個母體算高低分組與鑑別度，配分尺度不同會污染結果，
+//   「在相同標準下批改」本來就包含配分。答案卷存檔後鎖定，配分改不了，不會誤觸發。
+// anchorHint 等 AI 描述性欄位每次解析都會變，納入會把「其實一樣」誤判成分歧，不取。
+function answerKeyFingerprint(ak) {
+  try {
+    const parsed = typeof ak === 'string' ? JSON.parse(ak) : ak
+    const qs = Array.isArray(parsed?.questions) ? parsed.questions : []
+    const shape = qs.map((q) => [
+      String(q?.id ?? ''),
+      String(q?.answer ?? q?.referenceAnswer ?? ''),
+      Number(q?.maxScore) || 0,
+      String(q?.questionCategory ?? ''),
+    ])
+    return nodeCrypto.createHash('sha1').update(JSON.stringify(shape)).digest('hex')
+  } catch { return null }
+}
+
+// POST { templateIds: string[] } → { usage: { [templateId]: { sameVersion, diverged } } }
+//   sameVersion = 含自己在內、內容與這份答案卷相同的班級數
+//   diverged    = 同血緣但內容已不同的班級數（對方重新解析或改過題目）
+// 只回數字、不回班級或老師名稱（沿用 exam-compare 的隱私原則）。
+// 用途：老師打開答案卷庫就知道「這個版本只剩我在用」，自行決定要不要去要新的分享碼。
+// 批次設計：答案卷庫一次列出上百份，逐張打會變成上百個請求。
+async function handleTemplateUsage(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const ids = Array.isArray(parseJsonBody(req)?.templateIds)
+    ? parseJsonBody(req).templateIds.map((x) => String(x)).filter(Boolean).slice(0, 200)
+    : []
+  if (ids.length === 0) { res.status(200).json({ usage: {} }); return }
+  const supabaseDb = getSupabaseAdmin()
+  try {
+    const { data: mine } = await supabaseDb
+      .from('answer_key_templates').select('id, answer_key, source_template_id')
+      .eq('owner_id', user.id).in('id', ids)
+    const own = mine ?? []
+    if (own.length === 0) { res.status(200).json({ usage: {} }); return }
+
+    // 血緣根 → 家族全體（一次查完，不逐張打）
+    const roots = [...new Set(own.map((r) => r.source_template_id || r.id))]
+    let famRows = []
+    try {
+      const { data } = await supabaseDb
+        .from('answer_key_templates').select('id, source_template_id')
+        .in('source_template_id', roots).limit(500)
+      famRows = data ?? []
+    } catch { /* 血緣欄位未建 → 家族=自己 */ }
+    const familyByRoot = new Map(roots.map((r) => [r, new Set([r])]))
+    for (const row of famRows) {
+      familyByRoot.get(row.source_template_id)?.add(row.id)
+    }
+
+    const allTplIds = [...new Set([...familyByRoot.values()].flatMap((s) => [...s]))]
+    // 指紋一律從「答案卷」算（答案卷是起點）；assignments 只用來數班級，不參與內容比對。
+    const { data: famTpls } = await supabaseDb
+      .from('answer_key_templates').select('id, answer_key')
+      .in('id', allTplIds).limit(500)
+    const fpByTpl = new Map((famTpls ?? []).map((r) => [r.id, answerKeyFingerprint(r.answer_key)]))
+
+    const { data: asgs } = await supabaseDb
+      .from('assignments').select('answer_key_template_id')
+      .in('answer_key_template_id', allTplIds).limit(500)
+    const classCountByTpl = new Map()
+    for (const a of asgs ?? []) {
+      classCountByTpl.set(a.answer_key_template_id, (classCountByTpl.get(a.answer_key_template_id) ?? 0) + 1)
+    }
+
+    const usage = {}
+    for (const tpl of own) {
+      const root = tpl.source_template_id || tpl.id
+      const family = familyByRoot.get(root) ?? new Set([tpl.id])
+      if (family.size <= 1) { usage[tpl.id] = { sameVersion: 1, diverged: 0 }; continue }
+      const myFp = fpByTpl.get(tpl.id) ?? answerKeyFingerprint(tpl.answer_key)
+      let same = 0, diverged = 0
+      for (const tid of family) {
+        const n = classCountByTpl.get(tid) ?? 0
+        if (n === 0) continue
+        if (fpByTpl.get(tid) === myFp) same += n
+        else diverged += n
+      }
+      usage[tpl.id] = { sameVersion: Math.max(1, same), diverged }
+    }
+    res.status(200).json({ usage })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'failed' })
+  }
+}
+
 async function handleExamCompare(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
   const { user } = await getAuthUser(req, res)
@@ -2803,7 +2897,7 @@ async function handleExamCompare(req, res) {
 
     const { data: asgsRaw } = await supabaseDb
       .from('assignments')
-      .select('id, owner_id, classroom_id, title, answer_key, concept_tags')
+      .select('id, owner_id, classroom_id, title, answer_key, concept_tags, answer_key_template_id')
       .in('answer_key_template_id', familyIds)
       .limit(30)
     const asgs = asgsRaw ?? []
@@ -2823,8 +2917,28 @@ async function handleExamCompare(req, res) {
         for (const p of peers ?? []) allowedOwners.add(p.teacher_user_id)
       }
     }
-    const kept = asgs.filter((a) => allowedOwners.has(a.owner_id))
+    let kept = asgs.filter((a) => allowedOwners.has(a.owner_id))
     if (kept.length === 0) { res.status(200).json({ classCount: 0 }); return }
+
+    // 2026-08-13 版本閘（user 拍板「答案卷是起點，分歧就是不同版本，不比」）：
+    //   血緣家族只保證「同一份卷的後代」，不保證內容仍相同——任何一方重新解析或改題號／配分，
+    //   逐題聚合就會把不同的題當成同一題合併（byQuestion 是拿題號當 key），而且完全無聲。
+    //   指紋直接從各班實際批改用的 answer_key 現算（本來就撈出來了），不存欄位＝不會走鐘，
+    //   比對的也正是「這個班批改時用的那份」而非模板現況。
+    //   分歧者整班排除（含概念層）：user 拍板一致性優先，不做部分搶救。
+    //   指紋一律從「答案卷」算：assignments.answer_key 是伺服器反向同步下來的副本，
+    //   同步時機不一定跟模板一致，拿它比會出現「內容其實相同卻判成分歧」。
+    const { data: famTpls } = await supabaseDb
+      .from('answer_key_templates').select('id, answer_key').in('id', familyIds)
+    const fpByTpl = new Map((famTpls ?? []).map((r) => [r.id, answerKeyFingerprint(r.answer_key)]))
+    const anchorAsg = kept.find((a) => a.id === assignmentId)
+    const anchorFp = anchorAsg ? fpByTpl.get(anchorAsg.answer_key_template_id) : null
+    let divergedCount = 0
+    if (anchorFp) {
+      const sameVersion = kept.filter((a) => fpByTpl.get(a.answer_key_template_id) === anchorFp)
+      divergedCount = kept.length - sameVersion.length
+      kept = sameVersion
+    }
 
     const BLANKS = new Set(['', '未作答', '無法辨識'])
     const byCode = {}
@@ -2921,7 +3035,7 @@ async function handleExamCompare(req, res) {
         .sort((x, y) => y.count - x.count)
         .slice(0, 60)
     }
-    res.status(200).json({ classCount, byCode, byQuestion, answers, responses })
+    res.status(200).json({ classCount, divergedCount, byCode, byQuestion, answers, responses })
   } catch (err) {
     console.error('[exam-compare] failed:', err?.message)
     res.status(500).json({ error: err instanceof Error ? err.message : 'exam-compare failed' })
@@ -11452,6 +11566,10 @@ const log = document.getElementById('log');
   }
   if (action === 'exam-compare') {
     await handleExamCompare(req, res)
+    return
+  }
+  if (action === 'template-usage') {
+    await handleTemplateUsage(req, res)
     return
   }
   if (action === 'manual-grade') {
