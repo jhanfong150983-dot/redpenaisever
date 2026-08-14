@@ -13835,7 +13835,10 @@ export async function runStagedGradingPhaseB({
           errorType: agg.level === 3 ? 'none' : (agg.found.length === 0 ? 'blank' : 'concept'),
           scoringReason: agg.reason,
           scoreConfidence: agg.confidence,
-          studentFinalAnswer: agg.found.length === 0 ? '未作答' : '卷面作答',
+          // ⚠️ 不可用「找不到要素」推論成「未作答」——實測 1 號卷寫滿了算式（只是左欄被劃掉、
+          //   右欄判官漏讀），found=[] 卻顯示「未作答」，老師會以為學生交白卷。
+          //   判官只回報要素、不判空白；空白與否交給既有的 read 結果。
+          studentFinalAnswer: '卷面作答',
           needExplain: false,
           _levelBypass: true,
           levelResult: { level: agg.level, found: agg.found, split: agg.split, votes: ok },
