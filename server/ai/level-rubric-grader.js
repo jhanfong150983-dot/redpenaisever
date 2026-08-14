@@ -307,9 +307,18 @@ export function aggregateElementAnswers(rubric, answers, maxScore) {
   }
   if (missingAnswer.length > 0) parts.push(`${missingAnswer.length} 項未能判讀，請老師複核`)
 
+  const missingSet = new Set(missing)
   return {
     level, score, found, unsure, missingAnswer, confidence,
-    evidence: allKeys.map((k) => ({ key: k, ...(byKey.get(k) || { present: false }) })),
+    // label／waived 是給評分統計聚合用的：統計面板只拿得到 submissions，拿不到答案卷，
+    // 沒辦法把 E1 反查成人看得懂的字，所以批改當下就把短標籤存進來。
+    // waived = 替代組已由另一條滿足 → 這條不算「缺」，群名不該列它。
+    evidence: allKeys.map((k) => ({
+      key: k,
+      label: label(k),
+      waived: !found.includes(k) && !missingSet.has(k),
+      ...(byKey.get(k) || { present: false }),
+    })),
     reason: level == null
       ? '答案卷缺少等第判定規則'
       : `${['零', '一', '二', '三'][level]}級分（${parts.join('；')}）`,
