@@ -25,6 +25,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_VJ_RUBRIC: 'grading.vj_rubric',   // A0：答案卷 → vjRubric（itemLabels/condition/gradingDefinition）
   GRADING_VJ_BLANK: 'grading.vj_blank',     // Phase A：單一 PRO blank reader（每項有沒有畫）
   GRADING_VJ_GRADE: 'grading.vj_grade',     // Phase B：rubric + 權威 blank 參數判對錯
+  GRADING_LEVEL_JUDGE: 'grading.level_judge', // Phase B：級分制三判官（只回報要素、級分由 code 算）
   ANSWER_KEY_EXTRACT: 'answer_key.extract',
   ANSWER_KEY_LOCATE: 'answer_key.locate',
   ANSWER_KEY_REANALYZE: 'answer_key.reanalyze',

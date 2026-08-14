@@ -32,6 +32,7 @@ import {
   parseStageBResult,
   gradeMapFillDeterministically
 } from './map-fill-grader.js'
+import { buildLevelJudgePrompt, parseLevelJudgeResult, aggregateLevelVotes } from './level-rubric-grader.js'
 import {
   VISUAL_JUDGMENT_TYPES,
   buildVjRubricPrompt,
@@ -13744,6 +13745,84 @@ export async function runStagedGradingPhaseB({
     }
   }
 
+  // ── 🆕 2026-08-14 級分制判分（數學應用題、user 拍板）──────────────────────────
+  // 背景：應用題原本走 bucket A「只看最終答案」，學生湊對答案就拿滿分——即使老師在題本
+  //   明寫「請寫下計算過程，否則不予計分」。改判 0~3 級分，過程不足自然掉級。
+  // 設計（沙盒 21 份會考公告樣卷 × 5 輪：一致率 21/21、放水 0、級分零跳動）：
+  //   三位「檢查流程不同」的判官**只回報哪些要素出現**、不給分；級分與分數一律 code 依
+  //   答案卷的 levelRules / levels[].score 算。任一要素 2:1 分歧 → 標低信心交老師。
+  //   ⚠️ 不可改成讓 AI 直接判級分：實測要素完全相同時 AI 仍會判出不同級分（同寫法不同分）。
+  // fail-open：缺 levelRubric / 缺 crop / 判官全失敗 → 不進本分支，照原本流程（只比最終答案）。
+  // kill switch：LEVEL_JUDGE='0'。
+  const levelBypassIds = new Set()
+  const levelQuestions = akQuestions.filter((q) => q?.id && q?.levelRubric?.levelRules?.length > 0)
+  if (process.env.LEVEL_JUDGE !== '0' && levelQuestions.length > 0 && inlineImages.length > 0) {
+    const lvClassifyArr = Array.isArray(classifyResult)
+      ? classifyResult
+      : (classifyResult?.alignedQuestions || classifyResult?.questions || [])
+    const studentImg = inlineImages[0]?.inlineData
+    for (const q of levelQuestions) {
+      const qId = ensureString(q.id)
+      const maxScore = Number(q.maxScore) || 0
+      try {
+        const row = lvClassifyArr.find((r) => (r.questionId || r.id) === qId)
+        const crop = row?.answerBbox && studentImg?.data
+          ? await cropInlineImageByBbox(studentImg.data, studentImg.mimeType,
+              inflateBboxForType(row.answerBbox, q.questionCategory))
+          : null
+        if (!crop) {
+          logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 取不到 crop、交回原流程`)
+          continue
+        }
+        const votes = await Promise.all(['A', 'B', 'C'].map(async (j) => {
+          const resp = await executeStage({
+            apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL,
+            payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
+            timeoutMs: Math.min(getRemainingBudget(), 25_000), routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_LEVEL_JUDGE,
+            stageContents: [{ role: 'user', parts: [
+              { text: buildLevelJudgePrompt(q.levelRubric, j, ensureString(q.referenceAnswer || q.answer, '')) },
+              { inlineData: crop },
+            ] }],
+          })
+          if (resp) stageResponses.push(resp)
+          if (!resp?.ok) return null
+          const parsed = parseLevelJudgeResult(extractCandidateText(resp.data) || '')
+          return parsed ? { judge: j, found: parsed.found, uncertain: parsed.uncertain } : null
+        }))
+        const ok = votes.filter(Boolean)
+        if (ok.length === 0) {
+          logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 三判官全失敗、交回原流程`)
+          continue
+        }
+        const agg = aggregateLevelVotes(q.levelRubric, ok, maxScore)
+        if (agg.level == null) {
+          logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 無 levelRules、交回原流程`)
+          continue
+        }
+        logStaged(pipelineRunId, 'basic',
+          `[B-Level] ${qId} ${agg.level}級 ${agg.score}/${maxScore} 要素[${agg.found.join(',')}]`
+          + `${agg.split.length ? ` 分歧[${agg.split.join(',')}]` : ''} 票數${agg.voteCount}/3`)
+        deterministicScores.push({
+          questionId: qId,
+          isCorrect: agg.level === 3,
+          score: agg.score, maxScore,
+          errorType: agg.level === 3 ? 'none' : (agg.found.length === 0 ? 'blank' : 'concept'),
+          scoringReason: agg.reason,
+          scoreConfidence: agg.confidence,
+          studentFinalAnswer: agg.found.length === 0 ? '未作答' : '卷面作答',
+          needExplain: false,
+          _levelBypass: true,
+          levelResult: { level: agg.level, found: agg.found, split: agg.split, votes: ok },
+        })
+        levelBypassIds.add(qId)
+      } catch (e) {
+        logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 失敗：${e?.message} → 交回原流程`)
+      }
+    }
+  }
+
+
   // ── 🆕 2026-07-11 字形終審（glyph judge、user 拍板）────────────────────────────
   // 背景：寫國字題學生「造字/寫錯字」時、轉錄層必然投射成最接近的真字（輸出字庫沒有那個字）
   //   → 「讀出值=正解」在寫國字題不可信（國語卷實測 14+ 格放水、老師終審確認）。
@@ -13773,7 +13852,8 @@ export async function runStagedGradingPhaseB({
       const glyphJudgeAll = process.env.GLYPH_JUDGE_ALL !== '0'
       const glyphTargets = []
       for (const ans of finalReadAnswerResult.answers) {
-        if (ans.status !== 'read' || manualBypassIds.has(ans.questionId) || vjBypassIds.has(ans.questionId)) continue
+        if (ans.status !== 'read' || manualBypassIds.has(ans.questionId) || vjBypassIds.has(ans.questionId)
+            || levelBypassIds.has(ans.questionId)) continue
         const q = akQById.get(ans.questionId)
         if (!q || q.questionCategory !== 'fill_blank') continue
         const key = ensureString(q.answer, '').trim()
@@ -14113,7 +14193,7 @@ export async function runStagedGradingPhaseB({
         //   （call 失敗／缺 crop／stage 到點）→ 不可交 accessor（會拿佔位字判錯）→ 確定性 0 分＋低信心 45
         //   亮黃燈請老師確認。有真讀值的格維持舊 fail-open 交 accessor。
         for (const t of glyphTargets) {
-          if (vjBypassIds.has(t.qid)) continue
+          if (vjBypassIds.has(t.qid) || levelBypassIds.has(t.qid)) continue
           if (ensureString(t.student, '') !== '圖像辨識') continue
           const gMaxFb = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
           deterministicScores.push({
