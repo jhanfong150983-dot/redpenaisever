@@ -128,11 +128,22 @@ export function aggregateLevelVotes(rubric, votes, maxScore) {
   else if (split.length > 0) confidence = 75          // 要素有 2:1 分歧
   // 理由要寫「缺了哪一項」而不是只寫幾分之幾——老師檢討與學生申訴時看的就是這句。
   // 要素敘述含 ⛔ 條款（給判官看的），對老師是雜訊，去掉；過長截斷。
+  // 老師要看的是「缺哪一步」，不是完整規準原文。
+  // 早期直接砍到 24 字，結果砍掉的正好是最關鍵的具體值（「第(3)小題：正確列出一元一次不等式「x ≥ 2…」）。
+  // 改成抽取「小題標記」＋「」裡的具體值，丟掉中間的贅述。
   const label = (key) => {
     const e = (rubric?.requiredElements || []).find((x) => x.key === key)
       || (rubric?.alternativeGroups || []).flatMap((g) => g.options || []).find((o) => o.key === key)
-    const d = String(e?.desc ?? key).split('⛔')[0].trim()
-    return d.length > 24 ? `${d.slice(0, 24)}…` : d
+    const raw = String(e?.desc ?? key).split('⛔')[0].trim()
+    // 小題標記：取到第一個冒號為止（例：「第(4)小題條件(3)檢驗」）
+    const headMatch = raw.match(/^【?[^：:]{0,20}小題[^：:]{0,10}/)
+    const head = headMatch ? headMatch[0].replace(/^【/, '').trim() : ''
+    // 具體值：「」裡的內容，最多取 3 個（例：否／不通過／未通過）
+    const quoted = [...raw.matchAll(/「([^」]{1,40})」/g)].map((m) => m[1]).slice(0, 3)
+    if (quoted.length > 0) return head ? `${head}：${quoted.join('／')}` : quoted.join('／')
+    const rest = head ? raw.slice(head.length).replace(/^[：:]\s*/, '') : raw
+    const body = rest.length > 34 ? `${rest.slice(0, 34)}…` : rest
+    return head ? `${head}：${body}` : body
   }
   const missing = allKeys.filter((k) => !found.includes(k)
     // 替代組只要中一個就算滿足，未中的另一條不算「缺」
