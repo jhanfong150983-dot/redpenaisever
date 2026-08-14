@@ -8209,6 +8209,9 @@ function buildFinalGradingResult({
     const isMapFillBypass = score?._mapFillBypass === true
     // VJ 視覺判斷題：不走文字 Read、studentAnswer = blank 判讀摘要（圖上作答/未作答）、並帶逐柱 vjItemResults
     const isVjBypass = score?._vjBypass === true
+    // 級分制（應用題）：整題判等第、studentAnswer 用判官寫的摘要（卷面作答/未作答），
+    // 不用 Read 的原始讀值——那是一整段手寫推導，塞進 studentAnswer 對統計與 UI 都無意義。
+    const isLevelBypass = score?._levelBypass === true
     // 2026-05-29 Fix A: AI 沒給 scoringReason 時、fallback 不要寫「需人工複核」
     // 改成顯示「學生答案 vs 標準答案」、讓老師一眼判斷
     const studentAnsForReason = isMapFillBypass
@@ -8223,7 +8226,7 @@ function buildFinalGradingResult({
       questionId,
       // questionType 帶下來：前端對 map_fill 等視覺評分題型要鎖編輯欄
       questionType: classify?.questionType || question?.questionCategory || undefined,
-      studentAnswer: (isMapFillBypass || isVjBypass)
+      studentAnswer: (isMapFillBypass || isVjBypass || isLevelBypass)
         ? ensureString(score?.studentFinalAnswer, '')
         : ensureString(answer?.studentAnswerRaw, '無法辨識'),
       isCorrect: hasMismatch ? false : score?.isCorrect === true,
@@ -8243,6 +8246,10 @@ function buildFinalGradingResult({
       mapFillResults: Array.isArray(score?.mapFillResults) ? score.mapFillResults : undefined,
       // VJ 的逐柱結果（給前端 detail 顯示逐柱 + 老師逐柱改有畫/沒畫）
       vjItemResults: Array.isArray(score?.vjItemResults) ? score.vjItemResults : undefined,
+      // 級分制逐要素結果（給前端理由顯示、以及日後「同要素組合聚合」的鍵）。
+      // ⚠️ 這一列不可省：detail 是白名單，漏掉就被靜默剝掉——2026-07-12 字形 votes 全 null
+      //    就是同一個坑；沒有它，批改看起來正常但要素資料不存在，要聚合只能整批重批。
+      levelResult: score?.levelResult && typeof score.levelResult === 'object' ? score.levelResult : undefined,
       // 字形終審 audit（2026-07-12 補洞：white-list 剝掉了 9530eeb 加的欄位——B班首跑 votes 全 null 實測）
       glyphVotes: Array.isArray(score?.glyphVotes) ? score.glyphVotes : undefined,
       glyphAnalysis: ensureString(score?.glyphAnalysis, '').trim() || undefined,
