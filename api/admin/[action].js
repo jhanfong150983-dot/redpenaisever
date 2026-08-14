@@ -4066,6 +4066,9 @@ function q2CellClass(cell) {
   if (String(cell?.type) === 'short_answer') return 'subjective'                    // 語意軸=user 可接受桶(±2 分)
   return 'text_unique'                                                              // fill_blank 等唯一答案手寫
 }
+// 非作答內容的佔位字串（圖像判分題／未讀到）——不可拿來當「同寫法」的鍵
+const PLACEHOLDER_ANS = new Set(['未作答', '無法辨識', '圖像辨識', '圖上作答', '卷面作答', '圖片作答'])
+
 function q2VoteSplit(votes) {
   // glyphVotes 格式 "1:s:理由" → 取第 2 段當票;全同=一致
   const vs = (votes || []).map((v) => String(v).split(':')[1] ?? '?')
@@ -4171,8 +4174,11 @@ async function q2Detail(supabaseAdmin, assignmentId) {
       if (c.chain || /知答鏈/.test(String(c.journey ?? ''))) health.chainCells++
       if (Array.isArray(c.votes) && c.votes.length) { health.judgeCells++; if (q2VoteSplit(c.votes)) health.judgeSplit++ }
       if (/直判/.test(String(c.journey ?? ''))) health.codeJudged++
+      // 2026-08-15：圖像判分題的 studentAnswer 一律是「圖上作答」「卷面作答」等佔位字串，
+      //   拿它當「同寫法」會讓整班塌成一組 → 每張卷分數本來就不同 → 永遠報矛盾、accessor 燈永遠紅。
+      //   （實測培英數學：6 組矛盾中 3 組是這樣來的。）佔位字串不代表作答內容，一律不列入。
       const ansKey = String(c.ans ?? '').replace(/[\s。，、,.!?！？]/gu, '')
-      if (ansKey && c.ans !== '未作答' && c.ans !== '無法辨識') {
+      if (ansKey && !PLACEHOLDER_ANS.has(String(c.ans ?? '').trim())) {
         const k = `${c.qid}|${ansKey}`
         const arr = byQidAns.get(k) ?? []
         arr.push({ sub: run.submission_id, seat: seatBySub.get(run.submission_id), score: c.score, qid: c.qid, ans: c.ans })
