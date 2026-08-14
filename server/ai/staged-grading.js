@@ -8539,6 +8539,13 @@ function buildFinalGradingResult({
       }
       else if (score?._scRescue) { base = 90; journey = '單選值域救援' }
       else if (score?._vjBypass) { base = 90; journey = 'VJ視覺判斷' }
+      // 2026-08-14 級分制：判官自己算出的信心就是權威（全票97／分歧不影響等第75／
+      //   分歧會改變等第45／票數不足65）。不接這一條的話 systemConfidence 會落到預設 88，
+      //   UI 的低信心紅底與複核面板（門檻 <70）永遠不會亮。
+      else if (score?._levelBypass) {
+        base = Number.isFinite(score?.scoreConfidence) ? score.scoreConfidence : 90
+        journey = `級分制三判官(${score?.levelResult?.level ?? '?'}級)`
+      }
       // 2026-07-21 知答制鏈信心：新裁決(computeInformedDecision)直接帶 chainConfidence
       //   （L0一致92/88、多數或非標準≥2=80、單次看走眼採標準70、真分裂=45低信心）→ 直接當基準，
       //   已內含路徑信心、不再走 A 段 -8（否則低信心45會被再扣、或高信心被誤降）。前端 badge <70 才亮。
@@ -8546,7 +8553,9 @@ function buildFinalGradingResult({
       const hasChainConf = Number.isFinite(chainConf)
       if (hasChainConf) { base = chainConf; journey = `知答鏈:${ensureString(consistency?.arbiterResult?.chainLevel, '')}` }
       // A 段修正（只對走過讀取的格子；知答鏈已自帶信心 → 跳過；_glyphJudge=判官看圖、與讀取無關 → 跳過）
+      // 級分制判官不看 read 值（整題判等第），consistencyStatus 對它沒有意義 → 不做 A 段修正
       const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷'])
+      if (score?._levelBypass) skipA.add(journey)
       let aTag = ''
       if (!hasChainConf && !skipA.has(journey) && !score?._glyphJudge) {
         if (row.consistencyStatus === 'stable') aTag = '兩讀一致'

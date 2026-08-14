@@ -125,11 +125,18 @@ export function aggregateLevelVotes(rubric, votes, maxScore) {
   const ratio = { 3: 1, 2: 0.65, 1: 0.3, 0: 0 }[level] ?? 0
   const score = typeof lv?.score === 'number' ? lv.score : Math.round(maxScore * ratio * 2) / 2
 
-  // 信心：對齊注音三判官——全票一致高、2:1 有雜音、判官全失敗送審
+  // 信心：分歧要看「會不會改變級分」，不是所有 2:1 都同等嚴重。
+  //   把分歧要素全算有／全算沒有各跑一次，級分會變 → 這份的等第本身不確定 → 低信心送審（45）；
+  //   級分不變 → 只是雜訊、照多數採用但標一點雜音（75）。
+  //   ⚠️ UI 的低信心紅底與複核面板看的是 systemConfidence < 70，所以「要送審」必須 <70。
+  const lvOptimistic = levelFromElements(rubric, [...found, ...split])
+  const lvPessimistic = levelFromElements(rubric, found.filter((k) => !split.includes(k)))
+  const levelUnstable = split.length > 0 && (lvOptimistic !== level || lvPessimistic !== level)
   let confidence = 97
   if (valid.length === 0) confidence = 0
-  else if (valid.length < 3) confidence = 70          // 有判官失敗、票數不足
-  else if (split.length > 0) confidence = 75          // 要素有 2:1 分歧
+  else if (valid.length < 3) confidence = 65          // 判官失敗、票數不足 → 送審
+  else if (levelUnstable) confidence = 45             // 分歧會改變等第 → 送審
+  else if (split.length > 0) confidence = 75          // 分歧不影響等第 → 只標雜音
   // 理由要寫「缺了哪一項」而不是只寫幾分之幾——老師檢討與學生申訴時看的就是這句。
   // 要素敘述含 ⛔ 條款（給判官看的），對老師是雜訊，去掉；過長截斷。
   // 老師要看的是「缺哪一步」，不是完整規準原文。
@@ -157,7 +164,11 @@ export function aggregateLevelVotes(rubric, votes, maxScore) {
   // 兩邊都寫整份清單會變成重複的長句，反而難讀。
   const parts = [`${found.length}/${allKeys.length} 項要素呈現`]
   if (missing.length > 0) parts.push(`缺：${missing.map(label).join('、')}`)
-  if (split.length > 0) parts.push(`${split.length} 項判官意見不一致，建議複核`)
+  if (split.length > 0) {
+    parts.push(levelUnstable
+      ? `${split.length} 項判官意見不一致，且會影響等第，請老師複核`
+      : `${split.length} 項判官意見不一致（不影響等第）`)
+  }
   if (valid.length < 3) parts.push(`僅 ${valid.length} 位判官回覆`)
 
   return {
