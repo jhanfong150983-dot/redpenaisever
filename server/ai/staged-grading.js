@@ -13797,7 +13797,18 @@ export async function runStagedGradingPhaseB({
       const maxScore = Number(q.maxScore) || 0
       try {
         const row = lvClassifyArr.find((r) => (r.questionId || r.id) === qId)
-        const bb = row?.answerBbox ? inflateBboxForType(row.answerBbox, q.questionCategory) : null
+        // 判官專用的額外邊界：三位判官六次 uncertain 裡有五次寫「左側被裁切處…」——
+        //   共用的 TYPE_PAD(word_problem) 只有 1%，對整列寬的應用題格不夠。
+        //   ⚠️ 不動共用常數（read／accessor 的 crop 也吃它），只在判官這一段加。
+        const bbBase = row?.answerBbox ? inflateBboxForType(row.answerBbox, q.questionCategory) : null
+        const bb = bbBase ? (() => {
+          const padX = 0.02, padY = 0.012
+          const x = Math.max(0, bbBase.x - padX)
+          const right = Math.min(1, bbBase.x + bbBase.w + padX)
+          const y = Math.max(0, bbBase.y - padY)
+          const bottom = Math.min(1, bbBase.y + bbBase.h + padY)
+          return { x, y, w: right - x, h: bottom - y }
+        })() : null
         // ⭐ 2026-08-14 寬長條要切半再送。
         //   應用題的作答格常是整列寬（實測 1137×336、長寬比 3.4），學生左欄寫一段、右欄寫一段。
         //   實測判官三次都漏讀右欄的「4676767 > 4091219」，加 prompt 指令（「先掃整張圖」）無效，
