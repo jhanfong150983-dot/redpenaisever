@@ -8382,7 +8382,12 @@ function buildFinalGradingResult({
     //   最終答案對 + 有步驟 → 滿分
     //   最終答案對 + 空白步驟 → 0分（疑似抄答案）
     //   最終答案錯 → 0分（不論是否有步驟、不論 accessor 怎麼判）
-    if (qCategory === 'word_problem' || qCategory === 'calculation') {
+    // ⛔ 2026-08-14：級分制判官判過的題**不得再被最終答案字串比對覆寫**。
+    //   這條覆核是「只看最終答案」的二元計分，正是級分制要取代的東西；讓它跑在判官之後，
+    //   等於把逐要素的判斷結果丟掉。實測誤殺：學生六項要素全對、答「不通過」，
+    //   標準答案寫「否」→ 字串不同 → 0 分（而規準的 E6 明文接受「不通過」）。
+    //   判官有跑（row.levelResult 存在）→ 完全跳過本段；判官沒跑 → 維持原行為（fail-open）。
+    if ((qCategory === 'word_problem' || qCategory === 'calculation') && !row.levelResult) {
       const refText = ensureString(question?.referenceAnswer || question?.answer, '')
       const refFinal = extractFinalAnswerFromCalc(refText)
       const stuFinal = extractFinalAnswerFromCalc(studentAns)
@@ -13763,6 +13768,16 @@ export async function runStagedGradingPhaseB({
   // kill switch：LEVEL_JUDGE='0'。
   const levelBypassIds = new Set()
   const levelQuestions = akQuestions.filter((q) => q?.id && q?.levelRubric?.levelRules?.length > 0)
+  {
+    // 為什麼沒跑要看得出來：實測第一次上線時 0/32 份走到判官，卻無從得知卡在哪一關。
+    const wp = akQuestions.filter((q) => q?.questionCategory === 'word_problem')
+    if (wp.length > 0) {
+      logStaged(pipelineRunId, 'basic',
+        `[B-Level] 應用題 ${wp.length} 題、其中帶 levelRules ${levelQuestions.length} 題`
+        + `｜kill switch=${process.env.LEVEL_JUDGE === '0' ? 'OFF' : 'ON'}`
+        + `｜學生圖 ${inlineImages.length} 張`)
+    }
+  }
   if (process.env.LEVEL_JUDGE !== '0' && levelQuestions.length > 0 && inlineImages.length > 0) {
     const lvClassifyArr = Array.isArray(classifyResult)
       ? classifyResult
@@ -13778,7 +13793,10 @@ export async function runStagedGradingPhaseB({
               inflateBboxForType(row.answerBbox, q.questionCategory))
           : null
         if (!crop) {
-          logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 取不到 crop、交回原流程`)
+          logStaged(pipelineRunId, 'basic',
+            `[B-Level] ${qId} 取不到 crop、交回原流程`
+            + `（classify row ${row ? '有' : '無'}／bbox ${row?.answerBbox ? '有' : '無'}`
+            + `／學生圖 ${studentImg?.data ? '有' : '無'}）`)
           continue
         }
         const votes = await Promise.all(['A', 'B', 'C'].map(async (j) => {
