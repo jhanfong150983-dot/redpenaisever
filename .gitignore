@@ -11,3 +11,6 @@ api/debug/
 # GCP Service Account 金鑰絕不進 repo（廠商 Vertex AI 憑證）
 *sa-key*.json
 credentials/
+
+# 本機實驗/稽核腳本（沙盒、回放、一次性 probe）— 不進 repo
+local-only/
