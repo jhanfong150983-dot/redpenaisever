@@ -46,6 +46,7 @@ import {
 } from './visual-judgment-grader.js'
 import { getSupabaseAdmin } from '../_supabase.js'
 import { normSemanticValue, resolveSemanticScopeKey, loadSemanticTable, judgeAndFreezeValue, composeCellFromEntry } from './semantic-score-table.js'
+import { relationGateVerdict } from './numeric-relation-gate.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -8377,6 +8378,31 @@ function buildFinalGradingResult({
       }
     }
 
+    // ── 數值關係閘門：不等式／精確數值的放水攔截（2026-08-15）────────────────
+    // 上面那段通用覆核碰不到不等式：isSimpleAnswer 的字元集不含 < > =（整段跳過），
+    // studentHasCalcSteps 又把答案裡的「=」當成計算過程（再跳一次）；就算跑到，
+    // isNumericEqual 的 stripUnit 會把 < > = 全刪再比數值 → 「x>50/7」與「x>=50/7」相等。
+    // 實測：培英第三次定期評量 4 件放水（1-1-10 帶分數位置對調、1-1-9 三人把 ≥ 寫成 >）。
+    // 單向設計：只降分、不加分（加分牽涉單位/最簡分數/要不要列式，風險大於收益）。
+    // 降分依據是「讀值」，而讀值可能出錯（回放中「65」vs「6.5」疑似掉小數點）→ 一律送複核。
+    if (
+      !row.levelResult &&
+      !skipProgrammaticForEnglish &&
+      (qCategory === 'fill_blank' || qCategory === 'short_answer' || qCategory === 'single_choice') &&
+      refAnswer && studentAns && studentAns !== '未作答' && studentAns !== '無法辨識' &&
+      (row.isCorrect === true || (toFiniteNumber(row.score) ?? 0) >= (toFiniteNumber(question?.maxScore) ?? row.maxScore))
+    ) {
+      if (relationGateVerdict(refAnswer, studentAns) === 'differ') {
+        const prevScore = row.score
+        row.isCorrect = false
+        row.score = 0
+        row.needExplain = true
+        row.reason = `答案錯誤（數值比對覆核：學生 "${studentAns}" 與標準 "${refAnswer}" 數值不相等）`
+        row._relationGateDemoted = true
+        console.log(`[relation-gate] ${questionId} ref="${refAnswer}" student="${studentAns}" ${prevScore}→0（送複核）`)
+      }
+    }
+
     // ── 程式化覆核：word_problem / calculation BINARY 二元計分 ──
     // 規則（全有全無、accessor 給的 partial 一律 override）：
     //   最終答案對 + 有步驟 → 滿分
@@ -8562,8 +8588,12 @@ function buildFinalGradingResult({
         else if (row.consistencyStatus) { base -= 8; aTag = '兩讀分歧經鏈' }
         else aTag = ''
       }
+      // 數值關係閘門降分 → 強制落到複核門檻（<70）之下。比對本身是確定性的，
+      //   不確定的是「讀值對不對」——這一眼必須交給老師（UI 紅底＋低信心複核面板）。
+      if (row._relationGateDemoted) { base = 60; journey = '數值比對降分(待複核)'; aTag = '' }
       row.systemConfidence = Math.max(40, Math.min(100, Math.round(base)))
       row.confidenceJourney = aTag ? `${aTag}→${journey}` : journey
+      delete row._relationGateDemoted
     }
     // Classify 推理摘要（v4.0 新增）— 即使沒走 phaseA 也要保留
     if (!row.framingReason && classify?.framingReason) {
