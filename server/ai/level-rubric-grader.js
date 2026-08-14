@@ -20,7 +20,7 @@ export const LEVEL_JUDGE_TASKS = {
   C: ['找缺口', '假設這份作答是滿分，你的任務是**挑毛病**：找出要素清單中「學生沒有做到」的項目。沒把握的一律當作有做到（寧可放過，不要誤指）。'],
 }
 
-export function buildLevelJudgePrompt(rubric, judge, questionHint = '') {
+export function buildLevelJudgePrompt(rubric, judge, questionHint = '', splitImages = false) {
   const [name, task] = LEVEL_JUDGE_TASKS[judge] || LEVEL_JUDGE_TASKS.A
   const els = (rubric?.requiredElements || [])
     .map((e) => `  - ${e.key}：${e.desc}`).join('\n')
@@ -30,8 +30,12 @@ export function buildLevelJudgePrompt(rubric, judge, questionHint = '') {
     for (const o of g.options || []) groups += `\n      - ${o.key}：${o.desc}`
   }
   const flaws = (rubric?.toleratedFlaws || []).map((f) => `  - ${f}`).join('\n') || '  （無）'
+  const splitNote = splitImages
+    ? '\n⚠️ 你會收到【左半】【右半】兩張圖，那是**同一題作答區的左右兩半**（中間有重疊）。'
+      + '學生常左欄寫一段、右欄寫另一段，**兩張都要看完再判斷**，不要只依其中一張下結論。\n'
+    : ''
   return `你是數學非選擇題的閱卷老師之一（本題共三位老師各自獨立檢查，最後投票）。
-你這一位的檢查方式是【${name}】：${task}
+你這一位的檢查方式是【${name}】：${task}${splitNote}
 ${questionHint ? `\n【題目】${questionHint}\n` : ''}
 【必要解題要素】
 ${els}${groups}
@@ -53,6 +57,10 @@ ${flaws}
 3. 但要素敘述中標了「⛔」的情況，明確不算呈現。
 4. 手寫可能潦草；辨識不確定時填進 uncertain，不要為了給分假設看不到的內容。
 5. 承錯不重複扣：中間值算錯但後續方法正確，後續要素仍算呈現。
+6. ⛔ **要素指定了特定的值或結論時，學生寫成不同或相反的內容一律算「未呈現」**。
+   例：要素要求結論為「否／不通過」，學生寫「通過」→ 未呈現（不是「有寫結論就算」）。
+   例：要素要求「x ≥ 20000000 × 1/4」，學生寫「x ≥ 6700000 × 1/4」（總數用錯）→ 未呈現。
+   判斷的是「有沒有寫對」，不是「有沒有寫」。
 
 【輸出】只輸出一個 JSON 物件，不要加說明或程式碼框：
 {

@@ -13797,10 +13797,30 @@ export async function runStagedGradingPhaseB({
       const maxScore = Number(q.maxScore) || 0
       try {
         const row = lvClassifyArr.find((r) => (r.questionId || r.id) === qId)
-        const crop = row?.answerBbox && studentImg?.data
-          ? await cropInlineImageByBbox(studentImg.data, studentImg.mimeType,
-              inflateBboxForType(row.answerBbox, q.questionCategory))
-          : null
+        const bb = row?.answerBbox ? inflateBboxForType(row.answerBbox, q.questionCategory) : null
+        // ⭐ 2026-08-14 寬長條要切半再送。
+        //   應用題的作答格常是整列寬（實測 1137×336、長寬比 3.4），學生左欄寫一段、右欄寫一段。
+        //   實測判官三次都漏讀右欄的「4676767 > 4091219」，加 prompt 指令（「先掃整張圖」）無效，
+        //   解析度也已鎖 HIGH ⇒ 不是看不清，是寬圖的注意力偏向左側。
+        //   切成左右兩半（各 56% 寬、重疊 12%）後每半長寬比降到 ~1.7；總像素面積不變、成本幾乎不增。
+        const wide = !!bb && bb.h > 0 && (bb.w / bb.h) > 3
+        const crops = []
+        if (bb && studentImg?.data) {
+          if (wide) {
+            const half = bb.w * 0.56
+            for (const [label, x] of [['左半', bb.x], ['右半', bb.x + bb.w - half]]) {
+              const c = await cropInlineImageByBbox(studentImg.data, studentImg.mimeType,
+                { ...bb, x, w: half }, true)
+              if (c) crops.push({ label, inlineData: c })
+            }
+          }
+          if (crops.length < 2) {
+            const c = await cropInlineImageByBbox(studentImg.data, studentImg.mimeType, bb, true)
+            crops.length = 0
+            if (c) crops.push({ label: '', inlineData: c })
+          }
+        }
+        const crop = crops[0]?.inlineData || null
         if (!crop) {
           logStaged(pipelineRunId, 'basic',
             `[B-Level] ${qId} 取不到 crop、交回原流程`
@@ -13815,8 +13835,11 @@ export async function runStagedGradingPhaseB({
             timeoutMs: Math.min(getRemainingBudget(), 25_000), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_LEVEL_JUDGE,
             stageContents: [{ role: 'user', parts: [
-              { text: buildLevelJudgePrompt(q.levelRubric, j, ensureString(q.referenceAnswer || q.answer, '')) },
-              { inlineData: crop },
+              { text: buildLevelJudgePrompt(q.levelRubric, j, ensureString(q.referenceAnswer || q.answer, ''),
+                  crops.length > 1) },
+              ...crops.flatMap((c) => (c.label
+                ? [{ text: `【${c.label}】` }, { inlineData: c.inlineData }]
+                : [{ inlineData: c.inlineData }])),
             ] }],
           })
           if (resp) stageResponses.push(resp)
