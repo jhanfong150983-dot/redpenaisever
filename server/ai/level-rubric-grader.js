@@ -153,10 +153,11 @@ export function aggregateLevelVotes(rubric, votes, maxScore) {
     // 替代組只要中一個就算滿足，未中的另一條不算「缺」
     && !(rubric?.alternativeGroups || []).some((g) => (g.options || []).some((o) => o.key === k)
       && (g.options || []).some((o) => found.includes(o.key))))
-  const parts = []
-  if (missing.length === 0) parts.push(`${allKeys.length} 項要素全數呈現`)
-  else parts.push(`未呈現：${missing.map(label).join('；')}`)
-  if (split.length > 0) parts.push(`「${split.map(label).join('」「')}」判官意見不一致，建議複核`)
+  // 逐要素明細由 UI 羅列（✓／✗／？），理由只寫「幾項做到、缺哪幾步」的摘要——
+  // 兩邊都寫整份清單會變成重複的長句，反而難讀。
+  const parts = [`${found.length}/${allKeys.length} 項要素呈現`]
+  if (missing.length > 0) parts.push(`缺：${missing.map(label).join('、')}`)
+  if (split.length > 0) parts.push(`${split.length} 項判官意見不一致，建議複核`)
   if (valid.length < 3) parts.push(`僅 ${valid.length} 位判官回覆`)
 
   return {
