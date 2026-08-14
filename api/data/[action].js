@@ -3117,6 +3117,8 @@ function historyCellOf(d, chainByQid) {
     conf: Number.isFinite(Number(d?.confidence)) ? Number(d.confidence) : null,
     sysConf: Number.isFinite(Number(d?.systemConfidence)) ? Number(d.systemConfidence) : null,
     journey: d?.confidenceJourney ? String(d.confidenceJourney).slice(0, 60) : null,
+    // 2026-08-15：兩讀分歧後「最終採用哪一讀」——批改品質頁要能交代 unstable 的收斂結果
+    src: d?.finalAnswerSource ? String(d.finalAnswerSource).slice(0, 24) : null,
     bbox: d?.answerBbox ?? null,
     errType: d?.errorType ?? null,
     reason: d?.reason ? String(d.reason).slice(0, 100) : null

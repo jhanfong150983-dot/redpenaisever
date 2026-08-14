@@ -4221,8 +4221,8 @@ async function q2Detail(supabaseAdmin, assignmentId) {
             // 2026-08-15 user：要能展開看「該題該次的讀鏈」——r1/r2 讀值、一致性、
             //   知答鏈逐輪選擇(chain.picks)與採用值。快照本來就存了(historyCellOf)，
             //   先前只是沒往前端送。
-            a: { gradedAt: Number(ra.graded_at), ok: ca.ok, score: ca.score, ans: ca.ans, journey: ca.journey, votes: ca.votes ?? null, reason: ca.reason, r1: ca.r1 ?? null, r2: ca.r2 ?? null, cons: ca.cons ?? null, chain: ca.chain ?? null, sysConf: ca.sysConf ?? null },
-            b: { gradedAt: Number(rb.graded_at), ok: cb.ok, score: cb.score, ans: cb.ans, journey: cb.journey, votes: cb.votes ?? null, reason: cb.reason, r1: cb.r1 ?? null, r2: cb.r2 ?? null, cons: cb.cons ?? null, chain: cb.chain ?? null, sysConf: cb.sysConf ?? null },
+            a: { gradedAt: Number(ra.graded_at), ok: ca.ok, score: ca.score, ans: ca.ans, journey: ca.journey, votes: ca.votes ?? null, reason: ca.reason, r1: ca.r1 ?? null, r2: ca.r2 ?? null, cons: ca.cons ?? null, chain: ca.chain ?? null, sysConf: ca.sysConf ?? null, src: ca.src ?? null },
+            b: { gradedAt: Number(rb.graded_at), ok: cb.ok, score: cb.score, ans: cb.ans, journey: cb.journey, votes: cb.votes ?? null, reason: cb.reason, r1: cb.r1 ?? null, r2: cb.r2 ?? null, cons: cb.cons ?? null, chain: cb.chain ?? null, sysConf: cb.sysConf ?? null, src: cb.src ?? null },
             bbox: cb.bbox ?? ca.bbox ?? null
           })
         }
