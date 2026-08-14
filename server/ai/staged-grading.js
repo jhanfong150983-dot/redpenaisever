@@ -32,7 +32,7 @@ import {
   parseStageBResult,
   gradeMapFillDeterministically
 } from './map-fill-grader.js'
-import { buildLevelJudgePrompt, parseLevelJudgeResult, aggregateLevelVotes } from './level-rubric-grader.js'
+import { buildElementQuestionPrompt, parseElementAnswer, aggregateElementAnswers } from './level-rubric-grader.js'
 import {
   VISUAL_JUDGMENT_TYPES,
   buildVjRubricPrompt,
@@ -13839,15 +13839,20 @@ export async function runStagedGradingPhaseB({
             + `／學生圖 ${studentImg?.data ? '有' : '無'}）`)
           continue
         }
-        const votes = await Promise.all(['A', 'B', 'C'].map(async (j) => {
+        // 逐要素提問：一次只問一條（沙盒 21/21 vs 整份規準 19/21）。
+        //   會考型應用題是大格子自由書寫，整份規準會讓 AI 退化成「掃描找小標」。
+        const elements = [
+          ...(q.levelRubric.requiredElements || []),
+          ...(q.levelRubric.alternativeGroups || []).flatMap((g) => g.options || []),
+        ]
+        const answers = await Promise.all(elements.map(async (el) => {
           const resp = await executeStage({
             apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL,
             payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
             timeoutMs: Math.min(getRemainingBudget(), 25_000), routeHint,
             routeKey: AI_ROUTE_KEYS.GRADING_LEVEL_JUDGE,
             stageContents: [{ role: 'user', parts: [
-              { text: buildLevelJudgePrompt(q.levelRubric, j, ensureString(q.referenceAnswer || q.answer, ''),
-                  crops.length > 1) },
+              { text: buildElementQuestionPrompt(q.levelRubric, el, crops.length > 1) },
               ...crops.flatMap((c) => (c.label
                 ? [{ text: `【${c.label}】` }, { inlineData: c.inlineData }]
                 : [{ inlineData: c.inlineData }])),
@@ -13855,22 +13860,24 @@ export async function runStagedGradingPhaseB({
           })
           if (resp) stageResponses.push(resp)
           if (!resp?.ok) return null
-          const parsed = parseLevelJudgeResult(extractCandidateText(resp.data) || '')
-          return parsed ? { judge: j, found: parsed.found, uncertain: parsed.uncertain } : null
+          const parsed = parseElementAnswer(extractCandidateText(resp.data) || '')
+          return parsed ? { key: el.key, ...parsed } : null
         }))
-        const ok = votes.filter(Boolean)
+        const ok = answers.filter(Boolean)
         if (ok.length === 0) {
-          logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 三判官全失敗、交回原流程`)
+          logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 逐要素全失敗、交回原流程`)
           continue
         }
-        const agg = aggregateLevelVotes(q.levelRubric, ok, maxScore)
+        const agg = aggregateElementAnswers(q.levelRubric, ok, maxScore)
         if (agg.level == null) {
           logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 無 levelRules、交回原流程`)
           continue
         }
         logStaged(pipelineRunId, 'basic',
           `[B-Level] ${qId} ${agg.level}級 ${agg.score}/${maxScore} 要素[${agg.found.join(',')}]`
-          + `${agg.split.length ? ` 分歧[${agg.split.join(',')}]` : ''} 票數${agg.voteCount}/3`)
+          + `${agg.unsure.length ? ` 沒把握[${agg.unsure.join(',')}]` : ''}`
+          + `${agg.missingAnswer.length ? ` 未問到[${agg.missingAnswer.join(',')}]` : ''}`
+          + ` 逐要素${ok.length}/${elements.length}`)
         deterministicScores.push({
           questionId: qId,
           isCorrect: agg.level === 3,
@@ -13884,7 +13891,7 @@ export async function runStagedGradingPhaseB({
           studentFinalAnswer: '卷面作答',
           needExplain: false,
           _levelBypass: true,
-          levelResult: { level: agg.level, found: agg.found, split: agg.split, votes: ok },
+          levelResult: { level: agg.level, found: agg.found, unsure: agg.unsure, evidence: agg.evidence },
         })
         levelBypassIds.add(qId)
       } catch (e) {

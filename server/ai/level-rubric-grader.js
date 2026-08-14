@@ -187,3 +187,131 @@ export function aggregateLevelVotes(rubric, votes, maxScore) {
       : `${['零', '一', '二', '三'][level]}級分（${parts.join('；')}）`,
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-08-14 逐要素提問（user 拍板「1 crop 1 讀」，品質優先）
+//
+// 為什麼改：會考型應用題給學生一個大格子自由書寫、沒有 (1)(2) 小標。
+//   一次把整份規準丟給 AI，它會退化成「掃描找小標比對清單」，寬圖右半、非線性排版就漏。
+//   閱卷老師的實際做法是「拿一條標準搜整張卷，再換下一條」——照這個方式問就對了。
+//
+// 沙盒實測（21 份會考公告樣卷、同一份 v5 規準、級分都由 code 算，唯一變數是一次問幾條）：
+//   整份規準 19/21 = 90%（一件放水、一件誤殺）
+//   逐要素   21/21 = 100%   ← 兩個方向的錯都修正
+// 因此逐要素只用**單一判官**，不再疊三票（三票是為了壓整份規準的不穩，逐要素本身就穩）。
+//
+// 代價：呼叫數 1 → 要素數。實測每次呼叫成本幾乎固定（圖片是主體、prompt 長短影響很小），
+//   所以成本≈呼叫數；user 拍板品質優先。
+// 失去的分歧偵測改用判官自己回報的 uncertain——比投票更精準，直接指出是哪一條沒把握。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一次只問一條要素。刻意不列出其他要素——列了它又會回到掃描清單的模式。 */
+export function buildElementQuestionPrompt(rubric, element, splitImages = false) {
+  const flaws = (rubric?.toleratedFlaws || []).map((f) => `  - ${f}`).join('\n') || '  （無）'
+  const splitNote = splitImages
+    ? '\n⚠️ 你會收到【左半】【右半】兩張圖，那是同一題作答區的左右兩半（中間有重疊），兩張都要看完。\n'
+    : ''
+  return `你是數學非選擇題的閱卷老師。這是一位學生的整題作答——可能寫得零散：
+左欄一段、右欄一段、下方補算、順序顛倒都有可能，也不一定標 (1)(2)。${splitNote}
+【你這一次只需要回答一個問題】
+學生的作答裡，**有沒有出現下面這一項**？
+
+  ${element?.desc ?? ''}
+
+【怎麼判斷】
+1. 把整張圖從頭到尾看過，包含左右兩側與下方。不要只看最上面幾行或左半邊。
+2. 等值寫法一律算呈現：同一個值的不同算式、不同命名、不同排列順序都算。
+3. 上面若標了「⛔」，那些情況明確不算呈現。
+4. 判斷的是「**有沒有寫對**」，不是「有沒有寫」——寫成不同或相反的值算未呈現。
+   例：要求結論「否」，學生寫「通過」→ 未呈現。
+5. 「#」（井字號）是台灣數學作答慣例，寫在答案右邊表示「此即為答案」，**不是劃掉**；
+   底線、圈選、箭頭同屬強調。真正的塗改是線條穿過文字本身。
+6. 看不清楚就據實填 uncertain，不要為了給分假設看不到的內容。
+
+【容許的瑕疵】（出現這些不影響本項判定）
+${flaws}
+
+只輸出 JSON：{{"present": true/false, "evidence": "在圖的哪個位置看到／為何判定沒有（25字內）", "uncertain": "沒把握的地方；沒有就填空字串"}}`
+}
+
+export function parseElementAnswer(text) {
+  if (!text) return null
+  const cleaned = String(text).replace(/```json|```/g, '').trim()
+  let obj = null
+  try {
+    obj = JSON.parse(cleaned)
+  } catch {
+    const m = cleaned.match(/\{[\s\S]*\}/)
+    if (!m) return null
+    try { obj = JSON.parse(m[0]) } catch { return null }
+  }
+  if (!obj || typeof obj.present !== 'boolean') return null
+  return {
+    present: obj.present,
+    evidence: String(obj.evidence ?? '').trim(),
+    uncertain: String(obj.uncertain ?? '').trim(),
+  }
+}
+
+/**
+ * 逐要素答案 → 級分 → 分數。
+ * answers = [{ key, present, evidence, uncertain }]；取不到答案的要素請省略（會視為未呈現並降信心）。
+ */
+export function aggregateElementAnswers(rubric, answers, maxScore) {
+  const allKeys = [
+    ...(rubric?.requiredElements || []).map((e) => e.key),
+    ...(rubric?.alternativeGroups || []).flatMap((g) => (g.options || []).map((o) => o.key)),
+  ]
+  const byKey = new Map((answers || []).filter((a) => a && a.key).map((a) => [a.key, a]))
+  const found = allKeys.filter((k) => byKey.get(k)?.present === true)
+  const missingAnswer = allKeys.filter((k) => !byKey.has(k))
+  const unsure = allKeys.filter((k) => (byKey.get(k)?.uncertain || '').length > 0)
+
+  const level = levelFromElements(rubric, found)
+  const lv = (rubric?.levels || []).find((l) => Number(l.level) === level)
+  const ratio = { 3: 1, 2: 0.65, 1: 0.3, 0: 0 }[level] ?? 0
+  const score = typeof lv?.score === 'number' ? lv.score : Math.round(maxScore * ratio * 2) / 2
+
+  // 信心：判官自己說沒把握的要素，若翻面會改變等第 → 這份的等第不可靠 → 送審。
+  //   ⚠️ UI 的紅底與複核面板看 systemConfidence < 70，所以「要送審」必須 <70。
+  const flip = (k) => (found.includes(k) ? found.filter((x) => x !== k) : [...found, k])
+  const unsureMatters = unsure.some((k) => levelFromElements(rubric, flip(k)) !== level)
+  let confidence = 97
+  if (allKeys.length > 0 && byKey.size === 0) confidence = 0
+  else if (missingAnswer.length > 0) confidence = 65
+  else if (unsureMatters) confidence = 45
+  else if (unsure.length > 0) confidence = 75
+
+  const label = (key) => {
+    const e = (rubric?.requiredElements || []).find((x) => x.key === key)
+      || (rubric?.alternativeGroups || []).flatMap((g) => g.options || []).find((o) => o.key === key)
+    const raw = String(e?.desc ?? key).split('⛔')[0].trim()
+    const headMatch = raw.match(/^【?[^：:]{0,20}小題[^：:]{0,10}/)
+    const head = headMatch ? headMatch[0].replace(/^【/, '').trim() : ''
+    const quoted = [...raw.matchAll(/「([^」]{1,40})」/g)].map((m) => m[1]).slice(0, 3)
+    if (quoted.length > 0) return head ? `${head}：${quoted.join('／')}` : quoted.join('／')
+    const rest = head ? raw.slice(head.length).replace(/^[：:]\s*/, '') : raw
+    const body = rest.length > 34 ? `${rest.slice(0, 34)}…` : rest
+    return head ? `${head}：${body}` : body
+  }
+  // 替代組只要中一個就算滿足，未中的另一條不算「缺」
+  const missing = allKeys.filter((k) => !found.includes(k)
+    && !(rubric?.alternativeGroups || []).some((g) => (g.options || []).some((o) => o.key === k)
+      && (g.options || []).some((o) => found.includes(o.key))))
+  const parts = [`${found.length}/${allKeys.length} 項要素呈現`]
+  if (missing.length > 0) parts.push(`缺：${missing.map(label).join('、')}`)
+  if (unsure.length > 0) {
+    parts.push(unsureMatters
+      ? `${unsure.length} 項判讀沒把握，且會影響等第，請老師複核`
+      : `${unsure.length} 項判讀沒把握（不影響等第）`)
+  }
+  if (missingAnswer.length > 0) parts.push(`${missingAnswer.length} 項未能判讀，請老師複核`)
+
+  return {
+    level, score, found, unsure, missingAnswer, confidence,
+    evidence: allKeys.map((k) => ({ key: k, ...(byKey.get(k) || { present: false }) })),
+    reason: level == null
+      ? '答案卷缺少等第判定規則'
+      : `${['零', '一', '二', '三'][level]}級分（${parts.join('；')}）`,
+  }
+}
