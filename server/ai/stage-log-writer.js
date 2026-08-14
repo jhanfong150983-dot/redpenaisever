@@ -229,13 +229,31 @@ export async function loadPhaseAState(submissionId) {
     if (data.assignment_id) {
       const { data: asgn, error: asgnErr } = await supabase
         .from('assignments')
-        .select('answer_key')
+        .select('answer_key, answer_key_template_id')
         .eq('id', data.assignment_id)
         .maybeSingle()
       if (asgnErr) {
         console.warn(`[loadPhaseAState] assignment fetch error submission=${submissionId} assignment=${data.assignment_id}:`, asgnErr.message)
       } else {
         liveAnswerKey = asgn?.answer_key || null
+        // ⭐ 2026-08-14：assignments.answer_key 只是模板的**反向同步副本**，要等下一次 sync 才更新。
+        //   老師「改完答案卷馬上批改」時，這份副本還是舊的 → 用舊規準批完、分數照出、完全靜默。
+        //   實測：11:33 存新規準、11:37 批改、副本 11:47 才同步 → 整批 32 份沒走到級分制判官。
+        //   模板才是 SSoT（反向同步本來就是 template → assignments 單向），所以改成直接讀模板。
+        if (asgn?.answer_key_template_id) {
+          const { data: tpl } = await supabase
+            .from('answer_key_templates')
+            .select('answer_key')
+            .eq('id', asgn.answer_key_template_id)
+            .maybeSingle()
+          if (tpl?.answer_key) {
+            const stale = JSON.stringify(asgn?.answer_key?.questions || []) !== JSON.stringify(tpl.answer_key?.questions || [])
+            if (stale) {
+              console.log(`[loadPhaseAState] 作業副本落後模板、改用模板 submission=${submissionId} template=${asgn.answer_key_template_id}`)
+            }
+            liveAnswerKey = tpl.answer_key
+          }
+        }
       }
     }
     return {
