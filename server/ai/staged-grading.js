@@ -14762,7 +14762,15 @@ export async function runStagedGradingPhaseB({
   }
   // 2026-05-20: 合併 deterministic scores (manual-bypass) 進 accessorResult
   if (deterministicScores.length > 0) {
-    const existing = Array.isArray(accessorResult?.scores) ? accessorResult.scores : []
+    // ⭐ 2026-08-14：級分制判官的結果必須**取代** accessor 的評分，不能因為「accessor 也評過」就丟掉。
+    //   實測：判官正常跑完（帳單記錄 81 次呼叫）、但這裡被 !existingIds.has() 濾掉 →
+    //   levelResult 從未落地、分數仍由 accessor＋最終答案字串比對決定。
+    //   levelBypassIds 只擋住 Read 輸入，攔不住 accessor 對該題評分，所以要在合併時覆蓋。
+    const overrideIds = new Set(
+      deterministicScores.filter((s) => s?._levelBypass).map((s) => ensureString(s.questionId).trim())
+    )
+    const existing = (Array.isArray(accessorResult?.scores) ? accessorResult.scores : [])
+      .filter((s) => !overrideIds.has(ensureString(s?.questionId).trim()))
     const existingIds = new Set(existing.map((s) => ensureString(s?.questionId).trim()))
     const toAdd = deterministicScores.filter((s) => !existingIds.has(s.questionId))
     accessorResult = { ...accessorResult, scores: [...existing, ...toAdd] }
@@ -14795,9 +14803,15 @@ export async function runStagedGradingPhaseB({
         let retryResult = normalizeAccessorResult(retryParsed, accessorAnswerKey, accessorReadAnswerResult.answers, internalContext?.domainHint)
         // 重新合併 deterministic scores (manual-bypass) 進 retry 結果
         if (deterministicScores.length > 0) {
-          const existingIds = new Set((retryResult.scores || []).map((s) => ensureString(s?.questionId).trim()))
+          // 同上：級分制判官的結果要取代 accessor 的，否則 retry 路徑又會把它濾掉
+          const overrideIds = new Set(
+            deterministicScores.filter((s) => s?._levelBypass).map((s) => ensureString(s.questionId).trim())
+          )
+          const kept = (retryResult.scores || [])
+            .filter((s) => !overrideIds.has(ensureString(s?.questionId).trim()))
+          const existingIds = new Set(kept.map((s) => ensureString(s?.questionId).trim()))
           const toAdd = deterministicScores.filter((s) => !existingIds.has(s.questionId))
-          retryResult = { ...retryResult, scores: [...(retryResult.scores || []), ...toAdd] }
+          retryResult = { ...retryResult, scores: [...kept, ...toAdd] }
         }
         const retryQG = validateAccessorQuality(retryResult, accessorExpectedIds)
         logStaged(pipelineRunId, 'basic', 'accessor retry quality-gate', {
