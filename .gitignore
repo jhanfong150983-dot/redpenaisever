@@ -14,3 +14,10 @@ credentials/
 
 # 本機實驗/稽核腳本（沙盒、回放、一次性 probe）— 不進 repo
 local-only/
+
+# 沙盒/一次性實驗腳本與產物。scripts/ 內已納管的只有 backfill-*（已追蹤，不受影響）；
+#   日後要把新腳本納入版控請用 git add -f。用 /scripts/ 錨定根目錄，
+#   誤建在別處的同名資料夾才不會被一起藏起來。
+/scripts/
+exp_gz_*.html
+q118.png
