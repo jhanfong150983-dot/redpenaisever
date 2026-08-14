@@ -1317,7 +1317,7 @@ export function normalizeAnswerForComparison(raw) {
   //   只折「數字.數字」連續出現 ≥2 次的鏈（合法小數只有一個點，22.7/157.5 不受影響；
   //   兩段式 36.56 有小數歧義、不折）。折成逗號後由下行分隔符剝除統一。
   //   2026-07-11b: 容忍點旁空白——「36. 76. 96」也要折（round7 座29 實測漏接）
-  s = s.replace(/\d+(?:\s*\.\s*\d+){2,}/gu, (m) => m.replace(/\s*\.\s*/gu, ','))
+  s = foldEnumSeparators(s)   // 2026-08-15 改用「≥2 個分隔記號」判準（見 foldEnumSeparators）
   // 2026-07-11b: 空白語彙統一——「未作答」「(空白)」視為空字串（兩輪 finalize 寫法不一致的表示法噪聲）
   if (/^[（(]?(?:未作答|空白)[)）]?$/u.test(s)) return ''
   // 去除分隔符號（逗號、頓號、換行）— 比對內容本身，不比對格式
@@ -1610,6 +1610,22 @@ function extractFinalAnswerFromCalc(raw) {
  * 去除尾部非數字單位（cm², cc, min 等）後比較數值。
  * 只在兩邊都能解析為數值時回傳 true/false，否則 false。
  */
+// ── 列舉分隔符折疊（2026-08-15 取代原「≥2 個點」規則）─────────────────────────
+// 事故：標答「36,76,96」（三個數字寫在同一格），學生寫成逗號＋句點混用，
+//   兩次批改讀成「36, 76, 96」與「36,76.96」→ 一次判對一次判錯（理由：標點符號錯誤）。
+//   舊規則要求「數字.數字」連續 ≥2 次才折，混用分隔符（1 逗號 1 句點）接不住。
+// 新判準：數字之間出現 ≥2 個分隔記號 [.,、] → 整串視為列舉，全部折成逗號。
+//   ・小數 22.7、157.5 只有 1 個記號 → 不動
+//   ・千分位 1,000 / 1,000,000 / 1,000.5 → 型樣豁免（每組剛好 3 位數）
+//   ・兩側同樣處理，所以「3.14,2.71」vs「3,14,2.71」會一起折、等價成立
+function foldEnumSeparators(s) {
+  const str = String(s ?? '')
+  if (/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/u.test(str.replace(/\s+/gu, ''))) return str   // 千分位
+  const marks = str.match(/(?<=\d)\s*[.,、]\s*(?=\d)/gu) || []
+  if (marks.length < 2) return str
+  return str.replace(/(?<=\d)\s*[.,、]\s*(?=\d)/gu, ',')
+}
+
 function isNumericEqual(a, b) {
   if (!a || !b) return false
   // 去除尾部單位文字（保留數字、分數、小數、百分比、負號）
@@ -8296,7 +8312,7 @@ function buildFinalGradingResult({
           t = t.replace(/^[（(]\s*(.+?)\s*[）)]$/, '$1')
           // 2026-07-11: 與 normalizeAnswerForComparison 同步的兩條等價（⚠等價規則兩處要一起改）：
           // ①列舉分隔符——「36.76.96」=「36,76,96」（「數字.數字」鏈 ≥2 個點才折、小數 22.7 不動；round6 座10 實測冤枉）
-          t = t.replace(/\d+(?:\.\d+){2,}/gu, (m) => m.replace(/\./gu, ','))
+          t = foldEnumSeparators(t)
           // ②角度符號剝除——「640°」=「640」（培英 Q21 型）
           t = t.replace(/[°º˚]/gu, '')
           // ③2026-07-15 結尾句讀剝除——英語短句答案（「Yes, it is.」）被 isSimpleAnswer 收進簡單答案
