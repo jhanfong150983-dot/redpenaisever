@@ -23,6 +23,9 @@ export const CODE_FIRST_CATEGORIES = new Set([
   'ordering', 'multi_fill',
 ])
 
+// 不等式符號（刻意不含「=」，理由見 decideDeterministic 末段）
+const INEQ = /(<=|>=|[<>≤≧≥≦⩽⩾])/u
+
 const PLACEHOLDER = new Set(['未作答', '無法辨識', '圖像辨識', '圖上作答', '卷面作答', ''])
 const CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
 const CJKNUM = '一二三四五六七八九十'
@@ -95,8 +98,10 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
   const ref = String(q.answer ?? '').trim()
   const stu = String(studentAnswer ?? '').trim()
   if (!ref || PLACEHOLDER.has(stu) || status !== 'read') return null
-  // 標答本身列了多個可接受答案（頓號/斜線）→ 交既有路徑（那裡有 refAlts 邏輯）
-  if (/[、／/]/u.test(ref) && !/^\d+\s*\/\s*\d+$/u.test(ref)) return null
+  // 標答本身列了多個可接受答案（頓號/斜線）→ 交既有路徑（那裡有 refAlts 邏輯）。
+  //   ⚠ 先把「數字/數字」的分數線挖掉再判，否則「x>4/3」「73/11」「1/3小時」全被誤擋
+  //   （2026-08-15 實測：原寫法要求整串就是一個純分數才放行，覆蓋率被砍掉一大塊）。
+  if (/[、／/]/u.test(ref.replace(/\d+\s*\/\s*\d+/gu, ''))) return null
   if (answerKey?.fractionRule === 'require_simplified' && looksUnsimplified(stu)) return null
 
   const R = normLenient(ref), S = normLenient(stu)
@@ -115,6 +120,17 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
 
   // 兩邊都是短英數（≤12 字、無單位無中文）→ 不同就是不同
   if (/^[a-z0-9]{1,12}$/u.test(R) && /^[a-z0-9]{1,12}$/u.test(S)) return { verdict: 'differ', by: '短英數不同' }
+
+  // 標答是不等式、學生完全沒用關係符號 → 錯（2026-08-15 user：這單元在考不等式）
+  //   實例：標答「330<=x<=350」、學生「330~350」——波浪號表達的區間雖然同義，但答案卷
+  //   要的是不等式；同一格兩輪一判對一判錯，正是沒有確定性規則的後果。
+  //   以答案卷為準（見 docs/批改路由盤點）：答案卷寫不等式，就是要不等式。
+  //   ⚠ 只認 < > ≤ ≥，不含單純的「=」——很多標答寫「x=5」但老師接受「5」，那不該被判錯。
+  //   全庫實測：符合本條的格僅 13 個（扣掉級分制佔位），且現行幾乎全已判 0 →
+  //   不改變分數，但把它們從「AI 心情」變成確定性。
+  if (INEQ.test(ref) && !INEQ.test(stu)) {
+    return { verdict: 'differ', by: '答案卷要求不等式、學生未使用關係符號' }
+  }
 
   return null
 }
