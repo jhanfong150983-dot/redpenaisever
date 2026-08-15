@@ -14721,6 +14721,8 @@ export async function runStagedGradingPhaseB({
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
   // 2026-05-28: 也排除 mapFillBypassIds（map_fill 走 Direction Y、Accessor 不看）
+  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id) || clozeBypassIds.has(id) || glyphComposeIds.has(id)
+
   // ── Phase 0b-7 (2026-08-15)：確定性優先（code-first）─────────────────────────
   //   通則取代「為每個題型加一條 0b」：accessor 之前先用寬鬆比對器試判，判得動就直接定案、
   //   accessor 看不到這格；判不動照舊送 accessor → 照舊事後程式覆核。
@@ -14777,7 +14779,6 @@ export async function runStagedGradingPhaseB({
     }
   }
 
-  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id) || clozeBypassIds.has(id) || glyphComposeIds.has(id)
   const allAnswerIds = finalReadAnswerResult.answers
     .map((a) => ensureString(a?.questionId).trim())
     .filter((id) => id && !isBypassed(id))
