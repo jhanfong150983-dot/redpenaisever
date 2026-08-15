@@ -32,14 +32,23 @@ const CJKNUM = '一二三四五六七八九十'
 const HEAVEN = '甲乙丙丁戊己庚辛壬癸'
 
 // 選項代號跨記號等價：甲=A=1=①（2026-06-02 既有規則，此處沿用）
+//   ＋序數敘述「第二個」「第4項」→ 2、4（2026-08-15：勾選題的標答常是這種寫法，
+//   學生填的是編號；不解析的話會被下面「標答為文字」規則誤判成錯——回放實測 173 格）。
 function optionIndex(s) {
-  const t = String(s ?? '').trim().replace(/^[（(]\s*|\s*[）)]$/gu, '')
+  let t = String(s ?? '').trim().replace(/^[（(]\s*|\s*[）)]$/gu, '')
+  const ord = t.match(/^第\s*([0-9０-９一二三四五六七八九十])\s*[個項題張幅條列格排]?$/u)
+  if (ord) {
+    const c = ord[1].replace(/[０-９]/gu, (x) => String.fromCharCode(x.charCodeAt(0) - 0xFF10))
+    const i = CJKNUM.indexOf(c)
+    const idx = i >= 0 ? i + 1 : (/^[1-9]$/u.test(c) ? Number(c) : null)
+    return idx ? { idx, fromText: true } : null
+  }
   if (t.length !== 1) return null
-  let i = CIRCLED.indexOf(t); if (i >= 0) return i + 1
-  i = HEAVEN.indexOf(t); if (i >= 0) return i + 1
-  i = CJKNUM.indexOf(t); if (i >= 0) return i + 1
-  if (/^[A-Za-z]$/u.test(t)) return t.toUpperCase().charCodeAt(0) - 64
-  if (/^[1-9]$/u.test(t)) return Number(t)
+  let i = CIRCLED.indexOf(t); if (i >= 0) return { idx: i + 1, fromText: false }
+  i = HEAVEN.indexOf(t); if (i >= 0) return { idx: i + 1, fromText: false }
+  i = CJKNUM.indexOf(t); if (i >= 0) return { idx: i + 1, fromText: false }
+  if (/^[A-Za-z]$/u.test(t)) return { idx: t.toUpperCase().charCodeAt(0) - 64, fromText: false }
+  if (/^[1-9]$/u.test(t)) return { idx: Number(t), fromText: false }
   return null
 }
 
@@ -112,7 +121,14 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
   if (tr && ts) return { verdict: tr === ts ? 'equal' : 'differ', by: '是非等價' }
 
   const ir = optionIndex(ref), is = optionIndex(stu)
-  if (ir && is) return { verdict: ir === is ? 'equal' : 'differ', by: '選項代號等價' }
+  if (ir && is) {
+    if (ir.idx === is.idx) return { verdict: 'equal', by: '選項代號等價' }
+    // ⚠ 序數敘述（「第四個」）只能用來「確認相同」，不能用來判不同：答案卷存的是選項文字、
+    //   學生填的是編號，兩者的編號基準未必一致（回放實測 51 格：標答「第四個」學生「1」
+    //   而 AI 看圖判正確）。符號代號（A/甲/①）沒有這個歧義，可以判不同。
+    if (ir.fromText || is.fromText) return null
+    return { verdict: 'differ', by: '選項代號等價' }
+  }
 
   const g = relationGateVerdict(ref, stu)
   if (g === 'equal' || g === 'equal_approx') return { verdict: 'equal', by: '數值/代數等價' }
