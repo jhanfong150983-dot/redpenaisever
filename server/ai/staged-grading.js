@@ -2511,6 +2511,24 @@ function getContainmentPreferredRaw(read1, read2, questionType) {
 
 // 將老師確認的 finalAnswers 陣列轉換為 readAnswerResult 格式（供 Accessor 使用）
 // 2026-05-20: 保留 source 欄位、Phase B 可區分 'manual'（老師人工編輯）→ 走 deterministic 跳過 Accessor LLM
+// Phase A 的 VJ blank 結果會以字串形式流到 Phase B：「前視圖:有畫、右視圖:空白」
+//   （Phase A line ~11570 用 `${label}:${有畫|空白}` 以「、」串接寫進 finalStudentAnswer）。
+// Phase B 原本只認 finalAnswer.vjBlankConfirmed（那欄只有老師手動改時才寫），看不懂這個字串
+//   → 每張卷、每個 VJ 題都重跑一次 PRO blank reader。實測培英卷：vj_blank 呼叫數是
+//   vj_grade 的兩倍（256 vs 128＝32 卷×2 輪×2 題×2 次），一半是白花的。
+// 解析失敗（項數對不上、label 自帶「、」等）一律回 null → 照舊 lazy backfill（fail-open）。
+function parseVjBlankSummary(text, expectedCount) {
+  const segs = ensureString(text, '').split('、').map((s) => s.trim()).filter(Boolean)
+  if (segs.length === 0 || segs.length !== expectedCount) return null
+  const out = []
+  for (let i = 0; i < segs.length; i++) {
+    const m = segs[i].match(/[:：](有畫|空白)$/u)
+    if (!m) return null
+    out.push({ idx: i + 1, isBlank: m[1] === '空白' })
+  }
+  return out
+}
+
 function finalAnswersToReadAnswerResult(finalAnswers) {
   const answers = Array.isArray(finalAnswers)
     ? finalAnswers.map((a) => {
@@ -13735,7 +13753,15 @@ export async function runStagedGradingPhaseB({
         // 2) 取 blank 確認（client finalAnswer.vjBlankConfirmed）
         const fa = finalAnswerByQid.get(qId)
         let blankConfirmed = Array.isArray(fa?.vjBlankConfirmed) ? fa.vjBlankConfirmed : null
-        // 缺 → lazy 跑一次 PRO blank reader（auto-stable 流程客戶端通常會帶；此為保險）
+        // 先吃 Phase A 已經算好的結果（省一次 PRO call，見 parseVjBlankSummary）
+        if (!blankConfirmed) {
+          const fromPhaseA = parseVjBlankSummary(fa?.finalStudentAnswer, itemLabels.length)
+          if (fromPhaseA) {
+            blankConfirmed = fromPhaseA
+            logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 沿用 Phase A blank 結果、免跑 blank reader`)
+          }
+        }
+        // 仍然缺 → lazy 跑一次 PRO blank reader（fail-open 保險）
         if (!blankConfirmed && studentImg?.data) {
           const classifyRow = vjClassifyArr.find((r) => (r.questionId || r.id) === qId)
           if (classifyRow?.answerBbox) {
