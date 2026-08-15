@@ -8447,7 +8447,9 @@ function buildFinalGradingResult({
     //   等於把逐要素的判斷結果丟掉。實測誤殺：學生六項要素全對、答「不通過」，
     //   標準答案寫「否」→ 字串不同 → 0 分（而規準的 E6 明文接受「不通過」）。
     //   判官有跑（row.levelResult 存在）→ 完全跳過本段；判官沒跑 → 維持原行為（fail-open）。
-    if ((qCategory === 'word_problem' || qCategory === 'calculation') && !row.levelResult) {
+    // ⚠ 2026-08-15 拔 read 後追加 `!score?._levelBypass`：判官未定案的級分制格讀值是佔位
+    //   「圖像辨識」，若讓這段最終答案比對跑下去，等於拿佔位字串當學生答案判分（正是要避免的）。
+    if ((qCategory === 'word_problem' || qCategory === 'calculation') && !row.levelResult && !score?._levelBypass) {
       const refText = ensureString(question?.referenceAnswer || question?.answer, '')
       const refFinal = extractFinalAnswerFromCalc(refText)
       const stuFinal = extractFinalAnswerFromCalc(studentAns)
@@ -8604,7 +8606,9 @@ function buildFinalGradingResult({
       //   UI 的低信心紅底與複核面板（門檻 <70）永遠不會亮。
       else if (score?._levelBypass) {
         base = Number.isFinite(score?.scoreConfidence) ? score.scoreConfidence : 90
-        journey = `級分制三判官(${score?.levelResult?.level ?? '?'}級)`
+        journey = score?._levelFailed
+          ? '級分制未定案(待老師確認)'
+          : `級分制逐要素(${score?.levelResult?.level ?? '?'}級)`
       }
       // 2026-07-21 知答制鏈信心：新裁決(computeInformedDecision)直接帶 chainConfidence
       //   （L0一致92/88、多數或非標準≥2=80、單次看走眼採標準70、真分裂=45低信心）→ 直接當基準，
@@ -10234,11 +10238,25 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     const key = ensureString(ak.answer ?? ak.referenceAnswer, '').trim()
     return /^[一-鿿]{1,2}$/u.test(key) || /^[ㄅ-ㄩˊˇˋ˙]{1,5}$/u.test(key)
   }
+  // ── 2026-08-15 應用題級分制拔 read（user 拍板：改不了就交回老師）──────────────
+  //   級分制判官逐要素直接看 crop 定案、完全不用讀值，而應用題的 crop 是全卷最大（整片計算
+  //   過程），兩讀對它們是最貴的浪費。比照國字注音拔 read：跳過兩讀、以「圖像辨識」佔位
+  //   （兩讀同值 → stable、不進鏈/不進審查），Phase B 判官定案。
+  //   ⚠ 拔 read 之後**絕不可讓 accessor 碰這些格**（會拿佔位字串去比對標準答案判 0）——
+  //   2026-08-11 注音就是這樣整批被判 0 的。判官未定案一律走 Phase B 安全網（0 分＋低信心 45
+  //   ＋黃燈請老師確認），而不是靜默給分。kill-switch：LEVEL_SKIP_READ='0'。
+  const lrSkipRead = process.env.LEVEL_SKIP_READ !== '0'
+  const lrIsCell = (qid) => {
+    if (!lrSkipRead) return false
+    const ak = akMapForAi2.get(qid)
+    return Array.isArray(ak?.levelRubric?.levelRules) && ak.levelRubric.levelRules.length > 0
+  }
   const runTypeSplitRole = async (role) => {
     const groups = new Map()
     for (const q of classifyAligned) {
       if (!q.visible || TYPE_SPLIT_SKIP.has(q.questionType) || !allQuestionCropMap.has(q.questionId)) continue
       if (gzIsVjCell(q.questionId)) continue // 國字注音拔 read：判官全接手
+      if (lrIsCell(q.questionId)) continue    // 應用題級分制拔 read：逐要素判官全接手
       if (!groups.has(q.questionType)) groups.set(q.questionType, [])
       groups.get(q.questionType).push(q)
     }
@@ -10717,17 +10735,17 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
   // ── 2026-07-21 國字注音拔 read：被跳過的格注入 synthetic 讀值 ──────────────────
   //   兩讀同值「圖像辨識」→ computeConsistencyStatus 必 stable → 不觸發 NR/鏈/審查；
   //   finalAnswers 得到佔位值 → Phase B 判官（status='read'）以 crop 重判並覆寫分數與顯示。
-  if (gzVjSkipRead) {
+  if (gzVjSkipRead || lrSkipRead) {
     const seen1 = new Set((readAnswerParsed?.answers || []).map((a) => ensureString(a?.questionId).trim()))
     const seen2 = new Set((reReadAnswerParsed?.answers || []).map((a) => ensureString(a?.questionId).trim()))
     let synthN = 0
     for (const q of classifyAligned) {
-      if (!q.visible || !gzIsVjCell(q.questionId)) continue
+      if (!q.visible || !(gzIsVjCell(q.questionId) || lrIsCell(q.questionId))) continue
       const entry = () => ({ questionId: q.questionId, studentAnswerRaw: '圖像辨識', status: 'read', _gzVjSynthetic: true })
       if (!seen1.has(q.questionId)) { readAnswerParsed.answers = readAnswerParsed.answers || []; readAnswerParsed.answers.push(entry()); synthN++ }
       if (reReadAnswerParsed && !seen2.has(q.questionId)) { reReadAnswerParsed.answers = reReadAnswerParsed.answers || []; reReadAnswerParsed.answers.push(entry()) }
     }
-    if (synthN > 0) logStaged(pipelineRunId, 'basic', `[A2] 國字注音拔 read：${synthN} 格跳過兩讀（省 crop×2＋thinking）、synthetic 佔位、Phase B 判官定案`)
+    if (synthN > 0) logStaged(pipelineRunId, 'basic', `[A2] 拔 read（國字注音／級分制應用題）：${synthN} 格跳過兩讀（省 crop×2＋thinking）、synthetic 佔位、Phase B 判官定案`)
   }
 
   // ── 2026-06-30: AI2(校對) 整份/大量判空白偵測 → 重抽 read2 一次 ──────────────
@@ -13969,6 +13987,28 @@ export async function runStagedGradingPhaseB({
       } catch (e) {
         logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 失敗：${e?.message} → 交回原流程`)
       }
+    }
+
+    // ── 2026-08-15 拔 read 安全網（比照國字注音 line ~14342）────────────────────
+    //   讀值＝佔位「圖像辨識」的級分制格若判官未定案（call 失敗／缺 crop／預算到點），
+    //   **不可交 accessor**——它會拿佔位字串去比對標準答案判 0 分，還會顯示成學生的作答
+    //   （2026-08-11 注音就是這樣整批被判 0）。改為確定性 0 分＋低信心 45 亮黃燈請老師確認。
+    //   user 拍板：「改不了最好回歸老師」——寧可交回人工，也不要讓 accessor 亂給分。
+    //   有真讀值的格（LEVEL_SKIP_READ='0' 時）維持舊 fail-open：退回最終答案比對。
+    for (const q of levelQuestions) {
+      const qId = String(q.id).trim()
+      if (levelBypassIds.has(qId) || manualBypassIds.has(qId) || vjBypassIds.has(qId)) continue
+      const readRaw = ensureString(finalReadAnswerResult.answers.find((a) => a?.questionId === qId)?.studentAnswerRaw, '')
+      if (readRaw !== '圖像辨識') continue   // 有真讀值 → 照舊 fail-open
+      const lvMax = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+      deterministicScores.push({
+        questionId: qId, isCorrect: false, score: 0, maxScore: lvMax, errorType: 'unreadable',
+        scoringReason: '級分制判定未完成（系統忙碌或無法裁定）、暫判 0 分請老師確認（低信心）',
+        scoreConfidence: 45, studentFinalAnswer: '圖像辨識', needExplain: false,
+        _levelBypass: true, _levelFailed: true,
+      })
+      levelBypassIds.add(qId)
+      logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 判官未定案且無真讀值 → 0 分＋低信心 45 交老師`)
     }
   }
 
