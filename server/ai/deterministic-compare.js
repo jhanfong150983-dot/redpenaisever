@@ -68,6 +68,12 @@ export function normLenient(s) {
     .replace(new RegExp(`[${CIRCLED}]`, 'gu'), (c) => String(CIRCLED.indexOf(c) + 1))
     .replace(/[，]/gu, ',').replace(/[。]/gu, '.').replace(/[；]/gu, ';').replace(/[：]/gu, ':')
     .replace(/[−–—]/gu, '-').replace(/[°º˚]/gu, '')
+  // 逐項帶括號的清單「(1),(2),(4)」→「1,2,4」。只在**整串都是括號短項**時才剝，
+  //   否則會把數學式「2(x+3)」拆成「2x+3」（2026-08-15 回放實測 79 格多選題誤殺）。
+  if (/^[（(][^（()）]{1,3}[）)]([,、\s]*[（(][^（()）]{1,3}[）)])+$/u.test(t)) {
+    t = t.replace(/[（()）]/gu, (c) => (c === '（' || c === '(' ? '' : ','))
+      .replace(/[、\s]/gu, ',').replace(/,+/gu, ',').replace(/^,|,$/gu, '')
+  }
   t = t.replace(/^[（(]\s*(.+?)\s*[）)]$/u, '$1')
   // 列舉分隔符折疊（≥2 個記號、千分位豁免）——與 staged-grading.foldEnumSeparators 同判準
   const marks = (t.match(/(?<=\d)\s*[.,、]\s*(?=\d)/gu) || []).length
@@ -87,6 +93,21 @@ const looksUnsimplified = (s) => {
   if (!b || a === 0) return false
   const g = (x, y) => (y ? g(y, x % y) : x)
   return g(a, b) > 1
+}
+
+
+// 標答是不是「形式答案」（數、式、代號、是非）——只有這類才由 code 全權定案。
+//   含中日文字（含單位「100公尺」「7分42秒」、詞語「羅妹號事件」）→ 自然語言 → 交 accessor。
+//   含兩個以上英文單字（英語句子）→ 交 accessor。
+function isFormalAnswer(ref) {
+  const s = String(ref ?? '').trim()
+  if (!s) return false
+  if (/[㐀-鿿぀-ヿ]/u.test(s)) return false        // 有 CJK → 文字
+  if ((s.match(/[A-Za-z]{2,}/gu) || []).length > 0 && !/^[A-Za-z]$/u.test(s)) {
+    // 多字母詞（bathroom、kitchen）→ 文字；單一變數 x/y 不算
+    if (!/^[A-Za-z]\s*(<=|>=|<|>|=)/u.test(s)) return false
+  }
+  return /^[\d\s.,/%+\-*()\[\]<>=xXyYaAbBnN×÷≤≥°]+$/u.test(s) || optionIndex(s)?.fromText === false || !!tfValue(s)
 }
 
 /**
@@ -120,7 +141,13 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
   const tr = tfValue(ref), ts = tfValue(stu)
   if (tr && ts) return { verdict: tr === ts ? 'equal' : 'differ', by: '是非等價' }
 
-  const ir = optionIndex(ref), is = optionIndex(stu)
+  // 圈選題的讀值常把整行選項文字一起抄回來（「A. 2 hamburgers, French fries,」）——
+  //   標答是單一代號時，取學生答案開頭的代號比對（2026-08-15 回放實測 20 格誤殺）。
+  const leadCode = (s) => {
+    const m = String(s ?? '').trim().match(/^[（(]?\s*([A-Za-z1-9甲乙丙丁戊①-⑳])\s*[）).、,:：]/u)
+    return m ? m[1] : null
+  }
+  const ir = optionIndex(ref), is = optionIndex(stu) ?? (optionIndex(ref) ? optionIndex(leadCode(stu)) : null)
   if (ir && is) {
     if (ir.idx === is.idx) return { verdict: 'equal', by: '選項代號等價' }
     // ⚠ 序數敘述（「第四個」）只能用來「確認相同」，不能用來判不同：答案卷存的是選項文字、
@@ -136,6 +163,25 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
 
   // 兩邊都是短英數（≤12 字、無單位無中文）→ 不同就是不同
   if (/^[a-z0-9]{1,12}$/u.test(R) && /^[a-z0-9]{1,12}$/u.test(S)) return { verdict: 'differ', by: '短英數不同' }
+
+  // ── 形式答案：等價才對，其餘一律錯（user 拍板 2026-08-15）──────────────────
+  //   「圖、文字語言交給 accessor；代號、符號、數學（除應用題）直接交給 code」。
+  //   理由：等價在形式物件（數、式、代號、是非）上是可計算的，在自然語言上不是。
+  //   AI 對形式物件只會製造不一致——本日盤點的放水與誤殺幾乎全在這裡，其中
+  //   數練36-37 那 13 格 AI 還宣稱「經核對影像」，但 fill_blank 的 accessor 根本
+  //   拿不到裁圖（cropTypesForAccessor 只含 calc/word_problem）——證據是編的。
+  //   代價明示：學生若寫出 code 解析不了的形式（絕對值、多變數、殘缺式）會算錯，
+  //   由學生向老師申訴改分——人工才是最標準。
+  if (isFormalAnswer(ref)) {
+    // ⚠ 唯一保留的寬鬆：只有一邊帶 % 而字面數字相同（學生「45」vs 標答「45%」）。
+    //   答案卷格子後面通常已經印著「％」，學生不必再寫；嚴格判錯會誤殺（回放 11 格，
+    //   現行 AI 全判正確）。要改成嚴格，把這段拿掉即可。
+    const pctA = /^-?[\d.]+%$/u.test(ref.replace(/\s/gu, '')), pctB = /^-?[\d.]+%$/u.test(stu.replace(/\s/gu, ''))
+    if (pctA !== pctB && R.replace(/%/gu, '') === S.replace(/%/gu, '')) {
+      return { verdict: 'equal', by: '百分號有無（格子已印％）' }
+    }
+    return { verdict: 'differ', by: '與標準答案不等價' }
+  }
 
   // 標答是不等式、學生完全沒用關係符號 → 錯（2026-08-15 user：這單元在考不等式）
   //   實例：標答「330<=x<=350」、學生「330~350」——波浪號表達的區間雖然同義，但答案卷
