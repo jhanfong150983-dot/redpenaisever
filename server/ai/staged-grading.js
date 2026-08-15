@@ -14729,12 +14729,14 @@ export async function runStagedGradingPhaseB({
   //     數學 fill_blank 93%／98% 一致；不一致者逐筆歸因後幾乎全是 AI 判錯。
   //   排除清單寫在 deterministic-compare（word_problem/calculation、rubric 型、合題、
   //   啟用 englishRules 的英語填空、多值標答、require_simplified 的未約分分數）。
-  //   ⚠ 2026-08-15 暫時**預設關閉**（CODE_FIRST_ENABLED='true' 才啟用）：全庫回放 27,475 格
-  //     判得動、26,808 格與現行分數相同，但 160 格有差異，其中 83 格是「AI 用了答案卷沒寫的
-  //     標準」（面積答案卷只寫 94.2、AI 要求「94.2 平方公分」；英語卷沒開 punctuationCheck、
-  //     AI 仍為句尾缺句點扣分）。以答案卷為準還是以學科慣例為準是政策題，待 user 拍板。
-  //     另 13 格是 accessor 看圖修正了讀值錯位（code-first 會失去這個安全網）。
-  if (process.env.CODE_FIRST_ENABLED === 'true') {
+  //   ⚠ user 拍板（2026-08-15）：**以答案卷為準**——答案卷是老師寫的 SSoT，AI 不得自行加碼
+  //     學科慣例（答案卷只寫「94.2」就不該因為「缺少平方公分」扣分；英語卷沒開
+  //     punctuationCheck 就不該為句尾句點扣分）。AI 自行加碼正是同一份答案卷在不同批次
+  //     出現不同標準的來源。要單位/標點請寫進答案卷——那樣老師也改得動。
+  //     同時接受代價：accessor「看圖修正讀值錯位」的能力對這些格失效（回放 13 格），
+  //     讀值錯位應該在 read 階段解，不該靠 accessor 事後救（它救得也不穩定）。
+  //   kill switch: CODE_FIRST_ENABLED='false'。
+  if (process.env.CODE_FIRST_ENABLED !== 'false') {
     let cfCount = 0
     const cfBy = new Map()
     for (const ans of finalReadAnswerResult.answers) {
