@@ -14,6 +14,8 @@
 //   但抓放水不可以引入新誤殺，所以任何解析不確定的情況一律 skip（回到 AI 判斷）。
 // 保守條件：兩邊都要解析成精確有理數；關係符號要嘛都有、要嘛都沒有（只有一邊有 → skip）。
 
+import { linearVerdict } from './linear-expression.js'
+
 const FULLWIDTH_DIGIT = /[０-９]/g
 
 // 「=」視同沒有關係符號（「= 55.7」與「55.7」是同一件事，等號只是書寫習慣）
@@ -83,6 +85,11 @@ const value = (p) => rawValue(p) / (p.percent ? 100 : 1)  // 實際數值
  * @returns 'equal' | 'differ' | null（null = 無法確定，維持 AI 判斷）
  */
 export function relationGateVerdict(refRaw, studentRaw) {
+  // 含變數 → 走一元一次式等價（係數比對）。2026-08-15：AI 判代數等價會漏項——
+  //   培英 1-1-5 學生少了成本項 -x，AI 仍以「代入驗證同解」判對。
+  if (/[A-Za-z]/u.test(String(refRaw ?? '')) || /[A-Za-z]/u.test(String(studentRaw ?? ''))) {
+    return linearVerdict(refRaw, studentRaw)
+  }
   const ref = parseRelationValue(refRaw)
   const stu = parseRelationValue(studentRaw)
   if (!ref || !stu) return null
