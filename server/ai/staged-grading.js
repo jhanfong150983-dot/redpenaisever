@@ -8426,7 +8426,17 @@ function buildFinalGradingResult({
       refAnswer && studentAns && studentAns !== '未作答' && studentAns !== '無法辨識' &&
       (row.isCorrect === true || (toFiniteNumber(row.score) ?? 0) >= (toFiniteNumber(question?.maxScore) ?? row.maxScore))
     ) {
-      if (relationGateVerdict(refAnswer, studentAns) === 'differ') {
+      const gateVerdict = relationGateVerdict(refAnswer, studentAns)
+      // 2026-08-15 反向分歧：閘門「精確相等」而 AI 判錯 → 不改分（改分＝放水風險），
+      //   但壓低信心送複核，讓老師看到分歧。實測培英 1-1-5：AI 在同一題兩個方向都錯——
+      //   放水 2 格、誤殺 1 格（學生「1.3X-3000≥1 5/100 X」＝x≥12000，與標答等價卻判 0）。
+      //   equal_approx（靠四捨五入才相等）不提異議：那是老師的尺度，不是程式的事。
+      if (gateVerdict === 'equal' && row.isCorrect === false && (toFiniteNumber(row.score) ?? 0) <= 0) {
+        row._relationGateDisputed = true
+        row.reason = `${ensureString(row.reason, '')}（數值比對覆核：與標準答案等價，請老師確認）`.trim()
+        console.log(`[relation-gate] ${questionId} ref="${refAnswer}" student="${studentAns}" 判錯但程式判等價 → 送複核`)
+      }
+      if (gateVerdict === 'differ') {
         const prevScore = row.score
         row.isCorrect = false
         row.score = 0
@@ -8629,9 +8639,11 @@ function buildFinalGradingResult({
       // 數值關係閘門降分 → 強制落到複核門檻（<70）之下。比對本身是確定性的，
       //   不確定的是「讀值對不對」——這一眼必須交給老師（UI 紅底＋低信心複核面板）。
       if (row._relationGateDemoted) { base = 60; journey = '數值比對降分(待複核)'; aTag = '' }
+      else if (row._relationGateDisputed) { base = 65; journey = '程式判等價但AI判錯(待複核)'; aTag = '' }
       row.systemConfidence = Math.max(40, Math.min(100, Math.round(base)))
       row.confidenceJourney = aTag ? `${aTag}→${journey}` : journey
       delete row._relationGateDemoted
+      delete row._relationGateDisputed
     }
     // Classify 推理摘要（v4.0 新增）— 即使沒走 phaseA 也要保留
     if (!row.framingReason && classify?.framingReason) {

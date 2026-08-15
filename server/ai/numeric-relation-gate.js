@@ -82,7 +82,9 @@ const rawValue = (p) => p.n / p.d                       // 未套百分比的字
 const value = (p) => rawValue(p) / (p.percent ? 100 : 1)  // 實際數值
 
 /**
- * @returns 'equal' | 'differ' | null（null = 無法確定，維持 AI 判斷）
+ * @returns 'equal'（精確相等）| 'equal_approx'（靠四捨五入才相等）| 'differ' | null（無法確定）
+ *   兩種 equal 要分開：精確相等可以據以「送老師複核」，四捨五入相等不行——
+ *   標答 87.92 學生 87.9 算不算對是老師的尺度，不該由程式提出異議。
  */
 export function relationGateVerdict(refRaw, studentRaw) {
   // 含變數 → 走一元一次式等價（係數比對）。2026-08-15：AI 判代數等價會漏項——
@@ -107,7 +109,7 @@ export function relationGateVerdict(refRaw, studentRaw) {
   const dec = ref.isDecimal || stu.isDecimal
   if (dec) {
     const places = Math.min(ref.isDecimal ? ref.places : Infinity, stu.isDecimal ? stu.places : Infinity)
-    if (Number.isFinite(places) && Math.abs(value(ref) - value(stu)) <= 0.5 * 10 ** -places) return 'equal'
+    if (Number.isFinite(places) && Math.abs(value(ref) - value(stu)) <= 0.5 * 10 ** -places) return 'equal_approx'
   }
   return 'differ'
 }
