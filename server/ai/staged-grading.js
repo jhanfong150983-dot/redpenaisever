@@ -47,6 +47,7 @@ import {
 import { getSupabaseAdmin } from '../_supabase.js'
 import { normSemanticValue, resolveSemanticScopeKey, loadSemanticTable, judgeAndFreezeValue, composeCellFromEntry } from './semantic-score-table.js'
 import { relationGateVerdict } from './numeric-relation-gate.js'
+import { decideDeterministic } from './deterministic-compare.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -8589,6 +8590,9 @@ function buildFinalGradingResult({
       else if (row.studentAnswer === '無法辨識' && row.score === 0) { base = 65; journey = '雙無法辨識歸零' }
       else if (score?._semanticTable) { base = score._semanticLowConf ? 65 : 90; journey = '語意查表' }
       else if (score?._objectiveBypass) { base = 99; journey = '選擇題code直判' }
+      // 2026-08-15 code-first：確定性比對（正規化相同／是非等價／選項代號等價／數值代數等價）
+      //   本身無不確定性；剩餘風險在讀值，與其他 code 直判路徑同級 → 99。
+      else if (score?._codeFirst) { base = 99; journey = '確定性比對code直判' }
       else if (score?._clozeBypass) { base = 99; journey = '克漏字code直判' }
       else if (score?._glyphCompose) { base = 95; journey = '部件重組code直判' }
       else if (score?._mapFillBypass) { base = 88; journey = 'map_fill確定性' }
@@ -14717,6 +14721,60 @@ export async function runStagedGradingPhaseB({
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
   // 2026-05-28: 也排除 mapFillBypassIds（map_fill 走 Direction Y、Accessor 不看）
+  // ── Phase 0b-7 (2026-08-15)：確定性優先（code-first）─────────────────────────
+  //   通則取代「為每個題型加一條 0b」：accessor 之前先用寬鬆比對器試判，判得動就直接定案、
+  //   accessor 看不到這格；判不動照舊送 accessor → 照舊事後程式覆核。
+  //   全庫實證見 docs/批改路由盤點_code-first可行性_2026-08-15.md：
+  //     true_false 100% 判得動且 0 筆不一致、single_choice/check 家族 94–100%、
+  //     數學 fill_blank 93%／98% 一致；不一致者逐筆歸因後幾乎全是 AI 判錯。
+  //   排除清單寫在 deterministic-compare（word_problem/calculation、rubric 型、合題、
+  //   啟用 englishRules 的英語填空、多值標答、require_simplified 的未約分分數）。
+  //   ⚠ 2026-08-15 暫時**預設關閉**（CODE_FIRST_ENABLED='true' 才啟用）：全庫回放 27,475 格
+  //     判得動、26,808 格與現行分數相同，但 160 格有差異，其中 83 格是「AI 用了答案卷沒寫的
+  //     標準」（面積答案卷只寫 94.2、AI 要求「94.2 平方公分」；英語卷沒開 punctuationCheck、
+  //     AI 仍為句尾缺句點扣分）。以答案卷為準還是以學科慣例為準是政策題，待 user 拍板。
+  //     另 13 格是 accessor 看圖修正了讀值錯位（code-first 會失去這個安全網）。
+  if (process.env.CODE_FIRST_ENABLED === 'true') {
+    let cfCount = 0
+    const cfBy = new Map()
+    for (const ans of finalReadAnswerResult.answers) {
+      const qid = ensureString(ans?.questionId).trim()
+      if (!qid || isBypassed(qid)) continue
+      const q = akQById.get(qid)
+      if (!q) continue
+      const decision = decideDeterministic({
+        question: q, studentAnswer: ans.studentAnswerRaw, answerKey, status: ans.status
+      })
+      if (!decision) continue
+      const cfMax = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
+      const isEq = decision.verdict === 'equal'
+      deterministicScores.push({
+        questionId: qid,
+        isCorrect: isEq,
+        score: isEq ? cfMax : 0,
+        maxScore: cfMax,
+        errorType: isEq ? 'none' : 'concept',
+        reason: isEq
+          ? `答案正確（程式比對：${decision.by}）`
+          : `答案錯誤（程式比對：${decision.by}；學生「${ensureString(ans.studentAnswerRaw, '')}」、標準「${ensureString(q.answer, '')}」）`,
+        scoringReason: isEq
+          ? `答案正確（程式比對：${decision.by}）`
+          : `答案錯誤（程式比對：${decision.by}；學生「${ensureString(ans.studentAnswerRaw, '')}」、標準「${ensureString(q.answer, '')}」）`,
+        scoreConfidence: 100,
+        studentFinalAnswer: ensureString(ans.studentAnswerRaw, ''),
+        needExplain: !isEq,
+        _codeFirst: true,
+      })
+      objectiveBypassIds.add(qid)
+      cfCount++
+      cfBy.set(decision.by, (cfBy.get(decision.by) ?? 0) + 1)
+    }
+    if (cfCount > 0) {
+      logStaged(pipelineRunId, 'basic',
+        `[0b-7] code-first 直判 ${cfCount} 格、不送 accessor（${[...cfBy].map(([k, v]) => `${k}×${v}`).join('、')}）`)
+    }
+  }
+
   const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id) || clozeBypassIds.has(id) || glyphComposeIds.has(id)
   const allAnswerIds = finalReadAnswerResult.answers
     .map((a) => ensureString(a?.questionId).trim())
