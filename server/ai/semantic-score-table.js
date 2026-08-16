@@ -15,8 +15,29 @@
 //   =同答不同分事故,根因 AI read 對頓號/逗號/句點漂移):半形化後的 , . ; : 兩側緊鄰皆中文字→移除;
 //   數字鄰接(3.5/1:2/1,000)不符合→原樣保留。既有凍結列已同規則遷移(migrate-punct-norm-0812)。
 //   ⚠ 鏡像:client answerStats.normAnswerValue 同一套——動這裡記得同步那邊。
+// 2026-08-16 數學式分支:大小寫與關係符號折疊。
+//   事故(user 回報):評分統計裡「x>=50/7」「X>=50/7」「x≥50/7」「x≧50/7」分成四群,
+//     實際是同一個答案;另有「(75+65)x8=…」與「(75+65)X8=…」只差 x 大小寫卻一個 7 分一個 0 分
+//     ——同答不同分,合併不是製造矛盾,是把既有矛盾抓出來。
+//   ⚠ 只在「數學式」才折,因為 normSemanticValue 的核心規則是**一字不折**(錯字是 charerr 的事)。
+//     英語「Dog」vs「dog」是真的會扣分的差異,無條件小寫化會把它併成一群→群內兩種分數。
+//   守門兩道:①整串只含拉丁字母/數字/數學符號(有中文一律不折) ②必須含關係符號 <>=≤≥
+//     ——第二道是為了不動到英文單字(單字答案沒有關係符號,走原路)。
+//   全庫回放:可併 14 組,13 組併後同分、1 組是上述真矛盾;凍結表 78 列受影響 0(免遷移)。
+const MATHY_VALUE = /^[A-Za-z0-9+\-*/^().,%<>=≤≥≦≧⩽⩾≠√πθ°:| \\{}]+$/u
+function foldMathValue(base) {
+  if (!base || !MATHY_VALUE.test(base)) return base
+  // de-LaTeX 要在守門之前:「x\geqq 50/7」的關係是字母不是符號,先還原才認得出來
+  let t = deLatexForCompare(base)
+  if (!/[<>=≤≥≦≧⩽⩾]/u.test(t)) return base
+  t = t.replace(/[≦≤⩽]/gu, '<=').replace(/[≧≥⩾]/gu, '>=').replace(/≠/gu, '!=')
+  t = t.replace(/=>/gu, '>=').replace(/=</gu, '<=')
+  t = t.replace(/\s*(<=|>=|!=|<|>|=)\s*/gu, '$1')
+  return t.toLowerCase()
+}
+
 export function normSemanticValue(raw) {
-  return String(raw ?? '')
+  return foldMathValue(String(raw ?? '')
     .trim()
     // 2026-08-14 帶分數:數字↔數字之間的空白保留成單一空白,其餘照舊全刪。
     //   事故:「x<=6 7/11」(6又7/11,正確) 與「x<= 67/11」(67/11,錯) 全刪空白後同鍵 →
@@ -25,7 +46,7 @@ export function normSemanticValue(raw) {
     .replace(/\s+/g, (m, off, s) => (/\d$/.test(s.slice(0, off)) && /^\d/.test(s.slice(off + m.length)) ? ' ' : ''))
     .replace(/，/g, ',').replace(/。/g, '.').replace(/；/g, ';').replace(/：/g, ':').replace(/、/g, ',')
     .replace(/([一-鿿])[,.;:]+(?=[一-鿿])/g, '$1')
-    .replace(/^[,.;:!?，。；：、！？\s]+|[,.;:!?，。；：、！？\s]+$/g, '')
+    .replace(/^[,.;:!?，。；：、！？\s]+|[,.;:!?，。；：、！？\s]+$/g, ''))
 }
 
 export async function resolveSemanticScopeKey(supabase, assignmentId) {
@@ -52,6 +73,7 @@ export async function resolveSemanticScopeKey(supabase, assignmentId) {
 
 // 2026-08-16 收斂：查表制與 VJ 冷凍共用同一套政策（版本失效／老師裁決最高優先／低信心隨判定走）
 import { FREEZE_LOGIC_VERSION, AI_UPSERT_OPTS } from './freeze-policy.js'
+import { deLatexForCompare } from './deterministic-compare.js'
 
 // → Map(questionId → Map(valueNorm → entry))
 export async function loadSemanticTable(supabase, scopeKey, questionIds) {
