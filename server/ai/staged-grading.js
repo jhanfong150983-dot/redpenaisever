@@ -12263,6 +12263,21 @@ Return JSON:
         ? { arbiterStatus: 'arbitrated_agree', finalAnswer: qr.readAnswer1.studentAnswer }
         : { arbiterStatus: 'needs_review' }
     })()
+    // ⛔ 2026-08-16 AI3 不得憑空宣告「兩讀一致」——實測培英重批：
+    //     座7  讀1「7/2」      讀2「72」        → AI3 arbitrated_agree、採用「7/2」→ 判 0
+    //     座25 讀1「x > 11/3」  讀2「x>1 1/3」   → 同上 → 判 0
+    //     座32 讀1「x<73/11」   讀2「x<=73/11」  → 同上 → 判 0
+    //   三格都是讀2 才對。consistencyStatus 已標 unstable，但鏈的啟動條件是 arbiterStatus
+    //   ==='needs_review'，被 AI3 的 agree 擋掉 → 鏈不跑、無鏈明細、預設採用讀1。
+    //   守門：兩讀能解析成精確數值/代數且**值不相等**時，AI3 說一致一律不採信，強制送鏈裁決。
+    //   （只擋「可證明不同」的情形；解析不出來的仍尊重 AI3，避免大量增加鏈成本。）
+    if (arbiterResult.arbiterStatus === 'arbitrated_agree'
+      && qr.consistencyStatus !== 'stable'
+      && relationGateVerdict(qr.readAnswer1?.studentAnswer, qr.readAnswer2?.studentAnswer) === 'differ') {
+      logStaged(pipelineRunId, 'basic',
+        `[arbiter-guard] ${qr.questionId} AI3 宣稱兩讀一致但數值可證不同（「${qr.readAnswer1?.studentAnswer}」≠「${qr.readAnswer2?.studentAnswer}」）→ 改送鏈`)
+      arbiterResult = { arbiterStatus: 'needs_review' }
+    }
     // 包含關係覆寫：AI2 較短時，用 AI2 答案取代 AI1（更精確，避免多讀鄰近內容）
     if (arbiterResult.arbiterStatus === 'arbitrated_agree' && qr.containmentPreferredRaw) {
       arbiterResult = { ...arbiterResult, finalAnswer: qr.containmentPreferredRaw }
