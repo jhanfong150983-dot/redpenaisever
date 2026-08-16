@@ -3987,8 +3987,12 @@ export function deLatexMathText(raw) {
   t = t.replace(/\\sqrt\s*\{([^{}]+)\}/g, '√$1')
   // 2026-07-11: \b 改負向前瞻——「\le132」（後接數字）\b 不成立永遠折不到（round7 座3 實測判錯）；
   //   (?![a-z]) 擋 \left（le+字母）誤傷、允許後接數字/符號/結尾
-  t = t.replace(/\\(?:leqslant|leq|le)(?![a-z])/g, '<=')
-  t = t.replace(/\\(?:geqslant|geq|ge)(?![a-z])/g, '>=')
+  // 2026-08-16：補 \leqq / \geqq（雙 q）。原 pattern 的負向前瞻遇到 geqq 會失敗——
+  //   試 geq 時後面是 q ∈ [a-z] → 不匹配；試 ge 時後面也是 q → 不匹配 → 整串留著 \geqq，
+  //   正規化後變成 "xgeqq50/7"，與標答比對必錯。
+  //   實測：同一張圖兩輪分別讀成「x\geqq 50/7」與「x≧50/7」→ 一輪判 0、一輪判 3。
+  t = t.replace(/\\(?:leqslant|leqq|leq|le)(?![a-z])/g, '<=')
+  t = t.replace(/\\(?:geqslant|geqq|geq|ge)(?![a-z])/g, '>=')
   t = t.replace(/\\lt\b/g, '<').replace(/\\gt\b/g, '>')
   t = t.replace(/\\(?:times|cdot)\b/g, '×')
   t = t.replace(/\\div\b/g, '÷')

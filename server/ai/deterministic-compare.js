@@ -72,8 +72,27 @@ export function normNumericSeparators(s) {
   return x.replace(/^(\d+),(\d+)$/u, '$1.$2')
 }
 
+// ── LaTeX 逸出還原（判分前必做）─────────────────────────────────────────────
+// 2026-08-16 實測：同一張圖兩輪分別讀成「x\geqq 50/7」與「x≧50/7」，前者正規化後
+//   變成 "xgeqq50/7" → 判 0、後者判 3。read 端偶爾會吐 LaTeX，判分前不還原就一對一錯。
+//   （staged-grading 的 deLatexMathText 供讀取/一致性階段用；兩處規則須一致。）
+export function deLatexForCompare(raw) {
+  let t = String(raw ?? '')
+  if (!t.includes('\\')) return t
+  t = t.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/gu, '$1/$2')
+  t = t.replace(/\\sqrt\s*\{([^{}]+)\}/gu, '√$1')
+  t = t.replace(/\\(?:leqslant|leqq|leq|le)(?![a-z])/gu, '<=')
+  t = t.replace(/\\(?:geqslant|geqq|geq|ge)(?![a-z])/gu, '>=')
+  t = t.replace(/\\lt(?![a-z])/gu, '<').replace(/\\gt(?![a-z])/gu, '>')
+  t = t.replace(/\\(?:times|cdot)(?![a-z])/gu, '×')
+  t = t.replace(/\\div(?![a-z])/gu, '÷')
+  t = t.replace(/\\%/gu, '%')
+  t = t.replace(/\\(?:left|right)(?![a-z])/gu, '')
+  return t
+}
+
 export function normLenient(s) {
-  let t = String(s ?? '').trim()
+  let t = deLatexForCompare(String(s ?? '')).trim()
     .replace(/[０-９]/gu, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFF10))
     .replace(/[Ａ-Ｚａ-ｚ]/gu, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
     .replace(new RegExp(`[${CIRCLED}]`, 'gu'), (c) => String(CIRCLED.indexOf(c) + 1))
