@@ -179,7 +179,15 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
   const q = question
   if (!q) return null
   const cat = String(q.questionCategory ?? '')
-  if (!CODE_FIRST_CATEGORIES.has(cat)) return null
+  const refRaw0 = String(q.answer ?? '').trim()
+  // 缺 questionCategory 的舊卷（全庫 322 題／11.2%）走不到任何 code gate。
+  //   實測 480 格是「標答與讀值完全相同」的是非題/選項題卻只能交 accessor。
+  //   → category 缺失時改用**標答形態**判斷：是非符號／選項代號／形式答案才放行。
+  const catOk = CODE_FIRST_CATEGORIES.has(cat)
+    || (!cat && (!!tfValue(refRaw0) || optionIndex(refRaw0)?.fromText === false || isFormalAnswer(refRaw0)
+      // 讀值與標答完全相同 → 不論題型都判得動（「第三個」vs「第三個」）
+      || (!!refRaw0 && normLenient(refRaw0) === normLenient(String(studentAnswer ?? '')))))
+  if (!catOk) return null
   // 合題（一格多小題）要逐空計分 → 交既有路徑
   if (Array.isArray(q.parts) && q.parts.length >= 2) return null
   // 英語規則啟用時，fill_blank/short_answer 的拼字/大小寫/標點扣分是 accessor 的職責
@@ -189,15 +197,64 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
   const ref = String(q.answer ?? '').trim()
   const stu = String(studentAnswer ?? '').trim()
   if (!ref || PLACEHOLDER.has(stu) || status !== 'read') return null
-  // 標答本身列了多個可接受答案（頓號/斜線）→ 交既有路徑（那裡有 refAlts 邏輯）。
-  //   ⚠ 先把「數字/數字」的分數線挖掉再判，否則「x>4/3」「73/11」「1/3小時」全被誤擋
-  //   （2026-08-15 實測：原寫法要求整串就是一個純分數才放行，覆蓋率被砍掉一大塊）。
-  if (/[、／/]/u.test(ref.replace(/\d+\s*\/\s*\d+/gu, ''))) return null
-  if (answerKey?.fractionRule === 'require_simplified' && looksUnsimplified(stu)) return null
-
   const R = normLenient(ref), S = normLenient(stu)
   if (!R || !S) return null
+  // ⚠ 完全相同必須在所有守衛之前判：實測標答「A、D」學生「A、D」、標答「ㄆ、ㄊ」
+  //   學生「ㄆ、ㄊ」因為含頓號被「多值標答」守衛擋掉 → 一模一樣卻交給 AI（約 60 格）。
+  //   「A、D」是一個答案（多選填空），不是多個可接受答案。
   if (R === S) return { verdict: 'equal', by: '正規化後相同' }
+
+  // 標答用「或」列出多個可接受答案（「1或2或3或4」）→ 命中任一即對（實測 82 格）
+  // ⚠ 只用「或」拆，不用斜線：「上午/下午」可能是一個答案（時段），拆開會放水。
+  //   斜線仍由下方「多值標答」守衛交回 accessor。
+  const alts = ref.split(/或/u).map((x) => x.trim()).filter(Boolean)
+  if (alts.length > 1) {
+    for (const alt of alts) if (normLenient(alt) === S) return { verdict: 'equal', by: '命中標答列舉的其中一個' }
+    if (alts.every((alt) => isFormalAnswer(alt))) return { verdict: 'differ', by: '未命中標答列舉的任一個' }
+    return null
+  }
+
+  // 多值答案當集合比（標答「ㄅ、ㄇ、ㄉ」學生「ㄅ、ㄉ、ㄇ」順序不同、內容相同）。
+  //   排序題例外——那種題順序本身就是答案。
+  if (cat !== 'ordering' && /[、,]/u.test(R) && /[、,]/u.test(S)) {
+    const setOf = (x) => new Set(x.split(/[、,]/u).map((y) => y.trim()).filter(Boolean))
+    const A = setOf(R), B = setOf(S)
+    if (A.size > 1 && A.size === B.size && [...A].every((x) => B.has(x))) {
+      return { verdict: 'equal', by: '多值答案內容相同（順序不同）' }
+    }
+  }
+
+  // ── 數值相同、只差單位（標答「0.7 公里」學生「0.7」）─────────────────────
+  //   user 拍板：一致判定就好，老師在評分統計把整群拖到想要的分數。
+  //   關鍵是**確定性**——若交給 AI，同樣寫「0.7」的人會拿到不同分，
+  //   在統計面板就是「群內兩種分數」，拖曳也修不乾淨。
+  //   分數依 answerKey.unitErrorRule：zero（預設）／half／deduct(unitErrorDeduction)。
+  const unitSplit = (s) => {
+    const m = String(s ?? '').trim().match(/^(-?[\d.,/\s]+?)\s*([^\d.,/\s].{0,5})?$/u)
+    return m ? { num: m[1].replace(/\s/gu, ''), unit: (m[2] ?? '').trim() } : null
+  }
+  const ru = unitSplit(ref), su = unitSplit(stu)
+  if (ru && su && ru.num && ru.num === su.num && ru.unit && !su.unit) {
+    // ⚠ 老師沒設過 unitErrorRule → **不因缺單位扣分**。
+    //   實測 49 份數學作業只有 1 份設過；而 AI 對那些卷的理由是「單位已由題目提供」——
+    //   答案卷格子後面本來就印著單位，學生不必再寫（同「45」vs「45%」的處境）。
+    //   預設扣分會讓 235 格從滿分變 0，那是規則沒設就先罰人。有設才照設定。
+    if (!answerKey?.unitErrorRule) return { verdict: 'equal', by: '數值正確（單位多半由題目提供、本作業未設單位規則）' }
+    const rule = String(answerKey.unitErrorRule)
+    const max = Math.max(0, Number(q?.maxScore) || 0)
+    const ded = Number(answerKey?.unitErrorDeduction)
+    const score = rule === 'half'
+      ? Math.round((max / 2) * 10) / 10
+      : rule === 'deduct'
+        ? Math.max(0, Math.round((max - (Number.isFinite(ded) ? ded : 1)) * 10) / 10)
+        : 0
+    return { verdict: 'differ', by: `數值正確但缺少單位「${ru.unit}」（本作業規則：${rule === 'half' ? '給一半' : rule === 'deduct' ? '扣分' : '不給分'}）`, score }
+  }
+
+  // 標答本身列了多個可接受答案（頓號/斜線）→ 交既有路徑（那裡有 refAlts 邏輯）。
+  //   ⚠ 先把「數字/數字」的分數線挖掉再判，否則「x>4/3」「73/11」「1/3小時」全被誤擋。
+  if (/[、／/]/u.test(ref.replace(/\d+\s*\/\s*\d+/gu, ''))) return null
+  if (answerKey?.fractionRule === 'require_simplified' && looksUnsimplified(stu)) return null
 
   // 多選題：依答案卷的 multiCheckRule 計分（含部分給分）
   if (MULTI_CATEGORIES.has(cat)) return gradeMultiSelect(q, ref, stu, answerKey)
