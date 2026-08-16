@@ -61,6 +61,17 @@ function tfValue(s) {
 }
 
 const SENT = ''
+// ── 數字分隔符正規化（兩讀一致性與判分共用，避免兩邊漂移）──────────────────
+// 2026-08-16 user：同一個手寫被兩讀抄成「22.7」與「22,7」就判成分歧 → 白跑知答鏈四次。
+//   逗號在下游會被當分隔符刪掉、句點會被留成小數點，於是同值不同符號＝分歧。
+//   ・千分位（1,000／1.000／1,234,567）→ 去掉分隔符，與「1000」同值
+//   ・其餘單一逗號（22,7）→ 視為小數點
+export function normNumericSeparators(s) {
+  const x = String(s ?? '')
+  if (/^\d{1,3}([,.]\d{3})+$/u.test(x)) return x.replace(/[,.]/gu, '')
+  return x.replace(/^(\d+),(\d+)$/u, '$1.$2')
+}
+
 export function normLenient(s) {
   let t = String(s ?? '').trim()
     .replace(/[０-９]/gu, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFF10))
@@ -80,6 +91,10 @@ export function normLenient(s) {
   if (marks >= 2 && !/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/u.test(t.replace(/\s+/gu, ''))) {
     t = t.replace(/(?<=\d)\s*[.,、]\s*(?=\d)/gu, ',')
   }
+  // 數字之間的單一逗號視為小數點（「22,7」＝「22.7」）；千分位型樣豁免。
+  //   與 staged-grading.normalizeAnswerForComparison 同一條規則——那邊決定「要不要多跑鏈」，
+  //   這邊決定「判不判對」，兩邊不一致的話會出現「不跑鏈但判錯」的怪組合。
+  t = normNumericSeparators(t)
   // 英文字母之間的空白保留成單一空白，其餘全刪
   t = t.replace(/(?<=[A-Za-z])\s+(?=[A-Za-z])/gu, SENT).replace(/\s+/gu, '').replace(new RegExp(SENT, 'gu'), ' ')
   return t.replace(/[.。!！?？,，、;；]+$/u, '').toLowerCase()

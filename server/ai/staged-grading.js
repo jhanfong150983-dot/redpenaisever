@@ -47,7 +47,7 @@ import {
 import { getSupabaseAdmin } from '../_supabase.js'
 import { normSemanticValue, resolveSemanticScopeKey, loadSemanticTable, judgeAndFreezeValue, composeCellFromEntry } from './semantic-score-table.js'
 import { relationGateVerdict } from './numeric-relation-gate.js'
-import { decideDeterministic } from './deterministic-compare.js'
+import { decideDeterministic, normNumericSeparators } from './deterministic-compare.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -1319,6 +1319,10 @@ export function normalizeAnswerForComparison(raw) {
   //   兩段式 36.56 有小數歧義、不折）。折成逗號後由下行分隔符剝除統一。
   //   2026-07-11b: 容忍點旁空白——「36. 76. 96」也要折（round7 座29 實測漏接）
   s = foldEnumSeparators(s)   // 2026-08-15 改用「≥2 個分隔記號」判準（見 foldEnumSeparators）
+  // 2026-08-16：數字之間的**單一**逗號視為小數點。逗號在下方會被當分隔符刪掉、句點會被留成
+  //   小數點，於是同一個手寫「22.7」被兩讀抄成「22.7」與「22,7」時判成分歧 → 白跑知答鏈四次。
+  //   千分位型樣（1,000）豁免。本函式只用於「比對」，不影響存下來的讀值。
+  s = normNumericSeparators(s)
   // 2026-07-11b: 空白語彙統一——「未作答」「(空白)」視為空字串（兩輪 finalize 寫法不一致的表示法噪聲）
   if (/^[（(]?(?:未作答|空白)[)）]?$/u.test(s)) return ''
   // 去除分隔符號（逗號、頓號、換行）— 比對內容本身，不比對格式
