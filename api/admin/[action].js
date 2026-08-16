@@ -4159,10 +4159,11 @@ async function q2Detail(supabaseAdmin, assignmentId) {
     papers: latest.length, cells: 0, missingCellPapers: 0,
     unreadable: 0, unstable: 0, lowConf: 0, chainCells: 0,
     judgeCells: 0, judgeSplit: 0, codeJudged: 0,
-    perQuestionAnomalies: [], contradictions: []
+    perQuestionAnomalies: [], contradictions: [], lowConfQuestions: []
   }
   const byQidAns = new Map()
   const byQidUnread = new Map()
+  const byQidLowConf = new Map()
   for (const run of latest) {
     const cells = Array.isArray(run.cells) ? run.cells : []
     health.cells += cells.length
@@ -4170,7 +4171,16 @@ async function q2Detail(supabaseAdmin, assignmentId) {
     for (const c of cells) {
       if (q2IsUnreadable(c)) { health.unreadable++; byQidUnread.set(c.qid, (byQidUnread.get(c.qid) || 0) + 1) }
       if (c.cons === 'unstable') health.unstable++
-      if (Number(c.sysConf) < 70) health.lowConf++
+      // 2026-08-16 user：要能看出「哪幾題會被送老師檢查」，只有總數看不出來。
+      //   低信心＝systemConfidence < 70（與 UI 紅底、複核面板同一個門檻）。
+      if (Number(c.sysConf) < 70) {
+        health.lowConf++
+        const e = byQidLowConf.get(c.qid) || { n: 0, journeys: new Map() }
+        e.n++
+        const jr = String(c.journey ?? '').trim() || '（未標）'
+        e.journeys.set(jr, (e.journeys.get(jr) || 0) + 1)
+        byQidLowConf.set(c.qid, e)
+      }
       if (c.chain || /知答鏈/.test(String(c.journey ?? ''))) health.chainCells++
       if (Array.isArray(c.votes) && c.votes.length) { health.judgeCells++; if (q2VoteSplit(c.votes)) health.judgeSplit++ }
       if (/直判/.test(String(c.journey ?? ''))) health.codeJudged++
@@ -4187,6 +4197,9 @@ async function q2Detail(supabaseAdmin, assignmentId) {
     }
   }
   for (const [qid, n] of byQidUnread) if (latest.length >= 5 && n / latest.length >= 0.6) health.perQuestionAnomalies.push({ qid, unreadable: n, papers: latest.length })
+  health.lowConfQuestions = [...byQidLowConf]
+    .map(([qid, e]) => ({ qid, n: e.n, reason: [...e.journeys].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '' }))
+    .sort((a, b) => b.n - a.n || String(a.qid).localeCompare(String(b.qid), undefined, { numeric: true }))
   for (const [, arr] of byQidAns) {
     if (arr.length < 2) continue
     const scores = new Set(arr.map((x) => Number(x.score)))
