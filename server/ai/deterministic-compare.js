@@ -110,6 +110,49 @@ function isFormalAnswer(ref) {
   return /^[\d\s.,/%+\-*()\[\]<>=xXyYaAbBnN×÷≤≥°]+$/u.test(s) || optionIndex(s)?.fromText === false || !!tfValue(s)
 }
 
+
+// ── 多選題計分（2026-08-15 user 拍板：把部分給分變成答案卷的正式設定）────────────
+// 背景：AI 原本自行「答對一個給一半」——答案卷裡沒有這條規則。這是「AI 自行加碼」的
+//   同一個病（面積要單位、英文要句點皆同類），沒有規則撐著就會在不同批次給不同分。
+// answerKey.multiCheckRule：
+//   'all_or_nothing'（預設）＝集合完全相同才給分，否則 0
+//   'partial'        ＝滿分 × 選對數/正解數，多選不倒扣（＝AI 原本的實際行為）
+//   'partial_strict' ＝只要選到非正解就 0；否則同 partial
+const MULTI_CATEGORIES = new Set(['multi_check', 'multi_check_other', 'multi_choice'])
+
+function optionSet(raw) {
+  const toks = normLenient(raw).split(/[,;\s]+/u).map((x) => x.trim()).filter(Boolean)
+  if (toks.length === 0) return null
+  const out = new Set()
+  for (const tk of toks) {
+    const oi = optionIndex(tk)
+    if (!oi) return null            // 有無法對應成選項的 token → 交回 accessor
+    out.add(oi.idx)
+  }
+  return out
+}
+
+function gradeMultiSelect(q, ref, stu, answerKey) {
+  const rule = String(answerKey?.multiCheckRule ?? 'all_or_nothing')
+  const R = optionSet(ref), S = optionSet(stu)
+  if (!R || !S) return null
+  const max = Math.max(0, Number(q?.maxScore) || 0)
+  const hit = [...S].filter((x) => R.has(x)).length
+  const extra = [...S].filter((x) => !R.has(x)).length
+  const exact = hit === R.size && extra === 0
+  if (exact) return { verdict: 'equal', by: '多選集合相同', score: max }
+  if (rule === 'all_or_nothing') return { verdict: 'differ', by: '多選未完全正確（全有全無）', score: 0 }
+  if (rule === 'partial_strict' && extra > 0) {
+    return { verdict: 'differ', by: `多選有誤選（規則：選錯即 0）`, score: 0 }
+  }
+  const score = Math.round((max * hit / Math.max(1, R.size)) * 10) / 10
+  return {
+    verdict: score >= max ? 'equal' : 'differ',
+    by: `多選部分給分（選對 ${hit}/${R.size}${extra ? `、誤選 ${extra}` : ''}）`,
+    score,
+  }
+}
+
 /**
  * 這一格能不能由 code 直接定案？
  * @returns null（判不動 → 交 accessor）| { verdict: 'equal'|'differ', by }
@@ -137,6 +180,9 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
   const R = normLenient(ref), S = normLenient(stu)
   if (!R || !S) return null
   if (R === S) return { verdict: 'equal', by: '正規化後相同' }
+
+  // 多選題：依答案卷的 multiCheckRule 計分（含部分給分）
+  if (MULTI_CATEGORIES.has(cat)) return gradeMultiSelect(q, ref, stu, answerKey)
 
   const tr = tfValue(ref), ts = tfValue(stu)
   if (tr && ts) return { verdict: tr === ts ? 'equal' : 'differ', by: '是非等價' }

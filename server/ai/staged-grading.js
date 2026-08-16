@@ -14752,10 +14752,14 @@ export async function runStagedGradingPhaseB({
       if (!decision) continue
       const cfMax = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
       const isEq = decision.verdict === 'equal'
+      // 多選部分給分等情形會直接帶 score（依答案卷 multiCheckRule）；其餘 equal→滿分／differ→0
+      const cfScore = Number.isFinite(decision.score)
+        ? Math.max(0, Math.min(cfMax, decision.score))
+        : (isEq ? cfMax : 0)
       deterministicScores.push({
         questionId: qid,
         isCorrect: isEq,
-        score: isEq ? cfMax : 0,
+        score: cfScore,
         maxScore: cfMax,
         errorType: isEq ? 'none' : 'concept',
         reason: isEq
