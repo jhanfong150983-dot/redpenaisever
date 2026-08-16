@@ -50,6 +50,7 @@ import { getSupabaseAdmin } from '../_supabase.js'
 import { normSemanticValue, resolveSemanticScopeKey, loadSemanticTable, judgeAndFreezeValue, composeCellFromEntry } from './semantic-score-table.js'
 import { relationGateVerdict } from './numeric-relation-gate.js'
 import { decideDeterministic, normNumericSeparators } from './deterministic-compare.js'
+import { buildVjCacheKey, loadVjVerdict, saveVjVerdict, VJ_PROMPT_VERSION } from './vj-verdict-cache.js'
 
 const STAGED_PIPELINE_NAME = 'grading-evaluate-5stage-pipeline'
 
@@ -8652,8 +8653,10 @@ function buildFinalGradingResult({
       }
       else if (score?._scRescue) { base = 90; journey = '單選值域救援' }
       else if (score?._vjBypass) {
-        base = score?._vjVoteSplit ? 60 : 90
-        journey = score?._vjVoteSplit ? 'VJ三票分歧(待複核)' : 'VJ視覺判斷'
+        base = score?._vjFrozen === 'teacher' ? 100 : (score?._vjVoteSplit ? 60 : 90)
+        journey = score?._vjFrozen === 'teacher' ? 'VJ老師裁決(已凍結)'
+          : score?._vjVoteSplit ? 'VJ三票分歧(待複核)'
+          : score?._vjFrozen ? 'VJ視覺判斷(沿用冷凍)' : 'VJ視覺判斷'
       }
       // 2026-08-14 級分制：判官自己算出的信心就是權威（全票97／分歧不影響等第75／
       //   分歧會改變等第45／票數不足65）。不接這一條的話 systemConfidence 會落到預設 88，
@@ -8673,7 +8676,7 @@ function buildFinalGradingResult({
       // 級分制判官不看 read 值（整題判等第），consistencyStatus 對它沒有意義 → 不做 A 段修正
       // VJ 三票分歧也要跳過 A 段修正——判官不看讀值，consistencyStatus 對它沒有意義，
       //   讓 -8 修正把 60 再往下拉只會失真（同 'VJ視覺判斷' 的理由）。
-      const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷', 'VJ三票分歧(待複核)'])
+      const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷', 'VJ三票分歧(待複核)', 'VJ視覺判斷(沿用冷凍)', 'VJ老師裁決(已凍結)'])
       if (score?._levelBypass) skipA.add(journey)
       let aTag = ''
       if (!hasChainConf && !skipA.has(journey) && !score?._glyphJudge) {
@@ -13887,6 +13890,8 @@ export async function runStagedGradingPhaseB({
         // 3) 對非空白項跑 PRO grade（整題全空白 → 不發 call、直接 0）
         let grades = []
         let vjVoteSplit = false   // 三票有分歧 → 壓低信心送複核
+        let vjCacheKey = null
+        let vjFromCache = null    // 'ai' | 'teacher'（命中冷凍表）
         if (notBlank.length > 0 && studentImg?.data) {
           const classifyRow = vjClassifyArr.find((r) => (r.questionId || r.id) === qId)
           const bbox = classifyRow?.answerBbox
@@ -13902,6 +13907,17 @@ export async function runStagedGradingPhaseB({
                 if (rblob) refCropInline = { mimeType: q.cropImagePath.endsWith('.jpg') ? 'image/jpeg' : 'image/webp', data: Buffer.from(await rblob.arrayBuffer()).toString('base64') }
               } catch (e) { logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 正解圖下載失敗：${e?.message}`) }
             }
+            // ── ① 查冷凍表（鍵＝學生圖 hash + 規準 hash + prompt 版本）────────────
+            //   命中就直接用、零 AI、零飄動；source='teacher' 代表老師調整過，優先權最高。
+            //   fail-open：表不存在／查詢失敗 → cacheKey 或結果為 null → 照舊跑判官。
+            vjCacheKey = buildVjCacheKey({ cropBase64: crop?.data, vjRubric })
+            const cached = vjCacheKey ? await loadVjVerdict(getSupabaseAdmin(), vjCacheKey) : null
+            if (cached && Array.isArray(cached.verdicts) && cached.verdicts.length > 0) {
+              grades = cached.verdicts.map((v) => ({ idx: v.idx, verdict: v.verdict, seen: v.reason ?? '' }))
+              vjVoteSplit = cached.voteSplit
+              vjFromCache = cached.source
+              logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 命中冷凍表（${cached.source === 'teacher' ? '老師裁決' : 'AI 判定'}）→ 不再呼叫判官`)
+            }
             // ── 2026-08-16 user 拍板：比照應用題級分制「逐項單獨提問」──────────────
             //   應用題已付過這個學費：整份規準一次問，AI 傾向掃描比對清單、注意力分散；
             //   沙盒實測「整份規準 90%／逐要素分開問 100%」（同模型同卷、唯一變數是一次問幾條）。
@@ -13913,7 +13929,9 @@ export async function runStagedGradingPhaseB({
             //      空間相依**（步驟1 與步驟2 是同一個圖形的兩半），單獨問反而讓模型分不清在問哪一塊。
             //      → 預設**關閉**，保留程式碼供日後其他題型測試。開啟：VJ_PER_ITEM='1'。
             const perItem = process.env.VJ_PER_ITEM === '1'
-            if (perItem) {
+            if (grades.length > 0) {
+              // 已由冷凍表提供，不呼叫判官
+            } else if (perItem) {
               const results = await Promise.all(itemLabels.map(async (label, i) => {
                 const itemPrompt = buildVjItemPrompt(label, vjRubric.gradingDefinition, !!refCropInline)
                 const parts = refCropInline
@@ -13976,7 +13994,19 @@ export async function runStagedGradingPhaseB({
           }
         }
 
-        const agg = aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore)
+        const agg = aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore, vjRubric?.itemScores ?? null)
+        // ── ⑤ 冷凍：判官剛判完才寫（命中冷凍表的不用重寫）───────────────────────
+        //   upsert 用 ignoreDuplicates → **永遠不覆蓋既有列**，老師回寫的 source='teacher' 受保護。
+        if (vjCacheKey && !vjFromCache) {
+          void saveVjVerdict(getSupabaseAdmin(), vjCacheKey, {
+            assignmentId: internalContext?.assignmentId || payload?.assignmentId || null,
+            submissionId: internalContext?.submissionId || payload?.submissionId || null,
+            questionId: qId,
+            verdicts: agg.vjItemResults,
+            score: agg.score, maxScore: agg.maxScore,
+            voteSplit: vjVoteSplit, model: phaseBModel,
+          })
+        }
         logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} score=${agg.score}/${agg.maxScore} 非空白${notBlank.length}項`)
         // 學生答案＝blank 判讀的摘要文案（非文字、非對錯）：全空白→未作答、有任一柱作答→圖上作答
         const vjAllBlank = agg.vjItemResults.length > 0 && agg.vjItemResults.every((r) => r.verdict === 'blank')
@@ -13987,8 +14017,10 @@ export async function runStagedGradingPhaseB({
           scoringReason: vjVoteSplit
             ? `${agg.scoringReason}（三票判定不一致，請老師確認）`
             : agg.scoringReason,
-          scoreConfidence: vjVoteSplit ? 60 : 100,
-          _vjVoteSplit: vjVoteSplit || undefined,
+          // 老師裁決過的（冷凍表 source='teacher'）＝人工定案，信心拉滿、不再送複核
+          scoreConfidence: vjFromCache === 'teacher' ? 100 : (vjVoteSplit ? 60 : 100),
+          _vjVoteSplit: (vjFromCache !== 'teacher' && vjVoteSplit) || undefined,
+          _vjFrozen: vjFromCache || undefined,
           studentFinalAnswer: vjAllBlank ? '未作答' : '圖上作答',
           needExplain: false, _vjBypass: true, vjItemResults: agg.vjItemResults
         })

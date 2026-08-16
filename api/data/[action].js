@@ -3407,6 +3407,40 @@ async function handleSaveGrading(req, res) {
 
 // 2026-05-18: PR3 審查頁老師確認後寫 final_answers 到 submissions。
 // 不更動 score / status (status 仍是 synced、由 deriveCardStage 透過 final_answers 完整性算出待批改 / 待複核)
+
+// 老師裁決回寫 VJ 冷凍表。body: { items: [{ submissionId, questionId, score }] }
+//   只認登入老師自己的卷；找不到冷凍列就跳過（表示那格還沒被判官凍過）。
+async function handleVjFreezeOverride(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  try {
+    const { user } = await getAuthUser(req, res)
+    if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, 200) : []
+    if (items.length === 0) { res.status(200).json({ updated: 0 }); return }
+    const db = getSupabaseAdmin()
+    const subIds = [...new Set(items.map((x) => String(x.submissionId ?? '')).filter(Boolean))]
+    // 擁有權：只能改自己作業底下的卷
+    const { data: owned } = await db.from('submissions').select('id, owner_id').in('id', subIds)
+    const mine = new Set((owned ?? []).filter((s) => s.owner_id === user.id).map((s) => s.id))
+    let updated = 0
+    for (const it of items) {
+      const sid = String(it.submissionId ?? '')
+      const qid = String(it.questionId ?? '')
+      const score = Number(it.score)
+      if (!mine.has(sid) || !qid || !Number.isFinite(score)) continue
+      const { error, count } = await db.from('vj_verdict_cache')
+        .update({ score, source: 'teacher', vote_split: false, updated_at: new Date().toISOString() }, { count: 'exact' })
+        .eq('submission_id', sid).eq('question_id', qid)
+      if (!error && count) updated += count
+    }
+    res.status(200).json({ updated })
+  } catch (err) {
+    // fail-open：表不存在或任何錯誤都不擋老師改分（分數本身已存進 submissions）
+    console.warn('[vj-freeze-override] failed (non-fatal):', err?.message)
+    res.status(200).json({ updated: 0 })
+  }
+}
+
 async function handleSaveFinalAnswers(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
   const { user } = await getAuthUser(req, res)
@@ -11544,6 +11578,14 @@ const log = document.getElementById('log');
   }
   if (action === 'save-grading') {
     await handleSaveGrading(req, res)
+    return
+  }
+  // ── 老師裁決回寫冷凍表（2026-08-16 user 拍板）────────────────────────────
+  //   老師在評分統計把某群拖到 X 分 → 那些格的冷凍項標成 source='teacher'，
+  //   之後重批直接沿用老師的分數、AI 不再覆蓋。這是「人工才是最標準」在資料層的落實。
+  //   （沒有這一步，老師改完、下次重批又被判官推翻，等於白改。）
+  if (action === 'vj-freeze-override') {
+    await handleVjFreezeOverride(req, res)
     return
   }
   if (action === 'save-final-answers') {

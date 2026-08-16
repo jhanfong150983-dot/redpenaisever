@@ -80,8 +80,14 @@ export function parseVjRubricResult(rawText) {
   if (!p || !Array.isArray(p.itemLabels)) return null
   const itemLabels = p.itemLabels.map((s) => String(s ?? '').trim()).filter(Boolean)
   if (itemLabels.length === 0) return null
+  // itemScores：逐項配分（2026-08-16）。長度需與 itemLabels 相同、皆為非負數，否則忽略。
+  const rawScores = Array.isArray(p.itemScores) ? p.itemScores.map(Number) : null
+  const itemScores = rawScores && rawScores.length === itemLabels.length
+    && rawScores.every((x) => Number.isFinite(x) && x >= 0) && rawScores.some((x) => x > 0)
+    ? rawScores : undefined
   return {
     itemLabels,
+    ...(itemScores ? { itemScores } : {}),
     condition: String(p.condition ?? '').trim(),
     gradingDefinition: String(p.gradingDefinition ?? '').trim()
   }
@@ -263,7 +269,7 @@ export function parseVjGradeResult(rawText, expectedCount) {
 // ── 聚合分數 ────────────────────────────────────────────────────────────────
 // itemLabels；blankConfirmed:[{idx,isBlank}]（老師/共識確認）；grades:[{idx,verdict}]（只非空白項有）
 // maxScore：題滿分。回 {score, isCorrect, vjItemResults, scoringReason}
-export function aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore) {
+export function aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore, itemScores = null) {
   const labels = Array.isArray(itemLabels) ? itemLabels : []
   const blankMap = new Map((blankConfirmed || []).map((b) => [b.idx, !!b.isBlank]))
   const gradeMap = new Map((grades || []).map((g) => [g.idx, g])) // 保留整個 {verdict, seen}
@@ -287,11 +293,27 @@ export function aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore) {
     vjItemResults.push({ idx, label, verdict, reason })
   }
   const ms = Number.isFinite(maxScore) ? maxScore : n
-  const score = n > 0 ? Math.round(ms * pass / n) : 0
+  // ⭐ 2026-08-16：依規準的逐項配分加總。原本一律「滿分 × 通過項數 ÷ 項數」平均分配，
+  //   完全不看規準寫的權重——規準明寫「步驟1佔2分、步驟2佔1分」時，
+  //   「步驟1錯、步驟2對」會拿到 2 分（應為 1），兩種不同的錯誤映射到同一個分數，
+  //   老師也無法從分數看出是哪一條被扣。
+  //   itemScores 缺漏／長度不符／總和為 0 → 退回平均分配（舊答案卷不受影響）。
+  const w = Array.isArray(itemScores) && itemScores.length === n
+    && itemScores.every((x) => Number.isFinite(Number(x)) && Number(x) >= 0)
+    && itemScores.reduce((a, b) => a + Number(b), 0) > 0
+    ? itemScores.map(Number)
+    : null
+  const score = n === 0 ? 0
+    : w
+      ? Math.round(vjItemResults.reduce((sum, r, i) => sum + (r.verdict === 'correct' ? w[i] : 0), 0) * 10) / 10
+      : Math.round(ms * pass / n)
   const isCorrect = score === ms && ms > 0
   const fails = vjItemResults.filter((r) => r.verdict !== 'correct')
   const scoringReason = fails.length === 0
     ? `全部 ${n} 項正確。`
-    : `通過 ${n - fails.length}/${n} 項。` + fails.map((f) => `「${f.label}」${f.reason}`).join('；')
+    : `通過 ${n - fails.length}/${n} 項。` + fails.map((f, i) => {
+      const lost = w ? `（扣 ${w[vjItemResults.indexOf(f)]} 分）` : ''
+      return `「${f.label}」${f.reason}${lost}`
+    }).join('；')
   return { score, maxScore: ms, isCorrect, vjItemResults, scoringReason }
 }
