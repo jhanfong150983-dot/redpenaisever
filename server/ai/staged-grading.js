@@ -8605,6 +8605,8 @@ function buildFinalGradingResult({
     //   整卷=平均 → paperConfidence（前端學生卡片左上角顯示）。
     {
       const rTxt = ensureString(row.reason, '')
+      const chainConf = consistency?.arbiterResult?.chainConfidence
+      const hasChainConf = Number.isFinite(chainConf)
       let base = 88, journey = 'accessor語意'
       if (row.finalAnswerSource === 'manual') { base = 100; journey = '人工輸入直判' }
       else if (row.studentAnswer === '無法辨識' && row.score === 0) { base = 65; journey = '雙無法辨識歸零' }
@@ -8647,8 +8649,7 @@ function buildFinalGradingResult({
       // 2026-07-21 知答制鏈信心：新裁決(computeInformedDecision)直接帶 chainConfidence
       //   （L0一致92/88、多數或非標準≥2=80、單次看走眼採標準70、真分裂=45低信心）→ 直接當基準，
       //   已內含路徑信心、不再走 A 段 -8（否則低信心45會被再扣、或高信心被誤降）。前端 badge <70 才亮。
-      const chainConf = consistency?.arbiterResult?.chainConfidence
-      const hasChainConf = Number.isFinite(chainConf)
+
       if (hasChainConf) { base = chainConf; journey = `知答鏈:${ensureString(consistency?.arbiterResult?.chainLevel, '')}` }
       // A 段修正（只對走過讀取的格子；知答鏈已自帶信心 → 跳過；_glyphJudge=判官看圖、與讀取無關 → 跳過）
       // 級分制判官不看 read 值（整題判等第），consistencyStatus 對它沒有意義 → 不做 A 段修正
@@ -8657,7 +8658,10 @@ function buildFinalGradingResult({
       let aTag = ''
       if (!hasChainConf && !skipA.has(journey) && !score?._glyphJudge) {
         if (row.consistencyStatus === 'stable') aTag = '兩讀一致'
-        else if (row.consistencyStatus) { base -= 8; aTag = '兩讀分歧經鏈' }
+        // ⛔ 2026-08-16：原本只要非 stable 就寫「經鏈」，但鏈的啟動條件是 arbiterStatus==='needs_review'，
+        //   很多格根本沒跑過鏈（user 實測：整份卷 escalationChain=[] 卻每格都掛「經鏈」）。
+        //   標籤騙人會讓人以為鏈壞了，實際是沒被觸發 → 依「有沒有鏈信心」據實標示。
+        else if (row.consistencyStatus) { base -= 8; aTag = hasChainConf ? '兩讀分歧經鏈' : '兩讀分歧未經鏈' }
         else aTag = ''
       }
       // 數值關係閘門降分 → 強制落到複核門檻（<70）之下。比對本身是確定性的，
@@ -13075,10 +13079,18 @@ export async function runStagedGradingPhaseB({
         } : undefined,
         // 2026-07-21：consistent 欄缺失時、兩讀同值(read)仍應視為 stable（synthetic 佔位/舊資料——
         //   否則整批被標 unstable、systemConfidence 冤 -8＋掛「兩讀分歧經鏈」誤導標籤）
+        // ⛔ 2026-08-16：這裡原本用**純字串相等**當 fallback，與決策時用的 computeConsistencyStatus
+        //   是兩套定義 → 同一格「決策當下判 stable、顯示卻寫 unstable」（user 在批改品質頁抓到）。
+        //   儲存的仲裁紀錄沒有 consistent 欄位，所以每次都掉到 fallback，等於顯示值長期失真：
+        //   老師看到 unstable 卻沒有鏈明細，會誤以為鏈壞了，實際上根本沒被觸發。
+        //   → fallback 改用同一支 computeConsistencyStatus，顯示值與決策依據一致。
         consistencyStatus: arb?.consistent === true ? 'stable'
           : arb?.consistent === false ? 'diff'
-          : (r1?.status === 'read' && r2?.status === 'read' && ensureString(r1?.answer, '') && ensureString(r1?.answer, '') === ensureString(r2?.answer, '')) ? 'stable'
-          : 'unstable',
+          : computeConsistencyStatus(
+            { status: r1?.status, studentAnswerRaw: ensureString(r1?.answer, ''), studentAnswer: ensureString(r1?.answer, '') },
+            { status: r2?.status, studentAnswerRaw: ensureString(r2?.answer, ''), studentAnswer: ensureString(r2?.answer, '') },
+            aq?.questionType ?? 'other'
+          ),
         answerBbox: aq.answerBbox,
         bboxCorrected: !!aq.bboxCorrected,
         framingReason: aq.framingReason
