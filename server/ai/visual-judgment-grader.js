@@ -87,6 +87,45 @@ export function parseVjRubricResult(rawText) {
   }
 }
 
+
+// ── 逐項提問（2026-08-16 user 拍板：比照應用題級分制）──────────────────────
+// 應用題已經踩過同一個坑並付過學費：整份規準一次問，AI 會傾向掃描比對清單、注意力分散；
+//   沙盒實測「整份規準 90%／逐要素分開問 100%」（同模型同卷、唯一變數是一次問幾條）。
+// 作圖題同理：一次問完所有項目，判定容易在邊界上晃；改成一次只問一項、其他完全不理會。
+// ⚠ 通用 prompt，不得寫入任何實際考題內容。
+export function buildVjItemPrompt(itemLabel, gradingDefinition, hasReference) {
+  const refIntro = hasReference
+    ? '附兩張圖：【正確答案圖】（老師畫好的正解）與【學生作答圖】，兩張畫在**相同版面**上（相同格線／基準線／既有圖形）。'
+    : '附【學生作答圖】。'
+  const refRule = hasReference
+    ? '把學生作答圖的該元素，拿去和正確答案圖的對應元素**比對**，判斷是否結構等價——形狀、大小（相對格數）、相對於基準的位置一致即可。'
+    : '判斷學生畫的該元素，形狀／大小／相對位置是否符合評判標準。'
+  return `你是視覺作答題的閱卷老師。${refIntro}
+
+【你這一次只需要判斷一個項目】
+  ${itemLabel}
+
+【怎麼判斷】
+1. **只看這一個項目**，其他項目完全不要理會。
+2. ${refRule}
+3. 版面上**原本就印好的內容**（格線、基準線、既有圖形、標示字母）不是學生的作答，不可當成學生畫的。
+4. **容許手繪誤差**：線條抖動、不直、輕微偏移、未完全閉合但形狀可辨，一律算 correct。
+5. **不要自己數方格、不要報絕對座標**——你數格容易數錯。
+6. 判不出來時傾向 correct（寧可不冤枉）。
+${gradingDefinition ? `
+【評判標準（僅供參考本項的可核對事實）】${gradingDefinition}
+` : ''}
+只輸出 JSON：{"seen": "你看到學生在這一項畫了什麼（20字內）", "verdict": "correct|wrong|blank"}`
+}
+
+export function parseVjItemResult(rawText) {
+  const p = parseJson(rawText)
+  if (!p) return null
+  const v = String(p.verdict ?? '').toLowerCase()
+  if (!['correct', 'wrong', 'blank'].includes(v)) return null
+  return { verdict: v, seen: String(p.seen ?? '').trim().slice(0, 40) }
+}
+
 // ── Phase A：專用 blank reader（FLASH）只判「每個子元素有沒有畫」 ─────────────
 // 不轉錄、不判對錯、不假設顏色。兩個獨立 reader 比一致性。
 export function buildVjBlankPrompt(itemLabels) {

@@ -42,6 +42,8 @@ import {
   classifyVjBlank,
   buildVjGradePrompt,
   parseVjGradeResult,
+  buildVjItemPrompt,
+  parseVjItemResult,
   aggregateVjScore
 } from './visual-judgment-grader.js'
 import { getSupabaseAdmin } from '../_supabase.js'
@@ -13894,17 +13896,48 @@ export async function runStagedGradingPhaseB({
                 if (rblob) refCropInline = { mimeType: q.cropImagePath.endsWith('.jpg') ? 'image/jpeg' : 'image/webp', data: Buffer.from(await rblob.arrayBuffer()).toString('base64') }
               } catch (e) { logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 正解圖下載失敗：${e?.message}`) }
             }
-            const gradePromptText = buildVjGradePrompt(q.questionCategory, itemLabels, vjRubric.gradingDefinition, notBlank, !!refCropInline)
-            const gradeParts = refCropInline
-              ? [{ text: gradePromptText }, { text: '【正確答案圖】' }, { inlineData: refCropInline }, { text: '【學生作答圖】' }, { inlineData: crop }]
-              : [{ text: gradePromptText }, { inlineData: crop }]
-            const resp = await executeStage({
-              apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
-              timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
-              stageContents: [{ role: 'user', parts: gradeParts }]
-            })
-            if (resp?.ok) grades = parseVjGradeResult(extractCandidateText(resp.data) || '', n) || []
-            if (resp) stageResponses.push(resp)
+            // ── 2026-08-16 user 拍板：比照應用題級分制「逐項單獨提問」──────────────
+            //   應用題已付過這個學費：整份規準一次問，AI 傾向掃描比對清單、注意力分散；
+            //   沙盒實測「整份規準 90%／逐要素分開問 100%」（同模型同卷、唯一變數是一次問幾條）。
+            //   作圖題同理——一次問完所有項目，判定容易在邊界上晃。
+            //   ⛔ 但沙盒實測**結果相反**（培英 1-2-1、32 張 ×5 輪、鏡像 production 設定）：
+            //        A 一次問全部：分數飄動 3%、每輪 2 群
+            //        B 逐項單獨問：分數飄動 41%、每輪 3 群
+            //      推測：應用題的要素是各自獨立的文字主張，聚焦有幫助；作圖題的項目在**同一張圖上
+            //      空間相依**（步驟1 與步驟2 是同一個圖形的兩半），單獨問反而讓模型分不清在問哪一塊。
+            //      → 預設**關閉**，保留程式碼供日後其他題型測試。開啟：VJ_PER_ITEM='1'。
+            const perItem = process.env.VJ_PER_ITEM === '1'
+            if (perItem) {
+              const results = await Promise.all(itemLabels.map(async (label, i) => {
+                const itemPrompt = buildVjItemPrompt(label, vjRubric.gradingDefinition, !!refCropInline)
+                const parts = refCropInline
+                  ? [{ text: itemPrompt }, { text: '【正確答案圖】' }, { inlineData: refCropInline }, { text: '【學生作答圖】' }, { inlineData: crop }]
+                  : [{ text: itemPrompt }, { inlineData: crop }]
+                const r = await executeStage({
+                  apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
+                  timeoutMs: Math.min(getRemainingBudget(), 25_000), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
+                  stageContents: [{ role: 'user', parts }]
+                })
+                if (r) stageResponses.push(r)
+                if (!r?.ok) return null
+                const parsed = parseVjItemResult(extractCandidateText(r.data) || '')
+                return parsed ? { idx: i + 1, ...parsed } : null
+              }))
+              grades = results.filter(Boolean)
+              logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 逐項提問 ${grades.length}/${itemLabels.length} 項成功`)
+            } else {
+              const gradePromptText = buildVjGradePrompt(q.questionCategory, itemLabels, vjRubric.gradingDefinition, notBlank, !!refCropInline)
+              const gradeParts = refCropInline
+                ? [{ text: gradePromptText }, { text: '【正確答案圖】' }, { inlineData: refCropInline }, { text: '【學生作答圖】' }, { inlineData: crop }]
+                : [{ text: gradePromptText }, { inlineData: crop }]
+              const resp = await executeStage({
+                apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
+                timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
+                stageContents: [{ role: 'user', parts: gradeParts }]
+              })
+              if (resp?.ok) grades = parseVjGradeResult(extractCandidateText(resp.data) || '', n) || []
+              if (resp) stageResponses.push(resp)
+            }
           }
         }
 
