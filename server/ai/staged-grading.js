@@ -2019,6 +2019,39 @@ export function computeInformedDecision(reads, key, witnesses = []) {
 //   ⚠ 未驗區：全庫知答制鏈紀錄只來自國語×2＋社會×1 三個作業，**英語/數學零樣本**。短正解（數字、
 //     單字）「剛好等於正解」的巧合率較高，靠逃生門擋；觸發時一律寫 log，英語/數學批完要撈 log 覆核。
 //   回歸實測（全庫 34 格）：觸發 1 格＝座7，改成 r2＝user 肉眼答案；0 格原本正確的被動到。
+// ═══ 覆核比對正規化（programmatic-override 專用）══════════════════════════════
+// 2026-08-16 提到模組層並匯出：原本是行內閉包，無法回放驗證，
+//   而「一致性判定」與「覆核比對」各自漂移正是 1-1-27 座13（3→0）的成因。
+//   任何等價規則的增修，兩處都必須同步並跑全庫反向檢查。
+export function overrideNorm(s) {
+  let t = s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-')
+  // 圈圈數字 → 半形數字（①②③...⑳ → 1~20）
+  t = t.replace(/[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/gu, (ch) => {
+    const idx = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'.indexOf(ch)
+    return idx >= 0 ? String(idx + 1) : ch
+  })
+  // 全形數字 → 半形
+  t = t.replace(/[０-９]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
+  // 剝除外層括號：(C) → C、（甲）→ 甲、(2) → 2
+  t = t.replace(/^[（(]\s*(.+?)\s*[）)]$/, '$1')
+  // 2026-07-11: 與 normalizeAnswerForComparison 同步的兩條等價（⚠等價規則兩處要一起改）：
+  // ①列舉分隔符——「36.76.96」=「36,76,96」（「數字.數字」鏈 ≥2 個點才折、小數 22.7 不動；round6 座10 實測冤枉）
+  t = foldEnumSeparators(t)
+  // ②角度符號剝除——「640°」=「640」（培英 Q21 型）
+  t = t.replace(/[°º˚]/gu, '')
+  // ③2026-07-15 結尾句讀剝除——英語短句答案（「Yes, it is.」）被 isSimpleAnswer 收進簡單答案
+  //   通道、學生沒寫句點被判 0（英語期末 3-E-7 座25/27 實測誤殺；英語赦免規則本就含結尾標點）
+  t = t.replace(/[.。!！?？]+$/u, '')
+  // ④2026-08-16 逗號小數——「22,7」=「22.7」（歐式寫法／read 把小數點讀成逗號）。
+  //   實錘 培英數學 1-1-27 座13：同一張圖前輪讀「22.7」判 3 分、後輪讀「22,7」判 0 分。
+  //   一致性判定用的 normNumericSeparators 認為兩者相同（故顯示「兩讀一致 stable」），
+  //   但覆核這條老比對沒跟上：isNumericEqual 的 stripUnit 直接把逗號刪掉 →「227」≠「22.7」。
+  //   同一個值在系統裡兩套答案，就是這格 3→0 的成因（不是選 read1 或 read2 的問題）。
+  //   ⚠正規化錨定整串 ^數字,數字$，列舉「1,3,4」不受影響。
+  t = normNumericSeparators(t)
+  return t.toLowerCase()
+}
+
 // ═══ 帶分數空白還原閘 — 2026-08-16 ═══════════════════════════════════════════
 //   知答鏈重讀時會把帶分數中間的空白吃掉：「x>=7 1/7」→「x >= 71/7」。
 //   數字間的空白在帶分數裡是**帶語意的**（7 1/7 = 50/7，71/7 = 71/7），空白一掉值就全變。
@@ -8391,27 +8424,8 @@ function buildFinalGradingResult({
       // 判斷標準答案是否為「簡單答案」（數字、分數、百分比、單一字母/符號）
       const isSimpleAnswer = /^[\d./×÷+\-−%°○✗✓A-Za-z\s，,]+$/u.test(refAnswer) && refAnswer.length <= 20
       if (isSimpleAnswer) {
-        const norm = (s) => {
-          let t = s.replace(/\s+/g, '').replace(/[，]/g, ',').replace(/[−–—]/g, '-')
-          // 圈圈數字 → 半形數字（①②③...⑳ → 1~20）
-          t = t.replace(/[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/gu, (ch) => {
-            const idx = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'.indexOf(ch)
-            return idx >= 0 ? String(idx + 1) : ch
-          })
-          // 全形數字 → 半形
-          t = t.replace(/[０-９]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10))
-          // 剝除外層括號：(C) → C、（甲）→ 甲、(2) → 2
-          t = t.replace(/^[（(]\s*(.+?)\s*[）)]$/, '$1')
-          // 2026-07-11: 與 normalizeAnswerForComparison 同步的兩條等價（⚠等價規則兩處要一起改）：
-          // ①列舉分隔符——「36.76.96」=「36,76,96」（「數字.數字」鏈 ≥2 個點才折、小數 22.7 不動；round6 座10 實測冤枉）
-          t = foldEnumSeparators(t)
-          // ②角度符號剝除——「640°」=「640」（培英 Q21 型）
-          t = t.replace(/[°º˚]/gu, '')
-          // ③2026-07-15 結尾句讀剝除——英語短句答案（「Yes, it is.」）被 isSimpleAnswer 收進簡單答案
-          //   通道、學生沒寫句點被判 0（英語期末 3-E-7 座25/27 實測誤殺；英語赦免規則本就含結尾標點）
-          t = t.replace(/[.。!！?？]+$/u, '')
-          return t.toLowerCase()
-        }
+        // ↓ 覆核用正規化已提到模組層（overrideNorm），可回放驗證
+        const norm = overrideNorm
         // 是非題：用 normalizeTrueFalseAnswer 正規化（O→○、X→✗ 等），處理完直接跳過通用比對
         if (qCategory === 'true_false') {
           const tfRef = normalizeTrueFalseAnswer(refAnswer)
