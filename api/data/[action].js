@@ -18,6 +18,7 @@ import { debitSchoolInk } from '../../server/school-wallet.js'
 // node:crypto 顯式匯入——Vercel Node 18+ 全域 crypto 是 WebCrypto、沒有 randomBytes(2026-07-31 踩雷)
 import nodeCrypto from 'node:crypto'
 import { MODEL_PRO } from '../../server/ai/model-config.js'
+import { resolveSemanticScopeKey, normSemanticValue } from '../../server/ai/semantic-score-table.js'
 import { computeInkPointsFromTokens } from '../../server/ink-session.js'
 import { trackingContext } from '../../server/ink-usage-tracker.js'
 import {
@@ -3408,8 +3409,13 @@ async function handleSaveGrading(req, res) {
 // 2026-05-18: PR3 審查頁老師確認後寫 final_answers 到 submissions。
 // 不更動 score / status (status 仍是 synced、由 deriveCardStage 透過 final_answers 完整性算出待批改 / 待複核)
 
-// 老師裁決回寫 VJ 冷凍表。body: { items: [{ submissionId, questionId, score }] }
-//   只認登入老師自己的卷；找不到冷凍列就跳過（表示那格還沒被判官凍過）。
+// 老師裁決回寫冷凍（兩表通用）。body: { assignmentId, items: [{ submissionId, questionId, score, value? }] }
+//   ・VJ（圖像判分）→ vj_verdict_cache，鍵＝submission + question（圖各自不同）
+//   ・查表制（值可比）→ semantic_score_tables，鍵＝scope + question + value_norm
+//     後者是**跨學生**的：老師把「某個答案」判成 X 分，全班（含日後）寫同樣答案的人都是 X 分，
+//     這正是「同答同分」該有的行為，也是老師拖一次就到位的來源。
+//   規則②：老師裁決最高優先、AI 永不覆蓋（見 server/ai/freeze-policy.js）。
+//   只認登入老師自己的卷；找不到冷凍列就跳過（那格還沒被凍過）。
 async function handleVjFreezeOverride(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
   try {
@@ -3433,7 +3439,31 @@ async function handleVjFreezeOverride(req, res) {
         .eq('submission_id', sid).eq('question_id', qid)
       if (!error && count) updated += count
     }
-    res.status(200).json({ updated })
+    // ── 查表制（值可比的題型）：依「答案值」回寫，跨學生生效 ──────────────
+    let semUpdated = 0
+    try {
+      const assignmentId = String(req.body?.assignmentId ?? '')
+      const withValue = items.filter((x) => String(x.value ?? '').trim() && mine.has(String(x.submissionId ?? '')))
+      if (assignmentId && withValue.length > 0) {
+        const scopeKey = await resolveSemanticScopeKey(db, assignmentId)
+        if (scopeKey) {
+          // 同 (題號, 值) 只需回寫一次
+          const seen = new Set()
+          for (const it of withValue) {
+            const qid = String(it.questionId ?? '')
+            const norm = normSemanticValue(it.value)
+            const k = `${qid}|${norm}`
+            if (!qid || !norm || seen.has(k)) continue
+            seen.add(k)
+            const { error, count } = await db.from('semantic_score_tables')
+              .update({ score: Number(it.score), source: 'teacher', low_conf: false }, { count: 'exact' })
+              .eq('scope_key', scopeKey).eq('question_id', qid).eq('value_norm', norm)
+            if (!error && count) semUpdated += count
+          }
+        }
+      }
+    } catch (e) { console.warn('[freeze-override] semantic 回寫略過:', e?.message) }
+    res.status(200).json({ updated, semUpdated })
   } catch (err) {
     // fail-open：表不存在或任何錯誤都不擋老師改分（分數本身已存進 submissions）
     console.warn('[vj-freeze-override] failed (non-fatal):', err?.message)

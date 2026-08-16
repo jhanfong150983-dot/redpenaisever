@@ -50,15 +50,20 @@ export async function resolveSemanticScopeKey(supabase, assignmentId) {
   }
 }
 
+// 2026-08-16 收斂：查表制與 VJ 冷凍共用同一套政策（版本失效／老師裁決最高優先／低信心隨判定走）
+import { FREEZE_LOGIC_VERSION, AI_UPSERT_OPTS } from './freeze-policy.js'
+
 // → Map(questionId → Map(valueNorm → entry))
 export async function loadSemanticTable(supabase, scopeKey, questionIds) {
   const out = new Map()
   if (!scopeKey || !questionIds?.length) return out
   const { data, error } = await supabase
     .from('semantic_score_tables')
-    .select('question_id, value_norm, value_raw, score, max_score, rubric_scores, char_err, verdict, low_conf')
+    .select('question_id, value_norm, value_raw, score, max_score, rubric_scores, char_err, verdict, low_conf, source, logic_version')
     .eq('scope_key', scopeKey)
     .in('question_id', questionIds)
+    // 版本失效：只取「當前判分邏輯」寫的列，或老師裁決過的（老師的決定跨版本有效）
+    .or(`logic_version.eq.${FREEZE_LOGIC_VERSION.semantic},source.eq.teacher`)
   if (error) throw new Error(`loadSemanticTable: ${error.message}`)
   for (const row of data || []) {
     const qm = out.get(row.question_id) ?? new Map()
@@ -213,19 +218,23 @@ export async function judgeAndFreezeValue({ supabase, askJson, askJsonPro, scope
     verdict: sem.verdict,
     low_conf: sem.lowConf,
     model: model || null,
-    config: config || null
+    config: config || null,
+    logic_version: FREEZE_LOGIC_VERSION.semantic,
+    source: 'ai'
   }
   const { data: inserted, error } = await supabase
     .from('semantic_score_tables')
-    .upsert(entry, { onConflict: 'scope_key,question_id,value_norm', ignoreDuplicates: true })
-    .select('question_id, value_norm, value_raw, score, max_score, rubric_scores, char_err, verdict, low_conf')
+    // ignoreDuplicates：AI 永不覆蓋既有列（含老師裁決）——收斂規則②
+    .upsert(entry, { onConflict: 'scope_key,question_id,value_norm,logic_version', ...AI_UPSERT_OPTS })
+    .select('question_id, value_norm, value_raw, score, max_score, rubric_scores, char_err, verdict, low_conf, source')
   if (error) throw new Error(`freezeEntry: ${error.message}`)
   if (Array.isArray(inserted) && inserted.length > 0) return inserted[0]
   // 衝突=別的卷先凍了 → 用勝者(同答同分同理由的保證)
   const { data: winner } = await supabase
     .from('semantic_score_tables')
-    .select('question_id, value_norm, value_raw, score, max_score, rubric_scores, char_err, verdict, low_conf')
+    .select('question_id, value_norm, value_raw, score, max_score, rubric_scores, char_err, verdict, low_conf, source')
     .eq('scope_key', scopeKey).eq('question_id', q.id).eq('value_norm', valueNorm)
+    .or(`logic_version.eq.${FREEZE_LOGIC_VERSION.semantic},source.eq.teacher`)
     .maybeSingle()
   return winner ?? entry
 }
