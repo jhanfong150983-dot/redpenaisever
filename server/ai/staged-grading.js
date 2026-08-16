@@ -2019,6 +2019,33 @@ export function computeInformedDecision(reads, key, witnesses = []) {
 //   ⚠ 未驗區：全庫知答制鏈紀錄只來自國語×2＋社會×1 三個作業，**英語/數學零樣本**。短正解（數字、
 //     單字）「剛好等於正解」的巧合率較高，靠逃生門擋；觸發時一律寫 log，英語/數學批完要撈 log 覆核。
 //   回歸實測（全庫 34 格）：觸發 1 格＝座7，改成 r2＝user 肉眼答案；0 格原本正確的被動到。
+// ═══ 帶分數空白還原閘 — 2026-08-16 ═══════════════════════════════════════════
+//   知答鏈重讀時會把帶分數中間的空白吃掉：「x>=7 1/7」→「x >= 71/7」。
+//   數字間的空白在帶分數裡是**帶語意的**（7 1/7 = 50/7，71/7 = 71/7），空白一掉值就全變。
+//   全庫實測 5 格全部發生在數學不等式題，其中三格是把**完全正確**的作答殺成 0：
+//     1-1-8「1 1/3」=4/3 正解、1-1-9「7 1/7」=50/7 正解、1-1-10「6 7/11」=73/11 正解。
+//   修法刻意設計成**單調**：只在「去掉全部空白後與某次盲讀完全相同、且採用值的數字間空白
+//   比盲讀少」時，還原成該盲讀的寫法。
+//     ・不會改任何「值」——兩邊去空白後逐字相同，鏈的判讀內容原封不動
+//     ・只往「還原」單向走，鏈自己**加**空白時不動它（鏈可能真的看得比盲讀清楚）
+//     ・不是「挑跟正解一樣的那個」——條件裡沒有正解，故不構成放水
+export function restoreDigitSpacing(decision, r1, r2) {
+  if (!decision || decision.adopted == null) return decision
+  const adopted = ensureString(decision.adopted, '')
+  const strip = (x) => ensureString(x, '').replace(/\s+/gu, '')
+  const digitGaps = (x) => (ensureString(x, '').match(/\d\s+\d/gu) ?? []).length
+  const mine = digitGaps(adopted)
+  let best = null
+  for (const cand of [r1, r2]) {
+    const c = ensureString(cand, '')
+    if (!c || strip(c) !== strip(adopted)) continue      // 去空白後必須逐字相同
+    if (digitGaps(c) <= mine) continue                   // 只還原鏈掉的、不新增
+    if (!best || digitGaps(c) > digitGaps(best)) best = c
+  }
+  if (!best) return decision
+  return { ...decision, adopted: best, level: `${decision.level}_spacing_restored` }
+}
+
 export function applyHallucinationGate(decision, r1, r2, key) {
   if (!decision || decision.adopted == null) return decision
   const fold = (x) => normalizeAnswerForComparison(deLatexMathText(ensureString(x, '')))
@@ -2165,7 +2192,10 @@ export async function applyEscalationChain({
           if (ecSame(ia.value, ib.value)) {
             // 幻覺閘也要蓋 L0_agree：座7 就是在這裡出去的（ia=ib=正解逐字、r1/r2 都不是）
             const l0 = applyHallucinationGate(
-              { adopted: ia.value, level: 'L0_agree', illegible: false, chainConfidence: ecKeyEq(ia.value, key) ? 92 : 88 },
+              restoreDigitSpacing(
+                { adopted: ia.value, level: 'L0_agree', illegible: false, chainConfidence: ecKeyEq(ia.value, key) ? 92 : 88 },
+                r1, r2
+              ),
               r1, r2, key
             )
             results.push({ qr, ...l0, ...meta0 })
@@ -2178,7 +2208,10 @@ export async function applyEscalationChain({
           ])
           // witnesses=[r1, r2]：原生雙讀當「非正解值平手」的破平手票（見 computeInformedDecision 說明）
           const decision = applyHallucinationGate(
-            computeInformedDecision([ia.value, ib.value, ic.value, id.value], key, [r1, r2]),
+            restoreDigitSpacing(
+              computeInformedDecision([ia.value, ib.value, ic.value, id.value], key, [r1, r2]),
+              r1, r2
+            ),
             r1, r2, key
           )
           results.push({ qr, ...decision, r1p: ia.value, r2p: ib.value, r3p: ic.value, r4p: id.value, r1pMs: ia.ms, r2pMs: ib.ms, r1pStatus: ia.status, r2pStatus: ib.status, key })
