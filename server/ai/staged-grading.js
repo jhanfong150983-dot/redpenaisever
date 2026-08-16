@@ -8651,7 +8651,10 @@ function buildFinalGradingResult({
         } else { base = 80; journey = '字形全票攔' }
       }
       else if (score?._scRescue) { base = 90; journey = '單選值域救援' }
-      else if (score?._vjBypass) { base = 90; journey = 'VJ視覺判斷' }
+      else if (score?._vjBypass) {
+        base = score?._vjVoteSplit ? 60 : 90
+        journey = score?._vjVoteSplit ? 'VJ三票分歧(待複核)' : 'VJ視覺判斷'
+      }
       // 2026-08-14 級分制：判官自己算出的信心就是權威（全票97／分歧不影響等第75／
       //   分歧會改變等第45／票數不足65）。不接這一條的話 systemConfidence 會落到預設 88，
       //   UI 的低信心紅底與複核面板（門檻 <70）永遠不會亮。
@@ -8668,7 +8671,9 @@ function buildFinalGradingResult({
       if (hasChainConf) { base = chainConf; journey = `知答鏈:${ensureString(consistency?.arbiterResult?.chainLevel, '')}` }
       // A 段修正（只對走過讀取的格子；知答鏈已自帶信心 → 跳過；_glyphJudge=判官看圖、與讀取無關 → 跳過）
       // 級分制判官不看 read 值（整題判等第），consistencyStatus 對它沒有意義 → 不做 A 段修正
-      const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷'])
+      // VJ 三票分歧也要跳過 A 段修正——判官不看讀值，consistencyStatus 對它沒有意義，
+      //   讓 -8 修正把 60 再往下拉只會失真（同 'VJ視覺判斷' 的理由）。
+      const skipA = new Set(['人工輸入直判', '雙無法辨識歸零', 'map_fill確定性', 'VJ視覺判斷', 'VJ三票分歧(待複核)'])
       if (score?._levelBypass) skipA.add(journey)
       let aTag = ''
       if (!hasChainConf && !skipA.has(journey) && !score?._glyphJudge) {
@@ -13881,6 +13886,7 @@ export async function runStagedGradingPhaseB({
 
         // 3) 對非空白項跑 PRO grade（整題全空白 → 不發 call、直接 0）
         let grades = []
+        let vjVoteSplit = false   // 三票有分歧 → 壓低信心送複核
         if (notBlank.length > 0 && studentImg?.data) {
           const classifyRow = vjClassifyArr.find((r) => (r.questionId || r.id) === qId)
           const bbox = classifyRow?.answerBbox
@@ -13926,17 +13932,46 @@ export async function runStagedGradingPhaseB({
               grades = results.filter(Boolean)
               logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 逐項提問 ${grades.length}/${itemLabels.length} 項成功`)
             } else {
+              // ── 2026-08-16 user 拍板：VJ 三票多數決 ────────────────────────────
+              //   實測根因：輸入 byte 級相同、模型相同、temperature 0，output 仍每輪不同
+              //   （ink_session_usage 的 input_tokens 跨批次完全一致、output_tokens 每次都變）
+              //   ——LLM 服務端在 temp 0 下本來就不保證可重現，作圖題的判定又落在決策邊界上。
+              //   prompt／規準／解析度／裁圖幾何／逐項提問全部試過都不是原因（見 local-only/vj-rubric-lab）。
+              //   → 唯一有效的手段是投票：三票一致＝可信；有分歧＝**壓低信心讓老師看見**，
+              //     把「看不見的飄動」轉成「看得見的待複核」。同國字注音三判官的思路。
+              //   成本：每題 3 次呼叫取代 1 次。kill switch: VJ_VOTES=1 退回單票。
+              const votes = Math.max(1, Number(process.env.VJ_VOTES) || 3)
               const gradePromptText = buildVjGradePrompt(q.questionCategory, itemLabels, vjRubric.gradingDefinition, notBlank, !!refCropInline)
               const gradeParts = refCropInline
                 ? [{ text: gradePromptText }, { text: '【正確答案圖】' }, { inlineData: refCropInline }, { text: '【學生作答圖】' }, { inlineData: crop }]
                 : [{ text: gradePromptText }, { inlineData: crop }]
-              const resp = await executeStage({
-                apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
-                timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
-                stageContents: [{ role: 'user', parts: gradeParts }]
-              })
-              if (resp?.ok) grades = parseVjGradeResult(extractCandidateText(resp.data) || '', n) || []
-              if (resp) stageResponses.push(resp)
+              const ballots = (await Promise.all(Array.from({ length: votes }, async () => {
+                const resp = await executeStage({
+                  apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
+                  timeoutMs: Math.min(getRemainingBudget(), 30_000), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
+                  stageContents: [{ role: 'user', parts: gradeParts }]
+                })
+                if (resp) stageResponses.push(resp)
+                return resp?.ok ? (parseVjGradeResult(extractCandidateText(resp.data) || '', n) || []) : null
+              }))).filter(Boolean)
+              if (ballots.length > 0) {
+                // 逐項多數決；票數相同（如 1/2/3 各一票）→ 取第一票，並記為分歧
+                grades = Array.from({ length: n }, (_, i) => {
+                  const idx = i + 1
+                  const vs = ballots.map((b) => b.find((x) => x.idx === idx)).filter(Boolean)
+                  if (vs.length === 0) return null
+                  const tally = new Map()
+                  for (const v of vs) tally.set(v.verdict, (tally.get(v.verdict) ?? 0) + 1)
+                  const [top, topN] = [...tally].sort((a, b) => b[1] - a[1])[0]
+                  const win = vs.find((v) => v.verdict === top) ?? vs[0]
+                  return { ...win, verdict: top, _split: topN < vs.length, _tally: [...tally].map(([k, c]) => `${k}×${c}`).join(' ') }
+                }).filter(Boolean)
+                vjVoteSplit = grades.some((g) => g?._split)
+                if (votes > 1) {
+                  logStaged(pipelineRunId, 'basic',
+                    `[B-VJ] ${qId} ${ballots.length} 票多數決${vjVoteSplit ? `、有分歧（${grades.filter((g) => g._split).map((g) => `項${g.idx}:${g._tally}`).join('、')}）→ 低信心送複核` : '、全票一致'}`)
+                }
+              }
             }
           }
         }
@@ -13948,7 +13983,12 @@ export async function runStagedGradingPhaseB({
         deterministicScores.push({
           questionId: qId, isCorrect: agg.isCorrect, score: agg.score, maxScore: agg.maxScore,
           errorType: agg.isCorrect ? 'none' : (notBlank.length === 0 ? 'blank' : 'concept'),
-          scoringReason: agg.scoringReason, scoreConfidence: 100,
+          // 三票有分歧 → 信心 60（<70 觸發 UI 紅底與複核面板），理由附註讓老師知道為什麼要看
+          scoringReason: vjVoteSplit
+            ? `${agg.scoringReason}（三票判定不一致，請老師確認）`
+            : agg.scoringReason,
+          scoreConfidence: vjVoteSplit ? 60 : 100,
+          _vjVoteSplit: vjVoteSplit || undefined,
           studentFinalAnswer: vjAllBlank ? '未作答' : '圖上作答',
           needExplain: false, _vjBypass: true, vjItemResults: agg.vjItemResults
         })
