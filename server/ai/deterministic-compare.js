@@ -115,9 +115,11 @@ function isFormalAnswer(ref) {
 // 背景：AI 原本自行「答對一個給一半」——答案卷裡沒有這條規則。這是「AI 自行加碼」的
 //   同一個病（面積要單位、英文要句點皆同類），沒有規則撐著就會在不同批次給不同分。
 // answerKey.multiCheckRule：
-//   'deduct'（預設）＝每錯一個扣 multiCheckDeduction 分（預設 1）；漏選與誤選同權、下限 0。
-//                     user 拍板：「錯1扣1、多1也扣1」。全庫 122 題多選中 91 題是「2 分／2 正解」，
-//                     這種題扣 1 分恰等於扣掉一個選項的配分。
+//   'deduct'（預設）＝每錯一個扣**一個選項的配分**（滿分÷正解數）；漏選與誤選同權、下限 0。
+//                     user 拍板：「錯1扣1、多1也扣1」→ 再拍板「按比例扣」。
+//                     全庫 122 題多選中 91 題是「2 分／2 正解」，按比例＝扣 1 分，兩者一致；
+//                     大配分題才有差（15 分／3 正解：按比例扣 5 分，固定扣 1 分只扣 6.7%）。
+//                     答案卷若明確指定 multiCheckDeduction 數字 → 改扣該固定分數。
 //   'all_or_nothing' ＝集合完全相同才給分，否則 0
 //   'partial'        ＝滿分 × 選對數/正解數，多選不倒扣（＝AI 原本的實際行為）
 //   'partial_strict' ＝只要選到非正解就 0；否則同 partial
@@ -146,7 +148,10 @@ function gradeMultiSelect(q, ref, stu, answerKey) {
   const missed = R.size - hit
   if (exact) return { verdict: 'equal', by: '多選集合相同', score: max }
   if (rule === 'deduct') {
-    const per = Number.isFinite(Number(answerKey?.multiCheckDeduction)) ? Number(answerKey.multiCheckDeduction) : 1
+    const fixed = Number(answerKey?.multiCheckDeduction)
+    const per = Number.isFinite(fixed) && fixed > 0
+      ? fixed
+      : Math.round((max / Math.max(1, R.size)) * 10) / 10   // 一個選項的配分
     const score = Math.max(0, Math.round((max - (missed + extra) * per) * 10) / 10)
     return {
       verdict: 'differ',
