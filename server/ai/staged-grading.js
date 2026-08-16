@@ -1309,7 +1309,15 @@ export function normalizeAnswerForComparison(raw) {
   // AI1: ( 械鬥 / 民變 ) → 械鬥民變, AI2: （ 械鬥 ） → 械鬥
   // 去括號 + 斜線讓兩者一致
   s = s.replace(/[（(]\s*([^）)]*?)\s*[）)]/gu, '$1')  // 去括號，保留內容
-  s = s.replace(/\s*[/／]\s*/gu, '')  // 去斜線分隔符
+  // ⚠ 2026-08-16：斜線只在「非數字之間」才刪。原本無條件刪 → 「7/2」與「72」、
+  //   「11/3」與「113」被視為同一個讀值 → **真分歧被折平、不升級、預設採用讀1**。
+  //   實測座7（讀1「7/2」讀2「72」，標答 72）、座25（讀1「x > 11/3」讀2「x>1 1/3」，
+  //   標答 x>4/3）都是讀2 正確卻採用讀1 而判 0。
+  //   同一類病灶 08-14 已在 normSemanticValue／normAnswerValue 修過（帶分數撞鍵），漏了這第三支。
+  //   數字之間的斜線＝分數線，必須保留（先換成哨兵，避開下一行的無差別刪除）
+  s = s.replace(/(\d)\s*[/／]\s*(\d)/gu, '$1$2')
+  s = s.replace(/\s*[/／]\s*/gu, '')                  // 其餘斜線（「支持/反對」等分隔用）照舊刪
+  s = s.replace(//gu, '/')
   // 省略號去除（……、...）— AI 讀到的格式提示文字
   s = s.replace(/[…]+/gu, '')
   s = s.replace(/\.{2,}/gu, '')
@@ -1327,8 +1335,9 @@ export function normalizeAnswerForComparison(raw) {
   if (/^[（(]?(?:未作答|空白)[)）]?$/u.test(s)) return ''
   // 去除分隔符號（逗號、頓號、換行）— 比對內容本身，不比對格式
   s = s.replace(/[,、\n\r]/gu, '')
-  // 去除所有空白（避免有無空白造成誤判）
-  s = s.replace(/\s+/gu, '')
+  // 去除空白——但**數字與數字之間的空白保留**：那是帶分數的分隔（「1 1/3」≠「11/3」）。
+  //   與 normSemanticValue／normAnswerValue 同一條規則（08-14 事故）。
+  s = s.replace(/\s+/gu, (m, off, str) => (/\d$/.test(str.slice(0, off)) && /^\d/.test(str.slice(off + m.length)) ? ' ' : ''))
   // 選項代號後的句點視為等價（學生筆跡常寫「A.」「B.」）：A.→A、A.B.C→ABC
   // 只去除「字母旁」的點（前面是字母、後面是字母或字串結尾）；
   // 數字旁的小數點不動（保護 3.14 / 0.5 / 257.04、No.5 這類答案）
@@ -2438,10 +2447,17 @@ export function computeConsistencyStatus(read1, read2, questionType = 'other') {
     if (scaffoldClozeLongerRaw(read1?.studentAnswerRaw, read2?.studentAnswerRaw)) return 'stable'
     // 2026-07-03: token 序列完全相等(只差標點/大小寫/空格，如「T-shirt, pants」vs「T-shirt pants」)→ 一致。
     //   token 只留 a-z0-9'（中文自動不生效）；逐字精確相等、無模糊比對。
+    //   ⛔ 2026-08-16：本捷徑會把 a-z0-9 以外的字元全剝掉，對英語片語沒問題，但**數學答案的意義
+    //   全在那些符號上**——實測「7/2」與「72」、「5.5」與「55」、「x<73/11」與「x<=73/11」都被
+    //   折成相等 → 真分歧不升級 → 預設採用讀1（座7／座25／座32 三格因此判 0，讀2 才是對的）。
+    //   → 任一讀值帶數學符號（/ < > = + × ÷）或「數字·分隔·數字」時，跳過本捷徑。
+    const hasMathSign = (s) => /[/<>=+×÷]/u.test(String(s ?? '')) || /\d\s*[.,]\s*\d/u.test(String(s ?? ''))
     const tokEq = (s) => String(s ?? '').split(/\s+/).map((w) => w.toLowerCase().replace(/[^a-z0-9']/g, '')).filter(Boolean)
-    const e1 = tokEq(read1?.studentAnswerRaw)
-    const e2 = tokEq(read2?.studentAnswerRaw)
-    if (e1.length >= 1 && e1.length === e2.length && e1.every((w, i) => w === e2[i])) return 'stable'
+    if (!hasMathSign(read1?.studentAnswerRaw) && !hasMathSign(read2?.studentAnswerRaw)) {
+      const e1 = tokEq(read1?.studentAnswerRaw)
+      const e2 = tokEq(read2?.studentAnswerRaw)
+      if (e1.length >= 1 && e1.length === e2.length && e1.every((w, i) => w === e2[i])) return 'stable'
+    }
   }
   // 2026-05-31: 兩讀值「數字（值）不同」一律 diff（送人工審查）。
   // 修真實 bug：「7倍」是「27倍」的子字串、「96280」與「6280」字元高度相似 → 被下方「包含關係 /
