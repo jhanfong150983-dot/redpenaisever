@@ -2359,6 +2359,19 @@ export function computeConsistencyStatus(read1, read2, questionType = 'other') {
   //   全寫在格內 → 兩讀的整串 studentAnswerRaw 因過程文字的讀取順序/雜訊永遠不等 → 題題送審。
   //   兩讀的 partValues（每空最終答案）逐空相等＝讀取穩定 → stable；任一空不等 → diff 照樣
   //   送審（不放過真分歧）。任一讀缺 partValues 或空數不合 → 保守 fall-through 走既有邏輯。
+  // ⭐ 2026-08-16 user 拍板：判準是「值一不一樣」，不是「字串像不像」。
+  //   兩讀若能解析成精確數值/代數 → 值相同就是一致（不管符號寫法）、值不同就是分歧（一定要送鏈）。
+  //   這比任何文字啟發式都準，且不會有「因為符號差異白跑鏈」或「真分歧被折平」兩種錯。
+  //   解析不出來（文字、詞語、含單位…）才往下走既有的文字比對。
+  {
+    const v = relationGateVerdict(
+      ensureString(read1?.studentAnswerRaw ?? read1?.studentAnswer, ''),
+      ensureString(read2?.studentAnswerRaw ?? read2?.studentAnswer, '')
+    )
+    if (v === 'equal' || v === 'equal_approx') return 'stable'
+    if (v === 'differ') return 'diff'
+  }
+
   if (questionType === 'fill_blank') {
     const pv1 = Array.isArray(read1?.partValues) ? read1.partValues : null
     const pv2 = Array.isArray(read2?.partValues) ? read2.partValues : null
