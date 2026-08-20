@@ -126,7 +126,9 @@ ${anchorText}
 「${raw}」
 
 【輸出】只輸出 JSON:
-{"rubricScores":[{"dimension":"${(q.rubricsDimensions?.[0]?.name) ?? ''}","score":0,"maxScore":${(q.rubricsDimensions?.[0]?.maxScore) ?? 1},"reason":"..."}]}`
+{"rubricScores":[${(q.rubricsDimensions || []).map((d) => `{"dimension":"${d.name}","score":0,"maxScore":${d.maxScore},"reason":"..."}`).join(',')}]}
+
+🚨 rubricScores **必須包含上列全部 ${(q.rubricsDimensions || []).length} 個維度**、順序一致，一個都不能少。`
 }
 
 // 錯字覆核 prompt(逐字鏡像 staged-grading B-CharErr v3)
@@ -165,9 +167,17 @@ function sumDims(q, rubricScores) {
 // 語意投票:兩票+不合加賽;回 {score, rubricScores, votes, verdict, lowConf} 或 null(全失敗 → fail-open 交 accessor)
 async function voteSemantic({ askJson, q, raw, anchors }) {
   const votes = []
+  // 2026-08-16 維度數驗證：短少的維度會被 sumDims 當 0 加總（rubricScores[i] undefined → NaN → 0），
+  //   等於該維永遠不給分。實錘 114-2 第2次定期評量國語 1-2-*（詞義理解+表達精確 各 1 分）：
+  //     維度數正確 495 格 → 2/2 有 428 格（86%）
+  //     AI 只回 1 維 58 格 → 2/2 **0 格**（全被壓在 0/2 或 1/2）
+  //   根因是本檔 buildSemanticJudgePrompt 的輸出範本原本寫死只列 rubricsDimensions[0]（已一併修）。
+  //   這裡再加一道 code 驗證：維度數不符＝無效票，交由投票機制重抽，不讓它污染分數。
+  const needDims = (q.rubricsDimensions || []).length
   const cast = async () => {
     const pj = await askJson(buildSemanticJudgePrompt(q, raw, anchors))
     if (!pj || !Array.isArray(pj.rubricScores)) return null
+    if (needDims > 0 && pj.rubricScores.length !== needDims) return null
     return { rubricScores: pj.rubricScores, total: sumDims(q, pj.rubricScores) }
   }
   const v1 = await cast(); if (v1) votes.push(v1)

@@ -15,7 +15,9 @@
 //   **必須**調高對應的版本號，否則既有卷會沿用舊判定、新修法對它們無效。
 export const FREEZE_LOGIC_VERSION = {
   // 國語短答值→分數表（semantic_score_tables）
-  semantic: 'sem-2026-08-16',
+  // 2026-08-16b 跳號原因：修好「輸出範本只列第一個維度」→ 2 維度題的第二維不再被強制歸零。
+  //   舊版凍結列是用壞掉的邏輯判的（58 格永遠拿不到滿分），必須失效重判。
+  semantic: 'sem-2026-08-16b',
   // 作圖題判官（vj_verdict_cache）；同時是 vj-verdict-cache.js 的 VJ_PROMPT_VERSION
   vj: 'vj-2026-08-16-3votes-weighted',
 }

@@ -15284,6 +15284,70 @@ export async function runStagedGradingPhaseB({
     }
   }
 
+  // ── 🆕 2026-08-16 rubric 向量缺席補打（user 回報社會非選聚合缺格）────────────────
+  // 病灶：帶 rubricsDimensions 的題，總分本該由 code 依 rubricScores 逐維 clamp 加總
+  //   （2026-07-14 上的穩定化機制：維度判定是小裁量、加總是確定性）。但 model 偶爾**不回**
+  //   rubricScores，normalizeAccessorResult 就 fail-open 退回 holistic 總分——
+  //   ⚠ 沒有偵測、沒有補救、沒有標記，看起來一切正常，實際上那格已經脫離確定性加總。
+  // 實錘 114-2 社會期中考（2026-08-13 批）：29 份裡 26 份完全正常、**3 份 8 題缺 6**，
+  //   而且缺的都是後面的題（前兩題零缺）——accessor 是整份卷一次呼叫，形狀像後半段偷懶。
+  // 沙盒（3 卷 × 5 輪、重打同一個 prompt）：15/15 全部補回 → 不是內容固定觸發，是逐次呼叫變異，
+  //   所以「只把缺的題重問一次」就治得了。（⚠ 沙盒是純文字 prompt、未帶 crop 圖，
+  //   未完全鏡像 production；但補打是更小的 call，成功率只會更高不會更低。）
+  // 設計：只補打缺的題（成本 ~3% 格）、只換這些題的結果（帶向量的判定嚴格優於 holistic）、
+  //   補不回就標低信心送複核——fail-open 可以，但不可以再靜默。
+  {
+    const dimNeed = new Map()
+    for (const q of accessorAnswerKey?.questions || []) {
+      const dims = Array.isArray(q?.rubricsDimensions) ? q.rubricsDimensions : null
+      if (dims && dims.length >= 2) dimNeed.set(ensureString(q?.id).trim(), dims.length)
+    }
+    const lacksVector = (sc) => {
+      const n = dimNeed.get(ensureString(sc?.questionId).trim())
+      if (!n) return false
+      // ⛔ 不碰別條管線判的格：查表制(_semanticTable)有自己的投票+凍結、級分制(_levelBypass)有判官，
+      //    用 accessor 補打會把它們從原本的管線拉走。它們的維度問題在各自的檔案裡修。
+      if (sc?._semanticTable === true || sc?._levelBypass === true) return false
+      return !Array.isArray(sc?.rubricScores) || sc.rubricScores.length !== n
+    }
+    const missIds = (accessorResult.scores || []).filter(lacksVector).map((s) => ensureString(s.questionId).trim())
+    if (missIds.length > 0) {
+      logStaged(pipelineRunId, 'basic', 'rubric vector missing → targeted refill', { missIds })
+      const idSet = new Set(missIds)
+      const akM = { ...accessorAnswerKey, questions: (accessorAnswerKey?.questions || []).filter((q) => idSet.has(ensureString(q?.id).trim())) }
+      const rarM = { answers: accessorReadAnswerResult.answers.filter((a) => idSet.has(ensureString(a?.questionId).trim())) }
+      logStageStart(pipelineRunId, 'Accessor-rubric-refill')
+      const refillResp = await executeStage({
+        apiKey, model: phaseBModel, payload: { ...payload, ...ACCESSOR_GENERATION_CONFIG },
+        timeoutMs: getRemainingBudget(), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_ACCESSOR,
+        stageContents: [{ role: 'user', parts: buildAccessorParts(buildAccessorPrompt(akM, rarM, internalContext?.domainHint, gradeBand), missIds, calcCropMap) }]
+      })
+      logStageEnd(pipelineRunId, 'Accessor-rubric-refill', refillResp)
+      stageResponses.push(refillResp)
+      let refilled = new Map()
+      if (refillResp.ok) {
+        const rp = parseCandidateJson(refillResp.data)
+        if (rp && typeof rp === 'object') {
+          const rr = normalizeAccessorResult(rp, akM, rarM.answers, internalContext?.domainHint)
+          for (const sc of rr.scores || []) if (!lacksVector(sc)) refilled.set(ensureString(sc.questionId).trim(), sc)
+        }
+      }
+      accessorResult = {
+        ...accessorResult,
+        scores: (accessorResult.scores || []).map((sc) => {
+          const qid = ensureString(sc?.questionId).trim()
+          if (!idSet.has(qid)) return sc
+          const got = refilled.get(qid)
+          if (got) return got
+          // 補不回：保留 holistic 分數，但標低信心（<70 進複核面板）——不可靜默
+          const cur = Number.isFinite(Number(sc?.scoreConfidence)) ? Number(sc.scoreConfidence) : 100
+          return { ...sc, scoreConfidence: Math.min(cur, 60) }
+        })
+      }
+      logStaged(pipelineRunId, 'basic', 'rubric refill result', { asked: missIds.length, recovered: refilled.size })
+    }
+  }
+
   // ── 🆕 2026-07-21 國語 short_answer 錯字覆核（加法式、只會扣分；user 拍板）────────────
   // ⭐ 2026-08-09 改成「逐字扣分」而非「翻 0」（user 拍板扣分表）─────────────────────
   //   問題：舊版抓到錯字就 sc.score=0，而「用意思相近的詞」完全忽略 → 同一題全班尺度矛盾。
