@@ -10768,6 +10768,22 @@ async function handleCampus1ClassroomSync(req, res) {
   // ⚠️ 不可硬用 id=dsns upsert：對「已存在但 id≠dsns」的學校會建不出 id=dsns 的列 → classroom FK 失敗。
   let schoolId = dsns
   const folderName = schoolDisplayName // 班級資料夾顯示名（真實校名；無則退回 dsns）
+  // 2026-08-16 學年學期進資料夾名（user 拍板）─────────────────────────────────
+  // 病灶：班級卡片的識別鍵是 courseID，而 courseID **每學期換號**（見下方 10799 附近）。
+  //   校務系統一換學年/學期 → 同步會建出一整套全新班級卡片，而同步是純 upsert、
+  //   **沒有任何刪除／封存／停用邏輯**，舊卡片原封不動留著 → 老師的班級列表變成兩套並存、
+  //   名稱還可能一模一樣，分不出哪套是本學期的。
+  // 為什麼不能刪舊的：1Campus getCourse API **只回當前學年學期、不支援查歷史**（官方確認，
+  //   見 server/_1campus.js:337）。舊課程我們自己不留就再也拿不回來，而且舊班底下掛著
+  //   作業與批改結果。所以正解是「留著但分開」，不是清掉。
+  // 作法：資料夾名帶上學年學期 →「培英國中 114-2」。換學期自動長出新資料夾、舊班留在舊資料夾，
+  //   沿用班級管理頁既有的資料夾分組，前端零改動（syncedFolderSet 是依 school_id 動態推導、
+  //   不寫死資料夾名，所以拖曳保護不受影響）。
+  // fail-open：時間章缺任一 → 退回純校名，維持原行為。
+  const folderFor = (cls) =>
+    cls?.schoolYear != null && cls?.semester != null
+      ? `${folderName} ${cls.schoolYear}-${cls.semester}`
+      : folderName
   {
     const { data: existingSchools } = await supabaseAdmin
       .from('schools')
@@ -10873,7 +10889,7 @@ async function handleCampus1ClassroomSync(req, res) {
               id: classroomId,
               owner_id: user.id,
               name: className,
-              folder: folderName,
+              folder: folderFor(cls),
               school_id: schoolId,
               ...(gradeValue != null ? { grade: gradeValue } : {}),
               // 時間章:值存在才寫,避免某次回應缺欄位時把既有章洗成 null
