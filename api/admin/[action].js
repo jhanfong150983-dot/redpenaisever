@@ -3174,6 +3174,65 @@ async function aggregateAssignmentTags(supabaseAdmin, stateRow) {
 // 2026-05-21: 後台 Token 用量分析
 // GET /api/admin/analytics?action=token-usage&from=YYYY-MM-DD&to=YYYY-MM-DD&userId=xxx
 // 老師本位視角：學生用 AI 算在 billing_user_id（老師 owner_id）名下
+
+// ═══ 菜單制計價哨兵（2026-08-27）═════════════════════════════════════════════
+// GET ?action=exam-cost-sentinel[&days=30]
+// 逐卷比對「實際 AI token 成本」vs「菜單實收點」——ratio>0.6 = 該卷型菜單定價失守，
+// 需要調價。這是菜單制「事後護欄」：估不準的題型會在第一個月現形，不會持續失血。
+async function handleExamCostSentinel(req, res, supabaseAdmin) {
+  const days = Math.min(120, Math.max(7, Number(req.query.days) || 30))
+  const since = new Date(Date.now() - days * 86400e3).toISOString()
+  function rates2(m0) {
+    const m = String(m0 || '').toLowerCase()
+    if (m.includes('2.5-flash-lite')) return { i: 0.10, o: 0.40 }
+    if (m.includes('2.5-flash')) return { i: 0.075, o: 0.30 }
+    if (m.includes('3.6-flash')) return { i: 1.50, o: 7.50 }
+    if (m.includes('pro')) return { i: 1.25, o: 5.00 }
+    return { i: 1.50, o: 9.00 }
+  }
+  const byA = new Map()
+  for (let f = 0; ; f += 1000) {
+    const { data, error } = await supabaseAdmin
+      .from('ink_session_usage')
+      .select('assignment_id,model_name,input_tokens,output_tokens,usage_metadata,is_admin_test')
+      .gte('created_at', since).like('route_key', 'grading.%').range(f, f + 999)
+    if (error) return res.status(500).json({ error: error.message })
+    for (const r of data ?? []) {
+      if (r.is_admin_test || !r.assignment_id) continue
+      const x = rates2(r.model_name)
+      const twd = ((Number(r.input_tokens) || 0) * x.i +
+        ((Number(r.output_tokens) || 0) + (Number(r.usage_metadata?.thoughtsTokenCount) || 0)) * x.o) / 1e6 * 33
+      byA.set(r.assignment_id, (byA.get(r.assignment_id) ?? 0) + twd)
+    }
+    if ((data?.length ?? 0) < 1000) break
+  }
+  const aids = [...byA.keys()]
+  if (!aids.length) return res.status(200).json({ days, rows: [] })
+  const [{ data: snaps }, { data: asgs }, { data: subs }] = await Promise.all([
+    supabaseAdmin.from('exam_price_snapshots').select('assignment_id,points_per_sheet,pricing_version').in('assignment_id', aids),
+    supabaseAdmin.from('assignments').select('id,title').in('id', aids),
+    supabaseAdmin.from('submissions').select('assignment_id').in('assignment_id', aids).not('charged_graded_at', 'is', null)
+  ])
+  const snapBy = new Map((snaps ?? []).map((r) => [r.assignment_id, r]))
+  const titleBy = new Map((asgs ?? []).map((r) => [r.id, r.title]))
+  const chargedBy = new Map()
+  for (const r of subs ?? []) chargedBy.set(r.assignment_id, (chargedBy.get(r.assignment_id) ?? 0) + 1)
+  const rows = aids.map((aid) => {
+    const cost = byA.get(aid)
+    const snap = snapBy.get(aid)
+    const sheets = chargedBy.get(aid) ?? 0
+    const revenue = snap && sheets ? snap.points_per_sheet * sheets : null
+    return {
+      assignmentId: aid, title: titleBy.get(aid) ?? aid,
+      costTwd: +cost.toFixed(1), chargedSheets: sheets,
+      pointsPerSheet: snap?.points_per_sheet ?? null, revenuePts: revenue,
+      ratio: revenue ? +(cost / revenue).toFixed(2) : null,
+      alert: revenue ? cost / revenue > 0.6 : null
+    }
+  }).sort((a, b) => (b.ratio ?? -1) - (a.ratio ?? -1))
+  return res.status(200).json({ days, alertThreshold: 0.6, rows })
+}
+
 async function handleTokenUsage(req, res, supabaseAdmin) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' })
@@ -3768,6 +3827,10 @@ export default async function handler(req, res) {
 
   if (action === 'token-usage') {
     return await handleTokenUsage(req, res, supabaseAdmin)
+  }
+
+  if (action === 'exam-cost-sentinel') {
+    return await handleExamCostSentinel(req, res, supabaseAdmin)
   }
 
   if (action === 'announcements') {

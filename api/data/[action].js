@@ -34,6 +34,7 @@ import {
   chargeFlatPoints,
   RECHECK_POINTS
 } from '../../server/action-billing.js'
+import { MENU_BILLING_ENABLED, resolvePointsPerSheet } from '../../server/exam-pricing.js'
 import {
   isValidDsns,
   getJasmineAccessToken,
@@ -3330,12 +3331,22 @@ async function handleSaveGrading(req, res) {
           //   同一次儲存混到兩種 scope 時分組各扣各的。
           const targets = await resolveBillingTargetsByAssignment(supabaseDb, user.id, aids)
           mark('targets')
+          // 2026-08-27 菜單制扣款（MENU_BILLING='1' 啟用）：每份點數=菜單公式（題型組成），
+          //   首次扣款凍結快照→同卷永遠同價。失敗 fail-open 回題數級距（寧可少收不擋批改）。
+          let menuPts = null
+          if (MENU_BILLING_ENABLED) {
+            try { menuPts = await resolvePointsPerSheet(supabaseDb, aids) } catch (e) {
+              console.warn('[save-grading] menu pricing failed, fallback to tier:', e?.message)
+            }
+          }
+          const pointsFor = (aid) =>
+            (menuPts?.get(aid)) ?? gradingActionPoints(qById.get(aid))
           const groups = new Map()
           for (const r of toCharge) {
             const t = targets.get(r.assignment_id) ?? { scope: 'personal', id: user.id }
             const k = `${t.scope}:${t.id}`
             const g = groups.get(k) ?? { target: t, points: 0, rows: [] }
-            g.points += gradingActionPoints(qById.get(r.assignment_id))
+            g.points += pointsFor(r.assignment_id)
             g.rows.push(r)
             groups.set(k, g)
           }

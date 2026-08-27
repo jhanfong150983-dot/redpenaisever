@@ -141,7 +141,9 @@ export default async function handler(req, res) {
         const { FLAT_BILLING_ENABLED, PARENT_REPORT_POINTS_PER_STUDENT, resolveBillingTarget, chargeFlatPoints } =
           await import('../../server/action-billing.js')
         if (FLAT_BILLING_ENABLED && rows.length > 0) {
-          const points = rows.length * PARENT_REPORT_POINTS_PER_STUDENT
+          // 2026-08-27 菜單制:家長報告 0 點(user 拍板——現無 AI、菜單承諾「全含」)
+          const { MENU_BILLING_ENABLED } = await import('../../server/exam-pricing.js')
+          const points = MENU_BILLING_ENABLED ? 0 : rows.length * PARENT_REPORT_POINTS_PER_STUDENT
           const target = await resolveBillingTarget(supabaseAdmin, user.id, assignmentId)
           const charge = await chargeFlatPoints(supabaseAdmin, {
             target, points, actorProfileId: user.id, reason: 'parent_report_action',
