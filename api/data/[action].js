@@ -2650,7 +2650,7 @@ async function handleImportTemplate(req, res) {
     //   不複製 folder（importer 沒這資料夾）。
     const { data: source, error: findErr } = await supabaseDb
       .from('answer_key_templates')
-      .select('id, name, domain, doc_type, folder, answer_key, question_count, total_score, page_orientations, answer_sheet_mode, answer_sheet_image_paths, question_booklet_image_paths')
+      .select('id, name, domain, grade, doc_type, folder, answer_key, question_count, total_score, page_orientations, answer_sheet_mode, answer_sheet_image_paths, question_booklet_image_paths')
       .eq('share_code', shareCode)
       .maybeSingle()
 
@@ -2717,6 +2717,7 @@ async function handleImportTemplate(req, res) {
       owner_id: user.id,
       name: source.name,
       domain: source.domain,
+      grade: source.grade ?? null,
       doc_type: source.doc_type,
       answer_key: copiedAnswerKey,
       question_count: source.question_count,
@@ -5049,6 +5050,7 @@ async function handleSync(req, res) {
           id: row.id,
           name: row.name,
           domain: row.domain ?? undefined,
+          grade: row.grade ?? undefined,
           docType: row.doc_type ?? undefined,
           folder: row.folder ?? undefined,
           schoolId: row.school_id ?? undefined,
@@ -5496,6 +5498,8 @@ async function handleSync(req, res) {
           owner_id: user.id,
           name: t.name ?? '',
           domain: t.domain ?? undefined,
+          // 2026-08-29 年級（課綱/KP 年段依據）；只在 client 有帶時寫，避免舊 client 洗掉
+          grade: typeof t.grade === 'number' ? t.grade : undefined,
           doc_type: t.docType ?? t.doc_type ?? undefined,
           folder: t.folder ?? undefined,
           school_id: t.schoolId ?? t.school_id ?? undefined,
