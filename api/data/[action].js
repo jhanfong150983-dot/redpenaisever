@@ -4800,6 +4800,9 @@ async function handleSync(req, res) {
           folder: row.folder ?? undefined,
           school_id: row.school_id ?? undefined,
           grade: row.grade ?? undefined,
+          // 2026-08-29 班級歸檔：永遠帶布林值。不可只在 true 時帶——「恢復」(false) 會被 compact 掉，
+          //   別台裝置就永遠停在已歸檔。client 以「缺欄=舊 server」判斷是否保留本地值。
+          archived: row.archived === true,
           updatedAt: toMillis(row.updated_at) ?? undefined
         })
       )
@@ -5358,6 +5361,9 @@ async function handleSync(req, res) {
             name: c.name,
             folder: c.folder,
             grade: c.grade != null ? parseInt(String(c.grade), 10) : undefined,
+            // 2026-08-29 班級歸檔：恢復=false 是實值（不可用 null，null 清除傳不過 local-first sync）。
+            //   舊 client payload 沒這欄→不帶，避免把別台裝置剛歸檔的班洗回 active。
+            archived: typeof c.archived === 'boolean' ? c.archived : undefined,
             owner_id: user.id,
             updated_at: toIsoTimestamp(c.updatedAt ?? c.updated_at) ?? nowIso
           })
@@ -6657,7 +6663,7 @@ async function handleStudentOverview(req, res) {
       ownerIds.length && classroomIds.length
         ? supabaseDb
             .from('classrooms')
-            .select('id, owner_id, name')
+            .select('id, owner_id, name, archived')
             .in('owner_id', ownerIds)
             .in('id', classroomIds)
         : Promise.resolve({ data: [], error: null }),
@@ -6671,11 +6677,18 @@ async function handleStudentOverview(req, res) {
     const classroomNameMap = new Map(
       (classroomsResult.data || []).map((row) => [`${row.owner_id}::${row.id}`, row.name])
     )
+    // 2026-08-29 班級歸檔：已封存班級從學生端整個消失（含下拉與總覽）
+    const archivedClassroomKeys = new Set(
+      (classroomsResult.data || [])
+        .filter((row) => row.archived === true)
+        .map((row) => `${row.owner_id}::${row.id}`)
+    )
     const teacherNameMap = new Map(
       (teacherProfilesResult.data || []).map((row) => [row.id, row.name || ''])
     )
 
     const classroomOptions = studentContexts
+      .filter((context) => !archivedClassroomKeys.has(`${context.ownerId}::${context.classroomId}`))
       .map((context) => ({
         key: buildStudentClassroomKey(context),
         ownerId: context.ownerId,
@@ -6695,6 +6708,10 @@ async function handleStudentOverview(req, res) {
         )
       )
 
+    if (!classroomOptions.length) {
+      res.status(403).json({ error: '所屬班級已由老師封存為歷史資料', code: 'CLASSROOM_ARCHIVED' })
+      return
+    }
     const primaryClassroom = classroomOptions[0]
     const primaryStudentContext = studentContexts.find(
       (c) => c.ownerId === primaryClassroom.ownerId && c.classroomId === primaryClassroom.classroomId
@@ -11276,6 +11293,15 @@ async function resolveStudentForAssignment(supabaseDb, user, assignmentId) {
     (c) => c.ownerId === assignment.owner_id && c.classroomId === assignment.classroom_id
   )
   if (!studentContext) return { ok: false, status: 403, error: 'Forbidden assignment access' }
+  // 2026-08-29 班級歸檔＝唯讀：學生端所有逐卷操作(自助批改/上傳/finalize)在此統一擋
+  const { data: classroomRow } = await supabaseDb
+    .from('classrooms')
+    .select('archived')
+    .eq('id', assignment.classroom_id)
+    .maybeSingle()
+  if (classroomRow?.archived === true) {
+    return { ok: false, status: 403, error: '此班級已由老師封存為歷史資料', code: 'CLASSROOM_ARCHIVED' }
+  }
   return { ok: true, studentContext, assignment, ownerId: assignment.owner_id }
 }
 
