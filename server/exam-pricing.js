@@ -15,23 +15,36 @@
 // 鏡像：client src/lib/exam-pricing.ts 同一套常數——動這裡必同步那邊，
 //   並跑 local-only/crosscheck-exam-pricing.mjs 驗證兩邊逐字一致（normAnswerValue 漂移的教訓）。
 
-export const PRICING_VERSION = 'menu-2026-08-27'
+export const PRICING_VERSION = 'menu-2026-08-30'
 
 // 開關：'1' 啟用菜單制扣款；預設關（沿用題數級距）。client 鏡像 VITE_MENU_BILLING，
 // 兩端同版部署後才能開（FLAT_BILLING 的紀律：顯示與實扣不可分家）。
 export const MENU_BILLING_ENABLED = process.env.MENU_BILLING === '1'
 
 // ── 題型單價（點/題；點面值 NT$1）─────────────────────────────────────────────
+// ⚠ 2026-08-28 全面修正：先前的數學相關單價是「同一份卷被連續重批兩次」的疊加值。
+//   培英卷 8 月被反覆重批 11.6 次（VJ 開發期），舊的「30 分鐘無呼叫＝新一輪」斷輪規則
+//   把間隔 21 分鐘的兩次批改黏成一輪 → 數學成本虛報 77%（8.36 實際 4.73）。
+//   改用「逐份卷分簇（>5 分鐘＝新一次批改）」重算，其他三科只批一次故不受影響。
 export const UNIT_POINTS = {
-  choice: 0.15,    // 選擇/是非/勾選/配合/排序（code 直判為主）
-  fillTxt: 0.2,    // 填空：文字、英文
-  fillMath: 0.35,  // 填空：數學式（含進鏈重讀攤提）
-  short: 0.3,      // 簡答/問答（rubric 逐項判）
-  vj: 1.6,         // 作圖題（VJ 三票）
-  level: 4.5,      // 應用題（會考級分制，6 call/題）
-  zhuyin: 1.1,     // 國字注音（三判官）——⚠ 暫行價，8 月無實測樣本
+  choice: 0.15,    // 選擇/是非/勾選/配合/排序（實測成本 0.05）
+  fillTxt: 0.2,    // 填空：文字、英文（實測 0.08）
+  fillMath: 0.2,   // 填空：數學式（實測 0.077；舊值 0.35 來自雙重計算）
+  short: 0.3,      // 簡答/問答（實測 0.12）
+  vj: 1.4,         // 作圖題 VJ（實測 0.616；舊值 1.6）
+  level: 2.1,      // 應用題級分制（實測 0.907／題＝要素數 6 × 每要素 1 次；舊值 4.5）
+  handwrite: 0.9,  // 國字/注音書寫格（字形判官＋注音判官各 3 票）——2026-08-30 實測 0.41/格
+  zhuyin: 0.9,     // （保留舊鍵、與 handwrite 同價，避免既有快照對不上）
   unknown: 0.3     // 未知題型 fallback（=簡答價）＋告警
 }
+
+// 2026-08-30 新增「國字/注音書寫格」：國語卷的手寫國字/注音格，每格都要跑
+//   字形判官（校對筆畫、抓造字錯字）＋注音判官，各 3 票 → 實測 0.41/格，
+//   是 fill_blank(0.08)/short_answer(0.12) 假設值的 3~5 倍。
+//   實證：114-2 國語卷每份固定 10 個判官格 × 3 票 = 30 次呼叫（逐份對照 33~37 次，判官佔 90%）。
+//   判別綁死「國語卷 × 填空/短答 × 標答為 1~4 中文字或含注音」——全庫回放 111 卷只動 4 卷國語，零誤傷。
+const HANDWRITE_CATS = new Set(['fill_blank', 'short_answer'])
+const isCjkShort = (ans) => /^[一-鿿]{1,4}$/u.test(String(ans ?? '').trim())
 
 // ── 題型 → 菜單類映射（2026-08-27 全庫 27 類審計定案）────────────────────────
 const CHOICE_SET = new Set([
@@ -50,14 +63,16 @@ const mathishAnswer = (ans) =>
 // 注音判別：標答含注音符號（ㄅ..ㄩ˙ˊˇˋ）
 const zhuyinAnswer = (ans) => /[ㄅ-ㄯˊˇˋ˙]/.test(ans)
 
-/** 單題歸類（billing 權威；client 鏡像同名函式） */
-export function menuClassOf(q) {
+/** 單題歸類（billing 權威；client 鏡像同名函式）。domain 用於國語手寫格判別。 */
+export function menuClassOf(q, domain = '') {
   const c = String(q?.questionCategory ?? '').trim()
   const ans = String(q?.answer ?? '')
   if (q?.levelRubric) return 'level'                      // 級分制優先於 category
   if (VJ_SET.has(c)) return 'vj'
   if (CHOICE_SET.has(c)) return 'choice'
-  if (zhuyinAnswer(ans)) return 'zhuyin'                  // 注音藏在 fill_blank/short 裡，靠標答偵測
+  // 國語手寫格：字形／注音判官各 3 票（成本 0.41/格，遠高於一般填空）
+  if (String(domain).includes('國') && HANDWRITE_CATS.has(c) && (isCjkShort(ans) || zhuyinAnswer(ans))) return 'handwrite'
+  if (zhuyinAnswer(ans)) return 'zhuyin'                  // 非國語卷的注音（保守仍收判官價）
   if (SHORT_SET.has(c)) return 'short'
   if (c === 'word_problem' || c === 'calculation' || c === 'fill_blank')
     return mathishAnswer(ans) ? 'fillMath' : (c === 'fill_blank' ? 'fillTxt' : 'short')
@@ -92,14 +107,14 @@ export function detectLayout(answerKey) {
  * 確定性、建卷即可算、批改前後不變。
  * @returns {{ points:number, version:string, breakdown:Object, warnings:string[] }}
  */
-export function computePointsPerSheet(answerKey, classSize) {
+export function computePointsPerSheet(answerKey, classSize, domain = '') {
   const warnings = []
   const qs = Array.isArray(answerKey?.questions) ? answerKey.questions : []
   const { mode, pages } = detectLayout(answerKey)
   const comp = {}
   let qSum = 0
   for (const q of qs) {
-    const cls = menuClassOf(q)
+    const cls = menuClassOf(q, domain)
     if (cls === 'unknown') warnings.push(`未知題型 "${q?.questionCategory}"（${q?.id}）→ 以簡答價計`)
     comp[cls] = (comp[cls] ?? 0) + 1
     qSum += UNIT_POINTS[cls]
@@ -132,7 +147,7 @@ export async function resolvePointsPerSheet(supabaseAdmin, assignmentIds) {
   if (missing.length === 0) return out
 
   const { data: asgs } = await supabaseAdmin
-    .from('assignments').select('id, classroom_id, answer_key').in('id', missing)
+    .from('assignments').select('id, classroom_id, answer_key, domain, title').in('id', missing)
   const classIds = [...new Set((asgs ?? []).map((a) => a.classroom_id).filter(Boolean))]
   const sizeByClass = new Map()
   if (classIds.length) {
@@ -144,7 +159,7 @@ export async function resolvePointsPerSheet(supabaseAdmin, assignmentIds) {
   }
   for (const a of asgs ?? []) {
     const size = sizeByClass.get(a.classroom_id) || 30
-    const r = computePointsPerSheet(a.answer_key, size)
+    const r = computePointsPerSheet(a.answer_key, size, String(a.domain ?? a.title ?? ''))
     out.set(a.id, r.points)
     try {
       await supabaseAdmin.from('exam_price_snapshots').upsert(
