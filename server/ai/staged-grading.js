@@ -14463,7 +14463,23 @@ export async function runStagedGradingPhaseB({
                 if (!resp?.ok) return null
                 return parseCandidateJson(resp.data)
               }
-              const pv = await Promise.all([callJudgeRef(pnA), callJudgeRef(pnB), callJudgeRef(pnC)])
+              // ── 2026-08-30 惰性第三票（ZY_VOTES_LAZY='0' 可回退）─────────────────
+              //   注音是**多數決**（different≥2 才攔），所以 A、B 一致時多數已鎖定，
+              //   C 的票在數學上不可能改變判定——只是留一個「有判官反對」的痕跡（信心 75）。
+              //   user 人工判讀 45 格「A=B、C 反對」的實據：**44 格 C 是為反而反**（雜訊）、
+              //   只有 1 格 C 是對的（而那格現行也判對＝已放水，且 75>70 老師本來就看不到）。
+              //   → 拿掉這 44 個假分歧，信心訊號反而更乾淨；A≠B 時 C 仍是決勝票、照跑。
+              //   實測：注音判官呼叫 −31%，判定結果 0 格改變（560 格全庫模擬）。
+              //   ⚠ 字形判官**不套用**：它是「一票否決」且 glyphBorderline 依賴完整票數，
+              //     提前停會改變「共識殺 95」與「邊界 70」的分界（見 line ~14549）。
+              //   ⚠ 只在「兩票都 same / 都 blank」時提前停。兩票都 different 仍跑滿——
+              //     因為 glyphBorderline = nOf('same')>=1 需要第三票才知道是「共識殺(80)」
+              //     還是「邊界殺(55，會進複核)」；判錯又有分歧正是最該讓老師看的類型。
+              const zyLazy = process.env.ZY_VOTES_LAZY !== '0'
+              const [pvA, pvB] = await Promise.all([callJudgeRef(pnA), callJudgeRef(pnB)])
+              const abAgree = ['same', 'blank'].includes(pvA?.verdict) && pvA?.verdict === pvB?.verdict
+              const pvC = (zyLazy && abAgree) ? undefined : await callJudgeRef(pnC)
+              const pv = pvC === undefined ? [pvA, pvB] : [pvA, pvB, pvC]
               glyphVotes = pv.map((v, i) => `${'ABC'[i]}:${ensureString(v?.verdict, '?')[0] ?? '?'}:${ensureString(v?.reason, '').slice(0, 30)}`)
               const validP = pv.filter((v) => ['same', 'different', 'blank'].includes(v?.verdict))
               const nOf = (k) => validP.filter((v) => v.verdict === k).length
