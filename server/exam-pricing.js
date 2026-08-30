@@ -70,8 +70,12 @@ export function menuClassOf(q, domain = '') {
   if (q?.levelRubric) return 'level'                      // 級分制優先於 category
   if (VJ_SET.has(c)) return 'vj'
   if (CHOICE_SET.has(c)) return 'choice'
-  // 國語手寫格：字形／注音判官各 3 票（成本 0.41/格，遠高於一般填空）
-  if (String(domain).includes('國') && HANDWRITE_CATS.has(c) && (isCjkShort(ans) || zhuyinAnswer(ans))) return 'handwrite'
+  // 國語手寫格：寫國字（字形判官比對筆畫）／寫注音（注音三判官）——成本 0.41/格。
+  // ⛔ 排除帶 rubricsDimensions 的題：那是註釋題、走查表制（純文字判分＋值→分數表快取），
+  //    不送圖也不跑判官。目前靠「標答 ≤4 字」剛好分開，但那是運氣不是設計——
+  //    註釋題參考答案若剛好是「深藍」這種 2 字詞就會誤收，故明確排除。
+  if (String(domain).includes('國') && HANDWRITE_CATS.has(c) && !q?.rubricsDimensions
+      && (isCjkShort(ans) || zhuyinAnswer(ans))) return 'handwrite'
   if (zhuyinAnswer(ans)) return 'zhuyin'                  // 非國語卷的注音（保守仍收判官價）
   if (SHORT_SET.has(c)) return 'short'
   if (c === 'word_problem' || c === 'calculation' || c === 'fill_blank')
