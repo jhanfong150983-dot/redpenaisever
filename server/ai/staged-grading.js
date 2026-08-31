@@ -684,7 +684,7 @@ function gradingModeKey(answerSheetMode, submissionSource) {
   return `${answerSheetMode === 'answer_only' ? 'ao' : 'wq'}_${submissionSource === 'teacher_scan' ? 'pdf' : 'photo'}`
 }
 
-function inflateBboxForType(bbox, questionType) {
+export function inflateBboxForType(bbox, questionType) {
   if (!bbox) return bbox
   const pad = TYPE_PAD[questionType] || DEFAULT_TYPE_PAD
   // padX 可用對稱 (padX) 或不對稱 (padLeft / padRight)
@@ -14552,7 +14552,23 @@ export async function runStagedGradingPhaseB({
             //   （user 拍板 2026-07-12：放水零容忍 > churn 誤殺；V11 全量票型重建實測：真錯誤全部
             //   住 DDD、混票區 2/106 格全是誤殺候選——一票殺的代價=偶發誤殺回歸、由標記＋申訴兜底，
             //   換到的是混票區理論上的抖動型真錯誤零漏放）。
-            const votes = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPrompt), callJudge(glyphPrompt)])
+            // ── 2026-08-31 惰性第三票（GLYPH_VOTES_LAZY='0' 可回退）─────────────────
+            //   三票是**同一個 glyphPrompt 跑三次、temp 0**——本來就不獨立，第三票只是複述。
+            //   全庫回放 280 格票型：SSS 193／DDD 48／BBB 37／DSS 1／SDD 1，
+            //   **`same,same,different` = 0 格**——第三票從未改變過任何判定。
+            //   前兩票一致時停在兩票，聚合結果逐條等價（下方三個分支都只看門檻，不看總票數）：
+            //     ・BB → blankVotes.length 2>=2 → blank（同 BBB）
+            //     ・DD → dVotes 2、valid 2 → different，glyphBorderline = 2<2 = false → 95 分共識殺（同 DDD）
+            //     ・SS → valid 2>=2 → same（同 SSS）
+            //   唯二的分歧格（DSS／SDD）第一二票就不合 → 照樣跑第三票當決勝，行為不變。
+            //   實測省 33.1% 字形判官呼叫、判定與信心 0 格改變。
+            //   ⚠ 注音走上面 ZY_PANEL3 分支、有自己的惰性規則（2026-08-30），與此無關。
+            const glyphLazy = process.env.GLYPH_VOTES_LAZY !== '0'
+            const okV = (v) => v === 'same' || v === 'different' || v === 'blank'
+            const [gv1, gv2] = await Promise.all([callJudge(glyphPrompt), callJudge(glyphPrompt)])
+            const gAgree = okV(gv1?.verdict) && gv1?.verdict === gv2?.verdict
+            const gv3 = (glyphLazy && gAgree) ? undefined : await callJudge(glyphPrompt)
+            const votes = gv3 === undefined ? [gv1, gv2] : [gv1, gv2, gv3]
             const valid = votes.filter((v) => v?.verdict === 'same' || v?.verdict === 'different')
             // 2026-07-12 觀測補洞（user 問「三抽都有理由嗎」）：三票各有完整 blocks+reason、
             //   之前只存被採用那票 → 全票持久化（S/D + 理由摘要），事後稽核看得到票型（如 SSD 邊界格）
