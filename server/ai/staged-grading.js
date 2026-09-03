@@ -33,6 +33,7 @@ import {
   gradeMapFillDeterministically
 } from './map-fill-grader.js'
 import { buildElementQuestionPrompt, parseElementAnswer, aggregateElementAnswers } from './level-rubric-grader.js'
+import { buildRubricJudgePrompt, parseRubricJudgeResult, isRubricJudgeTarget } from './rubric-judge.js'
 import {
   VISUAL_JUDGMENT_TYPES,
   buildVjRubricPrompt,
@@ -766,7 +767,12 @@ const SHEET_CELL_W = 460, SHEET_LABEL_H = 30, SHEET_GAP = 8
 //   **user 質疑「國語明明好好的」→ 查帳翻案**：
 //   read 模型有三層分流（不是統一 3.6）——
 //     國語卷：整卷 readModelOverride 強制 3.6（2026-06-02 手寫國字幻覺）
-//     其他科：choice=MODEL_FLASH(2.5、按像素計費)、check/ordering=3.6、text=英語/數學升 3.6
+//     其他科：choice/check/ordering=3.6、text=英語/數學升 3.6、其餘 text=2.5
+//   ⚠️ 2026-09-02 更正：本段原寫「其他科 choice=MODEL_FLASH(2.5、按像素計費)」，
+//      但 2026-08-09 已把 single_choice/true_false 的 cfg.model 改成 'PRO'（見 TYPE_READ_CONFIG）
+//      → **選擇題現在全領域都是 3.6**。下面兩行「英語 choice(2.5) 沒省到錢」是那次改動前的
+//      成本推論，結論（英語逐張、國語合成）仍成立但依據已變（兩者現在同為 3.6）。
+//      模型細目表以 TYPE_READ_CONFIG + 升級判斷式（:10384-10385）為準，不要引用本段註解。
 //   ⇒ 英語 choice(2.5)：合成圖**從來就沒省到錢**（R4 實測兩讀合計 NT$0.07/份）→ 逐張＝免費+零風險
 //   ⇒ 國語 choice(3.6)：合成圖**真省 ~NT$2/份**（40 格 80 parts×560tok），且實證乾淨
 //     （快照對照 1,550 格翻盤 6＝0.4%、零座26 式集中滑格；155px 格 vs 英語 87px）→ 留
@@ -8392,6 +8398,10 @@ function buildFinalGradingResult({
       // ⚠️ 這一列不可省：detail 是白名單，漏掉就被靜默剝掉——2026-07-12 字形 votes 全 null
       //    就是同一個坑；沒有它，批改看起來正常但要素資料不存在，要聚合只能整批重批。
       levelResult: score?.levelResult && typeof score.levelResult === 'object' ? score.levelResult : undefined,
+      // rubric 判官逐維度結果（前端理由顯示 ＋ 跨學生聚合的鍵：29 種文字答案 → 3 維向量）。
+      // ⚠️ 同上，detail 是白名單、漏掉就靜默消失——聚合正是導入這個判官的主要動機，不可省。
+      rubricDims: Array.isArray(score?.rubricDims) ? score.rubricDims : undefined,
+      rubricUncertain: score?.rubricUncertain ? String(score.rubricUncertain) : undefined,
       // 字形終審 audit（2026-07-12 補洞：white-list 剝掉了 9530eeb 加的欄位——B班首跑 votes 全 null 實測）
       glyphVotes: Array.isArray(score?.glyphVotes) ? score.glyphVotes : undefined,
       glyphAnalysis: ensureString(score?.glyphAnalysis, '').trim() || undefined,
@@ -8708,6 +8718,13 @@ function buildFinalGradingResult({
         journey = score?._vjFrozen === 'teacher' ? 'VJ老師裁決(已凍結)'
           : score?._vjVoteSplit ? 'VJ三票分歧(待複核)'
           : score?._vjFrozen ? 'VJ視覺判斷(沿用冷凍)' : 'VJ視覺判斷'
+      }
+      // 2026-09-03 rubric 判官：同級分制，判官算出的信心就是權威
+      //   （正常 90／自陳 uncertain 或有維度沒回報 65 → 低信心送複核）。
+      //   漏接這條 → 落到預設 88 → 低信心永遠不亮，複核面板收不到（級分制踩過同一個坑）。
+      else if (score?._rubricJudge) {
+        base = Number.isFinite(score?.scoreConfidence) ? score.scoreConfidence : 90
+        journey = score?.rubricUncertain ? 'rubric判官(沒把握待複核)' : 'rubric判官逐維度'
       }
       // 2026-08-14 級分制：判官自己算出的信心就是權威（全票97／分歧不影響等第75／
       //   分歧會改變等第45／票數不足65）。不接這一條的話 systemConfidence 會落到預設 88，
@@ -14245,6 +14262,97 @@ export async function runStagedGradingPhaseB({
   }
 
 
+  // ── 🆕 2026-09-03 rubric 判官（社會／自然開放式概念題，user 拍板上線）──────────────
+  //   取代「accessor 拿 read 的文字判分」這一段；read **照樣跑**（檢討單／家長報告要文字）。
+  //   為什麼：社會 4-5-5-1 沙盒（29 份）——2.5 把「斯文豪」讀成「其實憂／其紋豪」，
+  //   升 3.6 改成用歷史知識補出「李春生」（真人、但不在本卷清單，看起來完全合理）。
+  //   轉寫錯誤直接連累判分，而判官不需要抄對人名，只要判「是不是清單裡那一位」——
+  //   **沒有轉寫這一步，這類幻覺就沒有發生的地方。**
+  //   沙盒（8 題 × 8 生分層抽樣 = 64 格，用 production 的 crop）：夾住逐維度上限後
+  //   **56/64（87.5%）與現行判分一致**、判官較高 7 較低 1；圈選類維度表現最好（視覺判定）。
+  //   ⛔ 國語不套用：其 rubric criteria **100%** 寫「用字書寫正確」＝錯字本身是評分對象
+  //     （社會 0%／數學 0%／自然 0%）；國語走 read＋查表制（註釋題快取命中率 80%）。
+  //   ⚠ 只開 with_questions 模式：沙盒是在該模式的 set-of-mark 裁圖上驗的；
+  //     ao／photo 的 read 裁圖形態不同、未驗證 → 不路由、照舊交 accessor。
+  //   kill switch：RUBRIC_JUDGE='0'
+  const rubricJudgeBypassIds = new Set()
+  const rubricDomainOk = (() => {
+    const d = ensureString(payload?.domain ?? internalContext?.domainHint, '')
+    return d.includes('社會') || d.includes('自然')
+  })()
+  if (process.env.RUBRIC_JUDGE !== '0' && rubricDomainOk && answerSheetMode === 'with_questions'
+      && inlineImages.length > 0 && classifyResult) {
+    const domainHint = ensureString(payload?.domain ?? internalContext?.domainHint, '')
+    const rjTargets = akQuestions.filter((q) => {
+      const qId = ensureString(q?.id).trim()
+      // ⚠ 不可用 isBypassed()——它在 :15065 才宣告（暫時死區），這裡逐一列出當下已存在的集合
+      if (!qId) return false
+      if (manualBypassIds.has(qId) || vjBypassIds.has(qId) || levelBypassIds.has(qId)
+          || mapFillBypassIds.has(qId) || objectiveBypassIds.has(qId)
+          || clozeBypassIds.has(qId) || glyphComposeIds.has(qId)) return false
+      return isRubricJudgeTarget(q, domainHint)
+    })
+    if (rjTargets.length > 0) {
+      const rjImg = inlineImages[0]?.inlineData
+      const rjClassify = Array.isArray(classifyResult)
+        ? classifyResult
+        : (classifyResult?.alignedQuestions || classifyResult?.questions || [])
+      const rjBboxById = new Map(rjClassify.filter((r) => r?.answerBbox).map((r) => [ensureString(r.questionId || r.id).trim(), r.answerBbox]))
+      // 裁圖逐參數鏡像 read（staged-grading.js:10175-10184 wq_pdf set-of-mark）：
+      //   紅框標本題、padX 0.012、padY 0.048÷頁數。這 8 題都不在 MARK_TIGHT 內、用預設 padY。
+      const rjPages = new Set(akQuestions.map((q) => { const m = ensureString(q?.id).match(/^(\d+)-/); return m ? m[1] : '1' })).size || 1
+      const rjPadY = +(0.048 / Math.max(1, rjPages)).toFixed(4)
+      let rjDone = 0, rjLow = 0
+      // 併行 3（同字形終審；避免慢尾連鎖）
+      let rjIdx = 0
+      await Promise.all(Array.from({ length: Math.min(3, rjTargets.length) }, async () => {
+        while (rjIdx < rjTargets.length) {
+          if (getRemainingBudget() < 20_000) return   // 預算不足 → 剩餘格 fail-open 交 accessor
+          const q = rjTargets[rjIdx++]
+          const qId = ensureString(q.id).trim()
+          try {
+            const bbox = rjBboxById.get(qId) || q.answerBbox
+            if (!bbox || !rjImg?.data) continue
+            const crop = await cropWithMarkByBbox(rjImg.data, rjImg.mimeType, bbox, 0.012, rjPadY)
+            if (!crop) continue
+            const resp = await executeStage({
+              apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
+              timeoutMs: Math.min(getRemainingBudget(), 30_000), routeHint,
+              routeKey: AI_ROUTE_KEYS.GRADING_RUBRIC_JUDGE,
+              stageContents: [{ role: 'user', parts: [{ text: buildRubricJudgePrompt(q) }, { inlineData: crop }] }]
+            })
+            if (resp) stageResponses.push(resp)
+            if (!resp?.ok) continue
+            const res = parseRubricJudgeResult(parseCandidateJson(resp.data), q)
+            if (!res) continue
+            deterministicScores.push({
+              questionId: qId,
+              isCorrect: res.score >= res.maxScore && res.maxScore > 0,
+              score: res.score, maxScore: res.maxScore,
+              errorType: res.score >= res.maxScore ? 'none' : (res.score === 0 ? 'concept' : 'partial'),
+              scoringReason: res.reason,
+              scoreConfidence: res.confidence,
+              // 讀值交給 read（本判官不轉寫）；顯示值沿用 read 的結果、不覆寫
+              needExplain: res.score < res.maxScore,
+              _rubricJudge: true,
+              rubricDims: res.dims,
+              ...(res.uncertain ? { rubricUncertain: res.uncertain } : {}),
+            })
+            rubricJudgeBypassIds.add(qId)
+            rjDone++
+            if (res.confidence < 70) rjLow++
+          } catch (e) {
+            logStaged(pipelineRunId, 'basic', `[B-Rubric] ${qId} 失敗：${e?.message} → 交回 accessor`)
+          }
+        }
+      }))
+      if (rjDone > 0) {
+        logStaged(pipelineRunId, 'basic',
+          `[B-Rubric] rubric 判官判定 ${rjDone}/${rjTargets.length} 題（低信心送複核 ${rjLow}）、padY ${rjPadY}`)
+      }
+    }
+  }
+
   // ── 🆕 2026-07-11 字形終審（glyph judge、user 拍板）────────────────────────────
   // 背景：寫國字題學生「造字/寫錯字」時、轉錄層必然投射成最接近的真字（輸出字庫沒有那個字）
   //   → 「讀出值=正解」在寫國字題不可信（國語卷實測 14+ 格放水、老師終審確認）。
@@ -14969,7 +15077,9 @@ export async function runStagedGradingPhaseB({
   // ── B1: ACCESSOR (per-page parallel when multi-page) ─────────────────────
   // 2026-05-20: 排除 manualBypassIds（已有 deterministic score、不送 LLM）
   // 2026-05-28: 也排除 mapFillBypassIds（map_fill 走 Direction Y、Accessor 不看）
-  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id) || clozeBypassIds.has(id) || glyphComposeIds.has(id)
+  //   2026-09-03：rubricJudgeBypassIds 一併排除——判官已定案的題不必再送 accessor
+  //   （省一次呼叫；且合併時 _rubricJudge 會覆蓋，留著只會產生互相矛盾的分數）
+  const isBypassed = (id) => manualBypassIds.has(id) || mapFillBypassIds.has(id) || vjBypassIds.has(id) || objectiveBypassIds.has(id) || clozeBypassIds.has(id) || glyphComposeIds.has(id) || rubricJudgeBypassIds.has(id)
 
   // ── Phase 0b-7 (2026-08-15)：確定性優先（code-first）─────────────────────────
   //   通則取代「為每個題型加一條 0b」：accessor 之前先用寬鬆比對器試判，判得動就直接定案、
@@ -15257,7 +15367,7 @@ export async function runStagedGradingPhaseB({
     //   levelResult 從未落地、分數仍由 accessor＋最終答案字串比對決定。
     //   levelBypassIds 只擋住 Read 輸入，攔不住 accessor 對該題評分，所以要在合併時覆蓋。
     const overrideIds = new Set(
-      deterministicScores.filter((s) => s?._levelBypass).map((s) => ensureString(s.questionId).trim())
+      deterministicScores.filter((s) => s?._levelBypass || s?._rubricJudge).map((s) => ensureString(s.questionId).trim())
     )
     const existing = (Array.isArray(accessorResult?.scores) ? accessorResult.scores : [])
       .filter((s) => !overrideIds.has(ensureString(s?.questionId).trim()))
@@ -15295,7 +15405,7 @@ export async function runStagedGradingPhaseB({
         if (deterministicScores.length > 0) {
           // 同上：級分制判官的結果要取代 accessor 的，否則 retry 路徑又會把它濾掉
           const overrideIds = new Set(
-            deterministicScores.filter((s) => s?._levelBypass).map((s) => ensureString(s.questionId).trim())
+            deterministicScores.filter((s) => s?._levelBypass || s?._rubricJudge).map((s) => ensureString(s.questionId).trim())
           )
           const kept = (retryResult.scores || [])
             .filter((s) => !overrideIds.has(ensureString(s?.questionId).trim()))

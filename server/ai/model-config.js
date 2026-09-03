@@ -65,6 +65,7 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.GRADING_VJ_BLANK]: MODEL_PRO,         // Phase A 單一 blank reader
   [AI_ROUTE_KEYS.GRADING_VJ_GRADE]: MODEL_PRO,         // Phase B rubric 判對錯
   [AI_ROUTE_KEYS.GRADING_LEVEL_JUDGE]: MODEL_PRO,      // 級分制判官（讀手寫推導、需 PRO 視覺）
+  [AI_ROUTE_KEYS.GRADING_RUBRIC_JUDGE]: MODEL_PRO,     // rubric 判官（社會/自然看圖逐維度判分）
   // 2026-05-23: 紙張四角偵測切到 FLASH
   // 原因：(1) 老師端 AssignmentImport 已 skip、只剩學生拍照觸發
   //       (2) 找白色矩形邊緣是相對簡單視覺任務、FLASH 夠用
