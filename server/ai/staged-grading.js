@@ -10386,12 +10386,38 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     const ak = akMapForAi2.get(qid)
     return Array.isArray(ak?.levelRubric?.levelRules) && ak.levelRubric.levelRules.length > 0
   }
+  // ── 2026-09-04 rubric 判官格「單讀＋升 3.6＋跳鏈」（user 拍板 B 改版）──────────────
+  //   這些格的分數由 Phase B rubric 判官看圖定案，read 只供顯示——
+  //   read2＋知答鏈（分歧率 69%、鏈跑 3.6）是在仲裁一段只拿來顯示的文字，純浪費。
+  //   改法：read1 單讀（該批升 MODEL_PRO、顯示品質補回）、read2＝read1 副本
+  //   （consistency 必 stable → 鏈/NR/審查都不觸發）。
+  //   ⚠ 條件必須與 Phase B 的 isRubricJudgeTarget＋路由閘門**完全一致**——
+  //     判官不接手的格（如 ao 模式）必須照舊兩讀，否則單讀直接進 accessor 品質變差。
+  //   kill switch：RJ_SINGLE_READ='0'（回復兩讀＋鏈；判官照常）。
+  const rjSingleRead = process.env.RJ_SINGLE_READ !== '0' && process.env.RUBRIC_JUDGE !== '0'
+    && answerSheetMode === 'with_questions'
+    && (() => { const d = ensureString(payload?.domain ?? internalContext?.domainHint, ''); return d.includes('社會') || d.includes('自然') })()
+  const rjIsCell = (qid) => {
+    if (!rjSingleRead) return false
+    const ak = akMapForAi2.get(qid)
+    return Array.isArray(ak?.rubricsDimensions) && ak.rubricsDimensions.length > 0 && !ak?.levelRubric
+  }
+  // ⚠ 後綴必須純 ASCII：組名會進 logStaged 字串、最終寫進 Postgres——
+  //   Postgres TEXT/JSONB 拒收 NUL 字元，第一版用 NUL 當分隔會讓 stage_logs 寫入炸掉。
+  const RJ_GROUP_SUFFIX = '__rjsr'   // rubric 格獨立成組（單讀＋升 3.6、批次不與同型混）
   const runTypeSplitRole = async (role) => {
     const groups = new Map()
     for (const q of classifyAligned) {
       if (!q.visible || TYPE_SPLIT_SKIP.has(q.questionType) || !allQuestionCropMap.has(q.questionId)) continue
       if (gzIsVjCell(q.questionId)) continue // 國字注音拔 read：判官全接手
       if (lrIsCell(q.questionId)) continue    // 應用題級分制拔 read：逐要素判官全接手
+      if (rjIsCell(q.questionId)) {
+        if (role === 'review') continue        // rubric 格單讀：不跑 read2（read2=read1 副本、鏈不觸發）
+        const gk = q.questionType + RJ_GROUP_SUFFIX   // 獨立成組 → 該批升 MODEL_PRO
+        if (!groups.has(gk)) groups.set(gk, [])
+        groups.get(gk).push(q)
+        continue
+      }
       if (!groups.has(q.questionType)) groups.set(q.questionType, [])
       groups.get(q.questionType).push(q)
     }
@@ -10401,9 +10427,12 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     // env TYPE_SPLIT_PRO_TYPES=逗號分隔題型 → 強制那些型用 PRO（A/B 用、也是逐型調 model 的旋鈕、不必改碼）
     const tsProTypes = new Set(ensureString(process.env.TYPE_SPLIT_PRO_TYPES, '').split(',').map((s) => s.trim()).filter(Boolean))
     for (const [type, qs] of groups) {
-      const cfg = TYPE_READ_CONFIG[type] || TYPE_READ_DEFAULT
+      const isRjGroup = type.endsWith(RJ_GROUP_SUFFIX)
+      const baseType = isRjGroup ? type.slice(0, -RJ_GROUP_SUFFIX.length) : type
+      const cfg = TYPE_READ_CONFIG[baseType] || TYPE_READ_DEFAULT
       const upgradeForText = (englishTextReadPro || mathTextReadPro) && cfg.family === 'text'  // 英語/數學填空簡答讀升 3.5
-      const model = (cfg.model === 'PRO' || tsProTypes.has(type) || upgradeForText) ? MODEL_PRO : MODEL_FLASH
+      // rubric 格單讀升 PRO：只剩一讀、顯示品質靠它（2.5 讀「斯文豪」成「其紋豪」的前科）
+      const model = (isRjGroup || cfg.model === 'PRO' || tsProTypes.has(baseType) || upgradeForText) ? MODEL_PRO : MODEL_FLASH
       for (const batch of tsChunk(qs, cfg.batch)) {
         jobs.push(async () => {
           const parts = [{ text: tsReadHead(cfg.family, role) }]
@@ -10881,6 +10910,21 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       if (reReadAnswerParsed && !seen2.has(q.questionId)) { reReadAnswerParsed.answers = reReadAnswerParsed.answers || []; reReadAnswerParsed.answers.push(entry()) }
     }
     if (synthN > 0) logStaged(pipelineRunId, 'basic', `[A2] 拔 read（國字注音／級分制應用題）：${synthN} 格跳過兩讀（省 crop×2＋thinking）、synthetic 佔位、Phase B 判官定案`)
+  }
+  // ── 2026-09-04 rubric 格單讀：read2＝read1 副本 ─────────────────────────────
+  //   兩讀同值 → computeConsistencyStatus 必 stable → 鏈/NR/審查不觸發；
+  //   顯示值＝read1（已升 PRO）。read1 本身失敗的格照舊走缺讀處理（判官仍會看圖給分）。
+  if (rjSingleRead && reReadAnswerParsed) {
+    const seen2 = new Set((reReadAnswerParsed.answers || []).map((a) => ensureString(a?.questionId).trim()))
+    let rjSynthN = 0
+    for (const a of (readAnswerParsed?.answers || [])) {
+      const qid = ensureString(a?.questionId).trim()
+      if (!qid || !rjIsCell(qid) || seen2.has(qid)) continue
+      reReadAnswerParsed.answers = reReadAnswerParsed.answers || []
+      reReadAnswerParsed.answers.push({ ...a, _rjSingleRead: true })
+      rjSynthN++
+    }
+    if (rjSynthN > 0) logStaged(pipelineRunId, 'basic', `[A2] rubric 格單讀：${rjSynthN} 格 read2＝read1 副本（省 read2＋知答鏈；判分由 rubric 判官看圖定案）`)
   }
 
   // ── 2026-06-30: AI2(校對) 整份/大量判空白偵測 → 重抽 read2 一次 ──────────────
