@@ -34,6 +34,7 @@ import {
 } from './map-fill-grader.js'
 import { buildElementQuestionPrompt, parseElementAnswer, aggregateElementAnswers } from './level-rubric-grader.js'
 import { buildRubricJudgePrompt, parseRubricJudgeResult, isRubricJudgeTarget } from './rubric-judge.js'
+import { buildJudgeCacheKey, loadJudgeVerdict, saveJudgeVerdict, judgeFreezeEnabled } from './judge-verdict-cache.js'
 import {
   VISUAL_JUDGMENT_TYPES,
   buildVjRubricPrompt,
@@ -14177,6 +14178,24 @@ export async function runStagedGradingPhaseB({
             + `／學生圖 ${studentImg?.data ? '有' : '無'}）`)
           continue
         }
+        // ── 判定冷凍（2026-09-04）：鍵＝全部 crop bytes ＋ levelRubric ＋ prompt 版本。
+        //   命中＝沿用整題判定（含逐要素 evidence），跳過全部逐要素呼叫。
+        const lvCacheKey = buildJudgeCacheKey('level', crops.map((c) => c.inlineData?.data),
+          { rubric: q.levelRubric, max: toFiniteNumber(q?.maxScore) ?? 0 })
+        const lvCached = lvCacheKey ? await loadJudgeVerdict(getSupabaseAdmin(), lvCacheKey) : null
+        if (lvCached?.payload && Number.isFinite(lvCached.payload.score)) {
+          const cp = lvCached.payload
+          deterministicScores.push({
+            questionId: qId, isCorrect: !!cp.isCorrect, score: cp.score, maxScore: cp.maxScore,
+            errorType: cp.errorType ?? 'concept', scoringReason: cp.scoringReason ?? '級分制（沿用冷凍）',
+            scoreConfidence: Number.isFinite(cp.scoreConfidence) ? cp.scoreConfidence : 90,
+            studentFinalAnswer: '卷面作答', needExplain: false,
+            _levelBypass: true, levelResult: cp.levelResult ?? undefined,
+          })
+          levelBypassIds.add(qId)
+          logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 沿用冷凍判定（source=${lvCached.source}）`)
+          continue
+        }
         // 逐要素提問：一次只問一條（沙盒 21/21 vs 整份規準 19/21）。
         //   會考型應用題是大格子自由書寫，整份規準會讓 AI 退化成「掃描找小標」。
         const elements = [
@@ -14232,6 +14251,21 @@ export async function runStagedGradingPhaseB({
           levelResult: { level: agg.level, found: agg.found, unsure: agg.unsure, evidence: agg.evidence },
         })
         levelBypassIds.add(qId)
+        if (lvCacheKey) {
+          void saveJudgeVerdict(getSupabaseAdmin(), lvCacheKey, {
+            kind: 'level',
+            payload: {
+              score: agg.score, maxScore, isCorrect: agg.level === 3,
+              errorType: agg.level === 3 ? 'none' : (agg.found.length === 0 ? 'blank' : 'concept'),
+              scoringReason: agg.reason, scoreConfidence: agg.confidence,
+              levelResult: { level: agg.level, found: agg.found, unsure: agg.unsure, evidence: agg.evidence },
+            },
+            score: agg.score, maxScore, confidence: agg.confidence,
+            assignmentId: payload?.assignmentId ?? internalContext?.assignmentId ?? null,
+            submissionId: internalContext?.submissionId ?? payload?.submissionId ?? null,
+            questionId: qId, model: JUDGE_MODEL,
+          })
+        }
       } catch (e) {
         logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 失敗：${e?.message} → 交回原流程`)
       }
@@ -14314,16 +14348,36 @@ export async function runStagedGradingPhaseB({
             if (!bbox || !rjImg?.data) continue
             const crop = await cropWithMarkByBbox(rjImg.data, rjImg.mimeType, bbox, 0.012, rjPadY)
             if (!crop) continue
-            const resp = await executeStage({
-              apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
-              timeoutMs: Math.min(getRemainingBudget(), 30_000), routeHint,
-              routeKey: AI_ROUTE_KEYS.GRADING_RUBRIC_JUDGE,
-              stageContents: [{ role: 'user', parts: [{ text: buildRubricJudgePrompt(q) }, { inlineData: crop }] }]
-            })
-            if (resp) stageResponses.push(resp)
-            if (!resp?.ok) continue
-            const res = parseRubricJudgeResult(parseCandidateJson(resp.data), q)
-            if (!res) continue
+            // ── 判定冷凍（2026-09-04 user 拍板「圖像路：同指紋一律冷凍」）──
+            //   鍵＝送進模型的圖 bytes ＋ rubric 內容 ＋ prompt 版本；重批同圖直接沿用，
+            //   不重付判官錢、分數不翻盤。fail-open：表不在／查失敗照舊跑。
+            const rjCacheKey = buildJudgeCacheKey('rubric', [crop.data],
+              { dims: q.rubricsDimensions, ref: q.referenceAnswer ?? q.answer ?? '', max: q.maxScore })
+            const rjCached = rjCacheKey ? await loadJudgeVerdict(getSupabaseAdmin(), rjCacheKey) : null
+            let res = (rjCached?.payload && Array.isArray(rjCached.payload.dims)) ? rjCached.payload : null
+            if (res) {
+              logStaged(pipelineRunId, 'basic', `[B-Rubric] ${qId} 沿用冷凍判定（source=${rjCached.source}）`)
+            } else {
+              const resp = await executeStage({
+                apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
+                timeoutMs: Math.min(getRemainingBudget(), 30_000), routeHint,
+                routeKey: AI_ROUTE_KEYS.GRADING_RUBRIC_JUDGE,
+                stageContents: [{ role: 'user', parts: [{ text: buildRubricJudgePrompt(q) }, { inlineData: crop }] }]
+              })
+              if (resp) stageResponses.push(resp)
+              if (!resp?.ok) continue
+              res = parseRubricJudgeResult(parseCandidateJson(resp.data), q)
+              if (!res) continue
+              if (rjCacheKey) {
+                void saveJudgeVerdict(getSupabaseAdmin(), rjCacheKey, {
+                  kind: 'rubric', payload: res, score: res.score, maxScore: res.maxScore,
+                  confidence: res.confidence,
+                  assignmentId: payload?.assignmentId ?? internalContext?.assignmentId ?? null,
+                  submissionId: internalContext?.submissionId ?? payload?.submissionId ?? null,
+                  questionId: qId, model: MODEL_PRO,
+                })
+              }
+            }
             deterministicScores.push({
               questionId: qId,
               isCorrect: res.score >= res.maxScore && res.maxScore > 0,
@@ -14535,6 +14589,29 @@ export async function runStagedGradingPhaseB({
             return parseCandidateJson(resp.data)
           }
           let parsed, gVerdict, glyphVotes = null, glyphBorderline = false, toneReviewReleased = false, glyphPanelDissent = false
+          // ── 判定冷凍（2026-09-04）：凍「整格最終判定」（含調號覆核後的結果），不動分支內部。
+          //   注音鍵含兩張圖（學生＋答案卷標準圖；getZyRefCrop 有 per-page 快取、重呼叫免費）；
+          //   fallback 路徑（拿不到標準圖）只剩學生圖 → 鍵自然不同，之後標準圖可用時會重判升級。
+          //   ⚠ stuCrop 已是「放大後」的 bytes——裁圖/放大參數改動 → bytes 變 → 自然重判。
+          let jfKey = null, jfFromCache = false
+          if (judgeFreezeEnabled()) {
+            const jfRef = t.kind === 'zhuyin' ? await getZyRefCrop(t.q) : null
+            jfKey = buildJudgeCacheKey(t.kind === 'zhuyin' ? 'zhuyin' : 'glyph',
+              jfRef ? [stuCrop.data, jfRef.data] : [stuCrop.data], { key: t.key })
+            const jfHit = jfKey ? await loadJudgeVerdict(getSupabaseAdmin(), jfKey) : null
+            const cp = jfHit?.payload
+            if (cp && typeof cp.gVerdict === 'string' && cp.gVerdict) {
+              gVerdict = cp.gVerdict
+              parsed = cp.parsed ?? null
+              glyphVotes = Array.isArray(cp.glyphVotes) ? cp.glyphVotes : null
+              glyphBorderline = !!cp.glyphBorderline
+              toneReviewReleased = !!cp.toneReviewReleased
+              glyphPanelDissent = !!cp.glyphPanelDissent
+              jfFromCache = true
+              logStaged(pipelineRunId, 'basic', `[B-Glyph] ${t.qid} 沿用冷凍判定（source=${jfHit.source}）`)
+            }
+          }
+          if (!jfFromCache) {
           if (t.kind === 'zhuyin') {
             // ── 2026-07-21 注音三判官 v2（user 拍板；沙盒 155 格×2 輪：放水 0、誤殺 2（字醜/淡墨型、黃燈+申訴）、
             //    純調號誤殺 0、155/155 零翻動）：三位「檢查流程不同」的判官全帶標準答案圖＋冒號條款 → 三票多數決。
@@ -14691,6 +14768,25 @@ export async function runStagedGradingPhaseB({
             }
             else if (valid.length >= 2) { gVerdict = 'same'; parsed = valid.find((v) => v.verdict === 'same') ?? valid[0] }
             else { gVerdict = ''; parsed = null } // 有效票 <2 → fail-open 交 accessor
+          }
+          } // ← if (!jfFromCache) 結束（判定冷凍 wrapper）
+          // 存凍：只存有效判定（gVerdict 空字串＝fail-open，不凍——下次要重試）
+          if (jfKey && !jfFromCache && typeof gVerdict === 'string' && gVerdict) {
+            void saveJudgeVerdict(getSupabaseAdmin(), jfKey, {
+              kind: t.kind === 'zhuyin' ? 'zhuyin' : 'glyph',
+              payload: {
+                gVerdict,
+                parsed: parsed ? {
+                  reason: ensureString(parsed.reason, '').slice(0, 120),
+                  analysis: ensureString(parsed.analysis ?? parsed.blocks ?? parsed.diff ?? '', '').slice(0, 200),
+                } : null,
+                glyphVotes, glyphBorderline, toneReviewReleased, glyphPanelDissent,
+              },
+              confidence: null,
+              assignmentId: payload?.assignmentId ?? internalContext?.assignmentId ?? null,
+              submissionId: internalContext?.submissionId ?? payload?.submissionId ?? null,
+              questionId: t.qid, model: JUDGE_MODEL,
+            })
           }
           const gMax = Math.max(0, toFiniteNumber(t.q?.maxScore) ?? 0)
           // 2026-07-21 顯示統一（user 拍板）：VJ 化後「學生答案」欄不再顯示轉錄值（顯示太多反招質疑）——
