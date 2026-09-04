@@ -8398,9 +8398,8 @@ function buildFinalGradingResult({
       // ⚠️ 這一列不可省：detail 是白名單，漏掉就被靜默剝掉——2026-07-12 字形 votes 全 null
       //    就是同一個坑；沒有它，批改看起來正常但要素資料不存在，要聚合只能整批重批。
       levelResult: score?.levelResult && typeof score.levelResult === 'object' ? score.levelResult : undefined,
-      // rubric 判官逐維度結果（前端理由顯示 ＋ 跨學生聚合的鍵：29 種文字答案 → 3 維向量）。
-      // ⚠️ 同上，detail 是白名單、漏掉就靜默消失——聚合正是導入這個判官的主要動機，不可省。
-      rubricDims: Array.isArray(score?.rubricDims) ? score.rubricDims : undefined,
+      // rubric 判官：逐維度結果走既有的 rubricScores（:8787 已處理、聚合直接吃）；
+      // 這裡只補 uncertain 標記（複核 UI 顯示「判官沒把握什麼」）。
       rubricUncertain: score?.rubricUncertain ? String(score.rubricUncertain) : undefined,
       // 字形終審 audit（2026-07-12 補洞：white-list 剝掉了 9530eeb 加的欄位——B班首跑 votes 全 null 實測）
       glyphVotes: Array.isArray(score?.glyphVotes) ? score.glyphVotes : undefined,
@@ -14335,7 +14334,9 @@ export async function runStagedGradingPhaseB({
               // 讀值交給 read（本判官不轉寫）；顯示值沿用 read 的結果、不覆寫
               needExplain: res.score < res.maxScore,
               _rubricJudge: true,
-              rubricDims: res.dims,
+              // ⚠ 用既有契約 rubricScores（不是自創欄位）：8787 組進 detail、
+              //   answerStats 的 compound_* 向量分群吃它、15453 補打閘門也認它
+              rubricScores: res.dims,
               ...(res.uncertain ? { rubricUncertain: res.uncertain } : {}),
             })
             rubricJudgeBypassIds.add(qId)
@@ -15449,7 +15450,9 @@ export async function runStagedGradingPhaseB({
       if (!n) return false
       // ⛔ 不碰別條管線判的格：查表制(_semanticTable)有自己的投票+凍結、級分制(_levelBypass)有判官，
       //    用 accessor 補打會把它們從原本的管線拉走。它們的維度問題在各自的檔案裡修。
-      if (sc?._semanticTable === true || sc?._levelBypass === true) return false
+      //    2026-09-04 補：_rubricJudge 同理——判官已帶 rubricScores，缺維度時它自己標低信心送複核，
+      //    不可被補打拉回 accessor（那正是導入判官要取代的路徑）。
+      if (sc?._semanticTable === true || sc?._levelBypass === true || sc?._rubricJudge === true) return false
       return !Array.isArray(sc?.rubricScores) || sc.rubricScores.length !== n
     }
     const missIds = (accessorResult.scores || []).filter(lacksVector).map((s) => ensureString(s.questionId).trim())

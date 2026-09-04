@@ -104,11 +104,15 @@ export function parseRubricJudgeResult(parsed, q) {
   const byName = new Map(got.map((d) => [String(d?.name ?? '').trim(), d]))
   const out = []
   let missing = 0
+  // ⚠ 輸出鍵是 **dimension**（不是 name）——沿用 accessor 既有的 rubricScores 契約
+  //   （2026-08-16 社會非選聚合吃這個欄位分群、8787 的 detail 組裝與 15453 的補打閘門也認它）。
+  //   第一版發明了平行欄位 rubricDims → 聚合拿不到資料、補打閘門還會把判官的格拉回 accessor。
+  //   model 端 prompt 仍用 name（已測形狀），這裡轉鍵。
   for (const d of dims) {
     const hit = byName.get(String(d.name).trim())
-    if (!hit) { missing++; out.push({ name: d.name, score: 0, maxScore: d.maxScore, evidence: '', reason: '判官未回報此維度' }); continue }
+    if (!hit) { missing++; out.push({ dimension: d.name, score: 0, maxScore: Number(d.maxScore) || 0, evidence: '', reason: '判官未回報此維度' }); continue }
     out.push({
-      name: d.name,
+      dimension: d.name,
       score: clampDimScore(hit.score, d.maxScore),
       maxScore: Number(d.maxScore) || 0,
       evidence: String(hit.evidence ?? '').slice(0, 120),
@@ -123,7 +127,7 @@ export function parseRubricJudgeResult(parsed, q) {
   //   ⚠ 沿用「畫面資訊不足 → 該維度 0 分 + uncertain」的設計：分數已從嚴，
   //     由低信心讓老師看見，符合寧可誤殺不放水。
   const confidence = (uncertain || missing > 0) ? 65 : 90
-  const detail = out.map((d) => `${d.name} ${d.score}/${d.maxScore}`).join('、')
+  const detail = out.map((d) => `${d.dimension} ${d.score}/${d.maxScore}`).join('、')
   return {
     score, maxScore, dims: out, uncertain,
     confidence,
