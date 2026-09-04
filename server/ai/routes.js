@@ -28,6 +28,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_RUBRIC_JUDGE: 'grading.rubric_judge', // Phase B：社會/自然開放式概念題逐維度判分（看圖、不經 read 文字）
   GRADING_LEVEL_JUDGE: 'grading.level_judge', // Phase B：級分制三判官（只回報要素、級分由 code 算）
   ANSWER_KEY_EXTRACT: 'answer_key.extract',
+  ANSWER_KEY_SOLVE: 'answer_key.solve',       // 生成答案卷：AI 從題目卷解題起草（結構推斷＋解題＋rubric）
   ANSWER_KEY_LOCATE: 'answer_key.locate',
   ANSWER_KEY_REANALYZE: 'answer_key.reanalyze',
   ANSWER_KEY_TAG_CONCEPTS: 'answer_key.tag_concepts',
