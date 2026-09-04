@@ -8739,7 +8739,11 @@ function buildFinalGradingResult({
       //   （L0一致92/88、多數或非標準≥2=80、單次看走眼採標準70、真分裂=45低信心）→ 直接當基準，
       //   已內含路徑信心、不再走 A 段 -8（否則低信心45會被再扣、或高信心被誤降）。前端 badge <70 才亮。
 
-      if (hasChainConf) { base = chainConf; journey = `知答鏈:${ensureString(consistency?.arbiterResult?.chainLevel, '')}` }
+      // 2026-09-04 修（第一次重批驗收實錘）：rubric 判官的格**不吃鏈信心**——
+      //   分數是判官看圖給的，read 只供顯示；鏈信心蓋過去會出現「判官滿分卻因 read 不穩
+      //   進複核」（座23 5-6-6 實例），反向更危險：判官 uncertain 的 65 被鏈的 88 蓋掉、複核被壓。
+      //   判官算出的信心就是權威（上面 _rubricJudge 分支），鏈信心只管靠 read 判分的格。
+      if (hasChainConf && !score?._rubricJudge) { base = chainConf; journey = `知答鏈:${ensureString(consistency?.arbiterResult?.chainLevel, '')}` }
       // A 段修正（只對走過讀取的格子；知答鏈已自帶信心 → 跳過；_glyphJudge=判官看圖、與讀取無關 → 跳過）
       // 級分制判官不看 read 值（整題判等第），consistencyStatus 對它沒有意義 → 不做 A 段修正
       // VJ 三票分歧也要跳過 A 段修正——判官不看讀值，consistencyStatus 對它沒有意義，
