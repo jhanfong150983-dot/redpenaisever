@@ -16,6 +16,7 @@ import {
 } from './quality-gates.js'
 import { extractPhaseALogData, extractPhaseBLogData, saveGradingStageLog, persistPhaseAState, persistFinalAnswers, loadPhaseAState, clearPhaseAState } from './stage-log-writer.js'
 import { isOcrAssistEnabled, prepareOcrHintsForClassify, isOcrRowAnchorEnabled } from './ocr-client.js'
+import { alignGeneratedSheetBoxes } from './generated-sheet-readback.js'
 import { buildOcrHintsSection } from './bbox-anchor-match.js'
 // 2026-05-20: applyOcrBboxOverride (width_floor + x_shift) 已移除
 // 原因：實證上把 AI bbox 跟 OCR row candidate union 容易拉爆跨題（fill_blank 多次踩雷）。
@@ -9252,6 +9253,24 @@ export async function runStagedGradingPhaseA({
     totalPages = precomputedClassifyContext.totalPages || 1
     ocrAssistMeta = precomputedClassifyContext.ocrAssistMeta || { enabled: false, perPage: [] }
     logStaged(pipelineRunId, 'basic', `[A1] 跳過 OCR + classify、用前一階段傳入的 _phaseAClassifyContext (題目=${classifyAligned.length} 頁=${totalPages})`)
+  } else if (internalContext?.generatedSheetLayout) {
+    // 2026-09-05 生成作答卷（模組6）：bbox 由排版定版（generated_sheet 是 SSoT），
+    // 錨點對齊（純 CV、零 AI 呼叫）即得每格在學生卷影像上的位置 → 整段 classify 免跑。
+    // 對齊失敗（錨點被遮/摺到）會 throw 明確錯誤請重掃——寧可失敗不可錯裁。
+    const gsLayout = internalContext.generatedSheetLayout
+    const imgBuffer = Buffer.from(inlineImages[0].inlineData.data, 'base64')
+    const alignedGs = await alignGeneratedSheetBoxes(imgBuffer, gsLayout)
+    const akById = new Map((answerKeyQuestions || []).map((q) => [String(q.id), q]))
+    classifyAligned = alignedGs.boxes.map((b) => ({
+      questionId: b.id,
+      visible: true,
+      questionType: akById.get(String(b.id))?.questionCategory || akById.get(String(b.id))?.type || 'fill_blank',
+      answerBbox: b.bbox
+    }))
+    classifyResult = { alignedQuestions: classifyAligned }
+    totalPages = 1
+    ocrAssistMeta = { enabled: false, perPage: [] }
+    logStaged(pipelineRunId, 'basic', `[A1] 生成作答卷：錨點對齊免 classify（${gsLayout.version} ${classifyAligned.length} 格、零 AI 呼叫）`)
   } else {
   // 🆕 OCR-assist metadata 收集（用於 stage_logs 寫入）
   // Schema: { enabled: bool, perPage: [{ page, stats, candidates }] }
@@ -10206,7 +10225,9 @@ export async function runStagedGradingPhaseA({
           if (marked) return { questionId: q.questionId, cropData: marked }
         }
         let bboxToUse, cropPad
-        if (isAoPdf) {
+        const isGeneratedSheet = !!internalContext?.generatedSheetLayout
+        if (isAoPdf || isGeneratedSheet) {
+          // 生成作答卷：bbox＝排版定版的精確格位（錨點對齊映射），零 pad 原框（同 ao_pdf 拍板理由）
           // 2026-07-05: ao_pdf（答案卷+PDF）全題型零 pad——直接用 classify 原框、不 inflate。
           //   選擇題零 pad 已實證（2026-06-02）；擴到全題型依 user 拍板：格外筆跡屬學生責任、
           //   pad 吃鄰格（如培英題3 下方配分表）反而製造 read 雜訊。框穩定性由統一框 median+P90 保證。

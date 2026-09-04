@@ -723,6 +723,7 @@ export default async function handler(req, res) {
   //   → AI 看不到完整題目、CLASSIFY_LOW_COVERAGE。
   // 修：classify 與 legacy phase_a 兩條都要拿。
   // 重踩 feedback_dont_infer_total_pages_from_question_ids.md 的雷。
+  let generatedSheetLayout = null
   const needsAnswerKeyImagesAndTotalPages =
     routeKey === 'grading.phase_a' || routeKey === 'grading.phase_a_classify'
   if (needsAnswerKeyImagesAndTotalPages && payload?.assignmentId) {
@@ -738,10 +739,27 @@ export default async function handler(req, res) {
     try {
       const { data: a } = await supabaseAdmin
         .from('assignments')
-        .select('total_pages')
+        .select('total_pages, answer_key_template_id')
         .eq('id', payload.assignmentId)
         .maybeSingle()
       if (a?.total_pages != null) assignmentTotalPages = Number(a.total_pages)
+      // 2026-09-05 生成作答卷（模組6）：template 有 generated_sheet ＝ bbox 由排版決定，
+      // Phase A 錨點對齊即得每格位置 → 免 classify。kill switch GENERATED_SHEET_GRADING='0'。
+      if (a?.answer_key_template_id && process.env.GENERATED_SHEET_GRADING !== '0') {
+        try {
+          const { data: tpl } = await supabaseAdmin
+            .from('answer_key_templates')
+            .select('generated_sheet')
+            .eq('id', a.answer_key_template_id)
+            .maybeSingle()
+          if (tpl?.generated_sheet?.boxes?.length) {
+            generatedSheetLayout = tpl.generated_sheet
+            console.log(`📐 [GeneratedSheet] 命中定版版面 ${generatedSheetLayout.version} ${generatedSheetLayout.boxes.length} 格 → Phase A 免 classify`)
+          }
+        } catch (e) {
+          console.warn('[GeneratedSheet] fetch generated_sheet failed:', e?.message)
+        }
+      }
     } catch (e) {
       console.warn('[AnswerSheet] fetch total_pages failed:', e?.message)
     }
@@ -838,7 +856,8 @@ export default async function handler(req, res) {
             ownerId: user.id,
             assignmentId: payload?.assignmentId || undefined,
             submissionId: payload?.submissionId || undefined,
-            assignmentTotalPages  // 🆕 給 staged-grading 判定 ID 自動切頁
+            assignmentTotalPages,  // 🆕 給 staged-grading 判定 ID 自動切頁
+            generatedSheetLayout: generatedSheetLayout || undefined  // 生成作答卷定版版面（免 classify）
           }
         })
     )

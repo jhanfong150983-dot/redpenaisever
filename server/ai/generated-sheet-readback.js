@@ -119,6 +119,81 @@ function detectAnchorsInGray(gray, W, H, anchorSizeMm, pageMm) {
 }
 
 /**
+ * 批改用對齊：偵測錨點 → 解單應性 → 把每格 bbox 映射成「整張學生卷影像」的正規化座標。
+ * Phase A 免 classify 的核心：回傳格式與 classify 的 alignedQuestions.answerBbox 相同（0~1 全圖座標），
+ * 下游 crop 管線零改動直接吃。⛔ 不裁圖——裁圖沿用既有 cropInlineImageByBbox（pad 政策一致）。
+ * @param {Buffer} imageBuffer 學生卷（單張合併圖；生成卷恆為單面一頁）
+ * @param {object} layout template.generated_sheet（{pageMm, anchorsMm, uvBasis, header, boxes}）
+ * @returns {Promise<{ anchors: number[][], boxes: Array<{ id: string, bbox: {x:number,y:number,w:number,h:number} }> }>}
+ */
+export async function alignGeneratedSheetBoxes(imageBuffer, layout) {
+  const { pageMm, anchorsMm, uvBasis, boxes } = layout
+  const img = sharp(imageBuffer).rotate()
+  const { data: gray, info } = await img.clone().greyscale().raw().toBuffer({ resolveWithObject: true })
+  const W = info.width
+  const H = info.height
+  const anchors = detectAnchorsInGray(gray, W, H, 5, pageMm)
+  const anchorUv = anchorsMm.map(([x, y]) => [(x - uvBasis.x0) / uvBasis.w, (y - uvBasis.y0) / uvBasis.h])
+  const He = homography(anchorUv, anchors)
+  verifyAlignment(gray, W, H, He, layout)
+  const out = []
+  for (const b of boxes) {
+    const [x, y, w, h] = b.xyMm ?? b.xy_mm
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const [cx, cy] of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) {
+      const [px, py] = applyH(He, (cx - uvBasis.x0) / uvBasis.w, (cy - uvBasis.y0) / uvBasis.h)
+      if (px < minX) minX = px
+      if (py < minY) minY = py
+      if (px > maxX) maxX = px
+      if (py > maxY) maxY = py
+    }
+    out.push({
+      id: b.id,
+      bbox: {
+        x: Math.max(0, Math.min(1, minX / W)),
+        y: Math.max(0, Math.min(1, minY / H)),
+        w: Math.max(0, Math.min(1, (maxX - minX) / W)),
+        h: Math.max(0, Math.min(1, (maxY - minY) / H))
+      }
+    })
+  }
+  return { anchors, boxes: out }
+}
+
+// 對齊自檢（共用）：投影「標頭下排兩顆角標」驗黑，防上排被遮時誤用下排角標的靜默錯位。
+function verifyAlignment(gray, W, H, He, layout) {
+  if (!layout.header) return
+  const { uvBasis } = layout
+  const hd = layout.header
+  const verifyMm = [
+    [hd.x + 2.5, hd.y + hd.h - 2.5],
+    [hd.x + hd.w - 2.5, hd.y + hd.h - 2.5]
+  ]
+  for (const [vx, vy] of verifyMm) {
+    const [px, py] = applyH(He, (vx - uvBasis.x0) / uvBasis.w, (vy - uvBasis.y0) / uvBasis.h)
+    let sum = 0
+    let n = 0
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const sx = Math.round(px + dx)
+        const sy = Math.round(py + dy)
+        if (sx < 0 || sy < 0 || sx >= W || sy >= H) continue
+        sum += gray[sy * W + sx]
+        n++
+      }
+    }
+    if (!n || sum / n > 120) {
+      const err = new Error('作答卷對齊檢核失敗（定位方塊可能被遮住或摺到），請攤平整張卷、四角完整入鏡後重新掃描/拍照')
+      err.code = 'ALIGNMENT_CHECK_FAILED'
+      throw err
+    }
+  }
+}
+
+/**
  * 生成作答卷回讀：偵測錨點 → 對齊 → 依 bbox 裁出每一格。
  * @param {Buffer} imageBuffer 掃描/照片（任意常見格式；EXIF 方向自動校正）
  * @param {object} layout 產卡時存下的 layoutMeta＋boxes：
@@ -134,35 +209,7 @@ export async function readBackGeneratedSheet(imageBuffer, layout) {
   const anchors = detectAnchorsInGray(gray, W, H, 5, pageMm)
   const anchorUv = anchorsMm.map(([x, y]) => [(x - uvBasis.x0) / uvBasis.w, (y - uvBasis.y0) / uvBasis.h])
   const He = homography(anchorUv, anchors)
-
-  // ── 對齊自檢：投影「標頭下排兩顆角標」（已知 mm 位置的印刷特徵）驗證該處為黑方塊。
-  // 防的是：上排角標被遮時，偵測器把下排角標誤當上排 → 靜默錯位（反向測試抓到的漏洞）。
-  if (layout.header) {
-    const hd = layout.header
-    const verifyMm = [
-      [hd.x + 2.5, hd.y + hd.h - 2.5],
-      [hd.x + hd.w - 2.5, hd.y + hd.h - 2.5]
-    ]
-    for (const [vx, vy] of verifyMm) {
-      const [px, py] = applyH(He, (vx - uvBasis.x0) / uvBasis.w, (vy - uvBasis.y0) / uvBasis.h)
-      let sum = 0
-      let n = 0
-      for (let dy = -2; dy <= 2; dy++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          const sx = Math.round(px + dx)
-          const sy = Math.round(py + dy)
-          if (sx < 0 || sy < 0 || sx >= W || sy >= H) continue
-          sum += gray[sy * W + sx]
-          n++
-        }
-      }
-      if (!n || sum / n > 120) {
-        const err = new Error('作答卷對齊檢核失敗（定位方塊可能被遮住或摺到），請攤平整張卷、四角完整入鏡後重新掃描/拍照')
-        err.code = 'ALIGNMENT_CHECK_FAILED'
-        throw err
-      }
-    }
-  }
+  verifyAlignment(gray, W, H, He, layout)
 
   const cells = []
   for (const b of boxes) {
