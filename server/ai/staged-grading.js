@@ -768,7 +768,8 @@ const SHEET_CELL_W = 460, SHEET_LABEL_H = 30, SHEET_GAP = 8
 //   **user 質疑「國語明明好好的」→ 查帳翻案**：
 //   read 模型有三層分流（不是統一 3.6）——
 //     國語卷：整卷 readModelOverride 強制 3.6（2026-06-02 手寫國字幻覺）
-//     其他科：choice/check/ordering=3.6、text=英語/數學升 3.6、其餘 text=2.5
+//     其他科：choice/check/ordering=3.6、text=**全領域 3.6**（2026-09-04 起，社會 1-1-1 A/B 實證）
+//     仍在 2.5 的讀：compound(無 rubric)/draw/circle_select/map_fill 專屬讀
 //   ⚠️ 2026-09-02 更正：本段原寫「其他科 choice=MODEL_FLASH(2.5、按像素計費)」，
 //      但 2026-08-09 已把 single_choice/true_false 的 cfg.model 改成 'PRO'（見 TYPE_READ_CONFIG）
 //      → **選擇題現在全領域都是 3.6**。下面兩行「英語 choice(2.5) 沒省到錢」是那次改動前的
@@ -10430,7 +10431,16 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       const isRjGroup = type.endsWith(RJ_GROUP_SUFFIX)
       const baseType = isRjGroup ? type.slice(0, -RJ_GROUP_SUFFIX.length) : type
       const cfg = TYPE_READ_CONFIG[baseType] || TYPE_READ_DEFAULT
-      const upgradeForText = (englishTextReadPro || mathTextReadPro) && cfg.family === 'text'  // 英語/數學填空簡答讀升 3.5
+      // 2026-09-04 user 拍板：text family **全領域**升 PRO——原本只有國語(整卷)/英語/數學，
+      //   社會/自然的手寫中文填空留在 2.5 是按科目名稱寫死的漏網（模型細目表盤點時抓到）。
+      //   證據＝社會 1-1-1 A/B(29 份、同 crop 同 prompt 只換模型)：2.5 讀對 17/29、3.6 讀對 25/29
+      //   （其餘 4 份是學生自己寫別的，3.6 實際讀取正確率 29/29）；只有 3.6 對 8 份、只有 2.5 對 0 份
+      //   ＝單調較優，Fisher p=0.038。2.5 的病：把「艋舺」拆成「舟孟舟甲」、「斯文豪」讀成「其紋豪」。
+      //   成本：3.6 促銷價下每格 +約 NT$0.03（詳 docs/實驗成本記錄.md 2026-09-02 那筆）。
+      //   家族含 fill_blank/short_answer/未知型(TYPE_READ_DEFAULT)；compound/draw/circle_select 不在內。
+      //   回退：ALL_TEXT_READ_PRO='false'（英語/數學各自的舊開關仍獨立有效）。
+      const allTextReadPro = process.env.ALL_TEXT_READ_PRO !== 'false'
+      const upgradeForText = (allTextReadPro || englishTextReadPro || mathTextReadPro) && cfg.family === 'text'
       // rubric 格單讀升 PRO：只剩一讀、顯示品質靠它（2.5 讀「斯文豪」成「其紋豪」的前科）
       const model = (isRjGroup || cfg.model === 'PRO' || tsProTypes.has(baseType) || upgradeForText) ? MODEL_PRO : MODEL_FLASH
       for (const batch of tsChunk(qs, cfg.batch)) {
