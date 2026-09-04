@@ -5062,6 +5062,7 @@ async function handleSync(req, res) {
           answerSheetMode: row.answer_sheet_mode ?? undefined,
           answerSheetImagePaths: row.answer_sheet_image_paths ?? undefined,
           questionBookletImagePaths: row.question_booklet_image_paths ?? undefined,
+          generatedSheet: row.generated_sheet ?? undefined,
           version: row.version ?? 1,
           updatedAt: toMillis(row.updated_at) ?? undefined
         }))
@@ -5511,6 +5512,8 @@ async function handleSync(req, res) {
           answer_sheet_mode: normalizeAnswerSheetMode(t.answerSheetMode ?? t.answer_sheet_mode) ?? undefined,
           answer_sheet_image_paths: t.answerSheetImagePaths ?? t.answer_sheet_image_paths ?? undefined,
           question_booklet_image_paths: t.questionBookletImagePaths ?? t.question_booklet_image_paths ?? undefined,
+          // 2026-09-04 生成作答卷定版資料（RPGEN1）；只在 client 有帶時寫，避免舊 client 洗掉
+          generated_sheet: t.generatedSheet ?? t.generated_sheet ?? undefined,
           version: t.version ?? 1,
           updated_at: toIsoTimestamp(t.updatedAt ?? t.updated_at) ?? nowIso
         }))
