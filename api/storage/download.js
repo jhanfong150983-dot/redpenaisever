@@ -152,16 +152,19 @@ async function handleTemplateAnswerSheetDownload(req, res, user, supabaseDb) {
   if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
   if (!own.template) { res.status(404).json({ error: 'Template not found' }); return }
 
-  // 預設 template-answer-sheets/...；?prefix=question-booklets 改抓 question-booklets/{templateId}/page-N.webp
+  // 預設 template-answer-sheets/...；?prefix=question-booklets 抓題本頁；
+  // ?prefix=generated-sheets 抓生成作答卷定版 PDF（單檔）
   const storagePath = prefixRaw === 'question-booklets'
     ? `question-booklets/${templateId}/page-${pageIndex}.webp`
-    : `template-answer-sheets/${templateId}/page-${pageIndex}.webp`
+    : prefixRaw === 'generated-sheets'
+      ? `generated-sheets/${templateId}/sheet.pdf`
+      : `template-answer-sheets/${templateId}/page-${pageIndex}.webp`
   const { data, error: downloadError } = await supabaseDb.storage
     .from('homework-images').download(storagePath)
   if (downloadError || !data) { res.status(404).json({ error: 'Image not found' }); return }
 
   const buffer = Buffer.from(await data.arrayBuffer())
-  res.setHeader('Content-Type', 'image/webp')
+  res.setHeader('Content-Type', prefixRaw === 'generated-sheets' ? 'application/pdf' : 'image/webp')
   res.setHeader('Content-Length', buffer.length)
   res.setHeader('Cache-Control', 'private, max-age=3600')
   res.status(200).send(buffer)
@@ -180,8 +183,11 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
   const allowedPrefixes = ['answer-sheets', 'question-booklets', 'template-answer-sheets']
   let prefix
   if (isTemplate) {
-    // 模板：強制使用 template-answer-sheets 前綴（題本圖目前沿用 question-booklets/{templateId}/...）
-    prefix = storagePrefix === 'question-booklets' ? 'question-booklets' : 'template-answer-sheets'
+    // 模板：強制使用 template-answer-sheets 前綴（題本圖沿用 question-booklets/{templateId}/...；
+    // 2026-09-04 generated-sheets = 生成作答卷定版 PDF，單檔）
+    prefix = storagePrefix === 'question-booklets' ? 'question-booklets'
+      : storagePrefix === 'generated-sheets' ? 'generated-sheets'
+      : 'template-answer-sheets'
   } else {
     prefix = allowedPrefixes.includes(storagePrefix) ? storagePrefix : 'answer-sheets'
   }
@@ -207,10 +213,11 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
     if (buffer.length > MAX_ANSWER_SHEET_IMAGE_SIZE) {
       res.status(400).json({ error: `Page ${i} exceeds max size of 2 MB` }); return
     }
-    const storagePath = `${prefix}/${ownerEntityId}/page-${i}.webp`
+    const isPdf = prefix === 'generated-sheets'
+    const storagePath = isPdf ? `${prefix}/${ownerEntityId}/sheet.pdf` : `${prefix}/${ownerEntityId}/page-${i}.webp`
     const { error: uploadError } = await supabaseDb.storage
       .from('homework-images')
-      .upload(storagePath, buffer, { contentType: 'image/webp', upsert: true })
+      .upload(storagePath, buffer, { contentType: isPdf ? 'application/pdf' : 'image/webp', upsert: true })
     if (uploadError) { res.status(500).json({ error: `Upload failed for page ${i}: ${uploadError.message}` }); return }
     paths.push(storagePath)
   }
