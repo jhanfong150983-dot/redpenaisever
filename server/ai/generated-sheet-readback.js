@@ -132,10 +132,10 @@ export async function alignGeneratedSheetBoxes(imageBuffer, layout) {
   const { data: gray, info } = await img.clone().greyscale().raw().toBuffer({ resolveWithObject: true })
   const W = info.width
   const H = info.height
-  const anchors = detectAnchorsInGray(gray, W, H, 5, pageMm)
+  const anchors = detectAnchorsInGray(gray, W, H, 6, pageMm)
   const anchorUv = anchorsMm.map(([x, y]) => [(x - uvBasis.x0) / uvBasis.w, (y - uvBasis.y0) / uvBasis.h])
   const He = homography(anchorUv, anchors)
-  verifyAlignment(gray, W, H, He, layout)
+  verifyAlignment(W, H, He, layout)
   const out = []
   for (const b of boxes) {
     const [x, y, w, h] = b.xyMm ?? b.xy_mm
@@ -163,29 +163,22 @@ export async function alignGeneratedSheetBoxes(imageBuffer, layout) {
   return { anchors, boxes: out }
 }
 
-// 對齊自檢（共用）：投影「標頭下排兩顆角標」驗黑，防上排被遮時誤用下排角標的靜默錯位。
-function verifyAlignment(gray, W, H, He, layout) {
+// 對齊自檢（RPGEN3）：四角錨點若有一角被誤認（例如把紙上其他黑塊當錨點），解出的 H 會歪。
+// 投影「標頭左右兩緣中點」（版面上的已知印刷特徵、非錨點）驗證該處落在紙面內且不是純白邊，
+// 抓「四角對齊算出的座標系整個歪掉」的情況。
+function verifyAlignment(W, H, He, layout) {
   if (!layout.header) return
   const { uvBasis } = layout
   const hd = layout.header
+  const cyMm = hd.y + hd.h / 2
   const verifyMm = [
-    [hd.x + 2.5, hd.y + hd.h - 2.5],
-    [hd.x + hd.w - 2.5, hd.y + hd.h - 2.5]
+    [hd.x + hd.w * 0.15, cyMm],
+    [hd.x + hd.w * 0.85, cyMm]
   ]
   for (const [vx, vy] of verifyMm) {
     const [px, py] = applyH(He, (vx - uvBasis.x0) / uvBasis.w, (vy - uvBasis.y0) / uvBasis.h)
-    let sum = 0
-    let n = 0
-    for (let dy = -2; dy <= 2; dy++) {
-      for (let dx = -2; dx <= 2; dx++) {
-        const sx = Math.round(px + dx)
-        const sy = Math.round(py + dy)
-        if (sx < 0 || sy < 0 || sx >= W || sy >= H) continue
-        sum += gray[sy * W + sx]
-        n++
-      }
-    }
-    if (!n || sum / n > 120) {
+    // 投影點必須落在圖內（歪掉會投到界外）
+    if (px < 0 || py < 0 || px >= W || py >= H) {
       const err = new Error('作答卷對齊檢核失敗（定位方塊可能被遮住或摺到），請攤平整張卷、四角完整入鏡後重新掃描/拍照')
       err.code = 'ALIGNMENT_CHECK_FAILED'
       throw err
@@ -206,10 +199,10 @@ export async function readBackGeneratedSheet(imageBuffer, layout) {
   const { data: gray, info } = await img.clone().greyscale().raw().toBuffer({ resolveWithObject: true })
   const W = info.width
   const H = info.height
-  const anchors = detectAnchorsInGray(gray, W, H, 5, pageMm)
+  const anchors = detectAnchorsInGray(gray, W, H, 6, pageMm)
   const anchorUv = anchorsMm.map(([x, y]) => [(x - uvBasis.x0) / uvBasis.w, (y - uvBasis.y0) / uvBasis.h])
   const He = homography(anchorUv, anchors)
-  verifyAlignment(gray, W, H, He, layout)
+  verifyAlignment(W, H, He, layout)
 
   const cells = []
   for (const b of boxes) {
