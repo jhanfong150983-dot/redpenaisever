@@ -90,6 +90,7 @@ export const STAGE_MODEL = Object.freeze({
   //   extract 是一次性建答案卷（非每生），成本可接受；印刷 OCR 部分 PRO 同樣勝任。
   [AI_ROUTE_KEYS.ANSWER_KEY_EXTRACT]: MODEL_PRO,           // 答案卷題目辨識（含密集勾選、需 PRO 視覺）
   [AI_ROUTE_KEYS.ANSWER_KEY_SOLVE]: MODEL_PRO,             // 生成答案卷：AI 解題起草（3.6＋default thinking，段1 沙盒實證國82.5%/數91%）
+  [AI_ROUTE_KEYS.ANSWER_KEY_READ_REFERENCE]: MODEL_PRO,   // 讀老師手寫參考答案（read 級任務、含注音/數學式）
   [AI_ROUTE_KEYS.ANSWER_KEY_REANALYZE]: MODEL_FLASH,       // 答案卷重新分析
   [AI_ROUTE_KEYS.ANSWER_KEY_TAG_CONCEPTS]: MODEL_FLASH,    // 108 課綱概念標記
   [AI_ROUTE_KEYS.REPORT_TEACHER_SUMMARY]: MODEL_FLASH,     // 老師週報
