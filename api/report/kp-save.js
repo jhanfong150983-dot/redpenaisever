@@ -20,6 +20,8 @@ function mergeAnalysis(ak, byId, kpTips) {
       knowledgePoints: (Array.isArray(it.knowledgePoints) ? it.knowledgePoints : []).map((k) => String(k).slice(0, 60)).slice(0, 4),
       // 2026-07-22 三層版：課綱指標代碼（固定候選、跨卷穩定）——未來趨勢聚合用這層
       ...(it.code ? { code: String(it.code).slice(0, 20) } : {}),
+      // 2026-09-06 第二層：知識節點 ID（自研節點表、跨卷/跨校比對用）——漏存會讓雷達下鑽對不上節點
+      ...(it.nodeId ? { nodeId: String(it.nodeId).slice(0, 24) } : {}),
       ...(it.ability ? { ability: String(it.ability).slice(0, 30) } : {}),
       ...(it.cnaArea ? { cnaArea: String(it.cnaArea).slice(0, 30) } : {}),
       ...(it.note ? { note: String(it.note).slice(0, 120) } : {}),
