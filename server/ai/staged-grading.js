@@ -7435,8 +7435,9 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
 
   const accessorTypesUsed = new Set((compactAnswerKey.questions || []).map((q) => q.questionCategory).filter(Boolean))
   // 2026-09-07 fill_variants 判準制（user 拍板）：命中清單→對；清單外→依 referenceAnswer 判準判斷（造詞/同義注釋）。
-  //   只放寬、不新增誤殺 → 上線前需全庫回放+反向檢查看放水幾格。預設關（FILL_VARIANTS_JUDGE_ENABLED='1' 才開）。
-  const fvVariantsRule = process.env.FILL_VARIANTS_JUDGE_ENABLED === '1'
+  //   opt-in 天然收斂：只在 referenceAnswer 是「判準」（新擷取才產）才判斷，舊範例式資料維持清單比對、動不到。
+  //   因此不需傳統全庫回放（舊資料 inert）→ 預設開；保留 kill-switch：FILL_VARIANTS_JUDGE_ENABLED='0' 才關。
+  const fvVariantsRule = process.env.FILL_VARIANTS_JUDGE_ENABLED !== '0'
     ? 'fill_variants: 先比對 acceptableAnswers[]，命中任一 → isCorrect=true（確定性、優先）。若未命中，依 referenceAnswer 描述的「可接受條件（簡易判準）」判斷學生答案是否成立（例：合法造詞、與正解同義的注釋）；成立→isCorrect=true，否則 false、errorType=\'concept\'。⚠ 只在 referenceAnswer 是「條件描述」時才動用判斷；若 referenceAnswer 只是單一範例答案或空白，維持「不在 acceptableAnswers 即錯」，不要自行擴大放行。'
     : 'fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.'
   const _accPrompt = `
