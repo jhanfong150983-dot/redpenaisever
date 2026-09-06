@@ -11904,6 +11904,18 @@ async function handleGetConceptMap(req, res) {
     res.status(200).json({ items: [] })
     return
   }
+  // 2026-09-06 高中選修分軌：數學高二/高三代碼帶軌別(11A/11B、12甲/12乙)。
+  //   帶 track=A|B 時只回該軌代碼，避免第一層歸類在兩軌共有概念(如平面向量)間亂選→雷達裂軸。
+  //   grade<11 或未帶 track ⇒ 不過濾(向後相容)。A↔甲(自然/學術組)、B↔乙(社會/應用組)。
+  const trackRaw = Array.isArray(req.query?.track) ? req.query.track[0] : req.query?.track
+  const trackInfix = (() => {
+    if (!trackRaw || grade < 11) return null
+    const t = String(trackRaw).trim().toUpperCase()
+    if (t !== 'A' && t !== 'B') return null
+    if (grade === 11) return t === 'A' ? '-11A-' : '-11B-'
+    if (grade === 12) return t === 'A' ? '-12甲-' : '-12乙-'
+    return null
+  })()
   try {
     const supabaseDb = getSupabaseAdmin()
     let query = supabaseDb
@@ -11917,8 +11929,9 @@ async function handleGetConceptMap(req, res) {
       res.status(500).json({ error: 'DB error' })
       return
     }
-    console.log(`[concept-map] grade=${grade} domain=${domainRaw || '(none)'} subjects=${subjects ? subjects.join(',') : 'all'} items=${data?.length || 0}`)
-    res.status(200).json({ items: data || [] })
+    const items = trackInfix ? (data || []).filter((it) => String(it.code || '').includes(trackInfix)) : (data || [])
+    console.log(`[concept-map] grade=${grade} domain=${domainRaw || '(none)'} subjects=${subjects ? subjects.join(',') : 'all'} track=${trackRaw || '(none)'} items=${items.length}/${data?.length || 0}`)
+    res.status(200).json({ items })
   } catch (err) {
     console.error('[concept-map] error:', err)
     res.status(500).json({ error: 'Internal Server Error' })
