@@ -7434,6 +7434,11 @@ Determine the mode by counting words in correctAnswer, then apply the correspond
     : []
 
   const accessorTypesUsed = new Set((compactAnswerKey.questions || []).map((q) => q.questionCategory).filter(Boolean))
+  // 2026-09-07 fill_variants 判準制（user 拍板）：命中清單→對；清單外→依 referenceAnswer 判準判斷（造詞/同義注釋）。
+  //   只放寬、不新增誤殺 → 上線前需全庫回放+反向檢查看放水幾格。預設關（FILL_VARIANTS_JUDGE_ENABLED='1' 才開）。
+  const fvVariantsRule = process.env.FILL_VARIANTS_JUDGE_ENABLED === '1'
+    ? 'fill_variants: 先比對 acceptableAnswers[]，命中任一 → isCorrect=true（確定性、優先）。若未命中，依 referenceAnswer 描述的「可接受條件（簡易判準）」判斷學生答案是否成立（例：合法造詞、與正解同義的注釋）；成立→isCorrect=true，否則 false、errorType=\'concept\'。⚠ 只在 referenceAnswer 是「條件描述」時才動用判斷；若 referenceAnswer 只是單一範例答案或空白，維持「不在 acceptableAnswers 即錯」，不要自行擴大放行。'
+    : 'fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.'
   const _accPrompt = `
 You are stage Assessor. Score each question by comparing student answers to the answer key.
 
@@ -7476,7 +7481,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
 - fill_blank: Exact match required. UNIT RULE: if the correctAnswer contains a unit (e.g. "15 公分"), the student's unit must be identical OR an equivalent pair per the UNIT EQUIVALENCE TABLE above (e.g. "15 km" = "15 公里" ✓). Units NOT in the same equivalence pair are WRONG (errorType='unit'): 公尺 ≠ 公分, 公克 ≠ 公斤, m ≠ cm. Do NOT accept other unit substitutions regardless of strictness setting.
   DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
   STUDENT DUAL-FORM RULE (國字注音，與上條互補): 國字注音題的 studentAnswerRaw 可能同時含「國字」與「注音」兩種形式（系統把作答盒內看到的兩者都讀出來、格式「國字 注音」，其中一個是印刷題幹、一個是學生手寫，你不需分辨）。correctAnswer 為單一形式時，只要 studentAnswerRaw 裡的**國字 OR 注音 任一與 correctAnswer 完全相符**（注音須含聲調）即 isCorrect=true、滿分；另一個不吻合的形式是印刷題幹，**忽略、不可當作答錯扣分**。若兩形式都不等於 correctAnswer（含注音聲調不符、破音字錯讀如紮讀成ㄗㄚ、只讀到印刷國字而正解是注音）→ isCorrect=false。
-- fill_variants: Match any entry in acceptableAnswers[]. Answers not in the list are wrong.
+- ${fvVariantsRule}
 - table_cell: 群組批改表格題。AnswerKey 提供 cells 陣列（每元素 {row, col, label, answer}）；Read 結果在 cellValues 陣列（每元素 {row, col, student}）。
   - 對每個 answerKey.cells[i]，依 (row, col) 找到對應的 cellValues 元素，比對 student vs answer。
   - 比對規則同 fill_blank（精確比對 + UNIT RULE）；單位、空白、不可讀的處理一致。
