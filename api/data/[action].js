@@ -8,6 +8,7 @@ export const config = {
 import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
+import { getBuildQuota } from '../../server/build-quota.js'
 import { getEnvValue } from '../../server/_env.js'
 import { runAiPipeline } from '../../server/ai/orchestrator.js'
 import { AI_ROUTE_KEYS } from '../../server/ai/routes.js'
@@ -11581,6 +11582,19 @@ export default async function handler(req, res) {
   }
   if (action === 'teacher-preferences') {
     await handleTeacherPreferences(req, res)
+    return
+  }
+  if (action === 'build-quota') {
+    // 2026-09-06 建卷 AI 週上限：回本週已用/上限/剩餘，供建卷 modal 顯示「本週剩餘 N 次」
+    try {
+      const { user } = await getAuthUser(req, res)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+      const q = await getBuildQuota(user.id, getSupabaseAdmin())
+      res.status(200).json(q)
+    } catch (e) {
+      // fail-open：查詢失敗回一個「不擋」的寬鬆值，前端就不顯示限制
+      res.status(200).json({ used: 0, cap: null, remaining: null, unlimited: true, error: String(e?.message || e) })
+    }
     return
   }
   if (action === 'students-batch-upsert') {

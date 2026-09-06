@@ -14,6 +14,7 @@ import { runAiPipeline } from '../server/ai/orchestrator.js'
 import { MODEL_FLASH } from '../server/ai/model-config.js'
 import { resolveBillingUserId } from '../server/billing-user.js'
 import { debitSchoolInk } from '../server/school-wallet.js'
+import { isBuildRoute, getBuildQuota } from '../server/build-quota.js'
 import crypto from 'crypto'
 
 // 🆕 AnswerKey 緩存（按 user + hash 存儲）
@@ -484,6 +485,27 @@ export default async function handler(req, res) {
     answerSheetMode: requestedAnswerSheetMode,
     ...payload
   } = body || {}
+
+  // 2026-09-06 建卷 AI 週上限（免費但鎖次數，user 拍板）：locate/extract/reanalyze/solve/read_reference
+  //   本週超過上限即擋（每週一台灣時區自動重置）。fail-open：check 本身出錯不擋建卷。
+  //   系統 admin 不限、學校行政高上限、一般老師低上限（見 server/build-quota.js）。
+  if (isBuildRoute(routeKey)) {
+    try {
+      const bq = await getBuildQuota(user.id)
+      if (!bq.unlimited && bq.used >= bq.cap) {
+        console.warn(`${logPrefix} build-quota 擋下 user=${maskUserId(user.id)} used=${bq.used}/${bq.cap}`)
+        res.status(429).json({
+          error: 'build_quota_exceeded',
+          message: `本週建卷額度已用完（${bq.used}/${bq.cap} 次，每週一自動重置）。這通常代表操作異常；若確有需求請與我們聯繫。`,
+          used: bq.used,
+          cap: bq.cap,
+        })
+        return
+      }
+    } catch (e) {
+      console.warn(`${logPrefix} build-quota check 失敗（放行）:`, e?.message || e)
+    }
+  }
   // 2026-05-21: model 由 server/ai/model-config.js 統一管理（MODEL_PRO / MODEL_FLASH 2 個 env）
   // orchestrator.executeSinglePipelineCall + staged-grading.executeStage 內部會以 routeKey 查 STAGE_MODEL
   // proxy 層 model 變數只是個 placeholder（傳下去會被 orchestrator 覆寫），給 client 傳什麼都行
