@@ -6982,7 +6982,7 @@ function matchArbiterItemByQid(rawQid, items) {
 //          table_cell 引用 fill_blank → 這些型出現時強制保留被引用型的 bullet，避免斷引。
 const ACCESSOR_KNOWN_CATS = new Set([
   'single_choice', 'multi_choice', 'circle_select_one', 'circle_select_many', 'single_check', 'multi_check',
-  'multi_check_other', 'true_false', 'fill_blank', 'multi_fill', 'table_cell', 'matching', 'ordering',
+  'multi_check_other', 'true_false', 'fill_blank', 'multi_fill', 'table_cell', 'table_check', 'matching', 'ordering',
   'mark_in_text', 'calculation', 'word_problem', 'fill_variants', 'map_fill', 'short_answer', 'map_symbol',
   'grid_geometry', 'connect_dots', 'diagram_draw', 'diagram_color', 'compound_circle_with_explain',
   'compound_check_with_explain', 'compound_writein_with_explain', 'compound_judge_with_correction',
@@ -6990,7 +6990,7 @@ const ACCESSOR_KNOWN_CATS = new Set([
 ])
 const ACCESSOR_RULE_DEPS = {
   circle_select_many: ['multi_check'], mark_in_text: ['multi_check'],
-  multi_check_other: ['multi_check'], table_cell: ['fill_blank']
+  multi_check_other: ['multi_check'], table_cell: ['fill_blank'], table_check: ['table_cell', 'fill_blank']
 }
 function gateAccessorCategoryRules(prompt, typesUsed) {
   try {
@@ -7483,6 +7483,7 @@ QUESTION CATEGORY RULES (apply based on questionCategory field in AnswerKey):
   DUAL-ANSWER RULE: if correctAnswer contains "/" (e.g. "彰/ㄓㄤ"), this is a 國字注音 question — student writes EITHER the character OR the phonetic. Accept if student answer matches EITHER side of the "/". Do NOT require both.
   STUDENT DUAL-FORM RULE (國字注音，與上條互補): 國字注音題的 studentAnswerRaw 可能同時含「國字」與「注音」兩種形式（系統把作答盒內看到的兩者都讀出來、格式「國字 注音」，其中一個是印刷題幹、一個是學生手寫，你不需分辨）。correctAnswer 為單一形式時，只要 studentAnswerRaw 裡的**國字 OR 注音 任一與 correctAnswer 完全相符**（注音須含聲調）即 isCorrect=true、滿分；另一個不吻合的形式是印刷題幹，**忽略、不可當作答錯扣分**。若兩形式都不等於 correctAnswer（含注音聲調不符、破音字錯讀如紮讀成ㄗㄚ、只讀到印刷國字而正解是注音）→ isCorrect=false。
 - ${fvVariantsRule}
+- table_check: 正常情況已在進 Accessor 前正規化成 table_cell。若仍看到 table_check（正規化漏接的防呆），一律**比照下面 table_cell 規則處理**（cells/cellValues 逐格比對、依答對比例給分），不要落通用計分。
 - table_cell: 群組批改表格題。AnswerKey 提供 cells 陣列（每元素 {row, col, label, answer}）；Read 結果在 cellValues 陣列（每元素 {row, col, student}）。
   - 對每個 answerKey.cells[i]，依 (row, col) 找到對應的 cellValues 元素，比對 student vs answer。
   - 比對規則同 fill_blank（精確比對 + UNIT RULE）；單位、空白、不可讀的處理一致。
@@ -7669,6 +7670,7 @@ ${isHighSchool
 - circle_select_one: Student wrote the selected option **text** (not letter), e.g. "同意". Compare to answer field (correct option text) — exact text match after whitespace trim and full-width/half-width normalize. score = maxScore if match, else 0. errorType: 'concept' if wrong; 'blank' if empty/未圈.
 - circle_select_many: Student answer is comma-separated option **texts** (e.g. "同意,中立"). answer field is correct set as comma-separated texts. Apply SEPARATOR NORMALIZATION + set comparison logic identical to multi_check (correct ∩, extraWrong = max(0, |wrong|−|missing|), partial credit formula). errorType: 'concept' if wrong; 'blank' if empty.
 - mark_in_text: Student answer is comma-separated marked words (e.g. "春天,夏天"). answer field is correct set as comma-separated. Use the same set comparison + partial credit formula as multi_check. errorType: 'concept' if wrong words marked; 'blank' if empty.
+- ordering: 排序題。studentAnswerRaw 是學生在這一格填的序號（如 "3"）；answer field 是這一格的正確序號。正規化後以整數比對：isCorrect = 學生序號 === 正確序號；score = maxScore if 相符 else 0（逐格獨立計分，非整組全對才給分）。errorType: 'concept' 序號錯；'blank' 空白/未填/不可讀。⚠ 只比這一格，不要臆測其他格。
 - compound_circle_with_explain / compound_check_with_explain / compound_writein_with_explain: Compound D-bucket question. studentAnswerRaw uses "⧉" as separator: "[partA] ⧉ [partB]" where partA = 圈選/勾選位置編號/寫入代號, partB = 理由文字.
   REQUIRED: rubricsDimensions present (typically 2 dims: 圈選/勾選/代號 + 理由).
   Apply per-dimension scoring:
