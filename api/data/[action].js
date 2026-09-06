@@ -11597,6 +11597,30 @@ export default async function handler(req, res) {
     }
     return
   }
+  if (action === 'qtype-log') {
+    // 2026-09-07 Phase 3：老師改題型 override log（fire-and-forget）。表不存在/失敗都不報錯給前端、不阻塞存檔。
+    try {
+      const { user } = await getAuthUser(req, res)
+      if (!user) { res.status(200).json({ ok: false }); return }
+      const events = Array.isArray(req.body?.events) ? req.body.events.slice(0, 200) : []
+      if (events.length) {
+        const rows = events.map((e) => ({
+          stage: String(e?.stage || 'override').slice(0, 20),
+          answer_key_id: e?.answer_key_id ? String(e.answer_key_id).slice(0, 64) : null,
+          question_id: e?.question_id ? String(e.question_id).slice(0, 64) : null,
+          ai_category: e?.ai_category ? String(e.ai_category).slice(0, 40) : null,
+          final_category: e?.final_category ? String(e.final_category).slice(0, 40) : null,
+          domain: e?.domain ? String(e.domain).slice(0, 20) : null,
+          user_id: user.id,
+        }))
+        await getSupabaseAdmin().from('qtype_pipeline_log').insert(rows)
+      }
+      res.status(200).json({ ok: true })
+    } catch {
+      res.status(200).json({ ok: false }) // fire-and-forget
+    }
+    return
+  }
   if (action === 'students-batch-upsert') {
     await handleStudentsBatchUpsert(req, res)
     return
