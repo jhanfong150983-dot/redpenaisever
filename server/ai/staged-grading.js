@@ -2726,8 +2726,14 @@ export function unitErrorRuleLabel(answerKey) {
 // 2026-07-16 processCreditRule（應用題過程分、作業層級設定、user 拍板三段）：
 //   none=不給分(預設=現行)/half=一半/deduct=扣固定 processCreditDeduction 分（下限 0）。
 //   適用「最終答案錯、但 accessor 看 crop 判定列式與過程正確到最後一步（correct_until_final）」的格。
+// ⛔ 2026-09-10 停用（user 拍板）：word_problem 主路徑已是級分制（下方 B-Level 分支：帶 levelRubric 由 code 依
+//   levelRules 算分、判官不讀此設定），此設定只剩 fail-open 退路與「數值比對閘門」副作用會發作
+//   （rule≠none 時連 fill_blank/calculation 答錯也被送 accessor 走過程分救濟）＝對老師是假承諾。
+//   一律視為 'none'（＝歷來預設、行為不變；盤點 DB 113 份作業 0 份非 none）。UI 已拆。重開：PROCESS_CREDIT_ENABLED='1'。
+const PROCESS_CREDIT_ENABLED = process.env.PROCESS_CREDIT_ENABLED === '1'
+const processCreditRuleOf = (answerKey) => (PROCESS_CREDIT_ENABLED ? ensureString(answerKey?.processCreditRule, 'none') : 'none')
 export function processCreditScoreFor(maxScore, answerKey) {
-  const rule = ensureString(answerKey?.processCreditRule, 'none')
+  const rule = processCreditRuleOf(answerKey)
   const max = Math.max(0, toFiniteNumber(maxScore) ?? 0)
   if (rule === 'half') return max / 2
   if (rule === 'deduct') {
@@ -2737,7 +2743,7 @@ export function processCreditScoreFor(maxScore, answerKey) {
   return 0
 }
 export function processCreditRuleLabel(answerKey) {
-  const rule = ensureString(answerKey?.processCreditRule, 'none')
+  const rule = processCreditRuleOf(answerKey)
   if (rule === 'half') return '給一半分數'
   if (rule === 'deduct') return `扣 ${toFiniteNumber(answerKey?.processCreditDeduction) ?? 1} 分`
   return '不給分'
@@ -3054,7 +3060,7 @@ export function gradeMathFinalDeterministic(q, studentAnswerRaw, status, answerK
   const keyText = ensureString(q?.answer ?? q?.referenceAnswer, '').trim()
   if (sv.num !== kv.num) {
     // 數值錯:過程分規則開啟時交 accessor 走窄判定救濟,否則 0
-    if (ensureString(answerKey?.processCreditRule, 'none') !== 'none') return { gradable: false }
+    if (processCreditRuleOf(answerKey) !== 'none') return { gradable: false }
     return { gradable: true, isCorrect: false, score: 0, maxScore, errorType: 'calculation', scoringReason: `學生答句「${raw}」，正確答案為「${keyText}」，答案數值錯誤` }
   }
   if (kv.hadUnit && sv.unit !== kv.unit) {
@@ -7286,7 +7292,7 @@ export function buildAccessorPrompt(answerKey, readAnswerResult, domainHint, gra
      （覆寫各題型「單位錯 score=0」規則）、errorType='unit'、isCorrect=false。數值錯誤仍為 0。`
     : ''
   // 2026-07-16 應用題過程分（作業層級設定、user 拍板）：答案錯的題附 crop、accessor 只回窄判定，計分由 code 做
-  const processCreditClause = ensureString(answerKey?.processCreditRule, 'none') !== 'none'
+  const processCreditClause = processCreditRuleOf(answerKey) !== 'none'
     ? `
   🔧 PROCESS VERDICT（本作業設定＝過程對但答案錯${processCreditRuleLabel(answerKey)}）: 對 calculation/word_problem
      且學生「最終答案錯誤」的題，除原本欄位外必須額外回傳 processVerdict：
@@ -8621,7 +8627,7 @@ function buildFinalGradingResult({
             row.reason = `數值正確但單位錯誤（本作業規則：${unitErrorRuleLabel(answerKey)}）：學生 "${stuFinal}"、標準 "${refFinal}"`
             row.confidence = 100
             console.log(`[programmatic-override] ${questionId} unit-partial(${row.score}) (${stuFinal} vs ${refFinal})`)
-          } else if (ensureString(answerKey?.processCreditRule, 'none') !== 'none'
+          } else if (processCreditRuleOf(answerKey) !== 'none'
               && ensureString(row?.processVerdict, '') === 'correct_until_final') {
             // 2026-07-16 應用題過程分（user 拍板）：accessor 看 crop 窄判定「過程正確到最後一步、
             //   僅最終答案算錯/抄錯」→ 依作業規則給部分分（計分 code 做、判定 AI 做窄題）
@@ -15086,7 +15092,7 @@ export async function runStagedGradingPhaseB({
   const calcFinalMatchedIds = new Set()
   const calcFinalWrongIds = new Set()
   const calcUnextractableIds = new Set()
-  const processCreditOn = ensureString(answerKey?.processCreditRule, 'none') !== 'none'
+  const processCreditOn = processCreditRuleOf(answerKey) !== 'none'
   for (const ans of finalReadAnswerResult.answers) {
     if (manualBypassIds.has(ans.questionId)) continue
     if (ans.status !== 'read') continue
