@@ -10419,6 +10419,10 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
   const lrSkipRead = process.env.LEVEL_SKIP_READ !== '0'
   const lrIsCell = (qid) => {
     if (!lrSkipRead) return false
+    // 2026-09-10 會考級分模式關閉（answerKey.levelRubricEnabled===false）→ 這些格會走 Bucket A 只比最終答案，
+    //   read 一定要照跑；若仍拔 read，accessor 會拿佔位字串比對→整批判 0（08-11 注音事故同型）。
+    //   ⚠ 必須與 Phase B 的 levelModeOn 閘門一致。
+    if (answerKey?.levelRubricEnabled === false) return false
     const ak = akMapForAi2.get(qid)
     return Array.isArray(ak?.levelRubric?.levelRules) && ak.levelRubric.levelRules.length > 0
   }
@@ -14208,14 +14212,17 @@ export async function runStagedGradingPhaseB({
   // fail-open：缺 levelRubric / 缺 crop / 判官全失敗 → 不進本分支，照原本流程（只比最終答案）。
   // kill switch：LEVEL_JUDGE='0'。
   const levelBypassIds = new Set()
-  const levelQuestions = akQuestions.filter((q) => q?.id && q?.levelRubric?.levelRules?.length > 0)
+  // 2026-09-10 會考級分模式開關（answerKey.levelRubricEnabled、老師自選）：false → 即使卷上留有規準也不進級分制、
+  //   退回 Bucket A 只比最終答案（＝級分制之前的原路）。undefined＝舊卷相容視為開。非破壞：規準資料留著、重開即生效。
+  const levelModeOn = answerKey?.levelRubricEnabled !== false
+  const levelQuestions = levelModeOn ? akQuestions.filter((q) => q?.id && q?.levelRubric?.levelRules?.length > 0) : []
   {
     // 為什麼沒跑要看得出來：實測第一次上線時 0/32 份走到判官，卻無從得知卡在哪一關。
     const wp = akQuestions.filter((q) => q?.questionCategory === 'word_problem')
     if (wp.length > 0) {
       logStaged(pipelineRunId, 'basic',
         `[B-Level] 應用題 ${wp.length} 題、其中帶 levelRules ${levelQuestions.length} 題`
-        + `｜kill switch=${process.env.LEVEL_JUDGE === '0' ? 'OFF' : 'ON'}`
+        + `｜kill switch=${process.env.LEVEL_JUDGE === '0' ? 'OFF' : 'ON'}｜會考級分模式=${levelModeOn ? 'ON' : 'OFF(只比最終答案)'}`
         + `｜學生圖 ${inlineImages.length} 張`)
     }
   }
