@@ -14076,6 +14076,7 @@ export async function runStagedGradingPhaseB({
         // 3) 對非空白項跑 PRO grade（整題全空白 → 不發 call、直接 0）
         let grades = []
         let vjVoteSplit = false   // 三票有分歧 → 壓低信心送複核
+        let vjBallots = []        // 逐票紀錄（2026-09-12 起存進 vjItemResults.votes，供日後零成本回放）
         let vjCacheKey = null
         let vjFromCache = null    // 'ai' | 'teacher'（命中冷凍表）
         if (notBlank.length > 0 && studentImg?.data) {
@@ -14149,7 +14150,7 @@ export async function runStagedGradingPhaseB({
               const gradeParts = refCropInline
                 ? [{ text: gradePromptText }, { text: '【正確答案圖】' }, { inlineData: refCropInline }, { text: '【學生作答圖】' }, { inlineData: crop }]
                 : [{ text: gradePromptText }, { inlineData: crop }]
-              const ballots = (await Promise.all(Array.from({ length: votes }, async () => {
+              const castVote = async () => {
                 const resp = await executeStage({
                   apiKey, model: phaseBModel, payload: { ...payload, ...VJ_GRADE_GENERATION_CONFIG },
                   timeoutMs: Math.min(getRemainingBudget(), 30_000), routeHint, routeKey: AI_ROUTE_KEYS.GRADING_VJ_GRADE,
@@ -14157,7 +14158,31 @@ export async function runStagedGradingPhaseB({
                 })
                 if (resp) stageResponses.push(resp)
                 return resp?.ok ? (parseVjGradeResult(extractCandidateText(resp.data) || '', n) || []) : null
-              }))).filter(Boolean)
+              }
+              // ── 2026-09-12 惰性第三票（user 拍板預設開；VJ_VOTES_LAZY='0' 回退三票並行）──────
+              //   受控實驗（local-only/exp-vj-lazy-third-vote-2026-09-12、65 題、唯一變因＝第三票投不投）：
+              //   三票全同 63/65（97%）→ 第三票省 32% 呼叫、判定改變 0、今制標分歧的 2 題惰性版都仍投第三票。
+              //   規則：先投 2 票並行、逐項全同即定案；不同才補第三票走原多數決。
+              //   不變量：「投了第三票」⇔「今制會標分歧」（票1≠票2 時 tally 不可能 3:0）→ 低信心＝老師看到判官投過第三票。
+              //   取捨（同國字判官 8/31）：票1=票2≠票3 的分歧看不到（≈分歧題的 1/3、本輪 0/65），分數不變。
+              const lazy = process.env.VJ_VOTES_LAZY !== '0' && votes >= 3
+              let ballotsRaw
+              if (lazy) {
+                ballotsRaw = await Promise.all([castVote(), castVote()])
+                const [b1, b2] = ballotsRaw
+                const firstTwoAgree = !!(b1 && b2) && Array.from({ length: n }, (_, k) => k + 1)
+                  .every((idx) => b1.find((x) => x.idx === idx)?.verdict === b2.find((x) => x.idx === idx)?.verdict)
+                if (!firstTwoAgree) {
+                  const extra = await Promise.all(Array.from({ length: votes - 2 }, () => castVote()))
+                  ballotsRaw.push(...extra)
+                } else {
+                  logStaged(pipelineRunId, 'basic', `[B-VJ] ${qId} 前兩票逐項一致 → 第三票省略`)
+                }
+              } else {
+                ballotsRaw = await Promise.all(Array.from({ length: votes }, () => castVote()))
+              }
+              vjBallots = ballotsRaw
+              const ballots = ballotsRaw.filter(Boolean)
               if (ballots.length > 0) {
                 // 逐項多數決；票數相同（如 1/2/3 各一票）→ 取第一票，並記為分歧
                 grades = Array.from({ length: n }, (_, i) => {
@@ -14181,6 +14206,10 @@ export async function runStagedGradingPhaseB({
         }
 
         const agg = aggregateVjScore(itemLabels, blankConfirmed, grades, maxScore, vjRubric?.itemScores ?? null)
+        // 逐票存檔：votes[i] = 第 i 票對該項的 verdict（null＝該票呼叫失敗）；冷凍表命中時 vjBallots 為空、不寫
+        if (vjBallots.length > 0) {
+          for (const r of agg.vjItemResults) r.votes = vjBallots.map((b) => (b ? (b.find((x) => x.idx === r.idx)?.verdict ?? null) : null))
+        }
         // ── ⑤ 冷凍：判官剛判完才寫（命中冷凍表的不用重寫）───────────────────────
         //   upsert 用 ignoreDuplicates → **永遠不覆蓋既有列**，老師回寫的 source='teacher' 受保護。
         if (vjCacheKey && !vjFromCache) {
