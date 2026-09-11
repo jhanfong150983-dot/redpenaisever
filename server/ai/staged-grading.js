@@ -752,7 +752,9 @@ export async function cropWithMarkByBbox(imageBase64, mimeType, bbox, padX = 0.0
 //   其他科機制相同但未實證 → 出事就用 kill switch 或 READ_SHEET_DOMAINS 限科。
 // kill switch: READ_SHEET='0'（回退逐張裁圖）；限科: READ_SHEET_DOMAINS='國語,英語'
 const READ_SHEET_ENABLED = process.env.READ_SHEET !== '0'
-const READ_SHEET_MAX_CELLS = Math.max(2, Number(process.env.READ_SHEET_MAX_CELLS) || 20) // 沙盒驗到 20 格/張
+// 2026-09-11 20→30：受控實驗 S 合成全格＝一型一張（數學 fill_blank 29 格/張、國語 choice 50 格/張 1,240 格 100%）；
+//   30 = text 家族最大 batch（fill_blank 30），讓「一批＝一張」與沙盒形狀一致。
+const READ_SHEET_MAX_CELLS = Math.max(2, Number(process.env.READ_SHEET_MAX_CELLS) || 30)
 const SHEET_CELL_W = 460, SHEET_LABEL_H = 30, SHEET_GAP = 8
 
 // ⭐ 2026-08-09 合成圖只收「印刷記號類」家族（英語 3-E-7 逗號事故定案）─────────────────
@@ -782,7 +784,24 @@ const SHEET_CELL_W = 460, SHEET_LABEL_H = 30, SHEET_GAP = 8
 //   規則寫成「按計費模型」而非「按科目」：3.x 按張固定計費才有錢可省；2.5 按像素、合成無意義。
 //   殘餘風險（明示）：國語 choice 合成圖仍有理論滑格風險，實證 2,480+ 格未發生，接受並由
 //   快照對照持續監控。text 家族維持逐張（R3 逗號/拼字實錘、與模型無關的品質決定）。
-export const SHEET_SAFE_FAMILIES = new Set(['choice', 'check'])
+// ⭐⭐⭐ 2026-09-11 翻案：text 家族也合成（user 定義「凡走 read1/read2 的題型一律合成圖」）──────
+//   8/09「text 回逐張」的依據是英語 classify 卷（bbox 連坐、3-E-7 逗號事故）。改用真實手寫**作答卷**做
+//   受控實驗（唯一變因＝逐格 vs 合成全格；同 crop bytes、同 tsReadHead 逐字、同參數、同一致性函式）：
+//     數學 fill_blank 928 格（32 份）：stable 94.5% vs 91.5%；30 格「真讀錯聯集」user 逐格人工看 →
+//       P 逐格 誤殺0/放水0、S 合成全格 誤殺1/放水0，其餘差異全是分隔符/格式或學生字太醜（兩臂都救不了）。
+//     國語 short_answer 310 格（31 份）：stable 94.8% vs 91.6%；stable 格去標點後 ≠ final 兩臂皆 0。
+//   一致率 −3 pt ＝ 多 ~1 格/份進知答鏈（鏈仍逐格、每格 ~NT$0.045）；read 每份省 NT$0.75（數學）/0.23（國語）。
+//   詳 docs/實驗成本記錄.md 2026-09-11 三筆、local-only/exp-sheet-allcells-2026-09-10/run3.mjs、run4.mjs。
+//   ⚠ 英語 text（整行連印刷一起抄的規則）未用作答卷重測，依 user 定義一併納入；出事用 READ_SHEET_TEXT_ENGLISH='0' 單獨退回逐張。
+//   ⚠ compound/draw 也走兩讀但未實測、batch 1–4 省不了多少 → 預設不合成，READ_SHEET_FAMILIES 加上即開。
+//   旋鈕：READ_SHEET_FAMILIES='choice,check,text'（預設）；READ_SHEET='0' 全關；READ_SHEET_DOMAINS 限科。
+export const SHEET_SAFE_FAMILIES = new Set(
+  String(process.env.READ_SHEET_FAMILIES || 'choice,check,text').split(',').map((s) => s.trim()).filter(Boolean)
+)
+const READ_SHEET_TEXT_ENGLISH = process.env.READ_SHEET_TEXT_ENGLISH !== '0'
+/** 該 read 家族是否走合成圖（英語 text 可單獨退回） */
+export const sheetFamilyEligible = (family, isEnglish = false) =>
+  SHEET_SAFE_FAMILIES.has(family) && !(family === 'text' && isEnglish && !READ_SHEET_TEXT_ENGLISH)
 export const SHEET_SAFE_TYPES = new Set([
   'single_choice', 'multi_choice', 'true_false',
   'single_check', 'multi_check', 'circle_select_one', 'circle_select_many'
@@ -10507,7 +10526,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
           // ── 2026-08-07 合成圖 read：N 張裁圖 → 少數幾張大圖（圖片 token −94%、見 buildReadSheets 註解）──
           //   ordering(freshCrop、batch 1) 與單格批次不合成；任何失敗 fail-open 走逐張。
           const sheets = (readSheetEnabledFor(internalContext?.domainHint) && !cfg.freshCrop
-              && SHEET_SAFE_FAMILIES.has(cfg.family)
+              && sheetFamilyEligible(cfg.family, domainIsEnglish)   // 2026-09-11 起含 text（見 SHEET_SAFE_FAMILIES 註解）
               && sheetModelEligible(readModelOverride || model)   // 2.5 按像素計費＝合成無錢可省 → 逐張（見 SHEET_SAFE_FAMILIES）
               && cells.length >= 2)
             ? await buildReadSheets(cells) : null
@@ -10515,6 +10534,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
             const labelById = new Map(cells.map((c) => [c.questionId, c.label]))
             parts[0] = { text: tsReadHead(cfg.family, role) + sheetNoteOf(sheets.flatMap((s) => s.ids.map((id) => labelById.get(id) || id))) }
             for (const s of sheets) parts.push({ inlineData: s.inlineData })
+            if (role === 'detail') logStaged(pipelineRunId, 'basic', `[type-split] ${type} 合成圖 read：${cells.length} 格 → ${sheets.length} 張（family=${cfg.family}）`)
           } else {
             for (const c of cells) {
               parts.push({ text: `--- 題目 ${c.label} ---` })
@@ -10640,6 +10660,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       sheetItems.push({ questionId: String(q.questionId), crop, ai2Suffix: (correctAnswer && !hideAnswer) ? `（正確答案：${correctAnswer}）` : '' })
     }
     // 2026-08-09 長文題型回逐張（見 SHEET_SAFE_TYPES）：sheet 只收印刷記號類、其餘附獨立 crop part
+    //   ⚠ 2026-09-11 text 合成翻案只落在 type-split 路徑（預設路徑）；本全域路徑（TYPE_SPLIT_READ=0 才走）維持舊規則未動。
     const typeById = new Map(classifyAligned.map((q) => [String(q.questionId), q.questionType]))
     const sheetSafeItems = sheetItems.filter((it) => SHEET_SAFE_TYPES.has(typeById.get(it.questionId)))
     const looseItems = sheetItems.filter((it) => !SHEET_SAFE_TYPES.has(typeById.get(it.questionId)))
