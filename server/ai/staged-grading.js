@@ -36,6 +36,7 @@ import {
 import { buildElementQuestionPrompt, parseElementAnswer, aggregateElementAnswers } from './level-rubric-grader.js'
 import { buildRubricJudgePrompt, parseRubricJudgeResult, isRubricJudgeTarget } from './rubric-judge.js'
 import { buildJudgeCacheKey, loadJudgeVerdict, saveJudgeVerdict, judgeFreezeEnabled } from './judge-verdict-cache.js'
+import { buildLevelTranscribePrompt, parseTranscriptLines, formatTranscript, buildElementTextJudgePrompt } from './level-rubric-grader.js'
 import {
   VISUAL_JUDGMENT_TYPES,
   buildVjRubricPrompt,
@@ -100,6 +101,17 @@ export const JUDGE_HIGHRES_GENERATION_CONFIG = {
     mediaResolution: 'MEDIA_RESOLUTION_HIGH'
   }
 }
+
+// 2026-09-12 級分判官抄本制（沙盒 run-transcribe.mjs T_CFG / judge-only.mjs J_CFG 逐字）
+//   抄寫：整格一張、HIGH、MINIMAL、輸出上限 4096（抄本 JSON）；文字判官：純文字、MINIMAL、1024。
+//   LEVEL_JUDGE_MODE='image' 退回看圖逐要素判官（原路徑完整保留）。
+export const LEVEL_TRANSCRIBE_GENERATION_CONFIG = {
+  generationConfig: { temperature: 0, thinkingConfig: { thinking_level: 'MINIMAL' }, mediaResolution: 'MEDIA_RESOLUTION_HIGH', maxOutputTokens: 4096 }
+}
+export const LEVEL_TEXT_JUDGE_GENERATION_CONFIG = {
+  generationConfig: { temperature: 0, thinkingConfig: { thinking_level: 'MINIMAL' }, maxOutputTokens: 1024 }
+}
+export const levelJudgeMode = () => (process.env.LEVEL_JUDGE_MODE === 'image' ? 'image' : 'transcript')
 
 // ⭐ 2026-08-10 英語 text read 鎖 HIGH(user 逐假說追查定案；同 JUDGE_HIGHRES 的模式)────────
 //   英語 fill_blank「Yes, it is.」讀成「Yes it is」冤枉扣分事故——五個假說逐一對照排除:
@@ -14320,7 +14332,14 @@ export async function runStagedGradingPhaseB({
             if (c) crops.push({ label: '', inlineData: c })
           }
         }
-        const crop = crops[0]?.inlineData || null
+        // 2026-09-12 抄本制：抄寫員收「整格一張」（切半是看圖判官的注意力對策；抄寫實測整格 31/33 且無切斷數字）
+        const lvMode = levelJudgeMode()
+        let wholeCrop = null
+        if (lvMode === 'transcript' && bb && studentImg?.data) {
+          wholeCrop = crops.length === 1 && !crops[0].label ? crops[0].inlineData
+            : await cropInlineImageByBbox(studentImg.data, studentImg.mimeType, bb, true)
+        }
+        const crop = (lvMode === 'transcript' ? wholeCrop : null) || crops[0]?.inlineData || null
         if (!crop) {
           logStaged(pipelineRunId, 'basic',
             `[B-Level] ${qId} 取不到 crop、交回原流程`
@@ -14330,8 +14349,9 @@ export async function runStagedGradingPhaseB({
         }
         // ── 判定冷凍（2026-09-04）：鍵＝全部 crop bytes ＋ levelRubric ＋ prompt 版本。
         //   命中＝沿用整題判定（含逐要素 evidence），跳過全部逐要素呼叫。
-        const lvCacheKey = buildJudgeCacheKey('level', crops.map((c) => c.inlineData?.data),
-          { rubric: q.levelRubric, max: toFiniteNumber(q?.maxScore) ?? 0 })
+        const lvCacheKey = buildJudgeCacheKey('level',
+          (lvMode === 'transcript' && wholeCrop) ? [wholeCrop.data] : crops.map((c) => c.inlineData?.data),
+          { rubric: q.levelRubric, max: toFiniteNumber(q?.maxScore) ?? 0, ...(lvMode === 'transcript' ? { mode: 'transcript-v4' } : {}) })
         const lvCached = lvCacheKey ? await loadJudgeVerdict(getSupabaseAdmin(), lvCacheKey) : null
         if (lvCached?.payload && Number.isFinite(lvCached.payload.score)) {
           const cp = lvCached.payload
@@ -14352,7 +14372,40 @@ export async function runStagedGradingPhaseB({
           ...(q.levelRubric.requiredElements || []),
           ...(q.levelRubric.alternativeGroups || []).flatMap((g) => g.options || []),
         ]
-        const answers = await Promise.all(elements.map(async (el) => {
+        // ── 2026-09-12 抄本制：①整格知答抄寫（3.6 HIGH）②抄本純文字逐條判（3.6）；任一步失敗 → 退回下方看圖判官 ──
+        let lvTranscript = null
+        let answers = null
+        if (lvMode === 'transcript' && wholeCrop) {
+          const tResp = await executeStage({
+            apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+            payload: { ...payload, ...LEVEL_TRANSCRIBE_GENERATION_CONFIG },
+            timeoutMs: Math.min(getRemainingBudget(), 40_000), routeHint,
+            routeKey: AI_ROUTE_KEYS.GRADING_LEVEL_TRANSCRIBE,
+            stageContents: [{ role: 'user', parts: [{ text: buildLevelTranscribePrompt(elements) }, { inlineData: wholeCrop }] }],
+          })
+          if (tResp) stageResponses.push(tResp)
+          const lines = tResp?.ok ? parseTranscriptLines(extractCandidateText(tResp.data) || '') : null
+          if (lines) {
+            lvTranscript = formatTranscript(lines)
+            answers = await Promise.all(elements.map(async (el) => {
+              const resp = await executeStage({
+                apiKey, model: phaseBModel, modelOverride: MODEL_PRO,
+                payload: { ...payload, ...LEVEL_TEXT_JUDGE_GENERATION_CONFIG },
+                timeoutMs: Math.min(getRemainingBudget(), 25_000), routeHint,
+                routeKey: AI_ROUTE_KEYS.GRADING_LEVEL_JUDGE,
+                stageContents: [{ role: 'user', parts: [{ text: buildElementTextJudgePrompt(el, lvTranscript) }] }],
+              })
+              if (resp) stageResponses.push(resp)
+              if (!resp?.ok) return null
+              const parsed = parseElementAnswer(extractCandidateText(resp.data) || '')
+              return parsed ? { key: el.key, ...parsed } : null
+            }))
+            logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 抄本制：抄本 ${lines.length} 行 → 文字判 ${answers.filter(Boolean).length}/${elements.length} 要素`)
+          } else {
+            logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 抄寫失敗（status=${tResp?.status}）→ 退回看圖判官`)
+          }
+        }
+        if (!answers) answers = await Promise.all(elements.map(async (el) => {
           const resp = await executeStage({
             apiKey, model: phaseBModel, modelOverride: JUDGE_MODEL,
             payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
@@ -14381,7 +14434,7 @@ export async function runStagedGradingPhaseB({
           continue
         }
         logStaged(pipelineRunId, 'basic',
-          `[B-Level] ${qId} ${agg.level}級 ${agg.score}/${maxScore} 要素[${agg.found.join(',')}]`
+          `[B-Level] ${qId} ${agg.level}級 ${agg.score}/${maxScore} 要素[${agg.found.join(',')}]${lvTranscript ? '（抄本制）' : '（看圖）'}`
           + `${agg.unsure.length ? ` 沒把握[${agg.unsure.join(',')}]` : ''}`
           + `${agg.missingAnswer.length ? ` 未問到[${agg.missingAnswer.join(',')}]` : ''}`
           + ` 逐要素${ok.length}/${elements.length}`)
@@ -14398,7 +14451,7 @@ export async function runStagedGradingPhaseB({
           studentFinalAnswer: '卷面作答',
           needExplain: false,
           _levelBypass: true,
-          levelResult: { level: agg.level, found: agg.found, unsure: agg.unsure, evidence: agg.evidence },
+          levelResult: { level: agg.level, found: agg.found, unsure: agg.unsure, evidence: agg.evidence, ...(lvTranscript ? { mode: 'transcript', transcript: lvTranscript } : {}) },
         })
         levelBypassIds.add(qId)
         if (lvCacheKey) {
@@ -14408,7 +14461,7 @@ export async function runStagedGradingPhaseB({
               score: agg.score, maxScore, isCorrect: agg.level === 3,
               errorType: agg.level === 3 ? 'none' : (agg.found.length === 0 ? 'blank' : 'concept'),
               scoringReason: agg.reason, scoreConfidence: agg.confidence,
-              levelResult: { level: agg.level, found: agg.found, unsure: agg.unsure, evidence: agg.evidence },
+              levelResult: { level: agg.level, found: agg.found, unsure: agg.unsure, evidence: agg.evidence, ...(lvTranscript ? { mode: 'transcript', transcript: lvTranscript } : {}) },
             },
             score: agg.score, maxScore, confidence: agg.confidence,
             assignmentId: payload?.assignmentId ?? internalContext?.assignmentId ?? null,

@@ -324,3 +324,71 @@ export function aggregateElementAnswers(rubric, answers, maxScore) {
       : `${['零', '一', '二', '三'][level]}級分（${parts.join('；')}）`,
   }
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-09-12 抄本制（user 拍板落地）：整格一張「知答抄寫」→ 純文字逐條判要素。
+//   受控實驗（local-only/exp-level-judge-model-2026-09-12、33 題／198 要素、user 人工真值 13 條難題要素）：
+//     3.5 看圖（今制）對 9、抄本＋文字判官對 11；每題 NT$0.91 → 0.42（−54%）；證據＝抄本行號可讀。
+//   抄寫忠實規則（每條都是 user 看圖抓出來的失誤形態）：數值警語（提示值取代卷面值）、約分劃記、
+//     part 只在學生有寫、inferredPart 分開、圈號照原字、分欄先左後右、✓✗ 只進 note。
+//   ⛔ 盲抄（不給要素提示）實測更差（27/33、整段算式漏抄）→ 提示是必要的，警語擋取代。
+//   ⛔ 文字判官用 2.5 實測太弱（24/33）；整份要素一次判×3 票也更差（28/33）→ 3.6 逐條單問。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 整格知答抄寫 prompt（沙盒 run-transcribe.mjs HINT=warn v4 逐字） */
+export function buildLevelTranscribePrompt(elements) {
+  const hints = (elements || []).map((e) => `- ${e.key}：${e.desc}`).join('\n')
+  return `這是一題數學應用題作答區的裁切圖，學生手寫了解題過程。你是抄寫員：把圖上學生手寫的內容，由上到下、一行一筆，忠實抄成結構化資料。
+規則：
+1. 一行一筆，照卷面順序（有分欄就先左欄由上到下、再右欄由上到下）；同一小題的多行各自成一筆。
+   part 只在「學生自己在該行寫了小題號」時才填（照學生寫法，如 "(1)"、"1."、"①"）；學生沒寫就填 ""。
+   你若能從內容推斷該行屬於哪一小題，填在 inferredPart（如 "(4)"），不要填進 part。
+   圈號 ①②③④ 或其他記號一律照原字抄進 text，不要改寫成 (1)(2)。
+2. 數學式子用線性寫法：分數寫 a/b、次方寫 x^2、不等號與符號照原樣（>、≧、×、÷）；不要轉 LaTeX。
+3. note 用下列值：整行文字被線條穿過或塗黑 → "劃掉"；式子後面或旁邊有打勾 ✓ → "打勾"；有打叉 ✗ → "打叉"（✓ ✗ 是學生對該式子的判定記號，絕不可抄進 text、也不可抄成 × 或 x）；其他記號（井字、圈、箭頭）但文字本身沒被劃掉 → "行尾有記號"；
+   分數或數字用「約分／化簡的劃記」（把分子分母或某幾位數字劃掉、在旁邊或上方寫新值）→ 這不是放棄，text 抄「化簡後的式子」、note 填 "約分"（例如卷面 20000000/4 被劃記改成 5000000，就抄 5000000 並註 約分）；都沒有 → ""。
+   內容一律照抄、不要自己決定算不算。
+4. 看不清的字用「?」佔位，不要猜；整張圖沒有任何手寫 → lines 為空陣列。
+5. 只抄學生手寫，不抄印刷的題目文字。
+提示（只當「看仔細一點」的線索，絕不可把提示內容抄進去；圖上沒有就不要寫）：這題評分會找以下要素：
+${hints}
+⚠ 提示裡的數值、分數、係數是「預期答案」，學生實際寫的常常不同（例如 3/4 而不是 1/4、數字抄錯、不等號方向不同）。你抄的是卷面，不是提示：每個數字、分數、符號都要以圖上看到的為準，不可以用提示的值取代。
+只輸出 JSON：{"lines":[{"part":"","inferredPart":"(1)","text":"...","note":""}]}`
+}
+
+/** 抄本 JSON → lines[]；解析失敗回 null（呼叫端退回看圖判官） */
+export function parseTranscriptLines(text) {
+  if (!text) return null
+  try {
+    const s = String(text).replace(/```json|```/g, '').trim()
+    const o = JSON.parse(s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1))
+    return Array.isArray(o?.lines) ? o.lines.map((l) => ({
+      part: String(l?.part ?? '').trim(), inferredPart: String(l?.inferredPart ?? '').trim(),
+      text: String(l?.text ?? '').trim(), note: String(l?.note ?? '').trim(),
+    })).filter((l) => l.text || l.note) : null
+  } catch { return null }
+}
+
+/** lines[] → 判官與老師看的逐行抄本（行首 (n)=學生寫的小題號、[推n]=抄寫員推斷） */
+export function formatTranscript(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return '（抄本為空：圖上沒有手寫內容）'
+  return lines.map((l, k) => `${k + 1}. ${l.part ? `${l.part} ` : (l.inferredPart ? `[推${String(l.inferredPart).replace(/[()（）]/g, '')}] ` : '')}${l.text}${l.note ? `  （${l.note}）` : ''}`).join('\n')
+}
+
+/** 純文字逐條要素判官 prompt（沙盒 judge-only.mjs v2 嚴格核對＋✓✗ 條款 逐字）；輸出契約同 parseElementAnswer */
+export function buildElementTextJudgePrompt(element, transcript) {
+  return `以下是一位學生數學應用題解題過程的逐行抄本（由抄寫員從卷面抄錄，"?" 代表看不清的字；行首 (n) 是學生自己寫的小題號、[推n] 是抄寫員推斷的歸屬；note「約分」代表該行是學生用劃記約分後的結果；note「打勾」「打叉」是學生對該式子成立與否的判定記號）。
+請判斷抄本中是否呈現了這條評分要素：
+【要素 ${element?.key ?? ''}】${element?.desc ?? ''}
+規則：
+1. 只依抄本內容判斷，不要用你自己解題的結果補上抄本沒有的東西。
+2. 先找出抄本中與這條要素對應的那一行，把它和要素要求的式子「逐項核對」：每個數值、係數、分母、不等號方向、有無等號，都要一一相同或數學上等價（化簡／移項／約分後相等才算等價）。任何一個數字不同（例如要求 20000000 而抄本是 6700000）就不是等價，present=false。
+3. 要素文字裡的「⛔ … 不算」條款要逐條檢查，抄本符合任一條就 present=false，並在 evidence 寫明違反哪一條。
+4. note 為「劃掉」的行代表學生放棄該行、不算呈現（除非同一內容在別行沒被劃掉）；「行尾有記號」與「約分」的行照常算。
+   note 為「打叉」的行代表學生「檢驗了這個條件並判定它不成立」：例如要素要求比較「A < B」而學生寫「A ≥ B（打叉）」，等於寫出 A < B 的比較結果，算呈現；note 為「打勾」代表學生判定該條件成立，照字面核對。
+5. "?" 佔位的字不能當作已呈現；沒把握就填 uncertain，不要為了給分假設看不到的內容。
+抄本：
+${transcript}
+只輸出 JSON：{"present": true/false, "evidence": "抄本第幾行、哪個式子、核對結果（40字內）", "uncertain": "沒把握的地方；沒有就填空字串"}`
+}
