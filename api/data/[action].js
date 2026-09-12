@@ -9424,7 +9424,7 @@ async function handleSchoolReportSettings(req, res) {
       }
       const { data: rows, error } = await supabaseDb
         .from('schools')
-        .select('id, name, report_school_name, report_crest_data_url')
+        .select('id, name, report_school_name, report_crest_data_url, report_sections')
         .in('id', [...new Set(identities.map((i) => i.schoolId))])
       if (error) throw error
       // 一人多校時,優先挑「真的設過抬頭」的那一所
@@ -9436,6 +9436,8 @@ async function handleSchoolReportSettings(req, res) {
         crestDataUrl: picked?.report_crest_data_url || '',
         // 學校是否真的設定過(沒設過就不該覆蓋老師的個人設定)
         configured: !!(picked?.report_school_name || picked?.report_crest_data_url),
+        // 2026-09-13 家長報告大項目開關（學校層；null＝全開）。老師端只能在此範圍內再關、不能開
+        sections: picked?.report_sections || null,
         viewerName
       })
     } catch (error) {
@@ -9464,7 +9466,7 @@ async function handleSchoolReportSettings(req, res) {
     if (isGet) {
       const { data, error } = await supabaseDb
         .from('schools')
-        .select('name, report_school_name, report_crest_data_url')
+        .select('name, report_school_name, report_crest_data_url, report_sections')
         .eq('id', schoolId)
         .maybeSingle()
       if (error) throw error
@@ -9472,7 +9474,8 @@ async function handleSchoolReportSettings(req, res) {
         schoolName: data?.report_school_name || data?.name || '',
         // 有沒有覆寫過(UI 要顯示「目前用的是 1Campus 正式校名」)
         schoolNameOverridden: !!data?.report_school_name,
-        crestDataUrl: data?.report_crest_data_url || ''
+        crestDataUrl: data?.report_crest_data_url || '',
+        sections: data?.report_sections || null
       })
       return
     }
@@ -9490,6 +9493,13 @@ async function handleSchoolReportSettings(req, res) {
         return
       }
       patch.report_crest_data_url = v || null
+    }
+    // 大項目開關:只收四個已知鍵的布林;全開＝存 null(與「從未設定」同義,前端缺鍵視為開)
+    if (body.sections && typeof body.sections === 'object') {
+      const keys = ['score', 'types', 'mastery', 'wrong']
+      const sec = {}
+      for (const k of keys) sec[k] = body.sections[k] !== false
+      patch.report_sections = keys.every((k) => sec[k]) ? null : sec
     }
     const { error } = await supabaseDb.from('schools').update(patch).eq('id', schoolId)
     if (error) throw error
