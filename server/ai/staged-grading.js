@@ -10671,8 +10671,10 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
           // 每型耗時/批次/模型記錄(供落地監控、調 batch/model)
           const ms = Number(resp?.modelLatencyMs) || 0
           // model 記「實際生效」的 model id(readModelOverride||model)，非 cfg.model 設定值(會誤導落地驗證)。
-          const t = typeLat[type] || (typeLat[type] = { model: readModelOverride || model, cfgModel: cfg.model, batches: 0, maxMs: 0, sumMs: 0, ok: 0, fail: 0 })
+          const t = typeLat[type] || (typeLat[type] = { model: readModelOverride || model, cfgModel: cfg.model, batches: 0, maxMs: 0, sumMs: 0, ok: 0, fail: 0, cells: 0, sheets: 0, fmt: null })
           t.batches++; t.maxMs = Math.max(t.maxMs, ms); t.sumMs += ms
+          // 2026-09-12 落地驗證用（存進 phase_a_state.typeSplitLatencies）：本型格數／合成圖張數／輸出格式
+          t.cells += batch.length; if (sheets) t.sheets += sheets.length; t.fmt = fmt
           if (!callFailed) t.ok++; else { t.fail++; logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 重試後仍失敗、補 unreadable 送審`) }
         })
       }
@@ -10899,8 +10901,9 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     typeSplitLatencies = {}
     for (const src of [readAnswerResponse?._typeLat, reReadAnswerResponse?._typeLat]) {
       for (const [type, v] of Object.entries(src || {})) {
-        const t = typeSplitLatencies[type] || (typeSplitLatencies[type] = { model: v.model, batches: 0, maxMs: 0, ok: 0, fail: 0 })
+        const t = typeSplitLatencies[type] || (typeSplitLatencies[type] = { model: v.model, batches: 0, maxMs: 0, ok: 0, fail: 0, cells: 0, sheets: 0, fmt: null })
         t.batches += v.batches; t.maxMs = Math.max(t.maxMs, v.maxMs); t.ok += v.ok; t.fail += v.fail
+        t.cells += v.cells || 0; t.sheets += v.sheets || 0; t.fmt = v.fmt || t.fmt
       }
     }
   }
