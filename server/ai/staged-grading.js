@@ -14421,7 +14421,12 @@ export async function runStagedGradingPhaseB({
           })
           if (tResp) stageResponses.push(tResp)
           const lines = tResp?.ok ? parseTranscriptLines(extractCandidateText(tResp.data) || '') : null
-          if (lines) {
+          if (lines && lines.length === 0) {
+            // 抄本為空（抄寫員 HIGH 看過整格、沒有任何手寫）→ 六條要素必然不存在，不再花 6 次文字判（沙盒 33 題有 5 題＝15%）
+            lvTranscript = formatTranscript(lines)
+            answers = elements.map((el) => ({ key: el.key, present: false, evidence: '抄本為空：圖上沒有手寫內容', uncertain: '' }))
+            logStaged(pipelineRunId, 'basic', `[B-Level] ${qId} 抄本制：抄本為空 → 跳過文字判（${elements.length} 要素直接未呈現）`)
+          } else if (lines) {
             lvTranscript = formatTranscript(lines)
             answers = await Promise.all(elements.map(async (el) => {
               const resp = await executeStage({
