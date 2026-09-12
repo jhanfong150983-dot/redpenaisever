@@ -9422,10 +9422,18 @@ async function handleSchoolReportSettings(req, res) {
         res.status(200).json({ schoolName: '', crestDataUrl: '', viewerName })
         return
       }
-      const { data: rows, error } = await supabaseDb
+      const schoolIds = [...new Set(identities.map((i) => i.schoolId))]
+      let { data: rows, error } = await supabaseDb
         .from('schools')
         .select('id, name, report_school_name, report_crest_data_url, report_sections')
-        .in('id', [...new Set(identities.map((i) => i.schoolId))])
+        .in('id', schoolIds)
+      // DDL 尚未跑（report_sections 欄位不存在）→ 退回舊欄位查詢，抬頭不能因為新欄位而消失
+      if (error && /report_sections/.test(String(error.message || ''))) {
+        ;({ data: rows, error } = await supabaseDb
+          .from('schools')
+          .select('id, name, report_school_name, report_crest_data_url')
+          .in('id', schoolIds))
+      }
       if (error) throw error
       // 一人多校時,優先挑「真的設過抬頭」的那一所
       const picked =
@@ -9464,11 +9472,18 @@ async function handleSchoolReportSettings(req, res) {
 
   try {
     if (isGet) {
-      const { data, error } = await supabaseDb
+      let { data, error } = await supabaseDb
         .from('schools')
         .select('name, report_school_name, report_crest_data_url, report_sections')
         .eq('id', schoolId)
         .maybeSingle()
+      if (error && /report_sections/.test(String(error.message || ''))) {
+        ;({ data, error } = await supabaseDb
+          .from('schools')
+          .select('name, report_school_name, report_crest_data_url')
+          .eq('id', schoolId)
+          .maybeSingle())
+      }
       if (error) throw error
       res.status(200).json({
         schoolName: data?.report_school_name || data?.name || '',
