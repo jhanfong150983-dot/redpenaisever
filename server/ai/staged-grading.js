@@ -10374,7 +10374,39 @@ export async function runStagedGradingPhaseA({
   // 2026-07-15 r8 回歸修：措辭必須保留「只報手寫」——「只讀紅框內的內容」被解讀成連印刷模板一起抄
   //   （3-4-4/2-3-6 整批抄出「我（同意/不同意），」引導文字、蓋掉學生手寫、12 格誤殺）。
   const markLine = wqPdfMarkRead ? '每張圖中的「紅色方框」標示該題的作答區——只讀紅框內、紅框外（其他列/其他題）一律忽略。紅框內仍然只回報「學生手寫」的內容：印刷的題目文字、引導模板（如「我（同意/不同意），因為」）、選項文字都不要抄，只抄學生自己寫上去的字。' : ''
-  const tsReadHead = (family, role) => {
+  // ── 2026-09-12 讀取輸出格式壓縮（user 拍板、預設開；READ_OUTPUT_FORMAT='json' 退回）──────────
+  //   合成圖之後一次 read call 的錢 85% 在輸出：30 格 JSON 每格 43 tok、3.6 輸出單價是輸入 5 倍。
+  //   改「每格一行 題號|內容」：受控實驗（run5.mjs、唯一變因＝回覆格式）數學 928 格／國語注釋 310／選擇 1,240：
+  //     r1=線上 r1 91.3→90.0／83.9→83.5／99.9→99.8（＝重跑噪聲）、blank 數相同、解析失敗 0、缺格 0；
+  //     輸出 token −69～78%，讀取費 數學 0.72→0.30、國語注釋 0.146→0.072、選擇 0.451→0.161（每讀每份）。
+  //   合題（partValues）批次與 ordering 維持 JSON（格式帶不了 partValues）；解析端偵測到 JSON 一律走舊解析＝fail-open。
+  const READ_OUTPUT_FORMAT = process.env.READ_OUTPUT_FORMAT === 'json' ? 'json' : 'compact'
+  const TS_TAIL_JSON = '沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}'
+  const TS_TAIL_COMPACT = '輸出格式：純文字、每格一行、「題號|學生手寫內容」（半形 |，題號只寫題號本身、不要帶括號內的提示）。沒寫→該行只寫「題號|」（內容留空）；有寫但看不懂→「題號|?」。不要 JSON、不要多餘說明、每個題號都要有一行。'
+  // 每格一行 → 與 JSON 路徑同形的 answers[]；題號後的「（正確答案：…）」提示若被抄回來一律剝掉；模型仍回 JSON → 交回舊解析
+  const parseCompactReadAnswers = (text) => {
+    const t = ensureString(text, '').replace(/```[a-z]*|```/g, '').trim()
+    if (!t || /^[\[{]/.test(t)) return null
+    const out = []
+    for (const raw of t.split(/\r?\n/)) {
+      const line = raw.trim(); if (!line) continue
+      let i = line.indexOf('|')
+      if (i < 0) { const j = line.indexOf('｜'); if (j > 0 && /^[\w-]+$/.test(line.slice(0, j).trim())) i = j }
+      let id = (i < 0 ? line : line.slice(0, i)).trim(); const ans = i < 0 ? '' : line.slice(i + 1).trim()
+      id = id.replace(/[（(]\s*正確答案.*$/, '').replace(/^[-•]\s*/, '').trim()
+      if (!id) continue
+      out.push(ans === '' ? { questionId: id, studentAnswerRaw: '', status: 'blank' }
+        : ans === '?' ? { questionId: id, studentAnswerRaw: '', status: 'unreadable' }
+          : { questionId: id, studentAnswerRaw: ans, status: 'read' })
+    }
+    return out.length ? { answers: out } : null
+  }
+  const parseTypeSplitAnswers = (resp, fmt) => {
+    if (!resp?.ok) return null
+    if (fmt === 'compact') { const c = parseCompactReadAnswers(extractCandidateText(resp.data) || ''); if (c) return c }
+    return parseCandidateJson(resp.data)
+  }
+  const tsReadHead = (family, role, fmt = 'json') => {
     // ordering：兩讀改用「不同策略」(blindRead2 已使兩讀皆盲)。沙盒實證 PA/PB @PRO 一致率 97%(vs 抄寫/校對變體僅~53%)。
     if (family === 'ordering') {
       const strat = role === 'review'
@@ -10400,7 +10432,7 @@ export async function runStagedGradingPhaseA({
       compound: '這些是「複合表格題」：每題含多欄(如 人物／事件／影響)，回報學生各欄實際手寫內容、用「｜」分隔各欄。⚠ 若學生有「圈選/勾選印刷選項」或先寫立場詞（同意、不同意、支持、反對、勾選的類別名），把該立場抄在第一欄——學生圈選的印刷選項文字算學生的作答、要抄出來。',
       draw: '這些是「圖表繪製題」(長條圖/圓餅圖等)：描述學生實際畫的內容、以「標籤-數值」對列出(如 香蕉23%、蘋果40%)。'
     })[family] || '回報學生手寫的內容。'
-    return `以下是多張「同一題型」的作答區裁切放大圖，每張圖前有題號標籤。${roleLine}\n${markLine}${rule}\n沒寫→status="blank"、有寫看不懂→status="unreadable"。只輸出 JSON：{"answers":[{"questionId":"...","studentAnswerRaw":"...","status":"read|blank|unreadable"}]}`
+    return `以下是多張「同一題型」的作答區裁切放大圖，每張圖前有題號標籤。${roleLine}\n${markLine}${rule}\n${fmt === 'compact' ? TS_TAIL_COMPACT : TS_TAIL_JSON}`
   }
   const tsChunk = (arr, n) => { const o = []; const s = Math.max(1, n); for (let i = 0; i < arr.length; i += s) o.push(arr.slice(i, i + s)); return o }
   // 2026-07-05: type-split 的 fill_blank 合題支援——原本 text family 輸出 schema 只有 studentAnswerRaw、
@@ -10515,9 +10547,10 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       const model = (isRjGroup || cfg.model === 'PRO' || tsProTypes.has(baseType) || upgradeForText) ? MODEL_PRO : MODEL_FLASH
       for (const batch of tsChunk(qs, cfg.batch)) {
         jobs.push(async () => {
-          const parts = [{ text: tsReadHead(cfg.family, role) }]
           // 合題（partValues）SPEC：本批含合題才附加（見 tsPartsRule）
           const partsQsInBatch = batch.filter((q) => tsPartsMeta(q))
+          const fmt = (READ_OUTPUT_FORMAT === 'compact' && partsQsInBatch.length === 0 && cfg.family !== 'ordering') ? 'compact' : 'json'
+          const parts = [{ text: tsReadHead(cfg.family, role, fmt) }]
           if (partsQsInBatch.length > 0) parts.push({ text: tsPartsRule(partsQsInBatch) })
           // 先把本批的 crop 與答案提示收齊（合成圖與逐張兩條路共用）
           const cells = []
@@ -10544,7 +10577,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
             ? await buildReadSheets(cells) : null
           if (sheets) {
             const labelById = new Map(cells.map((c) => [c.questionId, c.label]))
-            parts[0] = { text: tsReadHead(cfg.family, role) + sheetNoteOf(sheets.flatMap((s) => s.ids.map((id) => labelById.get(id) || id))) }
+            parts[0] = { text: tsReadHead(cfg.family, role, fmt) + sheetNoteOf(sheets.flatMap((s) => s.ids.map((id) => labelById.get(id) || id))) }
             for (const s of sheets) parts.push({ inlineData: s.inlineData })
             if (role === 'detail') logStaged(pipelineRunId, 'basic', `[type-split] ${type} 合成圖 read：${cells.length} 格 → ${sheets.length} 張（family=${cfg.family}）`)
           } else {
@@ -10576,7 +10609,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
             stageContents: [{ role: 'user', parts }]
           })
           let resp = await runBatchCall()
-          let parsed = resp?.ok ? parseCandidateJson(resp.data) : null
+          let parsed = parseTypeSplitAnswers(resp, fmt)
           let arr = Array.isArray(parsed?.answers) ? parsed.answers : []
           // 批次失敗/空回應 → 重試一次(暫時性 503/timeout 常見)。
           // 2026-07-03：重試前退避 3-7s——全班並行時失敗多為 rate-limit、立刻重打會撞同一個限流窗
@@ -10585,10 +10618,11 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
             logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 失敗/空(status=${resp?.status})、退避後重試一次`)
             await new Promise((r) => setTimeout(r, 3000 + Math.random() * 4000))
             resp = await runBatchCall()
-            parsed = resp?.ok ? parseCandidateJson(resp.data) : null
+            parsed = parseTypeSplitAnswers(resp, fmt)
             arr = Array.isArray(parsed?.answers) ? parsed.answers : []
           }
           const callFailed = !(resp?.ok && arr.length > 0)
+          if (!callFailed && fmt === 'compact') logStaged(pipelineRunId, 'basic', `[type-split] ${type} 批(${batch.length}) ${role} 輸出格式=compact、解析 ${arr.length} 格`)
           const byQ = new Map(arr.map((a) => [ensureString(a?.questionId).trim(), a]))
           // 2026-07-03：批次重試仍失敗 → 「逐題單獨重讀」兜底(批次 call 掛掉時、單題小 call 通常活得下來)。
           //   實測災難：16號 fill_blank read1 批次連重試失敗 → 整批 8 題補 unreadable → 8 題全進審查。
@@ -10606,7 +10640,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
                 const ak = akMapForAi2.get(q.questionId)
                 const ans = giveAns ? tsAnswerHint(q, ak) : ''
                 const singleParts = [
-                  { text: tsReadHead(cfg.family, role) },
+                  { text: tsReadHead(cfg.family, role, fmt) },
                   ...(tsPartsMeta(q) ? [{ text: tsPartsRule([q]) }] : []),
                   { text: `--- 題目 ${q.questionId}${ans ? `（正確答案：${ans}）` : ''} ---` },
                   { inlineData: crop }
@@ -10618,7 +10652,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
                   routeKey: role === 'review' ? AI_ROUTE_KEYS.GRADING_RE_READ_ANSWER : AI_ROUTE_KEYS.GRADING_DETAIL_READ,
                   stageContents: [{ role: 'user', parts: singleParts }]
                 })
-                const p = r?.ok ? parseCandidateJson(r.data) : null
+                const p = parseTypeSplitAnswers(r, fmt)
                 const a = Array.isArray(p?.answers) ? p.answers[0] : null
                 if (a) byQ.set(q.questionId, { ...a, questionId: q.questionId })
               } catch { /* 單題兜底失敗 → 留給 missingFill 補 unreadable 送審 */ }
