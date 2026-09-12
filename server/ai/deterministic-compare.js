@@ -248,6 +248,25 @@ export function decideDeterministic({ question, studentAnswer, answerKey, status
     return null
   }
 
+  // ── 2026-09-12 列舉分隔符寬容（user 拍板：「36-76-96」「36、76-96」在老師眼裡都是 36,76,96）──
+  //   只在**標答本身是列舉**（正規化後 ≥2 個逗號分段、每段是數）時啟動：把學生答案中數字之間的
+  //   - – — 空白 也折成逗號；標答各段沒有小數點時，句點也折（「36.76-96」）。
+  //   守衛：標答不是列舉就不碰（「3-2」這種運算式標答不受影響）；ordering 順序題不碰。
+  //   實例：培英數學 1-1-25 兩位學生寫對被判 0（分隔符洞、記憶 project_process_credit_vs_level_rubric 附錄）。
+  const refParts = R.split(/[、,]/u).map((x) => x.trim()).filter(Boolean)
+  const refIsNumList = cat !== 'ordering' && refParts.length >= 2 && refParts.every((x) => /^-?\d+(?:\.\d+)?$/u.test(x))
+  if (refIsNumList) {
+    const refHasDecimal = refParts.some((x) => x.includes('.'))
+    let S2 = String(stu).replace(/[０-９]/gu, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFF10)).trim()
+    S2 = S2.replace(refHasDecimal ? /(?<=\d)\s*[-–—、,，\s]+\s*(?=\d)/gu : /(?<=\d)\s*[-–—、,，.\s]+\s*(?=\d)/gu, ',')
+    const stuParts = S2.split(',').map((x) => x.trim()).filter(Boolean)
+    if (stuParts.length === refParts.length && stuParts.every((x, i) => x === refParts[i])) {
+      return { verdict: 'equal', by: '多值答案：分隔符正規化後相同' }
+    }
+    if (stuParts.length === refParts.length && [...refParts].sort().join(',') === [...stuParts].sort().join(',')) {
+      return { verdict: 'equal', by: '多值答案內容相同（順序不同、分隔符正規化）' }
+    }
+  }
   // 多值答案當集合比（標答「ㄅ、ㄇ、ㄉ」學生「ㄅ、ㄉ、ㄇ」順序不同、內容相同）。
   //   排序題例外——那種題順序本身就是答案。
   if (cat !== 'ordering' && /[、,]/u.test(R) && /[、,]/u.test(S)) {

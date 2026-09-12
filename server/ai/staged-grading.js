@@ -15446,14 +15446,38 @@ export async function runStagedGradingPhaseB({
   if (process.env.CODE_FIRST_ENABLED !== 'false') {
     let cfCount = 0
     const cfBy = new Map()
+    // 2026-09-12 一致性 vs 計分正規化不一致的洞（user 拍板修）：兩讀被判 stable（差異只在分隔符）→ final 一律採 read1，
+    //   但 read1 的寫法計分器不吃、read2 其實過得了（實例 1-1-25「36-7696」/「36-76-96」、1-1-27「22,7」/「22.7」）。
+    //   → code-first 判錯時，若該格兩讀 stable，改拿另一讀再比一次；過了就採那一讀（只挑格式、不引入放水：兩讀本來就被判同值）。
+    const qrAltByQid = new Map()
+    for (const qr of (Array.isArray(phaseAResult?.questionResults) ? phaseAResult.questionResults : [])) {
+      const qid0 = ensureString(qr?.questionId).trim()
+      if (!qid0 || qr?.consistencyStatus !== 'stable') continue
+      const alts = [qr?.readAnswer1, qr?.readAnswer2]
+        .filter((r) => r && (r.status ?? 'read') === 'read')
+        .map((r) => ensureString(r.studentAnswerRaw ?? r.studentAnswer, '').trim()).filter(Boolean)
+      if (alts.length) qrAltByQid.set(qid0, alts)
+    }
     for (const ans of finalReadAnswerResult.answers) {
       const qid = ensureString(ans?.questionId).trim()
       if (!qid || isBypassed(qid)) continue
       const q = akQById.get(qid)
       if (!q) continue
-      const decision = decideDeterministic({
+      let decision = decideDeterministic({
         question: q, studentAnswer: ans.studentAnswerRaw, answerKey, status: ans.status
       })
+      if (decision && decision.verdict !== 'equal' && qrAltByQid.has(qid)) {
+        for (const alt of qrAltByQid.get(qid)) {
+          if (alt === ensureString(ans.studentAnswerRaw, '').trim()) continue
+          const d2 = decideDeterministic({ question: q, studentAnswer: alt, answerKey, status: 'read' })
+          if (d2 && d2.verdict === 'equal') {
+            logStaged(pipelineRunId, 'basic', `[code-first] ${qid} read 兩讀一致、採能通過比對的另一讀「${alt}」（原「${ans.studentAnswerRaw}」）`)
+            ans.studentAnswerRaw = alt
+            decision = { ...d2, by: `${d2.by}；兩讀一致採另一讀` }
+            break
+          }
+        }
+      }
       if (!decision) continue
       const cfMax = Math.max(0, toFiniteNumber(q?.maxScore) ?? 0)
       const isEq = decision.verdict === 'equal'
