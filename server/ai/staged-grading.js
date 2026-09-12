@@ -10549,7 +10549,9 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
         jobs.push(async () => {
           // 合題（partValues）SPEC：本批含合題才附加（見 tsPartsRule）
           const partsQsInBatch = batch.filter((q) => tsPartsMeta(q))
-          const fmt = (READ_OUTPUT_FORMAT === 'compact' && partsQsInBatch.length === 0 && cfg.family !== 'ordering') ? 'compact' : 'json'
+          // compact 只放已受控驗證的家族（text／choice）；check／compound／draw 未實測、先留 JSON，READ_COMPACT_FAMILIES 可放開
+          const compactFamilies = new Set(ensureString(process.env.READ_COMPACT_FAMILIES, 'text,choice').split(',').map((x) => x.trim()).filter(Boolean))
+          const fmt = (READ_OUTPUT_FORMAT === 'compact' && partsQsInBatch.length === 0 && compactFamilies.has(cfg.family)) ? 'compact' : 'json'
           const parts = [{ text: tsReadHead(cfg.family, role, fmt) }]
           if (partsQsInBatch.length > 0) parts.push({ text: tsPartsRule(partsQsInBatch) })
           // 先把本批的 crop 與答案提示收齊（合成圖與逐張兩條路共用）
