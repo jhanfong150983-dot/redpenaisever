@@ -10873,11 +10873,14 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       if (!crop) continue
       const itemLabels = akQ.vjRubric.itemLabels
       const blankIdx = parallelCalls.length
+      // 2026-09-12 VJ 空白偵測改 HIGH（user 抓到 32 號鉛筆淡、與印刷格線同色 → MEDIUM 判「兩項皆空白」靜默 0 分、信心 100 不進低信心；
+      //   沙盒同 crop 同 prompt：MEDIUM 3/3 判空白、HIGH 3/3 判步驟 1 有畫；66 格 HIGH vs 線上 MEDIUM 只有這 1 格不同）。
+      //   代價：圖片 544→1088 tok、每題 +NT$0.03。空白偵測的失誤是「靜默 0 分」，值得付。
       parallelCalls.push(
         executeStage({
           apiKey,
           model: readModel,
-          payload: { ...payload, ...READ_ANSWER_GENERATION_CONFIG },
+          payload: { ...payload, ...JUDGE_HIGHRES_GENERATION_CONFIG },
           timeoutMs: getRemainingBudget(),
           routeHint,
           routeKey: AI_ROUTE_KEYS.GRADING_VJ_BLANK,
