@@ -10444,7 +10444,7 @@ async function handleSchoolTeacherOverview(req, res) {
     await loadCampus(boundIds)
     if (boundIds.length) {
       const [{ data: profs }, { data: classrooms }] = await Promise.all([
-        supabaseAdmin.from('profiles').select('id, name, email, ink_balance').in('id', boundIds),
+        supabaseAdmin.from('profiles').select('id, name, email').in('id', boundIds),
         supabaseAdmin.from('classrooms').select('id, owner_id').eq('school_id', schoolId).in('owner_id', boundIds)
       ])
       for (const p of profs ?? []) profById.set(p.id, p)
@@ -10474,7 +10474,7 @@ async function handleSchoolTeacherOverview(req, res) {
         bound: !!p,
         profileId: p ? profileId : null,
         loginEmail: p?.email || '',
-        inkBalance: p ? (typeof p.ink_balance === 'number' ? p.ink_balance : 0) : null,
+        // 2026-09-13 user：學校不可看到老師的個人份數（只回校園墨水）
         campusBalance: p ? (campusBal.get(profileId) ?? 0) : null,
         classroomCount: p ? classCountByOwner.get(profileId) || 0 : null,
         assignmentCount: p ? assignCountByOwner.get(profileId) || 0 : null
@@ -10500,7 +10500,7 @@ async function handleSchoolTeacherOverview(req, res) {
       if (active.length && !profById.size) {
         const { data: profs } = await supabaseAdmin
           .from('profiles')
-          .select('id, name, email, ink_balance')
+          .select('id, name, email')
           .in('id', active.map((r) => r.teacher_user_id))
         for (const p of profs ?? []) profById.set(p.id, p)
       }
