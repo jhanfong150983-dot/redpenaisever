@@ -104,6 +104,12 @@ export default async function handler(req, res) {
       if (!assignmentId) { res.status(400).json({ error: 'Missing assignmentId' }); return }
       const asg = await loadAssignment(supabaseAdmin, assignmentId, user.id)
       if (!asg) { res.status(403).json({ error: 'Forbidden' }); return }
+      // 2026-09-13 方案等級：家長報告屬 PRO（個人卷不擋）
+      {
+        const { checkAssignmentPlan, planDeniedMessage } = await import('../../server/school-plan.js')
+        const chk = await checkAssignmentPlan(supabaseAdmin, assignmentId, 'parentReport')
+        if (!chk.ok) { res.status(403).json({ error: planDeniedMessage('parentReport', chk.plan), planDenied: true }); return }
+      }
       if (rawItems.length === 0) { res.status(200).json({ saved: 0 }); return }
 
       // 蓋指紋用的現值 graded_at＋score + answer_key 內容雜湊（2026-07-22 與 GET 同格式 `${graded_at}|${score}`）

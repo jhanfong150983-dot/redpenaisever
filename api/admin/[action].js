@@ -1,4 +1,5 @@
 import { handleCors } from '../../server/_cors.js'
+import { PLANS, normalizePlan } from '../../server/school-plan.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
 import { getEnvValue } from '../../server/_env.js'
@@ -3862,17 +3863,25 @@ async function handleSchoolWallet(req, res, supabaseAdmin, adminUser) {
     try {
       const schoolId = typeof req.query?.schoolId === 'string' ? req.query.schoolId.trim() : ''
       if (!schoolId) {
-        const { data: schools, error } = await supabaseAdmin
+        // 2026-09-13 方案等級：plan 欄位（DDL 未跑 → 退回不帶 plan 的查詢、全部視為 promax）
+        let schools, error
+        ;({ data: schools, error } = await supabaseAdmin
           .from('schools')
-          .select('id, name, provider_dsns, ink_balance')
-          .order('name', { ascending: true })
+          .select('id, name, provider_dsns, ink_balance, plan')
+          .order('name', { ascending: true }))
+        if (error && /plan/.test(String(error.message || ''))) {
+          ;({ data: schools, error } = await supabaseAdmin
+            .from('schools').select('id, name, provider_dsns, ink_balance').order('name', { ascending: true }))
+          schools = (schools ?? []).map((s) => ({ ...s, plan: 'promax' }))
+        }
         if (error) throw error
         res.status(200).json({
           schools: (schools ?? []).map((s) => ({
             id: s.id,
             name: s.name || s.id,
             dsns: s.provider_dsns || '',
-            balance: typeof s.ink_balance === 'number' ? s.ink_balance : 0
+            balance: typeof s.ink_balance === 'number' ? s.ink_balance : 0,
+            plan: normalizePlan(s.plan)
           }))
         })
         return
@@ -3921,6 +3930,25 @@ async function handleSchoolWallet(req, res, supabaseAdmin, adminUser) {
   const body = parseJsonBody(req, res)
   if (!body) return
   const schoolId = String(body.schoolId || '').trim()
+  // 2026-09-13 方案等級：POST {schoolId, plan}（系統 admin 專用；此 handler 本來就只有 admin 進得來）
+  if (schoolId && typeof body.plan === 'string' && body.delta === undefined) {
+    const plan = String(body.plan).trim().toLowerCase()
+    if (!PLANS.includes(plan)) { res.status(400).json({ error: 'plan 必須是 basic / pro / promax' }); return }
+    try {
+      const { data: school } = await supabaseAdmin.from('schools').select('id, name, plan, ink_balance').eq('id', schoolId).maybeSingle()
+      if (!school) { res.status(404).json({ error: '找不到此學校' }); return }
+      const { error: uErr } = await supabaseAdmin.from('schools').update({ plan, updated_at: new Date().toISOString() }).eq('id', schoolId)
+      if (uErr) throw uErr
+      await supabaseAdmin.from('school_ink_ledger').insert({
+        school_id: schoolId, delta: 0, balance_after: typeof school.ink_balance === 'number' ? school.ink_balance : 0,
+        reason: 'plan_change', actor_profile_id: adminUser?.id ?? null, metadata: { from: normalizePlan(school.plan), to: plan }
+      })
+      res.status(200).json({ ok: true, plan, schoolName: school.name || '' })
+    } catch (err) {
+      res.status(500).json({ error: /plan/.test(String(err?.message || '')) ? '方案欄位尚未建立（請先跑 DDL）' : (err?.message || '更新方案失敗') })
+    }
+    return
+  }
   const delta = Number(body.delta)
   const note = typeof body.note === 'string' ? body.note.trim().slice(0, 200) : ''
   if (!schoolId || !Number.isFinite(delta) || !Number.isInteger(delta) || delta === 0) {

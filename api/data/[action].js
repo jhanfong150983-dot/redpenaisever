@@ -39,6 +39,7 @@ import {
   listCampusBalances
 } from '../../server/action-billing.js'
 import { MENU_BILLING_ENABLED, resolvePointsPerSheet } from '../../server/exam-pricing.js'
+import { getSchoolPlan, getSchoolPlans, checkAssignmentPlan, planDeniedMessage, planAllows } from '../../server/school-plan.js'
 import {
   isValidDsns,
   getJasmineAccessToken,
@@ -4244,6 +4245,11 @@ async function handleCorrectionDispatchToggle(req, res) {
     if (!assignment) {
       res.status(404).json({ error: 'Assignment not found' })
       return
+    }
+    // 2026-09-13 方案等級：學生訂正屬 PROMAX（只擋「派發／開啟」；停止一律放行）
+    if (action !== 'stop') {
+      const chk = await checkAssignmentPlan(supabaseDb, assignmentId, 'studentCorrection')
+      if (!chk.ok) { res.status(403).json({ error: planDeniedMessage('studentCorrection', chk.plan), planDenied: true }); return }
     }
 
     const [{ data: states, error: statesError }, latestByStudent] = await Promise.all([
@@ -9920,6 +9926,11 @@ async function handleSchoolGradingJob(req, res) {
 
   if (mode === 'create') {
     const schoolId = String(body.schoolId || '').trim()
+    // 2026-09-13 方案等級：行政端統一批改屬 PRO
+    if (schoolId) {
+      const plan = await getSchoolPlan(supabaseDb, schoolId)
+      if (plan && !planAllows(plan, 'schoolGrading')) { res.status(403).json({ error: planDeniedMessage('schoolGrading', plan), planDenied: true }); return }
+    }
     const assignmentId = String(body.assignmentId || '').trim()
     if (!user || !schoolId || !assignmentId) {
       res.status(400).json({ error: '缺少 schoolId 或 assignmentId' })
@@ -10246,7 +10257,24 @@ async function handleMyWallets(req, res) {
       listCampusBalances(supabaseAdmin, user.id)
     ])
     const personal = typeof prof?.ink_balance === 'number' ? prof.ink_balance : 0
-    const out = { personal, campus }
+    // 2026-09-13 方案等級：老師任教學校（有掛 school_id 的班級、或 school_teachers active）的方案 → client 加權限
+    let plans = []
+    try {
+      const [{ data: cls }, { data: st }] = await Promise.all([
+        supabaseAdmin.from('classrooms').select('school_id').eq('owner_id', user.id).not('school_id', 'is', null),
+        supabaseAdmin.from('school_teachers').select('school_id, status').eq('teacher_user_id', user.id)
+      ])
+      const sids = [...new Set([...(cls ?? []).map((c) => c.school_id), ...(st ?? []).filter((r) => r.status === 'active').map((r) => r.school_id)].filter(Boolean))]
+      if (sids.length) {
+        const [pm, { data: schools }] = await Promise.all([
+          getSchoolPlans(supabaseAdmin, sids),
+          supabaseAdmin.from('schools').select('id, name, report_school_name').in('id', sids)
+        ])
+        const nameById = new Map((schools ?? []).map((s) => [s.id, s.report_school_name || s.name || '']))
+        plans = sids.map((id) => ({ schoolId: id, schoolName: nameById.get(id) || '', plan: pm.get(id) || 'basic' }))
+      }
+    } catch (e) { console.warn('[my-wallets] plans failed (non-fatal):', e?.message) }
+    const out = { personal, campus, plans }
     if (assignmentId) {
       const t = await resolveBillingTarget(supabaseAdmin, user.id, assignmentId)
       const c = t.scope === 'campus' ? campus.find((x) => x.schoolId === t.schoolId) : null
@@ -10297,7 +10325,7 @@ async function handleSchoolWallet(req, res) {
     res.status(404).json({ error: '找不到此學校' })
     return
   }
-  const result = { balance: typeof school.ink_balance === 'number' ? school.ink_balance : 0 }
+  const result = { balance: typeof school.ink_balance === 'number' ? school.ink_balance : 0, plan: await getSchoolPlan(supabaseAdmin, schoolId) }
   // ?ledger=1 → 附最近 50 筆點數紀錄(含操作者名稱)
   if (String(req.query.ledger || '') === '1') {
     const { data: ledger } = await supabaseAdmin
