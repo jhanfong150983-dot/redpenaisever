@@ -31,7 +31,7 @@ MIN_STRUCTURE = 0.25
 LINE_TOL_MM = 2.5        # 吸附：投影邊附近找學生印刷線的搜尋半徑
 CELL_SEARCH_MM = 5.0     # 逐格 NCC 搜尋半徑
 CELL_SHIFT_TOL_MM = 2.5  # 逐格最佳位移 ≤ 此值＝該格版面一致（同版面掃描漂移 ≤1.5mm；另版 5~7mm）
-PAGE_SHIFT_TOL_MM = 2.5  # 頁級：各格最佳位移中位數 ≤ 此值
+PAGE_SHIFT_TOL_MM = 3.0  # 頁級：pass1 各格位移中位 ≤ 此值才修正並採用（同版面本機 ≤1.2、Cloud Run ≤2.4；另版靠逐格一致率擋）
 MIN_DECIDABLE_RATIO = 0.3  # 可判定格佔比低於此 → 不敢下結論
 DEFAULT_MIN_CONSISTENCY = 0.75  # 實測：同版面 ≥0.83（數學稀疏格最低）、另版 ≤0.23
 
@@ -135,16 +135,38 @@ TEMPLATES = TemplateCache()
 @dataclass
 class StudentImage:
     gray: np.ndarray
-    kp: list
-    des: Optional[np.ndarray]
     hl: np.ndarray
     vl: np.ndarray
+    segments: List[Tuple[int, int]]            # 每頁段的 (y0, y1)（px）
+    _feats: dict = field(default_factory=dict)  # seg idx → (kp, des)
 
     @classmethod
-    def load(cls, data: bytes) -> 'StudentImage':
+    def load(cls, data: bytes, page_breaks: Optional[List[float]] = None, n_pages_hint: int = 1) -> 'StudentImage':
         g = decode_gray(data)
-        kp, des = _sift.detectAndCompute(g, None)
-        return cls(gray=g, kp=kp, des=des, hl=hlines(g), vl=vlines(g))
+        h, w = g.shape
+        # 分段：優先用 page_breaks；沒有就依模板頁數等分（單頁或不高的圖＝整張一段）
+        cuts: List[float] = []
+        if page_breaks:
+            cuts = sorted(float(b) for b in page_breaks if 0.0 < float(b) < 1.0)
+        elif n_pages_hint > 1 and h / w > 1.6:
+            cuts = [i / n_pages_hint for i in range(1, n_pages_hint)]
+        ys = [0] + [int(round(c * h)) for c in cuts] + [h]
+        segments = [(ys[i], ys[i + 1]) for i in range(len(ys) - 1) if ys[i + 1] - ys[i] > 50]
+        if not segments:
+            segments = [(0, h)]
+        return cls(gray=g, hl=hlines(g), vl=vlines(g), segments=segments)
+
+    def feats(self, i: int):
+        if i not in self._feats:
+            y0, y1 = self.segments[i]
+            # 段間多留 8% 重疊，避免題目跨段界
+            pad = int((y1 - y0) * 0.08)
+            a, b = max(0, y0 - pad), min(self.gray.shape[0], y1 + pad)
+            kp, des = _sift.detectAndCompute(self.gray[a:b], None)
+            for k in kp:
+                k.pt = (k.pt[0], k.pt[1] + a)  # 回合併圖座標
+            self._feats[i] = (kp, des)
+        return self._feats[i]
 
 
 # ── 配準 ──────────────────────────────────────────────────────────────────
@@ -157,21 +179,23 @@ class PageResult:
     structure: float = 0.0
     consistency: Optional[float] = None
     median_shift_mm: Optional[float] = None
+    line_shift_mm: Optional[float] = None   # 印刷線全域平移修正量
     decidable: int = 0
     total: int = 0
     residual_px: Optional[float] = None
     H: Optional[np.ndarray] = field(default=None, repr=False)
 
 
-def _homography(t: TemplatePage, s: StudentImage) -> Tuple[Optional[np.ndarray], int, Optional[float]]:
-    if t.des is None or s.des is None or len(t.kp) < 20 or len(s.kp) < 20:
+def _homography_seg(t: TemplatePage, kp_s: list, des_s: Optional[np.ndarray]) -> Tuple[Optional[np.ndarray], int, Optional[float]]:
+    if t.des is None or des_s is None or len(t.kp) < 20 or len(kp_s) < 20:
         return None, 0, None
-    m = _bf.knnMatch(t.des, s.des, k=2)
+    m = _bf.knnMatch(t.des, des_s, k=2)
     good = [a for a, b in (p for p in m if len(p) == 2) if a.distance < 0.75 * b.distance]
     if len(good) < 12:
         return None, 0, None
     src = np.float32([t.kp[a.queryIdx].pt for a in good]).reshape(-1, 1, 2)
-    dst = np.float32([s.kp[a.trainIdx].pt for a in good]).reshape(-1, 1, 2)
+    dst = np.float32([kp_s[a.trainIdx].pt for a in good]).reshape(-1, 1, 2)
+    cv2.setRNGSeed(12345)  # RANSAC 決定性
     H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
     if H is None or mask is None:
         return None, 0, None
@@ -179,6 +203,22 @@ def _homography(t: TemplatePage, s: StudentImage) -> Tuple[Optional[np.ndarray],
     proj = cv2.perspectiveTransform(src, H).reshape(-1, 2)
     err = np.linalg.norm(proj - dst.reshape(-1, 2), axis=1)[mask.ravel() == 1]
     return H, inl, float(np.median(err)) if err.size else None
+
+
+def _homography(t: TemplatePage, s: StudentImage, prefer: Optional[int] = None) -> Tuple[Optional[np.ndarray], int, Optional[float]]:
+    """模板頁 vs 學生各頁段：先試 prefer 段（模板頁序＝學生頁序的常態），inlier 夠就用；否則全段找 inlier 最多者。"""
+    order = list(range(len(s.segments)))
+    if prefer is not None and 0 <= prefer < len(order):
+        order.remove(prefer); order.insert(0, prefer)
+    best: Tuple[Optional[np.ndarray], int, Optional[float]] = (None, 0, None)
+    for i in order:
+        kp_s, des_s = s.feats(i)
+        H, inl, resid = _homography_seg(t, kp_s, des_s)
+        if inl > best[1]:
+            best = (H, inl, resid)
+        if i == prefer and inl >= MIN_INLIERS * 2:
+            break  # 常態：對應頁段就對上了，不必再掃其他段
+    return best
 
 
 def _structure_score(t: TemplatePage, s: StudentImage, H: np.ndarray) -> float:
@@ -242,7 +282,7 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
     回：{decision, reason, pages:[...], boxes:[{id, page, bbox(學生合併圖 normalized), status, snapped_edges, shift_mm}], ms}
     """
     t0 = time.time()
-    stu = StudentImage.load(student)
+    stu = StudentImage.load(student, page_breaks=page_breaks, n_pages_hint=len(template_pages))
     hs, ws = stu.gray.shape
     stu_edge = _edge(stu.gray)
     lim = LINE_TOL_MM / MM
@@ -253,7 +293,7 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
         tpl = TEMPLATES.get(data)
         ht, wt = tpl.gray.shape
         pr = PageResult(page=p, ok=False)
-        H, inl, resid = _homography(tpl, stu)
+        H, inl, resid = _homography(tpl, stu, prefer=p if len(stu.segments) == len(template_pages) else None)
         pr.inliers = inl; pr.residual_px = resid; pr.H = H
         if H is None or inl < MIN_INLIERS:
             pr.reason = f'inliers {inl} < {MIN_INLIERS}'
@@ -262,18 +302,39 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
         if pr.structure < MIN_STRUCTURE:
             pr.reason = f'structure {pr.structure:.2f} < {MIN_STRUCTURE}'
             page_results.append(pr); continue
-        warped_edge = _edge(cv2.warpPerspective(tpl.gray, H, (ws, hs), borderValue=255))
+        # 兩段式：pass 1 逐格 NCC 量位移 → 以整頁中位位移修正 H（SIFT/RANSAC 的 H 跨平台可差 1~2mm：
+        #   同資料本機 0.9mm、Cloud Run 2.4mm）→ pass 2 用修正後的 H 重量、用「原始位移」判逐格一致。
+        #   修正只在中位位移 ≤ PAGE_SHIFT_TOL 才做：另一版答案卷的位移是 3~7mm 且不均勻，不會被「拉正」成一致。
+        page_bs = [b for b in boxes if int(b.get('page', 0)) == p]
+
+        def _probe_all(Hc: np.ndarray):
+            we = _edge(cv2.warpPerspective(tpl.gray, Hc, (ws, hs), borderValue=255))
+            out = []
+            for b in page_bs:
+                bb = b['bbox']
+                pts = np.float32([[bb['x'] * wt, bb['y'] * ht], [(bb['x'] + bb['w']) * wt, (bb['y'] + bb['h']) * ht]]).reshape(-1, 1, 2)
+                q = cv2.perspectiveTransform(pts, Hc).reshape(-1, 2)
+                x0, y0 = float(q[0][0]), float(q[0][1]); x1, y1 = float(q[1][0]), float(q[1][1])
+                out.append((b, (x0, y0, x1, y1), _cell_probe(we, stu_edge, x0, y0, x1, y1, search_px)))
+            return out
+
+        probes = _probe_all(H)
+        raw = [pr_ for _, _, pr_ in probes if pr_ is not None]
+        pr.line_shift_mm = 0.0
+        if len(raw) >= 3:
+            gdx = float(np.median([d[0] for d in raw])); gdy = float(np.median([d[1] for d in raw]))
+            g_mm = float(np.hypot(gdx, gdy)) * MM
+            pr.median_shift_mm = g_mm  # pass 1 的中位位移（頁級守門用）
+            if 0.3 < g_mm <= PAGE_SHIFT_TOL_MM:
+                H = np.array([[1.0, 0.0, gdx], [0.0, 1.0, gdy], [0.0, 0.0, 1.0]]) @ H
+                pr.H = H
+                pr.line_shift_mm = round(g_mm, 2)
+                probes = _probe_all(H)
         ok = fail = 0
         shifts: List[float] = []
         page_boxes: List[dict] = []
-        for b in boxes:
-            if int(b.get('page', 0)) != p:
-                continue
+        for b, (x0, y0, x1, y1), probe in probes:
             bb = b['bbox']
-            pts = np.float32([[bb['x'] * wt, bb['y'] * ht], [(bb['x'] + bb['w']) * wt, (bb['y'] + bb['h']) * ht]]).reshape(-1, 1, 2)
-            q = cv2.perspectiveTransform(pts, H).reshape(-1, 2)
-            x0, y0 = float(q[0][0]), float(q[0][1]); x1, y1 = float(q[1][0]), float(q[1][1])
-            probe = _cell_probe(warped_edge, stu_edge, x0, y0, x1, y1, search_px)
             status = 'na'; dx = dy = 0.0
             if probe is not None:
                 dx, dy, _best, _zero = probe
@@ -327,11 +388,12 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
             pr.reason = f'decidable {pr.decidable}/{n} too few'
         else:
             pr.consistency = ok / pr.decidable
-            pr.median_shift_mm = float(np.median(shifts))
-            if pr.consistency < min_consistency:
-                pr.reason = f'consistency {pr.consistency:.2f} < {min_consistency}'
-            elif pr.median_shift_mm > PAGE_SHIFT_TOL_MM:
+            if pr.median_shift_mm is None:
+                pr.median_shift_mm = float(np.median(shifts))
+            if pr.median_shift_mm > PAGE_SHIFT_TOL_MM:
                 pr.reason = f'median shift {pr.median_shift_mm:.1f}mm > {PAGE_SHIFT_TOL_MM}'
+            elif pr.consistency < min_consistency:
+                pr.reason = f'consistency {pr.consistency:.2f} < {min_consistency}'
             else:
                 pr.ok = True
         page_results.append(pr)
@@ -347,6 +409,7 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
             'structure': round(pr.structure, 3),
             'consistency': None if pr.consistency is None else round(pr.consistency, 3),
             'median_shift_mm': None if pr.median_shift_mm is None else round(pr.median_shift_mm, 2),
+            'line_shift_mm': pr.line_shift_mm,
             'decidable': pr.decidable, 'total': pr.total,
             'residual_px': None if pr.residual_px is None else round(pr.residual_px, 2),
         } for pr in page_results],

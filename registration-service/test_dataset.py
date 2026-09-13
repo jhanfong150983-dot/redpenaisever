@@ -25,7 +25,7 @@ for key, m in meta.items():
         t0 = time.time()
         r = rc.register(pages, boxes, rd(os.path.join(ROOT, key, s['file'])), s.get('page_breaks'))
         n_al += r['decision'] == 'aligned'
-        pg = ' | '.join(f"p{p['page']} inl={p['inliers']} st={p['structure']:.2f} cons={p['consistency']} ({p['decidable']}/{p['total']}) {'OK' if p['ok'] else 'X:' + p['reason']}" for p in r['pages'])
+        pg = ' | '.join(f"p{p['page']} inl={p['inliers']} st={p['structure']:.2f} ls={p.get('line_shift_mm')} ms={p.get('median_shift_mm')} cons={p['consistency']} ({p['decidable']}/{p['total']}) {'OK' if p['ok'] else 'X:' + p['reason']}" for p in r['pages'])
         print(f"  {key:<9}{s['id'][:14]:<15} {r['decision']:<9} {int((time.time() - t0) * 1000):>5}ms  {pg}")
     print(f"  → {key}: aligned {n_al}/{len(m['students'])}")
 

@@ -10,5 +10,5 @@ COPY register_core.py app.py ./
 
 ENV PORT=8010
 EXPOSE 8010
-# 純 CPU、每請求 <2s；要吞吐用多 replica
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT} --workers 2"]
+# 純 CPU、每請求 <2s；單 worker（SIFT 佔記憶體）、要吞吐用多 replica
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT} --workers 1"]

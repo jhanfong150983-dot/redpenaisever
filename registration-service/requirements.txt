@@ -2,4 +2,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.6
 numpy>=1.26
-opencv-python-headless>=4.9
+opencv-python-headless==5.0.0.93  # 與本機驗證版本一致（SIFT/RANSAC 行為隨版本略異）
