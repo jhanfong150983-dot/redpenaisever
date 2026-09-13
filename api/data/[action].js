@@ -33,7 +33,10 @@ import {
   resolveBillingTarget,
   resolveBillingTargetsByAssignment,
   chargeFlatPoints,
-  RECHECK_POINTS
+  RECHECK_POINTS,
+  SHEET_POINTS,
+  adjustCampusInk,
+  listCampusBalances
 } from '../../server/action-billing.js'
 import { MENU_BILLING_ENABLED, resolvePointsPerSheet } from '../../server/exam-pricing.js'
 import {
@@ -3352,7 +3355,7 @@ async function handleSaveGrading(req, res) {
             g.rows.push(r)
             groups.set(k, g)
           }
-          let totalPoints = 0, papersCharged = 0, lastScope = null, lastBalance = null
+          let totalPoints = 0, papersCharged = 0, lastScope = null, lastBalance = null, lastCharge = null
           for (const g of groups.values()) {
             const charge = await chargeFlatPoints(supabaseDb, {
               target: g.target, points: g.points, actorProfileId: user.id, reason: 'grading_action',
@@ -3368,14 +3371,21 @@ async function handleSaveGrading(req, res) {
               }
               mark('stampCharged')
               totalPoints += g.points; papersCharged += g.rows.length
-              lastScope = g.target.scope; lastBalance = charge.balance
+              lastScope = g.target.scope; lastBalance = charge.balance; lastCharge = charge
               console.log(`[save-grading] flat-billed ${g.points} pts (${g.rows.length} papers, ${g.target.scope})`)
             } else {
               console.warn('[save-grading] flat charge failed (fail-open, will retry next round)')
             }
           }
           if (papersCharged > 0) {
-            billing = { points: totalPoints, papers: papersCharged, scope: lastScope, balanceAfter: lastBalance }
+            // 2026-09-13 份制：campus scope 會分「校園墨水扣了幾份、個人扣了幾份」；client 據此更新兩個餘額
+            billing = {
+              points: totalPoints, papers: papersCharged, scope: lastScope, balanceAfter: lastBalance,
+              campusBalanceAfter: lastCharge?.campusBalance ?? null,
+              personalBalanceAfter: lastCharge?.personalBalance ?? null,
+              campusCharged: lastCharge?.campusCharged ?? 0,
+              personalCharged: lastCharge?.personalCharged ?? (lastScope === 'personal' ? totalPoints : 0)
+            }
           }
         } else {
           billing = { points: 0, papers: 0, scope: null, alreadyCharged: true }
@@ -10120,6 +10130,7 @@ async function handleSchoolGradingJob(req, res) {
       }
 
       const costAcc = { points: 0, calls: 0 }
+      let sheetOk = false
       try {
         await trackingContext.run(
           {
@@ -10140,6 +10151,7 @@ async function handleSchoolGradingJob(req, res) {
             })
         )
         done += 1
+        sheetOk = true
       } catch (e) {
         failed += 1
         failedIds.add(next.id)
@@ -10155,16 +10167,16 @@ async function handleSchoolGradingJob(req, res) {
       }
       processedThisTick += 1
 
-      // 每卷結束扣學校點數(失敗卷已消耗的 AI call 也照扣)
-      if (costAcc.points > 0) {
+      // 2026-09-13 份制：每成功批改一卷扣學校池 1 份（失敗不扣；舊制按 token 累加在 FLAT 下恆 0＝免費，已改）
+      if (sheetOk) {
         const debit = await debitSchoolInk(supabaseDb, {
           schoolId: job.school_id,
-          points: costAcc.points,
+          points: SHEET_POINTS,
           actorProfileId: job.actor_profile_id,
           reason: 'grading_job',
           metadata: { jobId: job.id, submissionId: next.id, assignmentId: assignment.id, calls: costAcc.calls }
         })
-        points += costAcc.points
+        points += SHEET_POINTS
         if (debit.ok && typeof debit.balance === 'number' && debit.balance <= 0) {
           finalStatus = 'paused_insufficient'
         }
@@ -10221,6 +10233,31 @@ async function handleSchoolGradingJob(req, res) {
 // 2026-07-30 Step 4(user 拍板改判):學校層級共用錢包——schools.ink_balance,同校所有行政
 // 看同一個餘額、統一批改扣學校池。GET=餘額查詢(系統 admin 或該校 school_admin);
 // 儲值走 admin API(school-wallet POST,簽約制我們後台操作)。
+// 2026-09-13 份制：老師自己的兩種墨水（個人＋各校校園），可帶 ?assignmentId= 算這份卷會扣哪一種
+async function handleMyWallets(req, res) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const supabaseAdmin = getSupabaseAdmin()
+  try {
+    const assignmentId = typeof req.query.assignmentId === 'string' ? req.query.assignmentId.trim() : ''
+    const [{ data: prof }, campus] = await Promise.all([
+      supabaseAdmin.from('profiles').select('ink_balance').eq('id', user.id).maybeSingle(),
+      listCampusBalances(supabaseAdmin, user.id)
+    ])
+    const personal = typeof prof?.ink_balance === 'number' ? prof.ink_balance : 0
+    const out = { personal, campus }
+    if (assignmentId) {
+      const t = await resolveBillingTarget(supabaseAdmin, user.id, assignmentId)
+      const c = t.scope === 'campus' ? campus.find((x) => x.schoolId === t.schoolId) : null
+      out.applicable = { scope: t.scope, schoolId: t.schoolId ?? (t.scope === 'school' ? t.id : null), schoolName: c?.schoolName ?? '', campusBalance: c?.balance ?? 0, personalBalance: personal }
+    }
+    res.status(200).json(out)
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'Failed' })
+  }
+}
+
 async function handleSchoolWallet(req, res) {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -10350,6 +10387,16 @@ async function handleSchoolTeacherOverview(req, res) {
     const profById = new Map()
     const classCountByOwner = new Map()
     const assignCountByOwner = new Map()
+    // 2026-09-13 校園墨水：該校配給各老師、尚未用掉的份數（表不存在 → 全 0）
+    const campusBal = new Map()
+    const loadCampus = async (ids) => {
+      if (!ids.length) return
+      try {
+        const { data } = await supabaseAdmin.from('teacher_school_ink').select('profile_id, balance').eq('school_id', schoolId).in('profile_id', ids)
+        for (const w of data ?? []) campusBal.set(w.profile_id, typeof w.balance === 'number' ? w.balance : 0)
+      } catch { /* 表未建 */ }
+    }
+    await loadCampus(boundIds)
     if (boundIds.length) {
       const [{ data: profs }, { data: classrooms }] = await Promise.all([
         supabaseAdmin.from('profiles').select('id, name, email, ink_balance').in('id', boundIds),
@@ -10383,6 +10430,7 @@ async function handleSchoolTeacherOverview(req, res) {
         profileId: p ? profileId : null,
         loginEmail: p?.email || '',
         inkBalance: p ? (typeof p.ink_balance === 'number' ? p.ink_balance : 0) : null,
+        campusBalance: p ? (campusBal.get(profileId) ?? 0) : null,
         classroomCount: p ? classCountByOwner.get(profileId) || 0 : null,
         assignmentCount: p ? assignCountByOwner.get(profileId) || 0 : null
       }
@@ -10411,6 +10459,7 @@ async function handleSchoolTeacherOverview(req, res) {
           .in('id', active.map((r) => r.teacher_user_id))
         for (const p of profs ?? []) profById.set(p.id, p)
       }
+      await loadCampus(active.map((r) => r.teacher_user_id))
       teachers = active.map((r) => {
         const p = profById.get(r.teacher_user_id)
         return buildRow({ name: p?.name, account: p?.email, profileId: r.teacher_user_id })
@@ -10446,9 +10495,10 @@ async function handleSchoolGrant(req, res) {
   const body = parseJsonBody(req)
   const schoolId = typeof body?.schoolId === 'string' ? body.schoolId.trim() : ''
   const teacherProfileId = typeof body?.teacherProfileId === 'string' ? body.teacherProfileId.trim() : ''
+  // 2026-09-13 份制：amount>0 配發到老師的校園墨水；amount<0 從老師校園墨水收回到學校池
   const amount = Number(body?.amount)
-  if (!schoolId || !teacherProfileId || !Number.isInteger(amount) || amount <= 0) {
-    res.status(400).json({ error: '缺少 schoolId/teacherProfileId 或 amount 非正整數' })
+  if (!schoolId || !teacherProfileId || !Number.isInteger(amount) || amount === 0) {
+    res.status(400).json({ error: '缺少 schoolId/teacherProfileId 或 amount 非整數' })
     return
   }
   const supabaseAdmin = getSupabaseAdmin()
@@ -10479,54 +10529,74 @@ async function handleSchoolGrant(req, res) {
       .select('id, name, ink_balance')
       .eq('id', schoolId)
       .maybeSingle()
-    const before = typeof school?.ink_balance === 'number' ? school.ink_balance : 0
-    if (before < amount) {
-      res.status(400).json({ error: `學校點數不足(目前 ${before} 點)` })
-      return
-    }
-    const after = before - amount
-    const { data: updated, error: uErr } = await supabaseAdmin
-      .from('schools')
-      .update({ ink_balance: after, updated_at: new Date().toISOString() })
-      .eq('id', schoolId)
-      .eq('ink_balance', before)
-      .select('id')
-    if (uErr) throw uErr
-    if (!updated?.length) {
-      res.status(409).json({ error: '餘額剛被其他操作變更,請重新整理後再試' })
-      return
-    }
     const { data: tProf } = await supabaseAdmin
-      .from('profiles')
-      .select('id, name, email, ink_balance')
-      .eq('id', teacherProfileId)
-      .maybeSingle()
-    const tBefore = typeof tProf?.ink_balance === 'number' ? tProf.ink_balance : 0
-    const { error: tErr } = await supabaseAdmin
-      .from('profiles')
-      .update({ ink_balance: tBefore + amount, updated_at: new Date().toISOString() })
-      .eq('id', teacherProfileId)
-    if (tErr) {
-      // 入帳失敗:回滾學校池(盡力而為,失敗則留 log 供人工對帳)
-      await supabaseAdmin.from('schools').update({ ink_balance: before }).eq('id', schoolId)
-      throw new Error(`老師入帳失敗,學校點數已回復:${tErr.message}`)
-    }
+      .from('profiles').select('id, name, email').eq('id', teacherProfileId).maybeSingle()
     const teacherName = tProf?.name || tProf?.email || teacherProfileId
+    const before = typeof school?.ink_balance === 'number' ? school.ink_balance : 0
+
+    if (amount > 0) {
+      // 配發：先扣學校池（樂觀鎖）、再入老師校園墨水；入帳失敗回滾
+      if (before < amount) {
+        res.status(400).json({ error: `學校份數不足(目前 ${before} 份)` })
+        return
+      }
+      const after = before - amount
+      const { data: updated, error: uErr } = await supabaseAdmin
+        .from('schools')
+        .update({ ink_balance: after, updated_at: new Date().toISOString() })
+        .eq('id', schoolId)
+        .eq('ink_balance', before)
+        .select('id')
+      if (uErr) throw uErr
+      if (!updated?.length) {
+        res.status(409).json({ error: '餘額剛被其他操作變更,請重新整理後再試' })
+        return
+      }
+      const c = await adjustCampusInk(supabaseAdmin, {
+        schoolId, profileId: teacherProfileId, delta: amount, reason: 'school_grant', actorProfileId: user.id,
+        metadata: { schoolName: school?.name || '', teacherName }
+      })
+      if (!c.ok) {
+        await supabaseAdmin.from('schools').update({ ink_balance: before }).eq('id', schoolId)
+        res.status(500).json({ error: c.missing ? '校園墨水資料表尚未建立（請先跑 DDL）' : '老師入帳失敗，學校份數已回復' })
+        return
+      }
+      await supabaseAdmin.from('school_ink_ledger').insert({
+        school_id: schoolId, delta: -amount, balance_after: after, reason: 'school_grant',
+        actor_profile_id: user.id, metadata: { teacherProfileId, teacherName, before, after }
+      })
+      res.status(200).json({ ok: true, balance: after, teacherName, teacherBalance: c.balance })
+      return
+    }
+
+    // 收回：從老師校園墨水扣（最多扣到 0）、實際收回量加回學校池
+    const c = await adjustCampusInk(supabaseAdmin, {
+      schoolId, profileId: teacherProfileId, delta: amount, reason: 'school_reclaim', actorProfileId: user.id,
+      metadata: { schoolName: school?.name || '', teacherName }
+    })
+    if (!c.ok) {
+      res.status(500).json({ error: c.missing ? '校園墨水資料表尚未建立（請先跑 DDL）' : '收回失敗' })
+      return
+    }
+    const reclaimed = c.charged
+    if (reclaimed <= 0) {
+      res.status(400).json({ error: '這位老師沒有可收回的校園墨水' })
+      return
+    }
+    let after = before
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const { data: sch } = await supabaseAdmin.from('schools').select('ink_balance').eq('id', schoolId).maybeSingle()
+      const cur = typeof sch?.ink_balance === 'number' ? sch.ink_balance : 0
+      const { data: upd } = await supabaseAdmin.from('schools')
+        .update({ ink_balance: cur + reclaimed, updated_at: new Date().toISOString() })
+        .eq('id', schoolId).eq('ink_balance', cur).select('id')
+      if (upd?.length) { after = cur + reclaimed; break }
+    }
     await supabaseAdmin.from('school_ink_ledger').insert({
-      school_id: schoolId,
-      delta: -amount,
-      balance_after: after,
-      reason: 'school_grant',
-      actor_profile_id: user.id,
-      metadata: { teacherProfileId, teacherName, before, after }
+      school_id: schoolId, delta: reclaimed, balance_after: after, reason: 'school_reclaim',
+      actor_profile_id: user.id, metadata: { teacherProfileId, teacherName, before, after }
     })
-    await supabaseAdmin.from('ink_ledger').insert({
-      user_id: teacherProfileId,
-      delta: amount,
-      reason: 'school_grant',
-      metadata: { schoolId, schoolName: school?.name || '', before: tBefore, after: tBefore + amount }
-    })
-    res.status(200).json({ ok: true, balance: after, teacherName })
+    res.status(200).json({ ok: true, balance: after, teacherName, teacherBalance: c.balance, reclaimed })
   } catch (err) {
     res.status(500).json({ error: err?.message || '配發失敗' })
   }
@@ -11799,6 +11869,10 @@ const log = document.getElementById('log');
   }
   if (action === 'school-roster-sync') {
     await handleSchoolRosterSync(req, res)
+    return
+  }
+  if (action === 'my-wallets') {
+    await handleMyWallets(req, res)
     return
   }
   if (action === 'school-wallet') {

@@ -1,8 +1,12 @@
 // 2026-08-04 固定扣除計費(user 拍板:對外按動作定價、內部 token 帳只當毛利監控)。
-//
-// 舊制=每次 AI 呼叫按 token+平台費零碎扣;新制=「動作」完成時整筆扣:
-//   批改一份·一輪(Phase B 寫入分數時):依題數級距 5/10/15/20 點
-//   家長報告進階(每生):2 點;學生訂正:1 點;其餘(檢討單/分析/答案卷建置/錯題引導)免費
+// 2026-09-13 改「份」制(user 拍板、定價頁同步):
+//   ・單位＝份(一位學生的一份考卷)。每按一次批改、成功的每一份扣 1(不分題數題型、重批照扣、失敗不扣)。
+//   ・家長報告／訂正／學生自批 一律 0(功能開放與否改由學校方案等級決定，不用錢擋)。
+//   ・既有餘額不換算:1 點＝1 份(profiles.ink_balance / schools.ink_balance 欄位名照舊、語意改份)。
+//   ・兩種墨水:個人墨水(profiles.ink_balance)＋校園墨水(teacher_school_ink：學校從池裡配給老師、
+//     只能用在該校班級的卷、可收回)。扣款順序:統一考卷→學校池;老師自建卷在該校班級→校園墨水優先、
+//     不足的部分改扣個人;其餘→個人。
+//   ⚠ DDL 手動跑:local-only/ddl-2026-09-13-teacher-school-ink.sql(表不存在時 fail-open＝視為校園墨水 0)。
 //
 // 邊界語意(user 過目):失敗不扣、重批照輪再扣、審查中斷(只跑 A 沒進 B)不扣、
 //   人工改分不扣(scoreSource='manual' / fromManualScoreEdit)。
@@ -11,31 +15,48 @@
 //
 // ⚠ 開關:FLAT_BILLING='1' 啟用。啟用時 proxy/session/school 的舊三路扣款全部旁路
 //   (usage 照記、不扣點),扣款只在動作完成點發生。預設關=行為與舊制完全相同。
-//   「旁路」與「完成扣」必須同版部署後才能開,否則出現免費空窗。
 
 // 2026-08-04 user 拍板:預設開。回退=FLAT_BILLING='0'(client 同步 VITE_FLAT_BILLING='0')
 export const FLAT_BILLING_ENABLED = process.env.FLAT_BILLING !== '0'
 
-// 題數級距(定價報表 2026-08 定案;0/未知題數保守當標準卷,避免免費漏洞)
-export function gradingActionPoints(totalQuestions) {
-  const n = Number(totalQuestions) || 0
-  if (n <= 0) return 10
-  if (n <= 20) return 5
-  if (n <= 40) return 10
-  if (n <= 60) return 15
-  return 20
+/** 每份考卷扣幾份(=1)。保留函式簽名給舊呼叫點；題數不再影響價格。 */
+export const SHEET_POINTS = 1
+export function gradingActionPoints(_totalQuestions) {
+  return SHEET_POINTS
 }
 
-export const PARENT_REPORT_POINTS_PER_STUDENT = 2
-export const RECHECK_POINTS = 1
+export const PARENT_REPORT_POINTS_PER_STUDENT = 0
+export const RECHECK_POINTS = 0
+
+const isMissingTable = (err) => /teacher_school_ink|does not exist|relation .* not found|42P01/i.test(String(err?.message || err || ''))
+
+/** 老師在各校的校園墨水餘額（表不存在 → []）。 */
+export async function listCampusBalances(supabaseAdmin, profileId) {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('teacher_school_ink')
+      .select('school_id, balance')
+      .eq('profile_id', profileId)
+    if (error) throw error
+    const rows = (data ?? []).filter((r) => typeof r.balance === 'number')
+    if (!rows.length) return []
+    const { data: schools } = await supabaseAdmin
+      .from('schools').select('id, name, report_school_name').in('id', rows.map((r) => r.school_id))
+    const nameById = new Map((schools ?? []).map((s) => [s.id, s.report_school_name || s.name || '']))
+    return rows.map((r) => ({ schoolId: r.school_id, schoolName: nameById.get(r.school_id) || '', balance: r.balance }))
+  } catch (err) {
+    if (!isMissingTable(err)) console.warn('[action-billing] listCampusBalances failed:', err?.message)
+    return []
+  }
+}
 
 /**
  * 計費對象解析(server 端權威、不信任 client header)。
  * 2026-08-04 修正(user 抓到):看「考卷」不看「人」——只有學校考卷(school_exam_classes
- *   掛的 assignment → school_exams.school_id)才走學校錢包;其餘一律個人 ink_balance。
- *   舊版看 owner 是否為某校 exam_owner → 行政/admin 帳號連自己私人班的作業都誤扣學校錢包。
- *   查詢失敗 fail-open 回個人(寧可個人路線的 admin 免扣、不誤扣學校)。
- * @returns Map(assignmentId → {scope:'school'|'personal', id})
+ *   掛的 assignment → school_exams.school_id)才走學校錢包。
+ * 2026-09-13 校園墨水:其餘卷若掛在某校的班級(classrooms.school_id)、且老師在該校有校園墨水餘額>0
+ *   → scope 'campus'(先扣校園、不足改扣個人)；否則個人。查詢失敗 fail-open 回個人。
+ * @returns Map(assignmentId → {scope:'school'|'campus'|'personal', id, schoolId?})
  */
 export async function resolveBillingTargetsByAssignment(supabaseAdmin, ownerId, assignmentIds) {
   const map = new Map()
@@ -58,6 +79,36 @@ export async function resolveBillingTargetsByAssignment(supabaseAdmin, ownerId, 
       }
     }
   } catch { /* fail-open → 個人 */ }
+  // 校園墨水：老師自建卷 → 班級所屬學校 → 該校有餘額才切 campus
+  try {
+    const rest = aids.filter((a) => map.get(a)?.scope === 'personal')
+    if (rest.length) {
+      const { data: asgs } = await supabaseAdmin
+        .from('assignments').select('id, classroom_id').in('id', rest)
+      const cids = [...new Set((asgs ?? []).map((a) => a.classroom_id).filter(Boolean))]
+      if (cids.length) {
+        const { data: classes } = await supabaseAdmin
+          .from('classrooms').select('id, school_id').in('id', cids)
+        const schoolByClass = new Map((classes ?? []).filter((c) => c.school_id).map((c) => [c.id, c.school_id]))
+        const schoolIds = [...new Set([...schoolByClass.values()])]
+        if (schoolIds.length) {
+          const { data: wallets, error } = await supabaseAdmin
+            .from('teacher_school_ink')
+            .select('school_id, balance')
+            .eq('profile_id', ownerId)
+            .in('school_id', schoolIds)
+          if (error) throw error
+          const balBySchool = new Map((wallets ?? []).map((w) => [w.school_id, w.balance]))
+          for (const a of asgs ?? []) {
+            const sid = schoolByClass.get(a.classroom_id)
+            if (sid && (balBySchool.get(sid) ?? 0) > 0) map.set(a.id, { scope: 'campus', id: ownerId, schoolId: sid })
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (!isMissingTable(err)) console.warn('[action-billing] campus resolve failed (fail-open personal):', err?.message)
+  }
   return map
 }
 
@@ -93,8 +144,55 @@ async function debitPersonalInk(supabaseAdmin, { profileId, points }) {
 }
 
 /**
- * 整筆扣款(依 target 分流)。school 走既有 debitSchoolInk(含 ledger);personal 直扣 profiles。
- * @returns { ok, balance, scope }
+ * 校園墨水異動（正＝配發入帳、負＝扣款或收回）。樂觀鎖 ×4；扣到 0 為止（回實際扣掉的量 charged）。
+ * 表不存在 → {ok:false, missing:true}。
+ * @returns { ok, balance, charged }
+ */
+export async function adjustCampusInk(supabaseAdmin, { schoolId, profileId, delta, reason, actorProfileId = null, metadata = {} }) {
+  if (!delta) return { ok: true, balance: null, charged: 0 }
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let before = 0, exists = false
+    try {
+      const { data: row, error } = await supabaseAdmin
+        .from('teacher_school_ink').select('balance').eq('school_id', schoolId).eq('profile_id', profileId).maybeSingle()
+      if (error) throw error
+      exists = !!row; before = typeof row?.balance === 'number' ? row.balance : 0
+    } catch (err) {
+      if (isMissingTable(err)) return { ok: false, balance: null, charged: 0, missing: true }
+      console.warn('[action-billing] campus read failed:', err?.message); return { ok: false, balance: null, charged: 0 }
+    }
+    const applied = delta < 0 ? -Math.min(before, -delta) : delta
+    const after = before + applied
+    if (applied === 0) return { ok: true, balance: before, charged: 0 }
+    let updated
+    if (exists) {
+      const r = await supabaseAdmin.from('teacher_school_ink')
+        .update({ balance: after, updated_at: new Date().toISOString() })
+        .eq('school_id', schoolId).eq('profile_id', profileId).eq('balance', before).select('profile_id')
+      if (r.error) { console.warn('[action-billing] campus update failed:', r.error.message); return { ok: false, balance: before, charged: 0 } }
+      updated = r.data
+    } else {
+      const r = await supabaseAdmin.from('teacher_school_ink')
+        .insert({ school_id: schoolId, profile_id: profileId, balance: after }).select('profile_id')
+      if (r.error) { if (/duplicate|23505/i.test(r.error.message)) continue; console.warn('[action-billing] campus insert failed:', r.error.message); return { ok: false, balance: 0, charged: 0 } }
+      updated = r.data
+    }
+    if (updated?.length) {
+      const { error: lErr } = await supabaseAdmin.from('teacher_school_ink_ledger').insert({
+        school_id: schoolId, profile_id: profileId, delta: applied, balance_after: after, reason, actor_profile_id: actorProfileId, metadata
+      })
+      if (lErr) console.warn('[action-billing] campus ledger insert failed:', lErr.message)
+      return { ok: true, balance: after, charged: -Math.min(0, applied) }
+    }
+  }
+  console.warn('[action-billing] campus optimistic-lock exhausted', schoolId, profileId)
+  return { ok: false, balance: null, charged: 0 }
+}
+
+/**
+ * 整筆扣款(依 target 分流)。
+ *   school → 學校池(debitSchoolInk 含 ledger)；campus → 校園墨水優先、不足改扣個人；personal → 個人。
+ * @returns { ok, balance, scope, campusBalance?, personalBalance?, campusCharged?, personalCharged? }
  */
 export async function chargeFlatPoints(supabaseAdmin, { target, points, actorProfileId = null, reason, metadata = {} }) {
   if (!points || points <= 0) return { ok: true, balance: null, scope: target.scope }
@@ -105,6 +203,19 @@ export async function chargeFlatPoints(supabaseAdmin, { target, points, actorPro
     })
     return { ...r, scope: 'school' }
   }
+  if (target.scope === 'campus' && target.schoolId) {
+    const c = await adjustCampusInk(supabaseAdmin, {
+      schoolId: target.schoolId, profileId: target.id, delta: -points, reason, actorProfileId, metadata
+    })
+    const remainder = points - (c.ok ? c.charged : 0)
+    let p = { ok: true, balance: null }
+    if (remainder > 0) p = await debitPersonalInk(supabaseAdmin, { profileId: target.id, points: remainder })
+    return {
+      ok: (c.ok || c.missing) && p.ok, scope: 'campus',
+      balance: c.balance, campusBalance: c.balance, personalBalance: p.balance,
+      campusCharged: c.ok ? c.charged : 0, personalCharged: remainder
+    }
+  }
   const r = await debitPersonalInk(supabaseAdmin, { profileId: target.id, points })
-  return { ...r, scope: 'personal' }
+  return { ...r, scope: 'personal', personalBalance: r.balance, personalCharged: points }
 }

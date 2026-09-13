@@ -14,6 +14,7 @@ import { runAiPipeline } from '../server/ai/orchestrator.js'
 import { MODEL_FLASH } from '../server/ai/model-config.js'
 import { resolveBillingUserId } from '../server/billing-user.js'
 import { debitSchoolInk } from '../server/school-wallet.js'
+import { listCampusBalances } from '../server/action-billing.js'
 import { isBuildRoute, getBuildQuota } from '../server/build-quota.js'
 import crypto from 'crypto'
 
@@ -649,7 +650,7 @@ export default async function handler(req, res) {
             .maybeSingle()
           const schoolBalance = typeof sch?.ink_balance === 'number' ? sch.ink_balance : 0
           if (schoolBalance <= 0 && !isAdmin) {
-            res.status(402).json({ error: '學校點數不足,請聯繫 RedPen AI 儲值後再試' })
+            res.status(402).json({ error: '學校份數不足,請聯繫 RedPen AI 加購後再試' })
             return
           }
           schoolBillingId = requestedSchoolBillingId
@@ -692,10 +693,15 @@ export default async function handler(req, res) {
       }
     }
 
+    // 2026-09-13 份制：個人墨水 0 但有校園墨水（學校配發）也放行——扣款在 save-grading 依卷分流
+    let campusTotal = 0
     if (!isAdmin && !schoolBillingId && !hasValidInkSession && currentBalance <= 0) {
+      try { campusTotal = (await listCampusBalances(supabaseAdmin, billingUserId)).reduce((a, c) => a + (c.balance || 0), 0) } catch { campusTotal = 0 }
+    }
+    if (!isAdmin && !schoolBillingId && !hasValidInkSession && currentBalance <= 0 && campusTotal <= 0) {
       const message = inkSessionId
-        ? '批改會話已結束或點數不足，請重新進入或補充墨水'
-        : '墨水不足，請先補充墨水'
+        ? '批改會話已結束或份數不足，請重新進入或加購份數'
+        : '份數不足，請先加購份數或請學校配發'
       console.warn(`${logPrefix} insufficient-ink balance=${currentBalance} hasSession=${Boolean(inkSessionId)}`)
       res.status(402).json({ error: message })
       return
