@@ -1,4 +1,5 @@
 import { handleCors } from '../../server/_cors.js'
+import crypto from 'node:crypto'
 import { PLANS, normalizePlan } from '../../server/school-plan.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
@@ -3929,6 +3930,21 @@ async function handleSchoolWallet(req, res, supabaseAdmin, adminUser) {
   }
   const body = parseJsonBody(req, res)
   if (!body) return
+  // 2026-09-13 手動學校：POST {createSchool:true, name, schoolType} → 建沒有 1Campus 的學校（plan basic、餘額 0）
+  if (body.createSchool) {
+    const name = String(body.name || '').trim().slice(0, 80)
+    const schoolType = ['國小', '國中', '高中'].includes(String(body.schoolType || '')) ? String(body.schoolType) : null
+    if (!name) { res.status(400).json({ error: '缺少學校名稱' }); return }
+    try {
+      const id = 'sch_' + crypto.randomBytes(8).toString('hex')
+      const { error } = await supabaseAdmin.from('schools').insert({ id, name, provider_dsns: null, school_type: schoolType, ink_balance: 0, plan: 'basic' })
+      if (error) throw error
+      res.status(200).json({ ok: true, id, name })
+    } catch (err) {
+      res.status(500).json({ error: err?.message || '建立學校失敗' })
+    }
+    return
+  }
   const schoolId = String(body.schoolId || '').trim()
   // 2026-09-13 方案等級：POST {schoolId, plan}（系統 admin 專用；此 handler 本來就只有 admin 進得來）
   if (schoolId && typeof body.plan === 'string' && body.delta === undefined) {

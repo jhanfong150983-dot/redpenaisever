@@ -40,6 +40,7 @@ import {
 } from '../../server/action-billing.js'
 import { MENU_BILLING_ENABLED, resolvePointsPerSheet } from '../../server/exam-pricing.js'
 import { getSchoolPlan, getSchoolPlans, checkAssignmentPlan, planDeniedMessage, planAllows } from '../../server/school-plan.js'
+import { importManualRoster, isManualSchool } from '../../server/school-manual.js'
 import {
   isValidDsns,
   getJasmineAccessToken,
@@ -6646,9 +6647,18 @@ async function handleSchoolAdminOverview(req, res) {
     // 學校清單：admin 看全部；school_admin 只看自己管的
     const { data, error } = await supabaseDb.rpc('school_admin_schools')
     if (error) throw error
-    const schools = isAdminUser
+    let schools = isAdminUser
       ? data || []
       : (data || []).filter((s) => adminSchoolIds.includes(s.school_id))
+    // 2026-09-13 手動學校：帶 provider_dsns 讓行政端知道要顯示「名冊同步」還是「批次上傳」
+    try {
+      const ids = schools.map((s) => s.school_id).filter(Boolean)
+      if (ids.length) {
+        const { data: meta } = await supabaseDb.from('schools').select('id, provider_dsns').in('id', ids)
+        const dsnsById = new Map((meta ?? []).map((m) => [m.id, m.provider_dsns || null]))
+        schools = schools.map((s) => ({ ...s, provider_dsns: dsnsById.get(s.school_id) ?? null }))
+      }
+    } catch (e) { console.warn('[school-admin-overview] dsns attach failed:', e?.message) }
     res.status(200).json({ schools })
   } catch (error) {
     console.error('[school-admin-overview] error:', error)
@@ -10408,6 +10418,13 @@ async function handleSchoolTeacherOverview(req, res) {
         const acc = String(it.provider_account || '').trim().toLowerCase()
         if (acc) userByAcc.set(acc, it.user_id)
       }
+    } else {
+      // 2026-09-13 手動學校：名冊的 teacher_acc 就是 Email，直接對 profiles.email
+      const accs = [...new Set((roster ?? []).map((r) => String(r.teacher_acc || '').trim().toLowerCase()).filter((a) => a.includes('@')))]
+      if (accs.length) {
+        const { data: profs } = await supabaseAdmin.from('profiles').select('id, email').in('email', accs)
+        for (const p of profs ?? []) if (p.email) userByAcc.set(String(p.email).toLowerCase(), p.id)
+      }
     }
 
     // 已綁定者的 profile 與班級/作業統計
@@ -10632,6 +10649,37 @@ async function handleSchoolGrant(req, res) {
 
 // 2026-07-30 Step 3.5:行政端全校名冊同步(getClassStudent 全校 → school_classes+school_person SSoT
 // +getStudentDeparted 轉出標記)。權限=系統 admin 或該校 school_admin。細節見 server/school-membership.js。
+// 2026-09-13 手動學校（非 1Campus）：行政批次上傳名冊 → 與 1Campus 同步同一套名冊表（見 server/school-manual.js）
+async function handleSchoolRosterImport(req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return }
+  const { user } = await getAuthUser(req, res)
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+  const body = parseJsonBody(req)
+  const schoolId = typeof body?.schoolId === 'string' ? body.schoolId.trim() : ''
+  if (!schoolId) { res.status(400).json({ error: 'Missing schoolId' }); return }
+  const supabaseAdmin = getSupabaseAdmin()
+  const [{ data: profile }, { data: saRows }] = await Promise.all([
+    supabaseAdmin.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabaseAdmin.from('school_admins').select('school_id').eq('profile_id', user.id)
+  ])
+  const allowed = profile?.role === 'admin' || (Array.isArray(saRows) && saRows.some((r) => r.school_id === schoolId))
+  if (!allowed) { res.status(403).json({ error: 'Forbidden' }); return }
+  if (!(await isManualSchool(supabaseAdmin, schoolId))) { res.status(400).json({ error: '這所學校有 1Campus，名冊請用「全校名冊同步」' }); return }
+  const students = Array.isArray(body.students) ? body.students : []
+  const teachers = Array.isArray(body.teachers) ? body.teachers : []
+  if (!students.length && !teachers.length) { res.status(400).json({ error: '沒有可匯入的資料' }); return }
+  if (students.length > 5000 || teachers.length > 500) { res.status(413).json({ error: '一次最多 5000 名學生、500 位老師' }); return }
+  try {
+    const summary = await importManualRoster(supabaseAdmin, {
+      schoolId, schoolYear: Number(body.schoolYear) || null, semester: Number(body.semester) || 1, students, teachers
+    })
+    res.status(200).json(summary)
+  } catch (err) {
+    console.error('[roster-import] failed:', err?.message)
+    res.status(500).json({ error: err?.message || '匯入失敗' })
+  }
+}
+
 async function handleSchoolRosterSync(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' })
@@ -11893,6 +11941,10 @@ const log = document.getElementById('log');
   }
   if (action === '1campus-classroom-sync') {
     await handleCampus1ClassroomSync(req, res)
+    return
+  }
+  if (action === 'school-roster-import') {
+    await handleSchoolRosterImport(req, res)
     return
   }
   if (action === 'school-roster-sync') {

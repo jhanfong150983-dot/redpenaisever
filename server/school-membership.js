@@ -459,17 +459,23 @@ export async function syncSchoolRoster(supabaseAdmin, { schoolId, dsns }) {
 // 不依賴任何老師登入。冪等:classroom 以 (owner, school, campus_class_id) 對齊、
 // students 以座號 diff-and-skip(只增改不刪);學生自動歸戶(重用既有管線)。
 // ============================================================
-export async function mirrorSchoolClassesToOwner(supabaseAdmin, { schoolId, ownerId }) {
+export async function mirrorSchoolClassesToOwner(supabaseAdmin, { schoolId, ownerId, onlyClassIds = null }) {
   const { data: school } = await supabaseAdmin
     .from('schools')
     .select('id, name, school_type')
     .eq('id', schoolId)
     .maybeSingle()
   if (!school) throw new Error('找不到學校')
-  const { data: refClasses } = await supabaseAdmin
+  let { data: refClasses } = await supabaseAdmin
     .from('school_classes')
     .select('campus_class_id, class_name, grade_year, school_year, semester')
     .eq('school_id', schoolId)
+  // 2026-09-13 手動學校：老師只鏡像被指派的班（任課／導師）
+  if (Array.isArray(onlyClassIds)) {
+    const want = new Set(onlyClassIds.map(String))
+    refClasses = (refClasses ?? []).filter((c) => want.has(String(c.campus_class_id)))
+    if (!refClasses.length) return { classes: 0, created: 0, updated: 0, students: 0 }
+  }
   if (!refClasses?.length) throw new Error('尚無全校名冊,請先執行「全校名冊同步」')
 
   // 學制→絕對年級(與老師同步同規則:高中+9、國中+6、國小+0、未知不設)
