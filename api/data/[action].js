@@ -9681,7 +9681,7 @@ async function handleSchoolTeacherCourses(req, res) {
     const acc = typeof req.query?.teacherAcc === 'string' ? req.query.teacherAcc.trim() : ''
     let qb = supabaseDb
       .from('school_class_courses')
-      .select('campus_class_id, class_name, subject, course_name, teacher_acc, teacher_name, source')
+      .select('campus_class_id, class_name, subject, course_name, teacher_acc, teacher_name, source, school_year, semester')
       .eq('school_id', schoolId)
     if (acc) qb = qb.eq('teacher_acc', acc)
     const { data, error } = await fetchAllPaginated(() => qb)
@@ -10446,8 +10446,7 @@ async function handleSchoolTeacherOverview(req, res) {
     // 已綁定者的 profile 與班級/作業統計
     const boundIds = [...new Set([...userByTid.values(), ...userByAcc.values()])]
     const profById = new Map()
-    const classCountByOwner = new Map()
-    const assignCountByOwner = new Map()
+    // 2026-09-13 user：學校不看老師的班級數／考卷數（那是老師自己的東西）→ 不再統計
     // 2026-09-13 校園墨水：該校配給各老師、尚未用掉的份數（表不存在 → 全 0）
     const campusBal = new Map()
     const loadCampus = async (ids) => {
@@ -10459,27 +10458,8 @@ async function handleSchoolTeacherOverview(req, res) {
     }
     await loadCampus(boundIds)
     if (boundIds.length) {
-      const [{ data: profs }, { data: classrooms }] = await Promise.all([
-        supabaseAdmin.from('profiles').select('id, name, email').in('id', boundIds),
-        supabaseAdmin.from('classrooms').select('id, owner_id').eq('school_id', schoolId).in('owner_id', boundIds)
-      ])
+      const { data: profs } = await supabaseAdmin.from('profiles').select('id, name, email').in('id', boundIds)
       for (const p of profs ?? []) profById.set(p.id, p)
-      const classroomIds = (classrooms ?? []).map((c) => c.id)
-      const ownerByClassroom = new Map((classrooms ?? []).map((c) => [c.id, c.owner_id]))
-      for (const c of classrooms ?? []) {
-        classCountByOwner.set(c.owner_id, (classCountByOwner.get(c.owner_id) || 0) + 1)
-      }
-      for (let i = 0; i < classroomIds.length; i += 100) {
-        const chunk = classroomIds.slice(i, i + 100)
-        const { data: assigns } = await supabaseAdmin
-          .from('assignments')
-          .select('id, classroom_id')
-          .in('classroom_id', chunk)
-        for (const a of assigns ?? []) {
-          const owner = ownerByClassroom.get(a.classroom_id)
-          if (owner) assignCountByOwner.set(owner, (assignCountByOwner.get(owner) || 0) + 1)
-        }
-      }
     }
 
     const buildRow = ({ name, account, profileId }) => {
@@ -10491,9 +10471,7 @@ async function handleSchoolTeacherOverview(req, res) {
         profileId: p ? profileId : null,
         loginEmail: p?.email || '',
         // 2026-09-13 user：學校不可看到老師的個人份數（只回校園墨水）
-        campusBalance: p ? (campusBal.get(profileId) ?? 0) : null,
-        classroomCount: p ? classCountByOwner.get(profileId) || 0 : null,
-        assignmentCount: p ? assignCountByOwner.get(profileId) || 0 : null
+        campusBalance: p ? (campusBal.get(profileId) ?? 0) : null
       }
     }
 
