@@ -228,6 +228,41 @@ function maskUserId(userId) {
   return raw.length <= 8 ? raw : `${raw.slice(0, 4)}...${raw.slice(-4)}`
 }
 
+// 2026-09-14 疊合免 classify：讀答案卷模板的頁圖（base64）＋每題 answerBbox（模板頁 normalized、page 由 pageIndex／id 首段推）
+async function fetchRegistrationTemplate(supabaseAdmin, templateId) {
+  const { data: tpl } = await supabaseAdmin
+    .from('answer_key_templates')
+    .select('answer_sheet_image_paths, answer_key')
+    .eq('id', templateId)
+    .maybeSingle()
+  const questions = Array.isArray(tpl?.answer_key?.questions) ? tpl.answer_key.questions : []
+  const boxes = questions
+    .filter((q) => q?.answerBbox && Number.isFinite(q.answerBbox.x) && Number.isFinite(q.answerBbox.w))
+    .map((q) => ({
+      id: String(q.id),
+      page: Number.isInteger(q.pageIndex) ? q.pageIndex : Math.max(0, (parseInt(String(q.id).split('-')[0], 10) || 1) - 1),
+      bbox: { x: q.answerBbox.x, y: q.answerBbox.y, w: q.answerBbox.w, h: q.answerBbox.h }
+    }))
+  if (boxes.length === 0) return null
+  const bucket = supabaseAdmin.storage.from('homework-images')
+  let paths = Array.isArray(tpl?.answer_sheet_image_paths) ? tpl.answer_sheet_image_paths : []
+  if (paths.length === 0) {
+    const maxPage = Math.max(0, ...boxes.map((b) => b.page))
+    paths = Array.from({ length: maxPage + 1 }, (_, i) => `template-answer-sheets/${templateId}/page-${i}.webp`)
+  }
+  const settled = await Promise.allSettled(paths.map(async (p) => {
+    const { data, error } = await bucket.download(p)
+    if (error || !data) return null
+    return Buffer.from(await data.arrayBuffer()).toString('base64')
+  }))
+  const pages = settled.map((r) => (r.status === 'fulfilled' ? r.value : null))
+  if (pages.some((p) => !p)) {
+    console.warn(`[Registration] 模板 ${templateId} 頁圖不全（${pages.filter(Boolean).length}/${paths.length}）→ 不疊合`)
+    return null
+  }
+  return { templateId, pages, boxes }
+}
+
 async function fetchAnswerSheetImagesForClassify(supabaseAdmin, userId, assignmentId) {
   try {
     const { data: assignment } = await supabaseAdmin
@@ -752,6 +787,7 @@ export default async function handler(req, res) {
   // 修：classify 與 legacy phase_a 兩條都要拿。
   // 重踩 feedback_dont_infer_total_pages_from_question_ids.md 的雷。
   let generatedSheetLayout = null
+  let registrationTemplate = null  // 2026-09-14 疊合免 classify：模板頁圖＋模板格位
   const needsAnswerKeyImagesAndTotalPages =
     routeKey === 'grading.phase_a' || routeKey === 'grading.phase_a_classify'
   if (needsAnswerKeyImagesAndTotalPages && payload?.assignmentId) {
@@ -786,6 +822,18 @@ export default async function handler(req, res) {
           }
         } catch (e) {
           console.warn('[GeneratedSheet] fetch generated_sheet failed:', e?.message)
+        }
+      }
+      // 2026-09-14 疊合免 classify（自備作答卷／一般模式、PDF 掃描）：答案卷模板頁圖＋模板格位交給
+      //   staged-grading 呼叫配準服務（REGISTRATION_URL）；沒設 URL 或生成卷（已有錨點版面）就不抓。
+      if (a?.answer_key_template_id && !generatedSheetLayout && process.env.REGISTRATION_URL && process.env.REGISTRATION_ENABLED !== '0') {
+        try {
+          registrationTemplate = await fetchRegistrationTemplate(supabaseAdmin, a.answer_key_template_id)
+          if (registrationTemplate) {
+            console.log(`📐 [Registration] 模板 ${a.answer_key_template_id} ${registrationTemplate.pages.length} 頁 ${registrationTemplate.boxes.length} 格 → Phase A 試疊合`)
+          }
+        } catch (e) {
+          console.warn('[Registration] fetch template failed:', e?.message)
         }
       }
     } catch (e) {
@@ -885,7 +933,8 @@ export default async function handler(req, res) {
             assignmentId: payload?.assignmentId || undefined,
             submissionId: payload?.submissionId || undefined,
             assignmentTotalPages,  // 🆕 給 staged-grading 判定 ID 自動切頁
-            generatedSheetLayout: generatedSheetLayout || undefined  // 生成作答卷定版版面（免 classify）
+            generatedSheetLayout: generatedSheetLayout || undefined,  // 生成作答卷定版版面（免 classify）
+            registrationTemplate: registrationTemplate || undefined  // 疊合免 classify（模板頁圖＋格位）
           }
         })
     )

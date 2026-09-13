@@ -8897,6 +8897,55 @@ function buildFinalGradingResult({
   }
 }
 
+// 2026-09-14 疊合免 classify：PDF 掃描卷 × 答案卷模板頁圖 → 配準服務（純 CPU、零 AI）→ 整份格位。
+//   graceful：沒設 URL／服務失敗／逾時／服務判「版面不同」→ 回 null、照常走 classify。整份不逐格混用。
+//   只對 teacher_scan（PDF）；模式由 REGISTRATION_MODES 控（預設 answer_only,with_questions）。
+async function registerSubmissionBoxes({ inlineData, pageBreaks, submissionSource, answerSheetMode, registrationTemplate, pipelineRunId }) {
+  const url = process.env.REGISTRATION_URL
+  if (!url || process.env.REGISTRATION_ENABLED === '0') return null
+  if (!registrationTemplate?.pages?.length || !registrationTemplate?.boxes?.length) return null
+  if (submissionSource !== 'teacher_scan') return null
+  const modes = String(process.env.REGISTRATION_MODES || 'answer_only,with_questions').split(',').map((s) => s.trim())
+  if (!modes.includes(answerSheetMode === 'answer_only' ? 'answer_only' : 'with_questions')) return null
+  const timeoutMs = Number(process.env.REGISTRATION_TIMEOUT_MS) || 30000
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  const t0 = Date.now()
+  try {
+    const resp = await fetch(`${url.replace(/\/$/, '')}/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        template_id: registrationTemplate.templateId,
+        template_pages: registrationTemplate.pages,
+        boxes: registrationTemplate.boxes,
+        student_image: inlineData.data,
+        page_breaks: Array.isArray(pageBreaks) && pageBreaks.length > 0 ? pageBreaks : null
+      })
+    })
+    if (!resp.ok) {
+      logStaged(pipelineRunId, 'basic', `[registration] 服務回 ${resp.status}、改走 classify`)
+      return null
+    }
+    const data = await resp.json()
+    const pages = (data?.pages || [])
+      .map((p) => `p${p.page}:${p.ok ? 'ok' : 'x'} inl=${p.inliers} st=${p.structure} cons=${p.consistency} shift=${p.median_shift_mm}`)
+      .join(' | ')
+    if (data?.decision !== 'aligned' || !Array.isArray(data.boxes) || data.boxes.length === 0) {
+      logStaged(pipelineRunId, 'basic', `[registration] 退回 classify：${data?.reason || 'no boxes'} (${pages}) ${Date.now() - t0}ms`)
+      return null
+    }
+    logStaged(pipelineRunId, 'basic', `[registration] 疊合成功 ${data.boxes.length} 格 (${pages}) ${Date.now() - t0}ms`)
+    return { boxes: data.boxes, pages: data.pages, ms: data.ms }
+  } catch (err) {
+    logStaged(pipelineRunId, 'basic', `[registration] 例外 ${err?.name === 'AbortError' ? 'timeout' : err?.message}、改走 classify`)
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Dewarp（學生照片卷整平）：呼叫獨立 Python/UVDoc 微服務，把彎曲/傾斜照片拉平，
 // 讓 classify 的矩形 bbox 跟得上文字行。
@@ -9283,6 +9332,18 @@ export async function runStagedGradingPhaseA({
       pageBreaks = _dw.pageBreaks
     }
   }
+  // ── 疊合免 classify（2026-09-14）：PDF 掃描卷＋答案卷模板頁圖 → 配準服務 → 整份格位；不成就走 classify ──
+  let registrationAligned = null
+  if (!precomputedClassifyContext && !internalContext?.generatedSheetLayout && internalContext?.registrationTemplate) {
+    registrationAligned = await registerSubmissionBoxes({
+      inlineData: inlineImages[0].inlineData,
+      pageBreaks,
+      submissionSource,
+      answerSheetMode,
+      registrationTemplate: internalContext.registrationTemplate,
+      pipelineRunId
+    })
+  }
 
   const classifyCorrections = Array.isArray(payload?.classifyCorrections) ? payload.classifyCorrections : []
   if (classifyCorrections.length > 0) {
@@ -9316,6 +9377,19 @@ export async function runStagedGradingPhaseA({
     totalPages = 1
     ocrAssistMeta = { enabled: false, perPage: [] }
     logStaged(pipelineRunId, 'basic', `[A1] 生成作答卷：錨點對齊免 classify（${gsLayout.version} ${classifyAligned.length} 格、零 AI 呼叫）`)
+  } else if (registrationAligned) {
+    // 2026-09-14 疊合免 classify：配準服務已把模板格位投影到學生合併圖（全圖 normalized 座標、含吸附學生印刷線）
+    const akById = new Map((answerKeyQuestions || []).map((q) => [String(q.id), q]))
+    classifyAligned = registrationAligned.boxes.map((b) => ({
+      questionId: b.id,
+      visible: true,
+      questionType: akById.get(String(b.id))?.questionCategory || akById.get(String(b.id))?.type || 'fill_blank',
+      answerBbox: b.bbox
+    }))
+    classifyResult = { alignedQuestions: classifyAligned }
+    totalPages = Array.isArray(pageBreaks) && pageBreaks.length > 0 ? pageBreaks.length + 1 : 1
+    ocrAssistMeta = { enabled: false, perPage: [] }
+    logStaged(pipelineRunId, 'basic', `[A1] 疊合免 classify（${classifyAligned.length} 格、零 AI 呼叫、${registrationAligned.ms}ms）`)
   } else {
   // 🆕 OCR-assist metadata 收集（用於 stage_logs 寫入）
   // Schema: { enabled: bool, perPage: [{ page, stats, candidates }] }
