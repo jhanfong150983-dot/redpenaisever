@@ -107,7 +107,7 @@ export async function importManualRoster(supabaseAdmin, { schoolId, schoolYear, 
       const cn = norm(c.className), subj = norm(c.subject)
       if (!cn || !subj) continue
       courseRows.push({
-        school_id: schoolId, campus_class_id: manualClassId(sy, cn), course_name: `${cn} ${subj}`, subject: subj,
+        school_id: schoolId, campus_class_id: manualClassId(sy, cn), class_no: null, class_name: cn, course_name: `${cn} ${subj}`, subject: subj,
         campus_teacher_id: tid, teacher_acc: email, teacher_name: norm(t.name) || null,
         school_year: sy, semester: sem, source: 'manual', updated_at: nowIso,
       })
