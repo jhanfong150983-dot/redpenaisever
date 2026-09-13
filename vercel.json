@@ -46,6 +46,14 @@
     "api/report/parent-pdf.js": {
       "memory": 1536,
       "maxDuration": 60
+    },
+    "api/report/parent-publish.js": {
+      "memory": 1536,
+      "maxDuration": 60
+    },
+    "api/report/parent-open.js": {
+      "memory": 512,
+      "maxDuration": 30
     }
   },
   "env": {
