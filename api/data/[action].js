@@ -6623,16 +6623,19 @@ async function handleSchoolAdminOverview(req, res) {
       // 尚未跑過全校同步的學校退回舊 RPC(老師同步驅動、只有部分班級)
       const { data: refClasses, error: refErr } = await supabaseDb
         .from('school_classes')
-        .select('campus_class_id, class_name, grade_year, student_count, homeroom_teacher_name, homeroom_teacher_acc')
+        .select('campus_class_id, class_name, grade_year, student_count, homeroom_teacher_name, homeroom_teacher_acc, school_year, semester')
         .eq('school_id', schoolId)
         .order('class_name', { ascending: true })
       if (refErr) throw refErr
       if (refClasses && refClasses.length > 0) {
+        // 2026-09-13：帶學年學期——換學年後名冊表同時有舊班（classID 每學年換號）與新班，行政端預設只看最新學期、可切歷史
         const classes = refClasses.map((c) => ({
           class_label: c.class_name || c.campus_class_id,
           grade: c.grade_year,
           student_count: c.student_count ?? 0,
           campus_class_id: c.campus_class_id,
+          school_year: c.school_year ?? null,
+          semester: c.semester ?? null,
           homeroom_teacher_name: c.homeroom_teacher_name || null,
           homeroom_teacher_acc: c.homeroom_teacher_acc || null
         }))
