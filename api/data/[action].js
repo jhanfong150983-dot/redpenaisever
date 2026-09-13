@@ -6654,9 +6654,22 @@ async function handleSchoolAdminOverview(req, res) {
     try {
       const ids = schools.map((s) => s.school_id).filter(Boolean)
       if (ids.length) {
-        const { data: meta } = await supabaseDb.from('schools').select('id, provider_dsns').in('id', ids)
+        const [{ data: meta }, { data: terms }] = await Promise.all([
+          supabaseDb.from('schools').select('id, provider_dsns').in('id', ids),
+          supabaseDb.from('school_classes').select('school_id, school_year, semester').in('school_id', ids).not('school_year', 'is', null)
+        ])
         const dsnsById = new Map((meta ?? []).map((m) => [m.id, m.provider_dsns || null]))
-        schools = schools.map((s) => ({ ...s, provider_dsns: dsnsById.get(s.school_id) ?? null }))
+        // 名冊目前的學年學期（最大值）：行政端用來判斷「老師端已是新學年、名冊還是舊的」→ 自動同步＋橫幅
+        const termById = new Map()
+        for (const t of terms ?? []) {
+          const cur = termById.get(t.school_id)
+          const key = (Number(t.school_year) || 0) * 10 + (Number(t.semester) || 0)
+          if (!cur || key > cur.key) termById.set(t.school_id, { key, sy: Number(t.school_year), sem: Number(t.semester) || null })
+        }
+        schools = schools.map((s) => ({
+          ...s, provider_dsns: dsnsById.get(s.school_id) ?? null,
+          roster_school_year: termById.get(s.school_id)?.sy ?? null, roster_semester: termById.get(s.school_id)?.sem ?? null
+        }))
       }
     } catch (e) { console.warn('[school-admin-overview] dsns attach failed:', e?.message) }
     res.status(200).json({ schools })
