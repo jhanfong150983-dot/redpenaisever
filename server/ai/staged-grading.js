@@ -12097,7 +12097,7 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       if (!Array.isArray(pv) || pv.length === 0) return null
       const vals = pv.map((p) => ensureString(p?.student, '').trim())
       if (!vals.some((v) => v)) return null
-      const allAscii = vals.every((v) => /^[ -]*$/.test(v))
+      const allAscii = vals.every((v) => /^[ -~]*$/.test(v))
       return vals.map((v) => v || '（空）').join(allAscii ? ', ' : '、')
     }
     const read1PartsDisplay = joinPartValues(read1?.partValues)
