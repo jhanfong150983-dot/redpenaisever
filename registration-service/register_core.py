@@ -448,6 +448,7 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
             'line_shift_mm': pr.line_shift_mm,
             'decidable': pr.decidable, 'total': pr.total,
             'residual_px': None if pr.residual_px is None else round(pr.residual_px, 2),
+            'H': None if pr.H is None else [[float(v) for v in row] for row in pr.H],  # 模板頁(W=1200 座標)→學生合併圖(W=1200 座標)
         } for pr in page_results],
         'boxes': out_boxes if all_ok else [],
         'student_size': {'w': ws, 'h': hs},

@@ -235,6 +235,12 @@ async function fetchRegistrationTemplate(supabaseAdmin, templateId) {
     .select('answer_sheet_image_paths, answer_key')
     .eq('id', templateId)
     .maybeSingle()
+  // 只有「PDF 掃描」做的答案卷才能當模板（user 拍板：照片模板 vs PDF 學生卷一律退回 classify；
+  //   舊模板沒有 sheetSourceKind＝照片時代→不疊合）。REGISTRATION_ALLOW_LEGACY=1 可暫時放行舊模板做驗證。
+  if (tpl?.answer_key?.sheetSourceKind !== 'pdf' && process.env.REGISTRATION_ALLOW_LEGACY !== '1') {
+    console.log(`[Registration] 模板 ${templateId} 非 PDF 來源（sheetSourceKind=${tpl?.answer_key?.sheetSourceKind ?? '無'}）→ 不疊合、走 classify`)
+    return null
+  }
   const questions = Array.isArray(tpl?.answer_key?.questions) ? tpl.answer_key.questions : []
   const boxes = questions
     .filter((q) => q?.answerBbox && Number.isFinite(q.answerBbox.x) && Number.isFinite(q.answerBbox.w))
