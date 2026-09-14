@@ -332,6 +332,8 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
                 pr.H = H
                 pr.line_shift_mm = round(g_mm, 2)
                 probes = _probe_all(H)
+        tpl_hl_w = np.array([_warp_pt(H, wt / 2, y)[1] for y in tpl.hl]) if tpl.hl.size else np.zeros(0)
+        tpl_vl_w = np.array([_warp_pt(H, x, ht / 2)[0] for x in tpl.vl]) if tpl.vl.size else np.zeros(0)
         ok = fail = 0
         shifts: List[float] = []
         page_boxes: List[dict] = []
@@ -360,18 +362,23 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
                 bh, bw_ = (y1 - y0), (x1 - x0)
                 # 候選線必須「真的橫跨／縱貫這個格」（整頁線清單含別區表格的線，例如頁底得分表每 6mm 一條直線）
                 bwimg = stu.bw
+                # 覆蓋率量測範圍沿線方向外擴 30%：真正的格線會延伸出格外（整列/整表），
+                #   學生手寫的直豎（B、D、1）只在格內 → 外擴後覆蓋率掉到 <0.55 就不會被當成格線
                 def _spans_h(y: float) -> bool:
-                    yi = int(round(y)); a, b = int(max(0, x0 + bw_ * 0.15)), int(min(ws, x1 - bw_ * 0.15))
+                    yi = int(round(y)); a, b = int(max(0, x0 - bw_ * 0.3)), int(min(ws, x1 + bw_ * 0.3))
                     if b - a < 4 or yi < 1 or yi >= hs - 1: return False
-                    return float(bwimg[yi - 1:yi + 2, a:b].any(axis=0).mean()) >= 0.6
+                    return float(bwimg[yi - 1:yi + 2, a:b].any(axis=0).mean()) >= 0.55
                 def _spans_v(x: float) -> bool:
-                    xi = int(round(x)); a, b = int(max(0, y0 + bh * 0.15)), int(min(hs, y1 - bh * 0.15))
+                    xi = int(round(x)); a, b = int(max(0, y0 - bh * 0.3)), int(min(hs, y1 + bh * 0.3))
                     if b - a < 4 or xi < 1 or xi >= ws - 1: return False
-                    return float(bwimg[a:b, xi - 1:xi + 2].any(axis=1).mean()) >= 0.6
-                up = np.array([v for v in stu.hl if cy - max(bh * 1.5, 12 / MM) < v < cy and _spans_h(v)])
-                dn = np.array([v for v in stu.hl if cy < v < cy + max(bh * 1.5, 12 / MM) and _spans_h(v)])
-                lf = np.array([v for v in stu.vl if cx - max(bw_ * 1.5, 12 / MM) < v < cx and _spans_v(v)])
-                rt = np.array([v for v in stu.vl if cx < v < cx + max(bw_ * 1.5, 12 / MM) and _spans_v(v)])
+                    return float(bwimg[a:b, xi - 1:xi + 2].any(axis=1).mean()) >= 0.55
+                # 候選線還要在老師答案卷（warp 後）同位置 ±2mm 也有線：印刷線兩邊都有、學生手寫直豎只有學生卷有
+                lim2 = 2.0 / MM
+                _in_t = lambda arr, v: _nearest(arr, v, lim2) is not None
+                up = np.array([v for v in stu.hl if cy - max(bh * 1.5, 12 / MM) < v < cy and _spans_h(v) and _in_t(tpl_hl_w, v)])
+                dn = np.array([v for v in stu.hl if cy < v < cy + max(bh * 1.5, 12 / MM) and _spans_h(v) and _in_t(tpl_hl_w, v)])
+                lf = np.array([v for v in stu.vl if cx - max(bw_ * 1.5, 12 / MM) < v < cx and _spans_v(v) and _in_t(tpl_vl_w, v)])
+                rt = np.array([v for v in stu.vl if cx < v < cx + max(bw_ * 1.5, 12 / MM) and _spans_v(v) and _in_t(tpl_vl_w, v)])
                 if up.size and dn.size and lf.size and rt.size:
                     ey0, ey1, ex0, ex1 = float(up.max()), float(dn.min()), float(lf.max()), float(rt.min())
                     eh, ew = ey1 - ey0, ex1 - ex0
