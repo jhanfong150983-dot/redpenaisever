@@ -64,6 +64,8 @@ def register(req: RegisterReq):
         raise HTTPException(status_code=400, detail=str(e))
     result['template_id'] = req.template_id
     result['ms'] = int((time.time() - t0) * 1000)
+    pg = ' | '.join(f"p{p['page']}:{'ok' if p['ok'] else 'x'} inl={p['inliers']} cons={p['consistency']} shift={p['median_shift_mm']}" for p in result['pages'])
+    print(f"[register] tpl={req.template_id} {result['decision']} {result.get('reason') or ''} boxes={len(result['boxes'])} {result['ms']}ms ({pg})", flush=True)
     return result
 
 
@@ -95,6 +97,7 @@ def snap(req: SnapReq):
             continue
         for b in r['boxes']:
             out_boxes.append({'id': b['id'], 'page': p, 'bbox': b['bbox'], 'snapped_edges': b['snapped_edges']})
+    print(f"[snap] tpl={req.template_id} pages={len(pages)} boxes_in={len(req.boxes)} snapped={sum(1 for b in out_boxes if b['snapped_edges'])} {int((time.time() - t0) * 1000)}ms", flush=True)
     return {'template_id': req.template_id, 'boxes': out_boxes, 'pages': out_pages, 'ms': int((time.time() - t0) * 1000)}
 
 
