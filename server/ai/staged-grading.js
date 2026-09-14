@@ -12089,6 +12089,19 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
     //   重建後兩候選都是全句、黃底只剩真正不同的字、選哪個都能正確計分。bail(對不齊/爭議>3字)就照原樣顯示。
     let read1DisplayOverride = null
     let scaffoldReason
+    // 2026-09-14 user：「2-F 學生擷取答案怎麼怪怪的（You're ( a / an ) monkey）」——
+    //   合題（partValues）的 read 會把印刷句一起抄成 studentAnswerRaw；批改本來就用 partValues 逐空比對，
+    //   顯示卻拿整句 → 老師看不出學生到底填了什麼。改：有 partValues 就顯示「逐空值」（deterministic 拼接、不靠模型），
+    //   整句原文另存 studentAnswerFull 供審查對照。只動顯示欄位，不動 raw／partValues／一致性判定。
+    const joinPartValues = (pv) => {
+      if (!Array.isArray(pv) || pv.length === 0) return null
+      const vals = pv.map((p) => ensureString(p?.student, '').trim())
+      if (!vals.some((v) => v)) return null
+      const allAscii = vals.every((v) => /^[ -]*$/.test(v))
+      return vals.map((v) => v || '（空）').join(allAscii ? ', ' : '、')
+    }
+    const read1PartsDisplay = joinPartValues(read1?.partValues)
+    const read2PartsDisplay = joinPartValues(read2?.partValues)
     if (consistencyStatus !== 'stable'
       && (classifyRow?.questionType === 'fill_blank' || classifyRow?.questionType === 'short_answer')
       && read1?.status === 'read' && read2?.status === 'read') {
@@ -12106,7 +12119,8 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       questionType: classifyRow?.questionType ?? 'other',
       readAnswer1: {
         status: read1?.status ?? 'unreadable',
-        studentAnswer: read1DisplayOverride ?? read1?.studentAnswerRaw ?? '無法辨識',
+        studentAnswer: read1PartsDisplay ?? read1DisplayOverride ?? read1?.studentAnswerRaw ?? '無法辨識',
+        ...(read1PartsDisplay && read1?.studentAnswerRaw && read1.studentAnswerRaw !== read1PartsDisplay ? { studentAnswerFull: read1.studentAnswerRaw } : {}),
         // 2026-07-05: 合題逐空讀值傳給前端——審查卡「四小格」逐小題顯示/點選用
         ...(Array.isArray(read1?.partValues) && read1.partValues.length > 0 ? { partValues: read1.partValues } : {}),
         // 2026-07-11: 合成 unreadable 標記（call 失敗補的/read 整個缺失、非模型判讀）——
@@ -12115,7 +12129,8 @@ ${qs.map((q) => { const ps = tsPartsMeta(q) || []; return `- questionId="${q.que
       },
       readAnswer2: {
         status: read2?.status ?? 'unreadable',
-        studentAnswer: read2?.studentAnswerRaw ?? '無法辨識',
+        studentAnswer: read2PartsDisplay ?? read2?.studentAnswerRaw ?? '無法辨識',
+        ...(read2PartsDisplay && read2?.studentAnswerRaw && read2.studentAnswerRaw !== read2PartsDisplay ? { studentAnswerFull: read2.studentAnswerRaw } : {}),
         ...(Array.isArray(read2?.partValues) && read2.partValues.length > 0 ? { partValues: read2.partValues } : {}),
         ...(read2?._callFailed || !read2 ? { syntheticUnreadable: true } : {})
       },
