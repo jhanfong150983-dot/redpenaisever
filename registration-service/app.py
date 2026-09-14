@@ -28,6 +28,7 @@ class Box(BaseModel):
     page: int = 0
     bbox: dict
     kind: Optional[str] = None  # questionCategory（作圖類不做包圍格吸附）
+    manual: Optional[bool] = False  # 老師手框（referenceBbox）：只逐邊微調、不做包圍格
 
 
 class RegisterReq(BaseModel):

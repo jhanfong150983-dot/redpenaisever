@@ -242,14 +242,20 @@ async function fetchRegistrationTemplate(supabaseAdmin, templateId) {
     return null
   }
   const questions = Array.isArray(tpl?.answer_key?.questions) ? tpl.answer_key.questions : []
+  // 老師在答案卷檢核頁手動框的 referenceBbox 優先於 AI 的 answerBbox（2026-09-14：老師調過的框才是批改要用的）
+  const pick = (q) => (q?.referenceBbox && Number.isFinite(q.referenceBbox.x) && Number.isFinite(q.referenceBbox.w)) ? q.referenceBbox : q?.answerBbox
   const boxes = questions
-    .filter((q) => q?.answerBbox && Number.isFinite(q.answerBbox.x) && Number.isFinite(q.answerBbox.w))
-    .map((q) => ({
-      id: String(q.id),
-      page: Number.isInteger(q.pageIndex) ? q.pageIndex : Math.max(0, (parseInt(String(q.id).split('-')[0], 10) || 1) - 1),
-      bbox: { x: q.answerBbox.x, y: q.answerBbox.y, w: q.answerBbox.w, h: q.answerBbox.h },
-      kind: q.questionCategory || q.type || null  // 作圖類不做包圍格吸附
-    }))
+    .filter((q) => { const b = pick(q); return b && Number.isFinite(b.x) && Number.isFinite(b.w) })
+    .map((q) => {
+      const b = pick(q)
+      return {
+        id: String(q.id),
+        page: Number.isInteger(q.pageIndex) ? q.pageIndex : Math.max(0, (parseInt(String(q.id).split('-')[0], 10) || 1) - 1),
+        bbox: { x: b.x, y: b.y, w: b.w, h: b.h },
+        kind: q.questionCategory || q.type || null,  // 作圖類不做包圍格吸附
+        manual: b === q.referenceBbox  // 老師手框：只逐邊微調、不做包圍格（老師可能故意只框格子的一部分）
+      }
+    })
   if (boxes.length === 0) return null
   const bucket = supabaseAdmin.storage.from('homework-images')
   let paths = Array.isArray(tpl?.answer_sheet_image_paths) ? tpl.answer_sheet_image_paths : []

@@ -353,7 +353,8 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
             new = {'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1}
             snapped: List[str] = []
             # 作圖／繪圖類：格內本來就有方格紙／圖形線，包圍格會被縮到內框 → 只用逐邊吸附
-            if snap == 'cell' and str(b.get('kind') or '') in DRAWING_KINDS:
+            # 老師手框（manual）：老師可能故意只框格子的一部分 → 也只逐邊微調、不做包圍格
+            if snap == 'cell' and (str(b.get('kind') or '') in DRAWING_KINDS or b.get('manual')):
                 snap_mode = 'lines'
             elif snap == 'cell':
                 # 「包圍格」吸附：以投影框中心為準，找學生卷上包住中心的最近四條印刷線＝真正的作答格。
