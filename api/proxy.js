@@ -241,7 +241,8 @@ async function fetchRegistrationTemplate(supabaseAdmin, templateId) {
     .map((q) => ({
       id: String(q.id),
       page: Number.isInteger(q.pageIndex) ? q.pageIndex : Math.max(0, (parseInt(String(q.id).split('-')[0], 10) || 1) - 1),
-      bbox: { x: q.answerBbox.x, y: q.answerBbox.y, w: q.answerBbox.w, h: q.answerBbox.h }
+      bbox: { x: q.answerBbox.x, y: q.answerBbox.y, w: q.answerBbox.w, h: q.answerBbox.h },
+      kind: q.questionCategory || q.type || null  // 作圖類不做包圍格吸附
     }))
   if (boxes.length === 0) return null
   const bucket = supabaseAdmin.storage.from('homework-images')

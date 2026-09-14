@@ -34,6 +34,7 @@ CELL_SHIFT_TOL_MM = 2.5  # 逐格最佳位移 ≤ 此值＝該格版面一致（
 PAGE_SHIFT_TOL_MM = 3.0  # 頁級：pass1 各格位移中位 ≤ 此值才修正並採用（同版面本機 ≤1.2、Cloud Run ≤2.4；另版靠逐格一致率擋）
 MIN_DECIDABLE_RATIO = 0.3  # 可判定格佔比低於此 → 不敢下結論
 DEFAULT_MIN_CONSISTENCY = 0.75  # 實測：同版面 ≥0.83（數學稀疏格最低）、另版 ≤0.23
+DRAWING_KINDS = {'grid_geometry', 'map_symbol', 'connect_dots', 'diagram_draw', 'diagram_color', 'map_fill'}
 
 _sift = cv2.SIFT_create(nfeatures=6000)
 _bf = cv2.BFMatcher(cv2.NORM_L2)
@@ -138,6 +139,7 @@ class StudentImage:
     hl: np.ndarray
     vl: np.ndarray
     segments: List[Tuple[int, int]]            # 每頁段的 (y0, y1)（px）
+    bw: Optional[np.ndarray] = None             # 二值圖（包圍格吸附用：驗證候選線真的橫跨/縱貫該格）
     _feats: dict = field(default_factory=dict)  # seg idx → (kp, des)
 
     @classmethod
@@ -154,7 +156,7 @@ class StudentImage:
         segments = [(ys[i], ys[i + 1]) for i in range(len(ys) - 1) if ys[i + 1] - ys[i] > 50]
         if not segments:
             segments = [(0, h)]
-        return cls(gray=g, hl=hlines(g), vl=vlines(g), segments=segments)
+        return cls(gray=g, hl=hlines(g), vl=vlines(g), segments=segments, bw=_binarize(g) > 0)
 
     def feats(self, i: int):
         if i not in self._feats:
@@ -275,10 +277,10 @@ def _cell_probe(warped_edge: np.ndarray, stu_edge: np.ndarray, x0: float, y0: fl
 def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
              page_breaks: Optional[List[float]] = None,
              min_consistency: float = DEFAULT_MIN_CONSISTENCY,
-             snap: str = 'lines') -> dict:
+             snap: str = 'cell') -> dict:
     """
     boxes: [{id, page, bbox:{x,y,w,h}}]（模板頁 normalized）
-    snap: 'lines'（投影邊吸附學生印刷線、沒線用該格 NCC 位移）| 'ncc'（只用該格 NCC 位移）| 'none'
+    snap: 'cell'（預設：以中心找學生卷包圍格；找不到退 lines）| 'lines'（逐邊吸最近印刷線、沒線用 NCC 位移）| 'ncc' | 'none'
     回：{decision, reason, pages:[...], boxes:[{id, page, bbox(學生合併圖 normalized), status, snapped_edges, shift_mm}], ms}
     """
     t0 = time.time()
@@ -347,7 +349,41 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
             # 吸附
             new = {'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1}
             snapped: List[str] = []
-            if snap == 'lines':
+            # 作圖／繪圖類：格內本來就有方格紙／圖形線，包圍格會被縮到內框 → 只用逐邊吸附
+            if snap == 'cell' and str(b.get('kind') or '') in DRAWING_KINDS:
+                snap_mode = 'lines'
+            elif snap == 'cell':
+                # 「包圍格」吸附：以投影框中心為準，找學生卷上包住中心的最近四條印刷線＝真正的作答格。
+                #   模板 extract 框常整體偏半個標題列（人工檢視：培英數學下半頁偏 3~5mm），逐邊最近線會吸到錯的線，
+                #   用中心找包圍格才不受這種整體偏移影響（偏移 < 半格高就一定落在對的格）。
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                bh, bw_ = (y1 - y0), (x1 - x0)
+                # 候選線必須「真的橫跨／縱貫這個格」（整頁線清單含別區表格的線，例如頁底得分表每 6mm 一條直線）
+                bwimg = stu.bw
+                def _spans_h(y: float) -> bool:
+                    yi = int(round(y)); a, b = int(max(0, x0 + bw_ * 0.15)), int(min(ws, x1 - bw_ * 0.15))
+                    if b - a < 4 or yi < 1 or yi >= hs - 1: return False
+                    return float(bwimg[yi - 1:yi + 2, a:b].any(axis=0).mean()) >= 0.6
+                def _spans_v(x: float) -> bool:
+                    xi = int(round(x)); a, b = int(max(0, y0 + bh * 0.15)), int(min(hs, y1 - bh * 0.15))
+                    if b - a < 4 or xi < 1 or xi >= ws - 1: return False
+                    return float(bwimg[a:b, xi - 1:xi + 2].any(axis=1).mean()) >= 0.6
+                up = np.array([v for v in stu.hl if cy - max(bh * 1.5, 12 / MM) < v < cy and _spans_h(v)])
+                dn = np.array([v for v in stu.hl if cy < v < cy + max(bh * 1.5, 12 / MM) and _spans_h(v)])
+                lf = np.array([v for v in stu.vl if cx - max(bw_ * 1.5, 12 / MM) < v < cx and _spans_v(v)])
+                rt = np.array([v for v in stu.vl if cx < v < cx + max(bw_ * 1.5, 12 / MM) and _spans_v(v)])
+                if up.size and dn.size and lf.size and rt.size:
+                    ey0, ey1, ex0, ex1 = float(up.max()), float(dn.min()), float(lf.max()), float(rt.min())
+                    eh, ew = ey1 - ey0, ex1 - ex0
+                    if 0.5 * bh <= eh <= 2.2 * bh and 0.5 * bw_ <= ew <= 2.2 * bw_:
+                        new = {'x0': ex0 + 1, 'y0': ey0 + 1, 'x1': ex1 - 1, 'y1': ey1 - 1}; snapped = ['cell']
+                if not snapped:
+                    snap_mode = 'lines'
+                else:
+                    snap_mode = 'done'
+            else:
+                snap_mode = snap
+            if snap_mode == 'lines':
                 cx_t, cy_t = (bb['x'] + bb['w'] / 2) * wt, (bb['y'] + bb['h'] / 2) * ht
                 for name, tv, tl, sl, axis in (
                     ('top', bb['y'] * ht, tpl.hl, stu.hl, 'h'),
@@ -370,7 +406,7 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
                     snapped.append(name)
                 if not snapped and status == 'ok':
                     new = {'x0': x0 + dx, 'y0': y0 + dy, 'x1': x1 + dx, 'y1': y1 + dy}; snapped = ['ncc']
-            elif snap == 'ncc' and status == 'ok':
+            elif snap_mode == 'ncc' and status == 'ok':
                 new = {'x0': x0 + dx, 'y0': y0 + dy, 'x1': x1 + dx, 'y1': y1 + dy}; snapped = ['ncc']
             nx0, ny0 = max(0.0, min(new['x0'], new['x1'])), max(0.0, min(new['y0'], new['y1']))
             nx1, ny1 = min(float(ws), max(new['x0'], new['x1'])), min(float(hs), max(new['y0'], new['y1']))

@@ -19,7 +19,7 @@ rd = lambda p: open(p, 'rb').read()
 print('【正例：同作業】')
 for key, m in meta.items():
     pages = [rd(os.path.join(ROOT, key, p)) for p in m['tplPages']]
-    boxes = [{'id': b['id'], 'page': b['page'], 'bbox': b['bbox']} for b in m['tplBoxes']]
+    boxes = [{'id': b['id'], 'page': b['page'], 'bbox': b['bbox'], 'kind': b.get('cat')} for b in m['tplBoxes']]
     n_al = 0
     for s in m['students']:
         t0 = time.time()
@@ -33,7 +33,7 @@ print('\n【反例：別科模板套】')
 for tkey, skey in [('math_ao', 'guoyu_ao'), ('guoyu_ao', 'math_ao'), ('eng_wq', 'math_ao'), ('math_ao', 'eng_wq'), ('eng_wq', 'guoyu_ao')]:
     m = meta[tkey]
     pages = [rd(os.path.join(ROOT, tkey, p)) for p in m['tplPages']]
-    boxes = [{'id': b['id'], 'page': b['page'], 'bbox': b['bbox']} for b in m['tplBoxes']]
+    boxes = [{'id': b['id'], 'page': b['page'], 'bbox': b['bbox'], 'kind': b.get('cat')} for b in m['tplBoxes']]
     n_fb = 0
     for s in meta[skey]['students'][:5]:
         r = rc.register(pages, boxes, rd(os.path.join(ROOT, skey, s['file'])))

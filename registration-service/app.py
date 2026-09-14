@@ -27,6 +27,7 @@ class Box(BaseModel):
     id: str
     page: int = 0
     bbox: dict
+    kind: Optional[str] = None  # questionCategory（作圖類不做包圍格吸附）
 
 
 class RegisterReq(BaseModel):
@@ -36,7 +37,7 @@ class RegisterReq(BaseModel):
     student_image: str
     page_breaks: Optional[List[float]] = None
     min_consistency: float = register_core.DEFAULT_MIN_CONSISTENCY
-    snap: str = 'lines'  # 'lines' | 'ncc' | 'none'
+    snap: str = 'cell'  # 'cell' | 'lines' | 'ncc' | 'none'
 
 
 @app.get('/health')
