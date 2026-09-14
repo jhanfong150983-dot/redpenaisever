@@ -334,6 +334,7 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
                 probes = _probe_all(H)
         tpl_hl_w = np.array([_warp_pt(H, wt / 2, y)[1] for y in tpl.hl]) if tpl.hl.size else np.zeros(0)
         tpl_vl_w = np.array([_warp_pt(H, x, ht / 2)[0] for x in tpl.vl]) if tpl.vl.size else np.zeros(0)
+        centers = [(b['id'], (x0 + x1) / 2, (y0 + y1) / 2) for b, (x0, y0, x1, y1), _ in probes]
         ok = fail = 0
         shifts: List[float] = []
         page_boxes: List[dict] = []
@@ -382,7 +383,12 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
                 if up.size and dn.size and lf.size and rt.size:
                     ey0, ey1, ex0, ex1 = float(up.max()), float(dn.min()), float(lf.max()), float(rt.min())
                     eh, ew = ey1 - ey0, ex1 - ex0
-                    if 0.5 * bh <= eh <= 2.2 * bh and 0.5 * bw_ <= ew <= 2.2 * bw_:
+                    # 包圍格不可把「別題的中心」也包進來（格線偵測漏一條時會把兩格併成一格 → 兩題共用一框）
+                    others_inside = any(
+                        (ex0 < ocx < ex1 and ey0 < ocy < ey1)
+                        for oid, ocx, ocy in centers if oid != b['id']
+                    )
+                    if 0.5 * bh <= eh <= 2.2 * bh and 0.5 * bw_ <= ew <= 2.2 * bw_ and not others_inside:
                         new = {'x0': ex0 + 1, 'y0': ey0 + 1, 'x1': ex1 - 1, 'y1': ey1 - 1}; snapped = ['cell']
                 if not snapped:
                     snap_mode = 'lines'
