@@ -9386,7 +9386,7 @@ export async function runStagedGradingPhaseA({
       questionType: akById.get(String(b.id))?.questionCategory || akById.get(String(b.id))?.type || 'fill_blank',
       answerBbox: b.bbox
     }))
-    classifyResult = { alignedQuestions: classifyAligned }
+    classifyResult = { alignedQuestions: classifyAligned, source: 'registration' }  // source 供 phase_a_state 稽核（疊合 vs AI classify）
     totalPages = Array.isArray(pageBreaks) && pageBreaks.length > 0 ? pageBreaks.length + 1 : 1
     ocrAssistMeta = { enabled: false, perPage: [] }
     logStaged(pipelineRunId, 'basic', `[A1] 疊合免 classify（${classifyAligned.length} 格、零 AI 呼叫、${registrationAligned.ms}ms）`)

@@ -13092,6 +13092,24 @@ async function handlePdfClassifyTemplate(req, res) {
   }
   try {
     const supabaseDb = getSupabaseAdmin()
+    // 2026-09-14 疊合免 classify：答案卷是 PDF 模板（sheetSourceKind='pdf'、非生成卷）且服務開著 →
+    //   回 registration:true、不給範本也不存範本；client 每份各自疊合（零 AI、逐張修正掃描偏移），
+    //   統一框／抽樣／跨班借範本整套跳過（那些是為了省 classify AI 錢，疊合本來就不花）。
+    if (process.env.REGISTRATION_URL && process.env.REGISTRATION_ENABLED !== '0') {
+      try {
+        const { data: asg } = await supabaseDb.from('assignments').select('answer_key_template_id').eq('id', assignmentId).eq('owner_id', user.id).maybeSingle()
+        if (asg?.answer_key_template_id) {
+          const { data: tpl } = await supabaseDb.from('answer_key_templates').select('generated_sheet, answer_key').eq('id', asg.answer_key_template_id).maybeSingle()
+          const isPdfTpl = tpl?.answer_key?.sheetSourceKind === 'pdf' && !tpl?.generated_sheet?.boxes?.length
+          if (isPdfTpl) {
+            res.status(200).json(body.mode === 'set' ? { ok: true, skipped: 'registration' } : { template: null, registration: true })
+            return
+          }
+        }
+      } catch (e) {
+        console.warn('[pdf-classify-template] registration check failed（照舊走範本）:', e?.message)
+      }
+    }
     if (body.mode === 'set') {
       const { error } = await supabaseDb
         .from('assignments')
