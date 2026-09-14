@@ -54,6 +54,10 @@
     "api/report/parent-open.js": {
       "memory": 512,
       "maxDuration": 30
+    },
+    "api/registration/snap.js": {
+      "memory": 256,
+      "maxDuration": 60
     }
   },
   "env": {

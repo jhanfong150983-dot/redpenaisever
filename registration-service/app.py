@@ -67,6 +67,37 @@ def register(req: RegisterReq):
     return result
 
 
+class SnapReq(BaseModel):
+    """答案卷自我吸附：建卷時把 AI 抓的框貼齊老師掃描卷自己的印刷格線（模板疊自己、H≈單位矩陣）。
+    回傳的 bbox 是「該頁 normalized」座標，可直接寫回 answerKey.questions[].answerBbox。"""
+    template_id: Optional[str] = None
+    pages: List[str]            # base64，依頁序
+    boxes: List[Box]            # page 指向 pages 索引
+
+
+@app.post('/snap')
+def snap(req: SnapReq):
+    t0 = time.time()
+    try:
+        pages = [base64.b64decode(p) for p in req.pages]
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail='invalid base64')
+    out_boxes, out_pages = [], []
+    for p, data in enumerate(pages):
+        page_boxes = [b.model_dump() for b in req.boxes if b.page == p]
+        if not page_boxes:
+            continue
+        # 同一張圖當模板也當「學生」：page 全設 0
+        r = register_core.register([data], [{**b, 'page': 0} for b in page_boxes], data, None, snap='cell')
+        pg = r['pages'][0] if r['pages'] else None
+        out_pages.append({'page': p, 'ok': r['decision'] == 'aligned', 'reason': r.get('reason', ''), 'inliers': pg['inliers'] if pg else 0})
+        if r['decision'] != 'aligned':
+            continue
+        for b in r['boxes']:
+            out_boxes.append({'id': b['id'], 'page': p, 'bbox': b['bbox'], 'snapped_edges': b['snapped_edges']})
+    return {'template_id': req.template_id, 'boxes': out_boxes, 'pages': out_pages, 'ms': int((time.time() - t0) * 1000)}
+
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', '8010')))
