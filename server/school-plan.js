@@ -25,7 +25,11 @@ export function normalizePlan(v) {
   return PLANS.includes(p) ? p : 'basic'
 }
 
+// 2026-09-18 user 拍板：砍會員／等級、功能全開。閘門保留但預設關；PLAN_GATING_ENABLED=1 才重新啟用分級。
+export const PLAN_GATING_ENABLED = process.env.PLAN_GATING_ENABLED === '1'
+
 export function planAllows(plan, feature) {
+  if (!PLAN_GATING_ENABLED) return true
   const need = FEATURE_MIN_PLAN[feature]
   if (!need) return true
   return (PLAN_RANK[normalizePlan(plan)] ?? 0) >= PLAN_RANK[need]
