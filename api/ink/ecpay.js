@@ -1,6 +1,7 @@
 import { handleCors } from '../../server/_cors.js'
 import { getAuthUser } from '../../server/_auth.js'
 import { getSupabaseAdmin } from '../../server/_supabase.js'
+import { INK_UNIT_PRICE_TWD, CUSTOM_UNITS_MIN, CUSTOM_UNITS_MAX, inkAmountTwd } from '../../server/ink-pricing.js'
 import {
   getEcpayConfig,
   assertEcpayConfig,
@@ -141,9 +142,15 @@ async function handleCheckout(req, res) {
   const payload = parseJsonBody(req, res)
   if (!payload) return
 
+  // 2026-09-18：兩種買法——禮包（packageId、送 bonus_drops）或自訂份數（units、不送）。金額一律 份數 × 單價。
   const packageId = parsePositiveInt(payload.packageId)
-  if (!packageId) {
-    res.status(400).json({ error: '請選擇有效的補充方案' })
+  const customUnits = parsePositiveInt(payload.units)
+  if (!packageId && !customUnits) {
+    res.status(400).json({ error: '請選擇禮包或輸入份數' })
+    return
+  }
+  if (!packageId && (customUnits < CUSTOM_UNITS_MIN || customUnits > CUSTOM_UNITS_MAX)) {
+    res.status(400).json({ error: `自訂份數請在 ${CUSTOM_UNITS_MIN} 到 ${CUSTOM_UNITS_MAX} 份之間` })
     return
   }
   const consent = parseBoolean(payload.consent)
@@ -171,50 +178,68 @@ async function handleCheckout(req, res) {
   const supabaseAdmin = getSupabaseAdmin()
 
   try {
-    const { data: pkg, error: packageError } = await supabaseAdmin
-      .from('ink_packages')
-      .select(
-        'id, label, description, drops, bonus_drops, starts_at, ends_at, is_active'
-      )
-      .eq('id', packageId)
-      .maybeSingle()
+    let drops = 0
+    let bonusDrops = 0
+    let packageSnapshot
+    if (packageId) {
+      const { data: pkg, error: packageError } = await supabaseAdmin
+        .from('ink_packages')
+        .select(
+          'id, label, description, drops, bonus_drops, starts_at, ends_at, is_active'
+        )
+        .eq('id', packageId)
+        .maybeSingle()
 
-    if (packageError) {
-      res.status(500).json({ error: '讀取方案失敗' })
-      return
-    }
+      if (packageError) {
+        res.status(500).json({ error: '讀取方案失敗' })
+        return
+      }
 
-    if (!pkg) {
-      res.status(404).json({ error: '方案不存在' })
-      return
-    }
+      if (!pkg) {
+        res.status(404).json({ error: '方案不存在' })
+        return
+      }
 
-    const now = new Date()
-    if (!isPackageActive(pkg, now)) {
-      res.status(400).json({ error: '方案已下架或尚未開始' })
-      return
-    }
+      const now = new Date()
+      if (!isPackageActive(pkg, now)) {
+        res.status(400).json({ error: '方案已下架或尚未開始' })
+        return
+      }
 
-    const drops = Number.parseInt(String(pkg.drops), 10)
-    if (!Number.isFinite(drops) || drops <= 0) {
-      res.status(400).json({ error: '方案滴數設定錯誤' })
-      return
-    }
+      drops = Number.parseInt(String(pkg.drops), 10)
+      if (!Number.isFinite(drops) || drops <= 0) {
+        res.status(400).json({ error: '方案份數設定錯誤' })
+        return
+      }
 
-    const bonusDrops =
-      typeof pkg.bonus_drops === 'number' && pkg.bonus_drops > 0
-        ? pkg.bonus_drops
-        : 0
-    const amountTwd = drops
-    const packageSnapshot = {
-      package_id: pkg.id,
-      package_label: pkg.label,
-      package_description: pkg.description ?? null,
-      bonus_drops: bonusDrops,
-      consent_at: new Date().toISOString(),
-      terms_version: termsVersion,
-      privacy_version: privacyVersion
+      bonusDrops =
+        typeof pkg.bonus_drops === 'number' && pkg.bonus_drops > 0
+          ? pkg.bonus_drops
+          : 0
+      packageSnapshot = {
+        package_id: pkg.id,
+        package_label: pkg.label,
+        package_description: pkg.description ?? null,
+        bonus_drops: bonusDrops,
+        consent_at: new Date().toISOString(),
+        terms_version: termsVersion,
+        privacy_version: privacyVersion
+      }
+    } else {
+      drops = customUnits
+      bonusDrops = 0
+      packageSnapshot = {
+        package_id: null,
+        package_label: '自訂份數',
+        package_description: `${drops} 份 × NT$${INK_UNIT_PRICE_TWD}`,
+        bonus_drops: 0,
+        consent_at: new Date().toISOString(),
+        terms_version: termsVersion,
+        privacy_version: privacyVersion
+      }
     }
+    // 金額＝購買份數 × 單價（贈送不計價）。⚠ 舊版 amount = drops（1 元/份）已作廢。
+    const amountTwd = inkAmountTwd(drops)
 
     const { order, tradeNo } = await createOrderWithTradeNo(
       supabaseAdmin,
@@ -226,7 +251,7 @@ async function handleCheckout(req, res) {
 
     const clientBackUrl = `${config.siteUrl}/?page=ink-topup&payment=ecpay&orderId=${order.id}`
     const itemName =
-      bonusDrops > 0 ? `墨水 ${drops} 滴 + 贈送 ${bonusDrops} 滴` : `墨水 ${drops} 滴`
+      bonusDrops > 0 ? `RedPen AI 批改份數 ${drops} 份＋贈送 ${bonusDrops} 份` : `RedPen AI 批改份數 ${drops} 份`
     const fields = {
       MerchantID: config.merchantId,
       MerchantTradeNo: tradeNo,
