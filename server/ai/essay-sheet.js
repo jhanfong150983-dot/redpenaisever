@@ -196,18 +196,38 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
   if (!chain || chain.length < 2) return null
   // 防呆：抓不全比抓不到更危險（少抓的行＝整段文字無聲消失）。
   //   左端離影像邊緣還很遠＝那裡本來該有行卻沒抓到 → 不放行；緊貼邊緣＝掃描被裁切，照抓到的算。
-  const leftMost = chain[chain.length - 1]
-  const detected = chain.length - 1
-  if (detected < wantCols && leftMost > Math.max(8, (chain[0] - chain[1]) * 1.5)) {
-    return { rows: wantRows, cols: [], detectedCols: detected, incomplete: true }
-  }
   // chain 由右至左＝書寫順序；相鄰兩條線之間就是一行（含右側窄欄）
   const nCols = Math.min(chain.length - 1, wantCols)
   const cols = []
   for (let i = 0; i < nCols; i++) {
     cols.push({ x: chain[i + 1] / W, y: yTop / H, w: (chain[i] - chain[i + 1]) / W, h: (yBot - yTop) / H })
   }
-  return { rows: wantRows, cols, detectedCols: chain.length - 1 }
+  // 偵測器照實回報抓到什麼，「能不能用」的政策交給呼叫端（detectGridBoxes）決定。
+  //   ⭐ 三道 incomplete 判準，每一道對應一種「會讓整段文字無聲消失」的失敗：
+  const reasons = []
+  //   ① 左端離影像邊緣還很遠卻少抓行＝那裡本來該有行卻沒抓到（緊貼邊緣＝掃描被裁切，照抓到的算）
+  const leftMost = chain[chain.length - 1]
+  const detected = chain.length - 1
+  if (detected < wantCols && leftMost > Math.max(8, (chain[0] - chain[1]) * 1.5)) {
+    reasons.push(`只找到 ${detected} 行格線（應為 ${wantCols} 行），左側還有空間卻沒抓到`)
+  }
+  //   ② 行寬不一致＝中間漏掉一條格線、把兩行併成一行（實測 115 學測樣卷就是這樣，
+  //      行數看似連續、右半對齊正確，但左半整批位移一行）。單看行數抓不到這種錯。
+  const ws = cols.map((c) => c.w).sort((a, b) => a - b)
+  const medW = ws[ws.length >> 1]
+  const outlier = cols.findIndex((c) => Math.abs(c.w - medW) > medW * 0.25)
+  if (medW > 0 && outlier >= 0) {
+    reasons.push(`第 ${outlier + 1} 行的寬度與其他行差太多（可能兩行被併成一行）`)
+  }
+  //   ③ 格區上下界要能被列高整除成 wantRows 列。regularRun 取「最長等距段」，
+  //      若最上面幾條列線太淡沒被偵測到，上界就會往下掉——實測 115 學測樣卷少了最上面 3 列，
+  //      每一行的前 3 個字會被整批裁掉，而行數完全正常、看不出來。
+  const rowPitch = hRun.length > 1 ? (hRun[hRun.length - 1] - hRun[0]) / (hRun.length - 1) : 0
+  const rowsSpanned = rowPitch > 0 ? Math.round((yBot - yTop) / rowPitch) : 0
+  if (rowsSpanned && Math.abs(rowsSpanned - wantRows) > 0) {
+    reasons.push(`格區只涵蓋 ${rowsSpanned} 列（應為 ${wantRows} 列），上下界可能抓錯`)
+  }
+  return { rows: wantRows, cols, detectedCols: detected, incomplete: reasons.length > 0, reasons }
 }
 
 /** 自備稿紙：偵測到的格線 → 與錨點版同樣的 byId 結構（cN＝整行、cNrM＝單格） */
@@ -218,7 +238,7 @@ async function detectGridBoxes(pageBuffer, g) {
   }
   // ⛔ 抓不全一定要擋：少抓的行會讓整段文字無聲消失，比直接失敗危險得多
   if (grid.incomplete) {
-    throw new Error(`這一頁只找到 ${grid.detectedCols} 行格線（應為 ${g.cols} 行）——格線太淡或掃描不清，請提高掃描品質，或改用系統製作的作文稿紙`)
+    throw new Error(`這一頁的稿紙格線抓得不完整（${grid.reasons.join('；')}）——格線太淡或掃描不清，請提高掃描品質、整張掃進去不要裁到格線，或改用系統製作的作文稿紙`)
   }
   const byId = new Map()
   grid.cols.forEach((c, i) => {
