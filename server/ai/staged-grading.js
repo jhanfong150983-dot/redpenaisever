@@ -466,7 +466,7 @@ function normalizeBboxRef(value) {
   return { x, y, w, h }
 }
 
-function extractCandidateText(data) {
+export function extractCandidateText(data) {
   const candidates = Array.isArray(data?.candidates) ? data.candidates : []
   return candidates
     .flatMap((candidate) => candidate?.content?.parts ?? [])
@@ -8082,7 +8082,8 @@ function filterPayloadForGemini(payload) {
   return filtered
 }
 
-async function executeStage({
+// 2026-09-19 export：作文管線（essay-pipeline.js）要用同一套 stage 執行與計費/記錄
+export async function executeStage({
   apiKey,
   model: _legacyModel,  // 2026-05-21: 不再用，由 STAGE_MODEL[routeKey] 統一決定。保留參數簽名相容
   modelOverride,  // 2026-06-02: 有給就用這個 model（例：國語卷 read 改 PRO），否則照 routeKey 決定
