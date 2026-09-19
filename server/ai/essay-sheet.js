@@ -88,29 +88,29 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
   const H = info.height
   const ch = info.channels
   if (!W || !H || ch < 3) return null
-  // 印刷格線是紅／粉紅；門檻放寬到涵蓋會考的淺粉線與樣卷掃描的深紅線
-  const red = new Uint8Array(W * H)
-  for (let i = 0, p = 0; i < W * H; i++, p += ch) {
-    const r = data[p], g = data[p + 1], b = data[p + 2]
-    red[i] = (r - g > 18 && r - b > 18 && r > 110) ? 1 : 0
-  }
+  // 印刷格線＝「有顏色」的像素：會考是粉紅、學測是綠，所以不能只認紅色。
+  //   判準＝彩度夠高（max-min）且不太暗（排除黑字與定位方塊）、不太亮（排除紙白）。
+  //   學生筆跡是黑／深藍、又不成整條線，後面的投影門檻會把它濾掉。
+  //   ⚠ 已知限制：**灰階掃描**會把彩色格線變成灰線，此法失效（見 docs 實驗紀錄）。
   const colSum = new Float64Array(W)
   const rowSum = new Float64Array(H)
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      if (red[y * W + x]) { colSum[x]++; rowSum[y]++ }
-    }
+  for (let i = 0, p = 0; i < W * H; i++, p += ch) {
+    const r = data[p], g = data[p + 1], b = data[p + 2]
+    const mx = r > g ? (r > b ? r : b) : (g > b ? g : b)
+    const mn = r < g ? (r < b ? r : b) : (g < b ? g : b)
+    if (mx - mn > 28 && mx > 80 && mn < 235) { colSum[i % W]++; rowSum[(i / W) | 0]++ }
   }
   // 9px 帶狀加總：掃描微歪斜時一條線會跨好幾個像素列
   const band = (arr) => {
     const out = new Float64Array(arr.length)
     for (let i = 0; i < arr.length; i++) {
-      let s2 = 0
-      for (let k = -4; k <= 4; k++) { const j = i + k; if (j >= 0 && j < arr.length) s2 += arr[j] }
-      out[i] = s2
+      let s = 0
+      for (let k = -4; k <= 4; k++) { const j = i + k; if (j >= 0 && j < arr.length) s += arr[j] }
+      out[i] = s
     }
     return out
   }
+  const maxOf = (a) => { let m = 0; for (let i = 0; i < a.length; i++) if (a[i] > m) m = a[i]; return m }
   const runsOf = (arr, thr) => {
     const out = []
     let st = -1
@@ -126,34 +126,70 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
   //   （實測同一張圖 PNG 抓到 29 條橫線、WebP q85 只剩 1 條——橫線被壓得比直線糊）
   const bc = band(colSum)
   const br = band(rowSum)
-  const maxOf = (a) => { let m = 0; for (let i = 0; i < a.length; i++) if (a[i] > m) m = a[i]; return m }
-  const vx = runsOf(bc, Math.max(maxOf(bc) * 0.5, H * 0.25))
-  const hy = runsOf(br, Math.max(maxOf(br) * 0.5, W * 0.25))
-  if (vx.length < wantCols || hy.length < 2) return null
-  const y0 = hy[0]
-  const y1 = hy[hy.length - 1]
-  // 相鄰直線的間距：字格（寬）與行間窄欄（窄）交錯 → 取「寬的那些」當字格
-  const gaps = []
-  for (let i = 0; i < vx.length - 1; i++) gaps.push({ a: vx[i], b: vx[i + 1], w: vx[i + 1] - vx[i] })
-  const widths = gaps.map((g) => g.w).sort((a, b) => a - b)
-  if (!widths.length) return null
-  const thr = (widths[0] + widths[widths.length - 1]) / 2
-  let cells = gaps.filter((g) => g.w > thr)
-  // 期望 23 行：多抓到就取最靠右、連續的那 23 個（標題區的直線可能混進來）
-  cells.sort((a, b) => b.a - a.a)
-  if (cells.length > wantCols) cells = cells.slice(0, wantCols)
-  if (cells.length < wantCols) return null
-  const pitch = Math.abs(cells[0].a - cells[1].a) || (cells[0].b - cells[0].a)
-  return {
-    rows: wantRows,
-    // 由右至左＝書寫順序；含「右側」窄欄（插入字慣例寫右側）
-    cols: cells.map((c) => ({
-      x: Math.max(0, (c.a - (pitch - (c.b - c.a)) * 0) / W),
-      y: y0 / H,
-      w: Math.min(1, pitch / W),
-      h: (y1 - y0) / H,
-    })),
+  const mids = runsOf(bc, maxOf(bc) * 0.45)
+  const hmids = runsOf(br, maxOf(br) * 0.45)
+  if (mids.length < 3 || hmids.length < 3) return null
+
+  // 格區上下界：取「最長一段等距的橫線」＝字格的列線（排除標題框、裝訂線之類的雜線）
+  const regularRun = (arr) => {
+    if (arr.length < 3) return arr
+    const gaps = []
+    for (let i = 0; i < arr.length - 1; i++) gaps.push(arr[i + 1] - arr[i])
+    const sorted = [...gaps].sort((a, b) => a - b)
+    const med = sorted[sorted.length >> 1]
+    let best = [0, 0], st = 0
+    for (let i = 0; i <= gaps.length; i++) {
+      const ok = i < gaps.length && Math.abs(gaps[i] - med) <= Math.max(3, med * 0.35)
+      if (!ok) { if (i - st > best[1] - best[0]) best = [st, i]; st = i + 1 }
+    }
+    return arr.slice(best[0], best[1] + 1)
   }
+  const hRun = regularRun(hmids)
+  if (hRun.length < 3) return null
+  const yTop = hRun[0]
+  const yBot = hRun[hRun.length - 1]
+
+  // 直行：⛔ 不可用「老師填的行數均分」——掃描常被裁掉左右（實測 115 學測樣卷 38 行只掃到 26 行），
+  //   均分會讓整批行位全錯。改成「由每條候選直線往左跨一個行距、吸附最近格線」串成鏈，取最長的一條。
+  //   同時解決：①會考型（字格＋窄欄交錯，行距＝兩者相加）②學測型（均勻格線）
+  //   ③格區旁的框線（串不起來被淘汰）④掃描被裁切（串到沒線就停）。
+  const gapsAll = []
+  for (let i = 0; i < mids.length - 1; i++) gapsAll.push(mids[i + 1] - mids[i])
+  const minPitch = Math.max(4, W * 0.008)
+  const cands = new Set()
+  for (const g of gapsAll) if (g >= minPitch) cands.add(Math.round(g))
+  for (let i = 0; i < gapsAll.length - 1; i++) {
+    const sum = gapsAll[i] + gapsAll[i + 1]
+    if (sum >= minPitch) cands.add(Math.round(sum))
+  }
+  const snap = (x, tol) => {
+    let best = null, bd = Infinity
+    for (const m of mids) { const d = Math.abs(m - x); if (d < bd) { bd = d; best = m } }
+    return bd <= tol ? best : null
+  }
+  let chain = null
+  for (const pitch of cands) {
+    const tol = Math.max(3, pitch * 0.22)
+    for (let si = mids.length - 1; si >= 0; si--) {
+      const out = [mids[si]]
+      let x = mids[si]
+      for (;;) {
+        const nx = snap(x - pitch, tol)
+        if (nx == null || nx >= x) break
+        out.push(nx)
+        x = nx
+      }
+      if (!chain || out.length > chain.length) chain = out
+    }
+  }
+  if (!chain || chain.length < 2) return null
+  // chain 由右至左＝書寫順序；相鄰兩條線之間就是一行（含右側窄欄）
+  const nCols = Math.min(chain.length - 1, wantCols)
+  const cols = []
+  for (let i = 0; i < nCols; i++) {
+    cols.push({ x: chain[i + 1] / W, y: yTop / H, w: (chain[i] - chain[i + 1]) / W, h: (yBot - yTop) / H })
+  }
+  return { rows: wantRows, cols, detectedCols: chain.length - 1 }
 }
 
 /** 自備稿紙：偵測到的格線 → 與錨點版同樣的 byId 結構（cN＝整行、cNrM＝單格） */
