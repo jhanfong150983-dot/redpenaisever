@@ -44,7 +44,12 @@ async function splitPages(imageBuffer, pageBreaks) {
     const top = Math.round(bounds[i] * H)
     const bottom = Math.round(bounds[i + 1] * H)
     if (bottom - top <= 0) continue
-    out.push(await sharp(imageBuffer).extract({ left: 0, top, width: W, height: bottom - top }).png().toBuffer())
+    out.push({
+      buf: await sharp(imageBuffer).extract({ left: 0, top, width: W, height: bottom - top }).png().toBuffer(),
+      // 該頁在「合併圖」裡的縱向範圍（0~1）——檢討單要在原卷上畫紅字，需要合併圖座標
+      y0: bounds[i],
+      y1: bounds[i + 1],
+    })
   }
   return out
 }
@@ -102,7 +107,8 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
   }
   const columns = []
   for (let p = 0; p < g.pages; p++) {
-    const buf = pageBufs[p]
+    const { buf, y0: pageY0, y1: pageY1 } = pageBufs[p]
+    const pageSpan = pageY1 - pageY0
     const { byId } = await alignColumns(buf, layout)
     const { data: gray, info } = await sharp(buf).greyscale().raw().toBuffer({ resolveWithObject: true })
     const W = info.width
@@ -126,7 +132,15 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
           pngBase64 = (await sharp(buf).extract({ left, top, width, height }).png().toBuffer()).toString('base64')
         }
       }
-      columns.push({ page: p + 1, col: c, pngBase64, inkCells, blank })
+      columns.push({
+        page: p + 1,
+        col: c,
+        pngBase64,
+        inkCells,
+        blank,
+        // 這一行在「學生合併圖」上的位置（normalized）→ 檢討單直接照著畫紅字，不必在前端重做對齊
+        bbox: { x: rect.x, y: pageY0 + rect.y * pageSpan, w: rect.w, h: rect.h * pageSpan },
+      })
     }
   }
   return { columns, pages: g.pages }

@@ -94,6 +94,8 @@ export async function runEssayGrading({
       col: c.col,
       text,
       inkCells: c.inkCells,
+      // 這一行在學生合併圖上的位置（normalized）→ 檢討單畫紅字用
+      bbox: c.bbox,
       // 低信心：抄本字數與有墨格數不符（含抄寫失敗的行）→ 複核畫面請老師補
       lowConfidence: !c.blank && (k < 0 || texts[k] == null || chars !== c.inkCells),
     }
