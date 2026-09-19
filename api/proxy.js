@@ -829,12 +829,6 @@ export default async function handler(req, res) {
             .select('generated_sheet')
             .eq('id', a.answer_key_template_id)
             .maybeSingle()
-          // 2026-09-19 作文模式（generated_sheet.essay＝RPESSAY1 稿紙）：建卷先行上線、批改管線（逐直行抄寫→眉批）尚未接。
-          //   在接好之前明確擋下，避免作文卷被當成一般生成卷送進 Phase A（會把整面稿紙當一格去讀）。
-          if (tpl?.generated_sheet?.essay) {
-            res.status(422).json({ error: '作文卷的 AI 批改尚未開放，敬請期待', code: 'ESSAY_GRADING_NOT_READY' })
-            return
-          }
           if (tpl?.generated_sheet?.boxes?.length) {
             generatedSheetLayout = tpl.generated_sheet
             console.log(`📐 [GeneratedSheet] 命中定版版面 ${generatedSheetLayout.version} ${generatedSheetLayout.boxes.length} 格 → Phase A 免 classify`)
@@ -871,8 +865,11 @@ export default async function handler(req, res) {
   // 2026-07-22 知識點歸類（升級進階報告時懶跑）：tagging call 需整本題本圖（withBooklet=true）；
   //   同 key 的 kpTips call 純文字（withBooklet 不帶）→ 不注入、不浪費圖 token。
   const needsBookletForKpTagging = routeKey === 'report.kp_tagging' && payload?.assignmentId && payload?.withBooklet === true
+  // 2026-09-19 作文：題目一律送題本圖（實驗4），眉批與級分兩段都要 → Phase A 就要抓
+  const needsBookletForEssay = !!generatedSheetLayout?.essay && payload?.assignmentId
+    && (routeKey === 'grading.phase_a' || routeKey === 'grading.phase_a_classify')
   if ((routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId)
-      || needsBookletForDiagnosis || needsBookletForErrorFeatures || needsBookletForKpTagging) {
+      || needsBookletForDiagnosis || needsBookletForErrorFeatures || needsBookletForKpTagging || needsBookletForEssay) {
     questionBookletImages = await fetchQuestionBookletImages(
       // 2026-06-02: 同上，用 billingUserId 比對 owner_id（學生自助批改 answer_only 需題本圖）。
       supabaseAdmin, billingUserId, payload.assignmentId

@@ -10,7 +10,10 @@ import {
   runStagedGradingPhaseB,
   runErrorGuidance,
   runGradeOneQuestion
+  , executeStage, extractCandidateText
 } from './staged-grading.js'
+import { runEssayGrading, essayResultToQuestionResult } from './essay-pipeline.js'
+import { isEssayLayout } from './essay-sheet.js'
 
 async function executeSinglePipelineCall({
   apiKey,
@@ -124,6 +127,49 @@ export async function runAiPipeline({
   )
   if (dispatchedAnswerSheetMode === 'answer_only') {
     console.log(`${logPrefix} [純答案卡] 派發路由=${resolvedRouteKey}`)
+  }
+
+  // ── 2026-09-19 作文卷：不走 classify/read/arbiter，整條在第一個呼叫跑完 ──
+  //   client 的 gradePhaseA 有「舊版相容：server 一次跑完」路徑（phaseAComplete=true 即直接採用），
+  //   所以 phase_a 與 phase_a_classify 都回同一份完整結果；後續 Phase B 由 essayResult 直接算分、不再叫 AI。
+  const essayLayout = isEssayLayout(internalContext?.generatedSheetLayout) ? internalContext.generatedSheetLayout : null
+  if (essayLayout && (isPhaseA || isPhaseAClassify)) {
+    const t0 = Date.now()
+    const inline = (contents ?? [])
+      .flatMap((c) => c?.parts ?? [])
+      .find((part) => part?.inlineData?.data)
+    if (!inline) throw new Error('作文批改：沒有收到學生卷影像')
+    // 題號取自定版版面的 box id（作文卷的 box id＝`${questionId}@p${page}`）
+    const essayQuestionId = String(essayLayout.boxes?.[0]?.id ?? '1').split('@')[0]
+    const essayResult = await runEssayGrading({
+      executeStage,
+      extractCandidateText,
+      apiKey,
+      model,
+      payload,
+      routeHint,
+      imageBuffer: Buffer.from(inline.inlineData.data, 'base64'),
+      pageBreaks: payload?.pageBreaks ?? null,
+      layout: essayLayout,
+      bookletImages: internalContext?.questionBookletImages ?? [],
+      log: (m) => console.log(`${logPrefix} ${m}`),
+    })
+    const qr = essayResultToQuestionResult(essayQuestionId, essayResult)
+    const result = {
+      phaseAComplete: true,
+      essayComplete: true,
+      questionResults: [qr],
+      stableCount: 1,
+      diffCount: 0,
+      unstableCount: 0,
+      needsReviewCount: essayResult.lowConfidenceColumns > 0 ? 1 : 0,
+    }
+    console.log(`${logPrefix} [Essay] 完成（${Date.now() - t0}ms、低信心 ${essayResult.lowConfidenceColumns} 行）`)
+    return {
+      status: 200,
+      data: { candidates: [{ content: { parts: [{ text: JSON.stringify(result) }] } }] },
+      pipelineMeta: { pipeline: 'grading-essay', prepareLatencyMs: 0, modelLatencyMs: Date.now() - t0, warnings: [], metrics: { columns: essayResult.columns.length, lowConfidence: essayResult.lowConfidenceColumns } },
+    }
   }
 
   if (isPhaseA || isPhaseAClassify) {
