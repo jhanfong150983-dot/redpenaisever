@@ -1685,7 +1685,10 @@ async function applySubmissionStateTransitions(supabaseDb, ownerId, submissionRo
       0
     )
     const dispatchActive = dispatchActiveAssignments.has(assignmentId)
-    const autoDispatch = preferences.correction_dispatch_mode === 'auto' && source !== 'student_correction'
+    // 2026-09-19 學生端暫停、老師端訂正 UI 收起（client STUDENT_CORRECTION_UI_ENABLED=false）→ 自動派發預設關，
+    //   否則偏好設成 auto 的老師批改後學生會被默默標成待訂正、老師卻沒有入口。學生端恢復時設 STUDENT_CORRECTION_ENABLED=1。
+    const autoDispatch = process.env.STUDENT_CORRECTION_ENABLED === '1'
+      && preferences.correction_dispatch_mode === 'auto' && source !== 'student_correction'
     // 2026-06-02: 學生自助批改完成 → 自動派發訂正（視同 dispatchActive），讓學生立即可訂正。
     // 只對「原始上傳卷」(非 student_correction) 生效；finalize 才傳 studentSelfGrade。
     const studentSelfGrade = options?.studentSelfGrade === true && source !== 'student_correction'
