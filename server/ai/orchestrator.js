@@ -12,7 +12,7 @@ import {
   runGradeOneQuestion
   , executeStage, extractCandidateText
 } from './staged-grading.js'
-import { runEssayGrading, essayResultToQuestionResult } from './essay-pipeline.js'
+import { runEssayGrading, essayResultToQuestionResult, buildEssayGradingResult } from './essay-pipeline.js'
 import { isEssayLayout } from './essay-sheet.js'
 
 async function executeSinglePipelineCall({
@@ -294,6 +294,19 @@ export async function runAiPipeline({
         data: { candidates: [{ content: { parts: [{ text: JSON.stringify(failureData) }] } }] },
         pipelineMeta: { pipeline: 'grading-phase-a-arbiter-failure', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} }
       }
+    }
+  } else if (essayLayout && (isPhaseB || isPhaseBAccessor)) {
+    // 作文卷：分數在 Phase A 就定了（級分即分數）→ Phase B 不叫任何 AI，只把結果組成最終形狀。
+    //   essayResult 由 client 原樣帶回（gradePhaseB 會送整份 phaseAResult）。
+    const qrs = payload?.phaseAResult?.questionResults ?? internalContext?.phaseAResult?.questionResults ?? []
+    const hit = qrs.find((q) => q?.essayResult)
+    if (!hit) throw new Error('作文 Phase B：phaseAResult 裡沒有 essayResult（請重新批改）')
+    const finalResult = buildEssayGradingResult(String(hit.questionId ?? '1'), hit.essayResult)
+    console.log(`${logPrefix} [Essay] Phase B 直接組結果（零 AI、級分 ${finalResult.totalScore}）`)
+    pipelineResult = {
+      status: 200,
+      data: { candidates: [{ content: { parts: [{ text: JSON.stringify(finalResult) }] } }] },
+      pipelineMeta: { pipeline: 'grading-essay-phase-b', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} },
     }
   } else if (isPhaseB || isPhaseBAccessor || isPhaseBExplain) {
     // 2026-05-17: 支援 fromCache 模式（重新批改）——payload.fromCache=true 時、不需要 phaseAResult、

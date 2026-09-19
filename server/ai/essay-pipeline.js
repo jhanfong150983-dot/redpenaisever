@@ -202,3 +202,37 @@ export function essayResultToQuestionResult(questionId, essayResult) {
     essayResult,
   }
 }
+
+
+/**
+ * essayResult → Phase B 的最終批改結果（GradingResult 契約）。
+ * 作文的分數在 Phase A 就定了（級分即分數），Phase B 不需要再叫任何 AI——
+ * 這支只是把結果組成 client 存得下的形狀。
+ */
+export function buildEssayGradingResult(questionId, essayResult) {
+  const qr = essayResultToQuestionResult(questionId, essayResult)
+  const low = essayResult?.lowConfidenceColumns ?? 0
+  const detail = {
+    questionId,
+    studentAnswer: '作文卷面',
+    studentFinalAnswer: '作文卷面',
+    score: qr.score,
+    maxScore: qr.maxScore,
+    isCorrect: qr.isCorrect,
+    needExplain: false,
+    errorType: qr.errorType,
+    reason: qr.scoringReason,
+    confidence: qr.scoreConfidence,
+    essayResult,
+  }
+  return {
+    totalScore: qr.score,
+    details: [detail],
+    mistakes: [],
+    weaknesses: [],
+    suggestions: [],
+    // 有低信心的行就請老師看一下抄本（抄錯會影響眉批與級分）
+    needsReview: low > 0,
+    reviewReasons: low > 0 ? [`有 ${low} 行的抄本字數與稿紙上的字數不符，請確認抄本`] : [],
+  }
+}
