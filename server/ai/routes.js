@@ -28,6 +28,10 @@ export const AI_ROUTE_KEYS = Object.freeze({
   GRADING_RUBRIC_JUDGE: 'grading.rubric_judge', // Phase B：社會/自然開放式概念題逐維度判分（看圖、不經 read 文字）
   GRADING_LEVEL_JUDGE: 'grading.level_judge', // Phase B：級分制三判官（只回報要素、級分由 code 算）
   GRADING_LEVEL_TRANSCRIBE: 'grading.level_transcribe', // Phase B：級分制抄本制的整格知答抄寫（2026-09-12；判要素仍記 level_judge）
+  // 2026-09-19 作文模式（P3）：①逐直行抄寫 ②逐句眉批＋四向度診斷 ③建議級分
+  GRADING_ESSAY_TRANSCRIBE: 'grading.essay_transcribe',
+  GRADING_ESSAY_FEEDBACK: 'grading.essay_feedback',
+  GRADING_ESSAY_LEVEL: 'grading.essay_level',
   ANSWER_KEY_EXTRACT: 'answer_key.extract',
   ANSWER_KEY_SOLVE: 'answer_key.solve',       // 生成答案卷：結構推斷（題型/題數/配分；解題已退場改老師手寫）
   ANSWER_KEY_READ_REFERENCE: 'answer_key.read_reference', // 生成答案卷：讀老師手寫參考答案卷（逐格 crop 合批轉錄）

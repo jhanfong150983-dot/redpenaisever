@@ -66,6 +66,10 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.GRADING_VJ_GRADE]: MODEL_PRO,         // Phase B rubric 判對錯
   [AI_ROUTE_KEYS.GRADING_LEVEL_JUDGE]: MODEL_PRO,      // 級分制判官（讀手寫推導、需 PRO 視覺）
   [AI_ROUTE_KEYS.GRADING_LEVEL_TRANSCRIBE]: MODEL_PRO, // 級分制抄寫員（整格 HIGH、3.6；2.5 盲抄實測整段漏抄）
+  // 2026-09-19 作文：抄寫＝逐直行 HIGH（實驗0 定案，整篇一次抄否決）；眉批＝預設 thinking（實驗2 v3）；級分＝MINIMAL
+  [AI_ROUTE_KEYS.GRADING_ESSAY_TRANSCRIBE]: MODEL_PRO,
+  [AI_ROUTE_KEYS.GRADING_ESSAY_FEEDBACK]: MODEL_PRO,
+  [AI_ROUTE_KEYS.GRADING_ESSAY_LEVEL]: MODEL_PRO,
   [AI_ROUTE_KEYS.GRADING_RUBRIC_JUDGE]: MODEL_PRO,     // rubric 判官（社會/自然看圖逐維度判分）
   // 2026-05-23: 紙張四角偵測切到 FLASH
   // 原因：(1) 老師端 AssignmentImport 已 skip、只剩學生拍照觸發

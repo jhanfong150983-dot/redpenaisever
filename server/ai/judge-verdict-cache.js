@@ -31,6 +31,10 @@ export const JUDGE_PROMPT_VERSIONS = {
   zhuyin: 'zy-2026-08-30-panel3-lazy3',     // 三判官 v2 ＋ 惰性第三票（含標準圖比對）
   level: 'level-2026-08-14-element-x1',     // 逐要素 1 次呼叫、code 彙總級分
   rubric: 'rubric-2026-09-04-v1',           // 看圖逐維度判分（evidence 先於 score）
+  // 2026-09-19 作文（P3）：三段各自一個版本號——抄寫／眉批／級分 prompt 任一有改都要升，否則舊卷重批跑的是舊邏輯
+  essayTranscribe: 'essay-tr-2026-09-19-percol',   // 逐直行抄寫（實驗0 逐行臂原文）
+  essayFeedback: 'essay-fb-2026-09-19-v3',         // 逐句眉批 v3（向度＋規準用語＋程度詞）
+  essayLevel: 'essay-lv-2026-09-19-generic',       // 建議級分（只給通用規準、題目送圖）
 }
 
 const sha1 = (s) => crypto.createHash('sha1').update(String(s ?? '')).digest('hex')
@@ -38,7 +42,7 @@ const sha1 = (s) => crypto.createHash('sha1').update(String(s ?? '')).digest('he
 export const judgeFreezeEnabled = () => process.env.JUDGE_FREEZE !== '0'
 
 /**
- * @param {'glyph'|'zhuyin'|'level'|'rubric'} kind
+ * @param {'glyph'|'zhuyin'|'level'|'rubric'|'essayTranscribe'|'essayFeedback'|'essayLevel'} kind
  * @param {string[]} imageBase64s 實際送進模型的每張圖 bytes（順序固定：學生圖在前、參考圖在後）
  * @param {unknown} configSig 設定簽章素材（標準答案／rubric 內容…），JSON.stringify 後 hash
  */
