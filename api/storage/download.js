@@ -166,7 +166,8 @@ async function handleTemplateAnswerSheetDownload(req, res, user, supabaseDb) {
   const buffer = Buffer.from(await data.arrayBuffer())
   res.setHeader('Content-Type', prefixRaw === 'generated-sheets' ? 'application/pdf' : 'image/webp')
   res.setHeader('Content-Length', buffer.length)
-  res.setHeader('Cache-Control', 'private, max-age=3600')
+  // 作答卷定版 PDF 會在重新定版時原地覆蓋（同路徑 upsert）→ 不快取（09-19：老師重存後下載仍拿到舊稿紙）；頁圖照舊快取
+  res.setHeader('Cache-Control', prefixRaw === 'generated-sheets' ? 'no-store' : 'private, max-age=3600')
   res.status(200).send(buffer)
 }
 
@@ -224,7 +225,12 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
 
   // 持久化到對應表的對應欄位
   let updateError
-  if (isTemplate) {
+  if (prefix === 'generated-sheets') {
+    // 2026-09-19：作答卷定版 PDF 路徑固定（generated-sheets/<id>/sheet.pdf）、不需要寫回任何欄位。
+    //   原本會落到下面的分支，把模板的 answer_sheet_image_paths 蓋成這個 PDF 路徑
+    //   （免上傳的系統製作卷／作文卷沒有後續的答案卷圖上傳來蓋回去 → 欄位殘留 PDF 路徑）。
+    updateError = null
+  } else if (isTemplate) {
     const updatePayload = prefix === 'question-booklets'
       ? { question_booklet_image_paths: paths }
       : { answer_sheet_image_paths: paths }
