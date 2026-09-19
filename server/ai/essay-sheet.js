@@ -126,8 +126,17 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
   //   （實測同一張圖 PNG 抓到 29 條橫線、WebP q85 只剩 1 條——橫線被壓得比直線糊）
   const bc = band(colSum)
   const br = band(rowSum)
-  const mids = runsOf(bc, maxOf(bc) * 0.45)
-  const hmids = runsOf(br, maxOf(br) * 0.45)
+  // ⛔ 門檻不可用「全圖最大值」：實測 115 學測真實樣卷有個無關元素彩度飆到 877，
+  //   而格區的格線只有 83 → 用 max×0.45 會把格線整批濾掉（只串到 1 行）。改用 90 百分位。
+  const pctOf = (a, f) => {
+    const nz = []
+    for (let i = 0; i < a.length; i++) if (a[i] > 0) nz.push(a[i])
+    if (!nz.length) return 0
+    nz.sort((x, y) => x - y)
+    return nz[Math.min(nz.length - 1, Math.floor(nz.length * f))]
+  }
+  const mids = runsOf(bc, pctOf(bc, 0.9) * 0.5)
+  const hmids = runsOf(br, pctOf(br, 0.9) * 0.5)
   if (mids.length < 3 || hmids.length < 3) return null
 
   // 格區上下界：取「最長一段等距的橫線」＝字格的列線（排除標題框、裝訂線之類的雜線）
@@ -175,14 +184,23 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
       let x = mids[si]
       for (;;) {
         const nx = snap(x - pitch, tol)
-        if (nx == null || nx >= x) break
-        out.push(nx)
-        x = nx
+        if (nx != null && nx < x) { out.push(nx); x = nx; continue }
+        // 容許跳過一條「淡到偵測不到」的格線：往左跨兩個行距，中間那條用內插補回
+        const skip = snap(x - 2 * pitch, tol)
+        if (skip != null && skip < x) { out.push((x + skip) / 2, skip); x = skip; continue }
+        break
       }
       if (!chain || out.length > chain.length) chain = out
     }
   }
   if (!chain || chain.length < 2) return null
+  // 防呆：抓不全比抓不到更危險（少抓的行＝整段文字無聲消失）。
+  //   左端離影像邊緣還很遠＝那裡本來該有行卻沒抓到 → 不放行；緊貼邊緣＝掃描被裁切，照抓到的算。
+  const leftMost = chain[chain.length - 1]
+  const detected = chain.length - 1
+  if (detected < wantCols && leftMost > Math.max(8, (chain[0] - chain[1]) * 1.5)) {
+    return { rows: wantRows, cols: [], detectedCols: detected, incomplete: true }
+  }
   // chain 由右至左＝書寫順序；相鄰兩條線之間就是一行（含右側窄欄）
   const nCols = Math.min(chain.length - 1, wantCols)
   const cols = []
@@ -198,12 +216,18 @@ async function detectGridBoxes(pageBuffer, g) {
   if (!grid) {
     throw new Error('這一頁找不到稿紙的格線——請確認掃描完整、格線清楚，或改用系統製作的作文稿紙')
   }
+  // ⛔ 抓不全一定要擋：少抓的行會讓整段文字無聲消失，比直接失敗危險得多
+  if (grid.incomplete) {
+    throw new Error(`這一頁只找到 ${grid.detectedCols} 行格線（應為 ${g.cols} 行）——格線太淡或掃描不清，請提高掃描品質，或改用系統製作的作文稿紙`)
+  }
   const byId = new Map()
   grid.cols.forEach((c, i) => {
     byId.set(`c${i + 1}`, { x: c.x, y: c.y, w: c.w, h: c.h })
     const cellH = c.h / g.rows
     // 單格寬＝扣掉右側窄欄後的字格（偵測到的 w 含窄欄）
-    const cellW = c.w * (g.cellMm && g.gutterMm ? g.cellMm / (g.cellMm + g.gutterMm) : 0.8)
+    //   ⚠ gutterMm 可以是 0（學測稿紙沒有窄欄、整行就是字格）→ 不可用 `g.gutterMm &&` 判斷，
+    //     否則 0 會掉進 0.8 的 fallback、每格白白裁掉兩成。
+    const cellW = c.w * (g.cellMm && g.gutterMm != null ? g.cellMm / (g.cellMm + g.gutterMm) : 0.8)
     for (let r = 1; r <= g.rows; r++) {
       byId.set(`c${i + 1}r${r}`, { x: c.x, y: c.y + (r - 1) * cellH, w: cellW, h: cellH })
     }
