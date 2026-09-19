@@ -829,6 +829,12 @@ export default async function handler(req, res) {
             .select('generated_sheet')
             .eq('id', a.answer_key_template_id)
             .maybeSingle()
+          // 2026-09-19 作文模式（generated_sheet.essay＝RPESSAY1 稿紙）：建卷先行上線、批改管線（逐直行抄寫→眉批）尚未接。
+          //   在接好之前明確擋下，避免作文卷被當成一般生成卷送進 Phase A（會把整面稿紙當一格去讀）。
+          if (tpl?.generated_sheet?.essay) {
+            res.status(422).json({ error: '作文卷的 AI 批改尚未開放，敬請期待', code: 'ESSAY_GRADING_NOT_READY' })
+            return
+          }
           if (tpl?.generated_sheet?.boxes?.length) {
             generatedSheetLayout = tpl.generated_sheet
             console.log(`📐 [GeneratedSheet] 命中定版版面 ${generatedSheetLayout.version} ${generatedSheetLayout.boxes.length} 格 → Phase A 免 classify`)
