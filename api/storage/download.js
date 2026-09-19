@@ -198,12 +198,18 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
   }
 
   const ownerEntityId = isTemplate ? templateId : assignmentId
+  let rowExists = true
   if (isTemplate) {
     const own = await verifyTemplateOwnership(supabaseDb, templateId, user.id)
     if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+    // ⚠ verifyTemplateOwnership 對「列還不存在」是放行的（模板靠 sync 上來、上傳可能比 sync 早到）。
+    //   放行沒問題——檔案照存；但下面那個 .update().eq('id') 會 **match 0 列且不報錯**，
+    //   欄位就永遠是 null，而且沒有任何人會重試。回傳 persisted 讓 client 自己補。
+    rowExists = !!own.template
   } else {
     const own = await verifyAssignmentOwnership(supabaseDb, assignmentId, user.id)
     if (!own.ok) { res.status(own.status).json({ error: own.error }); return }
+    rowExists = own.assignment !== undefined ? !!own.assignment : true
   }
 
   const paths = []
@@ -254,8 +260,10 @@ async function handleAnswerSheetUpload(req, res, user, supabaseDb) {
   if (updateError) {
     console.warn(`[${prefix}] paths uploaded to Storage but failed to persist column for ${ownerEntityId}: ${updateError.message}`)
   }
-
-  res.status(200).json({ paths })
+  // persisted=false ⇒ 欄位沒寫進去（列還沒 sync 上來，或寫入報錯）。
+  //   client 收到 false 要把路徑寫進本機並 **bump updatedAt**，讓下一次 sync push 把欄位補上去。
+  const persisted = prefix !== 'generated-sheets' && rowExists && !updateError
+  res.status(200).json({ paths, persisted })
 }
 
 // ── answer-crop helpers ──────────────────────────────────────────────────────

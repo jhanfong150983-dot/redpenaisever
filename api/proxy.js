@@ -832,6 +832,14 @@ export default async function handler(req, res) {
           if (tpl?.generated_sheet?.boxes?.length) {
             generatedSheetLayout = tpl.generated_sheet
             console.log(`📐 [GeneratedSheet] 命中定版版面 ${generatedSheetLayout.version} ${generatedSheetLayout.boxes.length} 格 → Phase A 免 classify`)
+          } else if (tpl?.generated_sheet?.essay) {
+            // 2026-09-20 ⛔ 自備作文卷（RPESSAYBYO1）**沒有 boxes**：每一行的位置是批改當下
+            //   在學生卷上偵測印刷格線算出來的，存檔時只有 {cols,rows,pages,cellMm,gutterMm}。
+            //   原本只認 boxes?.length → generatedSheetLayout 永遠是 null → orchestrator 的作文攔截
+            //   （isEssayLayout(internalContext.generatedSheetLayout)）拿不到版型 → 整份卷掉回一般
+            //   classify，回 CLASSIFY_BBOX_SIZE_ANOMALY。user 09-20 實測第一份就踩到。
+            generatedSheetLayout = tpl.generated_sheet
+            console.log(`📝 [Essay] 作文稿紙 ${generatedSheetLayout.version}（${tpl.generated_sheet.essay.source ?? 'generated'}）→ Phase A 走作文管線`)
           }
         } catch (e) {
           console.warn('[GeneratedSheet] fetch generated_sheet failed:', e?.message)
