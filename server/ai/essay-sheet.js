@@ -81,6 +81,11 @@ async function alignColumns(pageBuffer, layout) {
  * @returns {Promise<{cols: Array<{x:number,y:number,w:number,h:number}>, rows:number}|null>} 頁面 normalized
  */
 export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
+  // ⛔ 卷種分流（user 09-21：會考卷與學測卷不能混在一起，各自要成功、互不影響）。
+  //   只認**明確的** format:'gsat'，不從行數／顏色去猜——猜錯的後果是拿錯的偵測器「碰巧成功」。
+  //   下面整段會考邏輯一個字元都沒動；學測走完全獨立的 detectGsatGridOnPage。
+  //   雙向隔離由 local-only/essay/_grid_isolation_regression.mjs 把關（四個象限）。
+  if (opts.format === 'gsat') return detectGsatGridOnPage(pageBuffer, opts)
   const wantCols = opts.cols ?? 23
   const wantRows = opts.rows ?? 22
   const { data, info } = await sharp(pageBuffer).raw().toBuffer({ resolveWithObject: true })
@@ -227,12 +232,176 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
   if (rowsSpanned && Math.abs(rowsSpanned - wantRows) > 0) {
     reasons.push(`格區只涵蓋 ${rowsSpanned} 列（應為 ${wantRows} 列），上下界可能抓錯`)
   }
+  //   ④ 行數明顯**多於**預期＝這張根本不是這種稿紙（2026-09-21 卷種隔離）。
+  //      原本只擋「少抓」：抓到 38 條線會默默取前 23 條當成功——空白的學測公版卷就這樣被會考偵測器放行。
+  //      實測 29 張通過的會考樣卷 detected 全部剛好 23（分佈 14~17／23／null，沒有任何一張 >23），
+  //      學測是 38 → 門檻留 2 行餘裕，對正常會考卷零影響（回歸①逐頁簽章一致）。
+  if (detected > wantCols + 2) {
+    reasons.push(`找到 ${detected} 行格線，明顯多於這種稿紙應有的 ${wantCols} 行——這張可能不是這種稿紙`)
+  }
   return { rows: wantRows, cols, detectedCols: detected, incomplete: reasons.length > 0, reasons }
+}
+
+/**
+ * 學測國寫**公版答題卷**的格線偵測（format:'gsat'）——與上面會考那支完全獨立，互不呼叫、互不共用門檻。
+ *
+ * 為什麼不能沿用會考的做法（2026-09-21，115 學測第二大題真實原卷 6 份實測 0/6）：
+ *   會考那支用「彩度夠高」當遮罩、再把過門檻的線串成鏈。學測真實掃描的綠格線又細又淡，
+ *   遮罩命中的像素裡 52% 是**筆跡邊緣的紅色色邊**、34% 是浮水印、綠線只有 14%
+ *   （整頁寫滿 800 字、又沒有窄欄隔開）。空白 PDF 會過、真實卷全滅。拉高飽和度沒用（雜訊一起放大）。
+ *
+ * 做法：
+ *   ①遮罩只認**綠色色相**（g 明顯大於 r、b）→ 筆跡的紅色色邊直接出局。
+ *   ②不去「找線再串」，改用**梳子比對**：公版格子是固定的 38×22 正方格（10mm），
+ *     所以拿一把「N+1 根等距齒」的梳子在投影上滑動，找齒壓在線上、齒縫落在格心的最佳位置。
+ *     39 條線的證據一起投票 → 個別線太淡、被筆跡蓋住都不影響；橫線比直線糊也不怕。
+ *   ③列距由行距推得（正方格，容許掃描器 ±4% 的縱橫比誤差）→ 不必偵測出每一條橫線。
+ * @returns 與 detectEssayGridOnPage 相同的結構（cols 由右至左、normalized）
+ */
+async function detectGsatGridOnPage(pageBuffer, opts = {}) {
+  const wantCols = opts.cols ?? 38
+  const wantRows = opts.rows ?? 22
+  const { data, info } = await sharp(pageBuffer).raw().toBuffer({ resolveWithObject: true })
+  const W = info.width
+  const H = info.height
+  const ch = info.channels
+  if (!W || !H || ch < 3) return null
+
+  // 綠色強度圖（一次算好，後面在不同範圍上重複投影）。
+  // ⛔ 不可用「過門檻才算 1」的二值遮罩：真實掃描的綠線又細又淡（縮圖＋WebP 後 g−max(r,b) 常只有 3~10），
+  //   二值化後一條線只剩 ~9% 的像素被算到（實測 115 原卷2-1），證據低到跟雜訊分不開。
+  //   改累加**連續的綠色強度** max(0, g−max(r,b))：淡線靠整條線的長度積分出來；
+  //   筆跡是灰黑（≈0）、筆跡邊緣的色邊偏紅（負值→0）、紙白≈0，都不貢獻。上限 40 防止少數鮮綠像素獨大。
+  const green = new Float32Array(W * H)
+  for (let i = 0, p = 0; i < W * H; i++, p += ch) {
+    const r = data[p], g = data[p + 1], b = data[p + 2]
+    const v = g - (r > b ? r : b)
+    if (v > 2 && g > 90) green[i] = v > 40 ? 40 : v
+  }
+  const project = (x0, x1, y0, y1) => {
+    const col = new Float64Array(W)
+    const row = new Float64Array(H)
+    for (let y = y0; y < y1; y++) {
+      const base = y * W
+      for (let x = x0; x < x1; x++) { const v = green[base + x]; if (v) { col[x] += v; row[y] += v } }
+    }
+    return { col, row }
+  }
+  // 帶狀加總：掃描微歪斜時一條線會跨好幾個像素
+  const band = (arr, half) => {
+    const out = new Float64Array(arr.length)
+    for (let i = 0; i < arr.length; i++) {
+      let s = 0
+      for (let k = -half; k <= half; k++) { const j = i + k; if (j >= 0 && j < arr.length) s += arr[j] }
+      out[i] = s
+    }
+    return out
+  }
+  const at = (arr, x) => {
+    if (x < 0 || x > arr.length - 1) return 0
+    const i = Math.floor(x)
+    const f = x - i
+    return arr[i] * (1 - f) + (arr[i + 1] ?? arr[i]) * f
+  }
+  /**
+   * 梳子比對：n 格＝n+1 根齒。分數＝齒上的量 − 齒縫（格心）的量。
+   * ⛔ 粗搜尋的步長必須配合帶寬：行距每差 dp，第 n 根齒就偏 n×dp。
+   *   首版粗搜尋 dp=0.5、帶寬 ±2 → 38 根齒尾端偏 9px，後段的齒全壓不到線，
+   *   分數失真、鎖到「整把梳子偏一格」的位置（連空白卷都中招：每張圖第一根齒證據都是 0）。
+   *   所以分兩段：粗搜尋用 ±6 寬帶＋dp 0.2（尾端最多偏 3.8px，仍在帶內）；再用 ±2 窄帶精修。
+   */
+  const comb = (raw, n, pMin, pMax, oMin, oMax) => {
+    const run = (arr, p0, p1, dp, o0, o1, dO) => {
+      let best = null
+      for (let P = p0; P <= p1; P += dp) {
+        const hi = Math.min(o1, arr.length - 1 - n * P)
+        for (let o = Math.max(0, o0); o <= hi; o += dO) {
+          let s = 0
+          for (let k = 0; k <= n; k++) s += at(arr, o + k * P)
+          for (let k = 0; k < n; k++) s -= at(arr, o + (k + 0.5) * P)
+          if (!best || s > best.s) best = { P, o, s }
+        }
+      }
+      return best
+    }
+    const coarse = run(band(raw, 6), pMin, pMax, 0.2, oMin, oMax, 2)
+    if (!coarse) return null
+    const fineArr = band(raw, 2)
+    const best = run(fineArr, coarse.P - 0.4, coarse.P + 0.4, 0.01, coarse.o - 8, coarse.o + 8, 0.25) ?? coarse
+    const teeth = []
+    const mids = []
+    for (let k = 0; k <= n; k++) teeth.push(at(fineArr, best.o + k * best.P))
+    for (let k = 0; k < n; k++) mids.push(at(fineArr, best.o + (k + 0.5) * best.P))
+    return { ...best, teeth, mids }
+  }
+
+  // 第一輪：整張圖的投影 → 先定直行；再只看格區的 x 範圍定橫列；最後只看格區的 y 範圍重定直行
+  // 行距的合理範圍：公版是 A3 橫式、格區 38 格 → 整張掃進來時行距≈寬度的 2.4%；
+  //   掃描被裁到只剩格區時上限＝寬度/38。下限取 1.8%（格區至少佔圖寬 68%）。
+  let pj = project(0, W, 0, H)
+  let cx = comb(pj.col, wantCols, W * 0.018, (W - 1) / wantCols, 0, W)
+  if (!cx) return null
+  const xr = (c) => [Math.max(0, Math.floor(c.o)), Math.min(W, Math.ceil(c.o + wantCols * c.P))]
+  pj = project(...xr(cx), 0, H)
+  let cy = comb(pj.row, wantRows, cx.P * 0.96, Math.min(cx.P * 1.04, (H - 1) / wantRows), 0, H)
+  if (!cy) return null
+  const yr = [Math.max(0, Math.floor(cy.o)), Math.min(H, Math.ceil(cy.o + wantRows * cy.P))]
+  pj = project(0, W, yr[0], yr[1])
+  cx = comb(pj.col, wantCols, cx.P * 0.98, cx.P * 1.02, cx.o - cx.P * 0.5, cx.o + cx.P * 0.5) ?? cx
+  pj = project(...xr(cx), 0, H)
+  cy = comb(pj.row, wantRows, cy.P * 0.98, cy.P * 1.02, cy.o - cy.P * 0.5, cy.o + cy.P * 0.5) ?? cy
+
+  // ── 守門：抓錯比抓不到危險（少一行＝整段文字無聲消失）──
+  const gridW = wantCols * cx.P
+  const gridH = wantRows * cy.P
+  // 每根齒的「線證據」＝那條線上的平均綠色強度（每像素、已除以格區邊長）。
+  // 守門看的是**相對**量（齒 vs 兩側齒縫），不是絕對值——不同掃描器、不同印刷的綠線深淺差很多。
+  const evX = cx.teeth.map((v) => v / gridH)
+  const evY = cy.teeth.map((v) => v / gridW)
+  const bgX = cx.mids.map((v) => v / gridH)
+  const bgY = cy.mids.map((v) => v / gridW)
+  const mean = (a) => a.reduce((p, q) => p + q, 0) / a.length
+  const reasons = []
+  // ① 整體沒有綠線（誤拿會考的粉紅稿紙、灰階掃描）→ 回 null，不可硬湊一個位置出來
+  //    綠線每像素強度即使很淡也有 ~1 以上（±2 帶寬加總），紙白／粉紅／灰階趨近 0
+  if (mean(evX) < 0.6 || mean(evY) < 0.6) {
+    if (!opts.debug) return null
+    reasons.push(`整體綠線證據不足（直 ${mean(evX).toFixed(2)}／橫 ${mean(evY).toFixed(2)}）`)
+  }
+  // ② 梳子真的壓在線上時，線上的綠遠高於格心（格心只有浮水印的淡綠底）
+  if (mean(evX) < mean(bgX) * 2) reasons.push('直格線與格心的對比不足，定位不可靠')
+  if (mean(evY) < mean(bgY) * 2) reasons.push('橫格線與格心的對比不足，定位不可靠')
+  // ③ 逐條檢查：某條線不比兩側格心亮＝那個位置其實沒有線（掃描裁到格區、或整把梳子偏了一格）
+  const weak = (ev, bg) => ev.filter((v, k) => {
+    const nb = [bg[k - 1], bg[k]].filter((x) => x != null)
+    return v < mean(nb) * 1.3 + 0.05
+  }).length
+  const weakX = weak(evX, bgX)
+  const weakY = weak(evY, bgY)
+  // 個別線被筆跡整條蓋住是可能的，容許極少數；超過就不放行
+  if (weakX > 2) reasons.push(`有 ${weakX} 條直格線在預期位置找不到（應為 ${wantCols + 1} 條）——掃描可能裁到格區，或不是學測公版答題卷`)
+  if (weakY > 1) reasons.push(`有 ${weakY} 條橫格線在預期位置找不到（應為 ${wantRows + 1} 條）——掃描可能裁到格區，或不是學測公版答題卷`)
+  // ④ 最外圈的四條框線一定要在：少了任何一條＝梳子偏一格或掃描被裁，這是「整行／整列文字無聲消失」的來源
+  const edgeOk = (ev, bg) => ev[0] >= bg[0] * 1.3 + 0.05 && ev[ev.length - 1] >= bg[bg.length - 1] * 1.3 + 0.05
+  if (!edgeOk(evX, bgX)) reasons.push('格區最左或最右的框線找不到——梳子可能偏了一格，或掃描裁到格區')
+  if (!edgeOk(evY, bgY)) reasons.push('格區最上或最下的框線找不到——梳子可能偏了一格，或掃描裁到格區')
+
+  // cols 由右至左＝書寫順序（與會考那支回傳的結構一致）
+  const cols = []
+  for (let i = 0; i < wantCols; i++) {
+    const xLeft = cx.o + (wantCols - 1 - i) * cx.P
+    cols.push({ x: xLeft / W, y: cy.o / H, w: cx.P / W, h: gridH / H })
+  }
+  const out = { rows: wantRows, cols, detectedCols: wantCols, incomplete: reasons.length > 0, reasons }
+  // 只給回歸／診斷腳本用（production 不帶 debug）
+  if (opts.debug) out._debug = { W, H, colPitch: cx.P, rowPitch: cy.P, x0: cx.o, y0: cy.o, evX, evY, bgX, bgY }
+  return out
 }
 
 /** 自備稿紙：偵測到的格線 → 與錨點版同樣的 byId 結構（cN＝整行、cNrM＝單格） */
 async function detectGridBoxes(pageBuffer, g) {
-  const grid = await detectEssayGridOnPage(pageBuffer, { cols: g.cols, rows: g.rows })
+  // format 只來自版面資料裡明確寫的欄位（學測模式建卷時寫 'gsat'）；沒寫＝會考，行為與過去完全相同
+  const grid = await detectEssayGridOnPage(pageBuffer, { cols: g.cols, rows: g.rows, format: g.format })
   if (!grid) {
     throw new Error('這一頁找不到稿紙的格線——請確認掃描完整、格線清楚，或改用系統製作的作文稿紙')
   }
