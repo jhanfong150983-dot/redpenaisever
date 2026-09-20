@@ -69,6 +69,12 @@ export function buildEssayTranscribePrompt() {
 3. 被塗黑或劃掉的字不抄；寫在格線旁的插入字，依學生標示的位置插入。
    格子裡只有塗改記號、刪除線、小勾、點這類**不是字的筆畫** → 該格當成沒寫、不要抄任何東西。
 4. 標點符號照抄；直行開頭的空格用全形空格「　」表示（空幾格就幾個）。
+   ⭐ **直書的標點長相跟橫書不同，各佔一格，不要誤判**：
+   ・引號「」『』在直書時是**上下的角狀short筆畫**——上引號在格子的右上、下引號在格子的左下。
+     看到格子裡只有一個角狀或勾狀的短筆畫，**優先考慮是引號**，不要當成注音（ㄥ、ㄋ、乚）或罕用字。
+   ・破折號──與刪節號……在直書時是**直的**，各佔兩格。
+   ・句號。逗號，頓號、寫在格子的右上角。
+   （實測：學生寫「夏日風鈴」，上引號被抄成罕用字、下引號被抄成注音ㄥ，還連累眉批去責備學生亂用符號。）
 5. 某個字筆畫寫錯、不是任何一個正確的字 → 抄最接近的字並在後面加「〔?〕」；完全看不清 → 「?」。
 6. 只抄手寫，不抄印刷文字。不要補字、不要刪字、不要潤飾。
 7. 只輸出常用的繁體中文字與標點。**不要使用罕用字／異體字（Unicode 擴充區的冷僻字）**——
@@ -83,8 +89,21 @@ export function parseEssayTranscribeColumn(text) {
     const s = String(text).replace(/```json|```/g, '').trim()
     const o = JSON.parse(s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1))
     if (!Array.isArray(o?.columns)) return null
-    return o.columns.map((x) => String(x)).join('')
+    return sanitizeTranscript(o.columns.map((x) => String(x)).join(''))
   } catch { return null }
+}
+
+/**
+ * 抄本淨化：把「國中生不可能寫出來的字」換成看不清標記。
+ * ⛔ 只處理 **Unicode CJK 擴充區**（U+20000 以上）——那是 𡘓 𠃑 這類冷僻字，
+ *   手寫作文絕不會出現，一定是 AI 認不出筆畫時硬湊的（實測：直書引號被湊成 𠃑）。
+ *   ⚠ **不碰注音符號**：學生不會寫的字真的會寫注音，那是會考「錯別字、格式與標點」
+ *     向度要抓的，濾掉會漏報。注音的誤判交給 prompt 規則處理。
+ */
+export function sanitizeTranscript(text) {
+  return [...String(text ?? '')]
+    .map((ch) => (ch.codePointAt(0) > 0x20000 ? '〔?〕' : ch))
+    .join('')
 }
 
 /** 抄本（逐行）→ 分段文章：直行以全形空格開頭＝新段落 */
