@@ -33,7 +33,7 @@ export const JUDGE_PROMPT_VERSIONS = {
   rubric: 'rubric-2026-09-04-v1',           // 看圖逐維度判分（evidence 先於 score）
   // 2026-09-19 作文（P3）：三段各自一個版本號——抄寫／眉批／級分 prompt 任一有改都要升，否則舊卷重批跑的是舊邏輯
   essayTranscribe: 'essay-tr-2026-09-19-percol',   // 逐直行抄寫（實驗0 逐行臂原文）
-  essayFeedback: 'essay-fb-2026-09-19-v3',         // 逐句眉批 v3（向度＋規準用語＋程度詞）
+  essayFeedback: 'essay-fb-2026-09-20-wordtypo',   // 逐句眉批 v4：錯別字改**以詞為單位**輸出（單字看不出對錯）
   essayLevel: 'essay-lv-2026-09-19-generic',       // 建議級分（只給通用規準、題目送圖）
 }
 

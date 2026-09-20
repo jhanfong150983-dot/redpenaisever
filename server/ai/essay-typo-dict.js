@@ -68,12 +68,34 @@ export function confirmTypo(wrong, correct) {
   if (wrong === correct) return { ok: false, reason: 'same' }
 
   // ① 建議的正確寫法要真的是個「教育部收錄且常用」的詞（單字則要有注音＝確實是個字）
+  //   ⭐ 2026-09-20 AI 改以「詞」為單位輸出後，整串未必是辭典詞（例：「拾它」→「給它」），
+  //     但**含被改字的子詞**可能是（例：「鈦舊換新」→「汰舊換新」的「汰舊」）。
+  //     所以整串查不到時，再退一步查子詞；兩者都查不到才判 correct-not-a-word。
+  // 2 字詞要過詞頻濾網（教育部辭典收了大量冷僻 2 字條目，不濾會放行一堆怪詞）；
+  //   3~4 字詞／成語本身就夠明確，收錄即可（例「汰舊換新」jieba 詞頻不足但確實是成語）
+  const isWord = (w) => d.all.has(w) && (w.length >= 3 || d.common.has(w))
+  const changedAt = wrong.length === correct.length
+    ? [...correct].findIndex((c, i) => c !== wrong[i])
+    : -1
+  const subWordOk = () => {
+    if (changedAt < 0) return false
+    for (const L of [4, 3, 2]) {
+      for (let st = Math.max(0, changedAt - L + 1); st + L <= correct.length && st <= changedAt; st++) {
+        const cand = correct.slice(st, st + L)
+        const orig = wrong.slice(st, st + L)
+        if (isWord(cand) && !d.all.has(orig)) return true   // 改完成詞、改之前不成詞＝典型別字
+      }
+    }
+    return false
+  }
   const okCorrect = correct.length >= 2
-    ? (d.all.has(correct) && d.common.has(correct))
+    ? (isWord(correct) || subWordOk())
     : !!d.sound[correct]
   if (!okCorrect) return { ok: false, reason: 'correct-not-a-word' }
 
-  // ② 學生寫的本身就是個詞 → 未必是錯，交老師判
+  // ② 學生寫的整串本身就是辭典收錄的詞 → 交老師判（例：「標緻」是詞，字典無從判斷他其實要寫「標誌」）。
+  //   ⚠ 這條**故意用最寬的 d.all**（不套詞頻濾網）：高信心＝直接採用，誤判會變成
+  //     「跟學生說你寫錯了，但他其實沒錯」——這一側要保守。
   if (wrong.length >= 2 && d.all.has(wrong)) return { ok: false, reason: 'wrong-is-also-a-word' }
 
   // ③ 只差一個字時要求同音——「別字」的定義就是音近而形異；不同音多半是 AI 抄錯或語意推測
