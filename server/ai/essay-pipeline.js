@@ -5,6 +5,7 @@
 //   低信心＝「該行有墨格數 ≠ 抄本字數」：實驗0 實測抓到全部漏字／多字／疊字行，交老師補。
 //   ⛔ 別在這裡改 prompt——prompt 在 essay-grader.js，且改了要升 JUDGE_PROMPT_VERSIONS。
 import { cutEssayColumns, isEssayLayout } from './essay-sheet.js'
+import { bucketTypos } from './essay-typo-dict.js'
 import {
   ESSAY_ROUTES,
   ESSAY_TRANSCRIBE_GENERATION_CONFIG,
@@ -215,8 +216,12 @@ export async function runEssayFeedback({
     const loc = locateQuote(columns, x?.[key])
     return { ...x, loc: loc.ok ? { page: loc.page, col: loc.col, toCol: loc.toCol } : null, quoteVerified: loc.ok }
   })
+  // 錯別字分桶（user 09-20 拍板）：字典確認＝高信心直接採用；字典不確認＝低信心交老師確認。
+  //   ⛔「字典抓到但 AI 沒抓到」一律無視——實驗數據 30 筆命中官方真值 0 筆，純雜訊。
+  const bucketed = bucketTypos(withLoc(fb?.typos, 'context'))
+  if (fb) log(`[Essay] 錯別字 ${bucketed.typos.length} 個：高信心 ${bucketed.highCount}、低信心 ${bucketed.lowCount}`)
   const feedback = fb ? {
-    typos: withLoc(fb.typos, 'context'),
+    typos: bucketed.typos,
     sentenceFeedback: withLoc(fb.sentenceFeedback, 'quote'),
     paragraphFeedback: Array.isArray(fb.paragraphFeedback) ? fb.paragraphFeedback : [],
     strengths: withLoc(fb.strengths, 'quote'),
@@ -283,7 +288,19 @@ export function essayResultToQuestionResult(questionId, essayResult) {
  */
 export function buildEssayGradingResult(questionId, essayResult) {
   const qr = essayResultToQuestionResult(questionId, essayResult)
-  const low = essayResult?.lowConfidenceColumns ?? 0
+  // ⛔ 2026-09-20 user 拍板：**抄寫錯誤全部忽略、不要老師確認**。理由（實測後成立）：
+  //   ①改了抄本不會重跑眉批／級分，是「做了等於沒做」的動作
+  //   ②學生檢討單印的是原卷筆跡，抄錯不影響
+  //   ③10 份卷每份都有低信心行 → 「需要複核」100% 亮起、等於雜訊
+  //   需要複核改由「低信心錯別字」驅動；抄本落差只在**比例過高**時當整份卷的品質警示。
+  const lowTypos = (essayResult?.feedback?.typos ?? []).filter((t) => t?.confidence !== 'high')
+  const written = (essayResult?.columns ?? []).filter((c) => c?.text).length
+  const lowCols = essayResult?.lowConfidenceColumns ?? 0
+  const badRatio = written > 0 ? lowCols / written : 0
+  const reasons = []
+  if (lowTypos.length) reasons.push(`有 ${lowTypos.length} 個疑似錯別字字典無法確認，請老師判斷`)
+  // 抄本落差過半＝掃描歪掉／拍糊／寫出格線，整份的眉批與級分都不能信 → 這種才值得吵老師
+  if (badRatio > 0.4) reasons.push(`這份有 ${lowCols}/${written} 行抄寫落差偏大，建議看一下原卷再採信級分`)
   const detail = {
     questionId,
     studentAnswer: '作文卷面',
@@ -303,8 +320,7 @@ export function buildEssayGradingResult(questionId, essayResult) {
     mistakes: [],
     weaknesses: [],
     suggestions: [],
-    // 有低信心的行就請老師看一下抄本（抄錯會影響眉批與級分）
-    needsReview: low > 0,
-    reviewReasons: low > 0 ? [`有 ${low} 行的抄本字數與稿紙上的字數不符，請確認抄本`] : [],
+    needsReview: reasons.length > 0,
+    reviewReasons: reasons,
   }
 }
