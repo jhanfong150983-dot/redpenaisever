@@ -141,7 +141,8 @@ export async function runAiPipeline({
       .find((part) => part?.inlineData?.data)
     if (!inline) throw new Error('作文批改：沒有收到學生卷影像')
     // 題號取自定版版面的 box id（作文卷的 box id＝`${questionId}@p${page}`）
-    const essayQuestionId = String(essayLayout.boxes?.[0]?.id ?? '1').split('@')[0]
+    //   有 items（學測：一張卷不只一篇）→ 題號取該項的 id；沒有＝會考，維持原規則
+    const essayQuestionId = String(essayLayout.essay?.items?.[0]?.id ?? essayLayout.boxes?.[0]?.id ?? '1').split('@')[0]
     // Phase A＝裁行＋逐行抄寫＋數格子驗證（對應 loading 的前三格）。眉批與級分留給 Phase B。
     const essayResult = await runEssayTranscribe({
       executeStage,

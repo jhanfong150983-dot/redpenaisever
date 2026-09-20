@@ -116,5 +116,53 @@ for (const s of subs) {
   }
 }
 
-console.log(`\n假 AI 呼叫 ${calls} 次（零成本）　失敗 ${fail}/${subs.length + 1}`)
+// ── 學測國寫（format:'gsat'）：一張答題卷＝正面第一大題＋背面第二大題，第一階段**只批背面** ──
+//   要驗的是「正面不會被混進來當成同一篇」——那是高中自備卷一直被鎖住的原因，錯了是無聲批錯。
+//   素材在 local-only/（gitignore）：115 學測第二大題真實原卷＋114 空白卷。沒有就跳過、不算失敗。
+let extra = 1
+{
+  const path = await import('node:path')
+  const dir = path.join(import.meta.dirname, '..', 'local-only', 'essay', 'pages')
+  const front = path.join(dir, 'gsat_p1.png'), back = path.join(dir, 'gsat115_q2_4.png')
+  if (!fs.existsSync(front) || !fs.existsSync(back)) {
+    console.log('⏭  學測案例跳過（local-only 沒有樣卷圖）')
+  } else {
+    extra++
+    const Wd = 3240
+    const p1 = await sharp(front).resize({ width: Wd }).png().toBuffer()
+    const p2 = await sharp(back).resize({ width: Wd }).png().toBuffer()
+    const h1 = (await sharp(p1).metadata()).height, h2 = (await sharp(p2).metadata()).height
+    const merged = await sharp({ create: { width: Wd, height: h1 + h2, channels: 3, background: '#fff' } })
+      .composite([{ input: p1, top: 0, left: 0 }, { input: p2, top: h1, left: 0 }]).webp({ quality: 85 }).toBuffer()
+    const gsat = { source: 'byo', format: 'gsat', pages: 2, cols: 38, rows: 22, cellMm: 10, gutterMm: 0, items: [{ id: '1', pages: [2] }] }
+    const breaks = [h1 / (h1 + h2)]
+    try {
+      const { columns: pre } = await cutEssayColumns(merged, { essay: gsat }, breaks)
+      colPx = pre[0].bbox.w * Wd
+      let trCalls = 0
+      const stage = async (a) => { if (a.routeKey.endsWith('essay_transcribe')) trCalls++; return fakeStage(a) }
+      const draft = await runEssayTranscribe({
+        executeStage: stage, extractCandidateText: fakeExtract, apiKey: 'x', model: 'x',
+        payload: {}, routeHint: {}, log: () => {}, imageBuffer: merged, pageBreaks: breaks, layout: { essay: gsat },
+      })
+      const pages = [...new Set(draft.columns.map((c) => c.page))]
+      const written = draft.columns.filter((c) => c.text).length
+      if (pages.length !== 1 || pages[0] !== 2) throw new Error(`應該只有第 2 頁的行，實際出現第 ${pages.join(',')} 頁`)
+      if (draft.columns.length !== 38) throw new Error(`應該有 38 行，實際 ${draft.columns.length}`)
+      if (written < 36) throw new Error(`有字行只有 ${written}（這份原卷應該 37~38 行）`)
+      if (trCalls > 6) throw new Error(`抄寫呼叫 ${trCalls} 次，38 行每 8 行一組應該 5 次上下`)
+      console.log(`✅ 學測（只批背面）：只出現第 2 頁、${draft.columns.length} 行、有字 ${written} 行、抄寫 ${trCalls} 次呼叫`)
+      // 多個寫作題還沒支援 → 必須大聲失敗，不可默默合成一篇
+      let threw = false
+      try { await cutEssayColumns(merged, { essay: { ...gsat, items: [{ id: '1', pages: [1] }, { id: '2', pages: [2] }] } }, breaks) } catch { threw = true }
+      if (!threw) throw new Error('多個寫作題沒有被擋下')
+      console.log('✅ 學測（多題）：正確擋下、沒有默默合成一篇')
+    } catch (e) {
+      fail++
+      console.log(`⛔ 學測案例：${e.message}`)
+    }
+  }
+}
+
+console.log(`\n假 AI 呼叫 ${calls} 次（零成本）　失敗 ${fail}/${subs.length + extra}`)
 process.exit(fail ? 1 : 0)

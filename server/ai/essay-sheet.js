@@ -480,6 +480,23 @@ export function applyColumnIndent(text, inkRows) {
 }
 
 /**
+ * 這份作文卷要批哪幾頁（1 起算）。沒有 items＝全部頁都是同一篇（會考），回 null 表示不限制。
+ *
+ * 2026-09-21 學測國寫：一張答題卷上有**不只一篇**（正面第一大題、背面第二大題），
+ *   版面資料用 essay.items 描述「哪一項寫在哪幾頁」。會考沒有 items → 行為與過去完全相同。
+ * ⛔ 目前只支援**一個** item（第一階段只批第二大題）。多個 item 需要逐項分開抄寫／眉批／評分，
+ *   那一段還沒做——這裡直接擋下，不可以默默把多篇合成一篇批（那正是高中自備卷一直被鎖住的原因）。
+ */
+export function essayGradedPages(g) {
+  const items = Array.isArray(g?.items) ? g.items : null
+  if (!items || !items.length) return null
+  if (items.length > 1) throw new Error('這份作文卷有多個寫作題，目前只支援一題（多題分開批改尚未開放）')
+  const pages = (Array.isArray(items[0]?.pages) ? items[0].pages : []).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= g.pages)
+  if (!pages.length) throw new Error('作文卷的寫作題沒有指定頁面（essay.items[0].pages）')
+  return new Set(pages)
+}
+
+/**
  * 學生卷 → 逐直行裁圖＋每行的「有墨格數」。
  * @returns {Promise<{columns: Array<{page:number,col:number,pngBase64:string,inkCells:number,inkRows:boolean[],blank:boolean}>, pages:number}>}
  */
@@ -501,7 +518,11 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
   }
   const columns = []
   const byoMode = g.source === 'byo'
+  const graded = essayGradedPages(g)
   for (let p = 0; p < g.pages; p++) {
+    // 不在批改範圍的頁整頁跳過：不偵測格線、不裁行、不產生任何 column
+    //   （學測第一階段只批背面的第二大題；正面的第一大題是另一篇文章，混進來會被當成同一篇批）
+    if (graded && !graded.has(p + 1)) continue
     const { buf, y0: pageY0, y1: pageY1 } = pageBufs[p]
     const pageSpan = pageY1 - pageY0
     // 自備稿紙沒有四角定位方塊 → 直接在學生卷上偵測印刷格線（純 code；實驗證實 102 張真實樣卷 100% 抓對）
