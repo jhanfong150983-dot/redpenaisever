@@ -18,6 +18,7 @@ import {
   parseJsonLoose,
   columnsToParagraphs,
   locateQuote,
+  locateTypoCell,
   essayZeroAiGate,
 } from './essay-grader.js'
 
@@ -218,7 +219,16 @@ export async function runEssayFeedback({
   })
   // 錯別字分桶（user 09-20 拍板）：字典確認＝高信心直接採用；字典不確認＝低信心交老師確認。
   //   ⛔「字典抓到但 AI 沒抓到」一律無視——實驗數據 30 筆命中官方真值 0 筆，純雜訊。
-  const bucketed = bucketTypos(withLoc(fb?.typos, 'context'))
+  // 錯別字要能在低信心清單裡「看到稿紙上的那個字」→ 定位到**格**（不只行），前端才裁得出來
+  const typosLocated = (Array.isArray(fb?.typos) ? fb.typos : []).map((t) => {
+    const cell = locateTypoCell(columns, t?.context, t?.wrong)
+    return {
+      ...t,
+      loc: cell.ok ? { page: cell.page, col: cell.col, row: cell.row, toCol: cell.toCol, toRow: cell.toRow } : null,
+      quoteVerified: cell.ok,
+    }
+  })
+  const bucketed = bucketTypos(typosLocated)
   if (fb) log(`[Essay] 錯別字 ${bucketed.typos.length} 個：高信心 ${bucketed.highCount}、低信心 ${bucketed.lowCount}`)
   const feedback = fb ? {
     typos: bucketed.typos,

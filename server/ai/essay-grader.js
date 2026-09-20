@@ -165,19 +165,60 @@ const flat = (s) => String(s ?? '').replace(/[\s　]/g, '').replaceAll('〔?〕'
  * 引用句 code 驗證＋定位：引用必須逐字出自抄本，否則視為判官幻覺（標 false）。
  * 回 {ok, page, col} —— col 供複核 UI 與檢討單把眉批對回原卷的直行。
  */
-export function locateQuote(columns, quote) {
-  const q = flat(quote)
-  if (!q) return { ok: false }
+/**
+ * 全文攤平成一串字，並記下每個字落在「第幾頁第幾行第幾格」。
+ * ⚠ 格位要用**原始文字**的索引算：稿紙一格一字，**開頭空兩格也佔兩格**，
+ *   用 flat() 之後的索引會整行位移兩格（裁圖就會裁錯字）。
+ */
+function flattenWithCells(columns) {
   let text = ''
   const map = []
   for (const c of columns) {
-    const body = flat(c.text)
-    for (let i = 0; i < body.length; i++) map.push({ page: c.page, col: c.col })
-    text += body
+    const raw = String(c.text ?? '')
+    for (let r = 0; r < raw.length; r++) {
+      const ch = raw[r]
+      if (/[\s　]/.test(ch)) continue          // 空格佔格但不是字，不進搜尋字串
+      map.push({ page: c.page, col: c.col, row: r + 1 })  // row 1-based＝該行第幾格
+      text += ch
+    }
   }
+  return { text, map }
+}
+
+export function locateQuote(columns, quote) {
+  const q = flat(quote)
+  if (!q) return { ok: false }
+  const { text, map } = flattenWithCells(columns)
   const i = text.indexOf(q)
   if (i < 0) return { ok: false }
-  return { ok: true, page: map[i].page, col: map[i].col, toCol: map[i + q.length - 1].col }
+  const a = map[i]
+  const z = map[i + q.length - 1]
+  return { ok: true, page: a.page, col: a.col, row: a.row, toCol: z.col, toRow: z.row }
+}
+
+/**
+ * 錯別字的精確格位：先用 context 定位（單字如「的」滿篇都是、只靠 wrong 會定錯），
+ * 再在 context 裡找 wrong 的偏移量。
+ * @returns {{ok:boolean, page?:number, col?:number, row?:number, toCol?:number, toRow?:number}}
+ */
+export function locateTypoCell(columns, context, wrong) {
+  const w = flat(wrong)
+  if (!w) return { ok: false }
+  const { text, map } = flattenWithCells(columns)
+  const ctx = flat(context)
+  let i = -1
+  if (ctx) {
+    const ci = text.indexOf(ctx)
+    if (ci >= 0) {
+      const off = ctx.indexOf(w)
+      if (off >= 0) i = ci + off
+    }
+  }
+  if (i < 0) i = text.indexOf(w)   // 沒有 context 或對不上 → 退而求其次
+  if (i < 0) return { ok: false }
+  const a = map[i]
+  const z = map[i + w.length - 1]
+  return { ok: true, page: a.page, col: a.col, row: a.row, toCol: z.col, toRow: z.row }
 }
 
 /** 零 AI 閘門：空白卷／字數過少／與題幹高度重疊（抄題幹）→ 不送眉批、直接給候選級分 */
