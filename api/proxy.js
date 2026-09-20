@@ -870,6 +870,29 @@ export default async function handler(req, res) {
   //   與 answer_only Phase B 共用同一個 RLS-safe loader（owner_id 比對 billingUserId）。
   const needsBookletForDiagnosis = routeKey === 'report.parent_diagnosis' && payload?.assignmentId
   const needsBookletForErrorFeatures = routeKey === 'report.question_error_features' && payload?.assignmentId
+  // ⛔ 2026-09-20 Phase B 也必須拿到作文版型。
+  //   上面那段只在 phase_a / phase_a_classify 撈 generated_sheet → Phase B 的 essayLayout 永遠是 null
+  //   → 作文卷落回一般 Phase B，去找根本不存在的 phase_a_state，回 503
+  //   （實測：runStagedGradingPhaseB fromCache: 找不到 submission=... 的 phase_a_state）。
+  //   只在確認是作文卷時才設，避免動到一般生成卷的 Phase B 行為。
+  if (!generatedSheetLayout && payload?.assignmentId
+      && (routeKey === 'grading.phase_b' || routeKey === 'grading.phase_b_accessor')) {
+    try {
+      const { data: a } = await supabaseAdmin
+        .from('assignments').select('answer_key_template_id').eq('id', payload.assignmentId).maybeSingle()
+      if (a?.answer_key_template_id) {
+        const { data: tpl } = await supabaseAdmin
+          .from('answer_key_templates').select('generated_sheet').eq('id', a.answer_key_template_id).maybeSingle()
+        if (tpl?.generated_sheet?.essay) {
+          generatedSheetLayout = tpl.generated_sheet
+          console.log(`📝 [Essay] Phase B 取得作文版型 ${generatedSheetLayout.version} → 零 AI 組裝`)
+        }
+      }
+    } catch (e) {
+      console.warn('[Essay] Phase B 取作文版型失敗:', e?.message)
+    }
+  }
+
   // 2026-07-22 知識點歸類（升級進階報告時懶跑）：tagging call 需整本題本圖（withBooklet=true）；
   //   同 key 的 kpTips call 純文字（withBooklet 不帶）→ 不注入、不浪費圖 token。
   const needsBookletForKpTagging = routeKey === 'report.kp_tagging' && payload?.assignmentId && payload?.withBooklet === true
