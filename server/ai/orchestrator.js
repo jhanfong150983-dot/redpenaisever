@@ -14,6 +14,7 @@ import {
 } from './staged-grading.js'
 import { runEssayGrading, essayResultToQuestionResult, buildEssayGradingResult } from './essay-pipeline.js'
 import { isEssayLayout } from './essay-sheet.js'
+import { persistPhaseAState, loadPhaseAState } from './stage-log-writer.js'
 
 async function executeSinglePipelineCall({
   apiKey,
@@ -164,6 +165,15 @@ export async function runAiPipeline({
       unstableCount: 0,
       needsReviewCount: essayResult.lowConfidenceColumns > 0 ? 1 : 0,
     }
+    // ⛔ 一定要寫 phase_a_state：作文的 Phase A 不走 staged-grading，沒有人幫它寫。
+    //   沒寫的話任何「從快取續批」的路徑（gradePhaseBFromCache、重批、換裝置）都會找不到結果 →
+    //   Phase B 報「phaseAResult 裡沒有 essayResult」（09-20 實測）。
+    const essaySubmissionId = internalContext?.submissionId || payload?.submissionId
+    if (essaySubmissionId) {
+      await persistPhaseAState(essaySubmissionId, { essay: true, questionResults: [qr], savedAt: Date.now() })
+    } else {
+      console.warn(`${logPrefix} [Essay] 沒有 submissionId、phase_a_state 未寫入（續批會需要重跑）`)
+    }
     console.log(`${logPrefix} [Essay] 完成（${Date.now() - t0}ms、低信心 ${essayResult.lowConfidenceColumns} 行）`)
     return {
       status: 200,
@@ -299,8 +309,17 @@ export async function runAiPipeline({
     // 作文卷：分數在 Phase A 就定了（級分即分數）→ Phase B 不叫任何 AI，只把結果組成最終形狀。
     //   essayResult 由 client 原樣帶回（gradePhaseB 會送整份 phaseAResult）。
     const qrs = payload?.phaseAResult?.questionResults ?? internalContext?.phaseAResult?.questionResults ?? []
-    const hit = qrs.find((q) => q?.essayResult)
-    if (!hit) throw new Error('作文 Phase B：phaseAResult 裡沒有 essayResult（請重新批改）')
+    let hit = qrs.find((q) => q?.essayResult)
+    // fromCache／續批：client 不會帶 phaseAResult → 回頭讀 Phase A 寫下的 phase_a_state
+    if (!hit) {
+      const subId = payload?.submissionId || internalContext?.submissionId
+      if (subId) {
+        const cached = await loadPhaseAState(subId)
+        hit = (cached?.phase_a_state?.questionResults ?? []).find((q) => q?.essayResult)
+        if (hit) console.log(`${logPrefix} [Essay] Phase B 從 phase_a_state 取回結果`)
+      }
+    }
+    if (!hit) throw new Error('作文 Phase B：找不到 Phase A 的批改結果（phaseAResult 與 phase_a_state 都沒有）——請重新批改')
     const finalResult = buildEssayGradingResult(String(hit.questionId ?? '1'), hit.essayResult)
     console.log(`${logPrefix} [Essay] Phase B 直接組結果（零 AI、級分 ${finalResult.totalScore}）`)
     pipelineResult = {
