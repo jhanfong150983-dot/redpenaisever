@@ -128,6 +128,8 @@ export async function runEssayTranscribe({
   return {
     version: 'essay-1',
     columns,
+    // 一行幾格：前端要靠它把「第幾格」換算成 bbox 裡的 y 偏移（低信心清單裁那個字）
+    rows: g.rows,
     paragraphs: paras,
     chars: totalChars,
     lowConfidenceColumns: lowCount,
@@ -248,6 +250,7 @@ export async function runEssayFeedback({
   return {
     version: 'essay-1',
     columns,
+    rows: draft?.rows,
     paragraphs: paras,
     chars: totalChars,
     // ⛔ 拆 Phase A／B 時漏改的：lowCount 定義在 runEssayTranscribe，這支拿不到 → ReferenceError
