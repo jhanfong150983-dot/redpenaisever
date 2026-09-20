@@ -897,8 +897,11 @@ export default async function handler(req, res) {
   //   同 key 的 kpTips call 純文字（withBooklet 不帶）→ 不注入、不浪費圖 token。
   const needsBookletForKpTagging = routeKey === 'report.kp_tagging' && payload?.assignmentId && payload?.withBooklet === true
   // 2026-09-19 作文：題目一律送題本圖（實驗4），眉批與級分兩段都要 → Phase A 就要抓
+  // 2026-09-20 眉批／級分搬到 Phase B 之後，題本圖是 **Phase B** 在用（Phase A 只裁行＋抄寫）。
+  //   Phase A 仍列著：舊卷或不分段的呼叫端還是走一次跑完。
   const needsBookletForEssay = !!generatedSheetLayout?.essay && payload?.assignmentId
-    && (routeKey === 'grading.phase_a' || routeKey === 'grading.phase_a_classify')
+    && (routeKey === 'grading.phase_a' || routeKey === 'grading.phase_a_classify'
+      || routeKey === 'grading.phase_b' || routeKey === 'grading.phase_b_accessor')
   if ((routeKey === 'grading.phase_b' && answerSheetMode === 'answer_only' && payload?.assignmentId)
       || needsBookletForDiagnosis || needsBookletForErrorFeatures || needsBookletForKpTagging || needsBookletForEssay) {
     questionBookletImages = await fetchQuestionBookletImages(

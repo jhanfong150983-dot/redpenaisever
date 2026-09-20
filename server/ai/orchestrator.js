@@ -12,7 +12,7 @@ import {
   runGradeOneQuestion
   , executeStage, extractCandidateText
 } from './staged-grading.js'
-import { runEssayGrading, essayResultToQuestionResult, buildEssayGradingResult } from './essay-pipeline.js'
+import { runEssayTranscribe, runEssayFeedback, essayResultToQuestionResult, buildEssayGradingResult } from './essay-pipeline.js'
 import { isEssayLayout } from './essay-sheet.js'
 import { persistPhaseAState, loadPhaseAState } from './stage-log-writer.js'
 
@@ -142,7 +142,8 @@ export async function runAiPipeline({
     if (!inline) throw new Error('作文批改：沒有收到學生卷影像')
     // 題號取自定版版面的 box id（作文卷的 box id＝`${questionId}@p${page}`）
     const essayQuestionId = String(essayLayout.boxes?.[0]?.id ?? '1').split('@')[0]
-    const essayResult = await runEssayGrading({
+    // Phase A＝裁行＋逐行抄寫＋數格子驗證（對應 loading 的前三格）。眉批與級分留給 Phase B。
+    const essayResult = await runEssayTranscribe({
       executeStage,
       extractCandidateText,
       apiKey,
@@ -152,7 +153,6 @@ export async function runAiPipeline({
       imageBuffer: Buffer.from(inline.inlineData.data, 'base64'),
       pageBreaks: payload?.pageBreaks ?? null,
       layout: essayLayout,
-      bookletImages: internalContext?.questionBookletImages ?? [],
       log: (m) => console.log(`${logPrefix} ${m}`),
     })
     const qr = essayResultToQuestionResult(essayQuestionId, essayResult)
@@ -320,8 +320,23 @@ export async function runAiPipeline({
       }
     }
     if (!hit) throw new Error('作文 Phase B：找不到 Phase A 的批改結果（phaseAResult 與 phase_a_state 都沒有）——請重新批改')
-    const finalResult = buildEssayGradingResult(String(hit.questionId ?? '1'), hit.essayResult)
-    console.log(`${logPrefix} [Essay] Phase B 直接組結果（零 AI、級分 ${finalResult.totalScore}）`)
+    // Phase B＝眉批＋建議級分（對應 loading 第四格）。Phase A 已把抄本算好、這裡只吃文字＋題本圖。
+    //   舊卷（Phase A 就已經跑完眉批的那批）draft.feedback 已存在 → 不重跑、直接組結果。
+    const essayResult = hit.essayResult?.feedback || hit.essayResult?.gate
+      ? hit.essayResult
+      : await runEssayFeedback({
+        executeStage,
+        extractCandidateText,
+        apiKey,
+        model,
+        payload,
+        routeHint,
+        draft: hit.essayResult,
+        bookletImages: internalContext?.questionBookletImages ?? [],
+        log: (m) => console.log(`${logPrefix} ${m}`),
+      })
+    const finalResult = buildEssayGradingResult(String(hit.questionId ?? '1'), essayResult)
+    console.log(`${logPrefix} [Essay] Phase B 完成（級分 ${finalResult.totalScore}）`)
     pipelineResult = {
       status: 200,
       data: { candidates: [{ content: { parts: [{ text: JSON.stringify(finalResult) }] } }] },

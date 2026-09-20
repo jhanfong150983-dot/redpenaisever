@@ -49,7 +49,7 @@ const flat = (s) => String(s ?? '').replace(/[\s　]/g, '').replaceAll('〔?〕'
  *   ⚠ 形狀是 {mimeType,data}（proxy 的 fetchQuestionBookletImages 產出），不是 {inlineData}
  * @returns {Promise<object>} essayResult
  */
-export async function runEssayGrading({
+export async function runEssayTranscribe({
   executeStage,
   extractCandidateText,
   apiKey,
@@ -59,8 +59,6 @@ export async function runEssayGrading({
   imageBuffer,
   pageBreaks,
   layout,
-  bookletImages = [],
-  gradeLabel,
   log = () => {},
 }) {
   if (!isEssayLayout(layout)) throw new Error('這份考卷不是作文稿紙版面')
@@ -124,19 +122,47 @@ export async function runEssayGrading({
 
   // ── 3) 零 AI 閘門（空白卷／字數過少）──
   const gate = essayZeroAiGate(columns)
-  if (gate) {
-    log(`[Essay] 零 AI 閘門：${gate.reason} → 級分 ${gate.level}，不送眉批`)
-    return {
-      version: 'essay-1',
-      columns,
-      paragraphs: paras,
-      chars: totalChars,
-      lowConfidenceColumns: lowCount,
-      feedback: null,
-      level: { suggested: gate.level, final: gate.level, reason: gate.reason, dimensions: [] },
-      gate: gate.reason,
-      ms: Date.now() - t0,
-    }
+  if (gate) log(`[Essay] 零 AI 閘門：${gate.reason} → 級分 ${gate.level}，不送眉批`)
+  return {
+    version: 'essay-1',
+    columns,
+    paragraphs: paras,
+    chars: totalChars,
+    lowConfidenceColumns: lowCount,
+    feedback: null,
+    level: gate ? { suggested: gate.level, final: gate.level, reason: gate.reason, dimensions: [] } : null,
+    gate: gate ? gate.reason : null,
+    ms: Date.now() - t0,
+  }
+}
+
+/**
+ * Phase B：眉批＋建議級分。只吃 Phase A 產出的抄本（純文字）＋題本圖，不需要學生卷影像。
+ *   拆成兩支的理由（2026-09-20 user 要求「批改動線切成四流程」）：
+ *   ①前三格（裁行／逐行讀取／數格子校對）3 秒內跑完，第四格才是那 20 秒的等待 → loading 才誠實
+ *   ②抄本先落地（phase_a_state），眉批失敗不會連抄寫成果一起白費
+ * @param {object} draft runEssayTranscribe 的產出
+ */
+export async function runEssayFeedback({
+  executeStage,
+  extractCandidateText,
+  apiKey,
+  model,
+  payload = {},
+  routeHint = {},
+  draft,
+  bookletImages = [],
+  gradeLabel,
+  log = () => {},
+}) {
+  const t0 = Date.now()
+  const columns = draft?.columns ?? []
+  const paras = draft?.paragraphs ?? []
+  const totalChars = draft?.chars ?? 0
+  // 零 AI 閘門在 Phase A 就判定了（空白卷／字數過少）→ 這裡直接原樣回傳，不叫 AI
+  if (draft?.gate) {
+    log(`[Essay] 零 AI 閘門（${draft.gate}）→ Phase B 不叫 AI`)
+    return { ...draft, ms: (draft.ms ?? 0) + (Date.now() - t0) }
   }
 
   // ── 4) 眉批與建議級分（並行；題目一律送題本圖）──
@@ -219,8 +245,14 @@ export async function runEssayGrading({
       dimensions: Array.isArray(lv?.dimensions) ? lv.dimensions : [],
     },
     gate: null,
-    ms: Date.now() - t0,
+    ms: (draft?.ms ?? 0) + (Date.now() - t0),
   }
+}
+
+/** 一次跑完（Phase A＋Phase B）。保留給不分段的呼叫端；orchestrator 已改走分段版。 */
+export async function runEssayGrading(p) {
+  const draft = await runEssayTranscribe(p)
+  return runEssayFeedback({ ...p, draft })
 }
 
 /** essayResult → 批改結果的單題 detail（滿分＝6 級分、級分即分數） */
