@@ -7,7 +7,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "vercel:dev": "vercel dev"
+    "vercel:dev": "vercel dev",
+    "smoke:essay": "node scripts/essay-smoke.mjs"
   },
   "dependencies": {
     "@sparticuz/chromium": "^133.0.0",
