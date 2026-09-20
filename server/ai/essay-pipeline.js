@@ -4,7 +4,7 @@
 //        → 引用句 code 驗證並定位回直行。
 //   低信心＝「該行有墨格數 ≠ 抄本字數」：實驗0 實測抓到全部漏字／多字／疊字行，交老師補。
 //   ⛔ 別在這裡改 prompt——prompt 在 essay-grader.js，且改了要升 JUDGE_PROMPT_VERSIONS。
-import { cutEssayColumns, isEssayLayout } from './essay-sheet.js'
+import { cutEssayColumns, cropEssayColumnGroup, applyColumnIndent, isEssayLayout } from './essay-sheet.js'
 import { bucketTypos } from './essay-typo-dict.js'
 import {
   ESSAY_ROUTES,
@@ -14,7 +14,7 @@ import {
   buildEssayTranscribePrompt,
   buildEssayFeedbackPrompt,
   buildEssayLevelPrompt,
-  parseEssayTranscribeColumn,
+  parseEssayTranscribeColumns,
   parseJsonLoose,
   columnsToParagraphs,
   locateQuote,
@@ -23,8 +23,16 @@ import {
 } from './essay-grader.js'
 
 const ESSAY_MAX_LEVEL = 6
-/** 逐行抄寫的並行數（一篇約 25~45 行；Phase A 有 300s 預算） */
+/** 抄寫的並行數（一篇約 25~45 行、合成後約 4~6 組；Phase A 有 300s 預算） */
 const TRANSCRIBE_CONCURRENCY = 6
+/**
+ * 一次送幾直行合成一張圖抄寫。2026-09-20 實驗定案 8。
+ * （4 份卷、50 個人工真值判讀點：N=5 準確 35/50・每欄 0.0341；**N=8 準確 38/50・每欄 0.0270**；
+ *   N=12 掉到 32/50；N=23 一致率崩到 70.7% 且漏 12 行。N=8 比 N=5 更便宜也更準，
+ *   還把座8 那份的簡體字從 9 個壓到 2 個。）
+ * 設 ESSAY_TRANSCRIBE_GROUP=1 可退回逐行抄寫。
+ */
+const TRANSCRIBE_GROUP = Math.max(1, Number(process.env.ESSAY_TRANSCRIBE_GROUP ?? 8) || 8)
 
 async function pool(items, n, fn) {
   const out = new Array(items.length)
@@ -71,34 +79,72 @@ export async function runEssayTranscribe({
   const written = cut.filter((c) => !c.blank && c.pngBase64)
   log(`[Essay] 裁行完成：${cut.length} 行、有字 ${written.length} 行（零 AI，${Date.now() - t0}ms）`)
 
-  // ── 2) 逐行抄寫 ──
+  // ── 2) 合成 N 行一張圖抄寫 ──
+  // 同一頁、連號的行才能併（跨頁或不連號一定要斷開，否則圖上根本不相鄰）
+  const groups = []
+  for (const c of written) {
+    const last = groups[groups.length - 1]
+    if (last && last[0].page === c.page && c.col === last[last.length - 1].col + 1 && last.length < TRANSCRIBE_GROUP) last.push(c)
+    else groups.push([c])
+  }
   const prompt = buildEssayTranscribePrompt()
-  // ⛔ 單行抄寫失敗不可以炸掉整份卷：設計上「抄不出來」＝低信心、交老師補（下面 lowConfidence 會標）。
-  //   原本沒接 catch，pool 裡任何一行 throw 就整個 Phase A 失敗、老師只看到「擷取失敗」。
   let transcribeErrors = 0
-  const texts = await pool(written, TRANSCRIBE_CONCURRENCY, async (c) => {
-    try {
-      const resp = await executeStage({
-        apiKey,
-        model,
-        payload: { ...payload, ...ESSAY_TRANSCRIBE_GENERATION_CONFIG },
-        timeoutMs: 60_000,
-        routeHint,
-        routeKey: ESSAY_ROUTES.transcribe,
-        stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/png', data: c.pngBase64 } }] }],
-      })
-      if (!resp?.ok) {
-        transcribeErrors++
-        log(`[Essay] 第${c.page}頁第${c.col}行 抄寫未成功（status=${resp?.status ?? '?'}）→ 標低信心`)
-        return null
-      }
-      return parseEssayTranscribeColumn(extractCandidateText(resp.data) || '')
-    } catch (err) {
-      transcribeErrors++
-      log(`[Essay] 第${c.page}頁第${c.col}行 抄寫例外：${err?.message || err} → 標低信心`)
+  let regrouped = 0
+
+  /** 送一組圖去抄；回傳長度＝group.length 的陣列（元素可為 null＝這行沒抄到） */
+  const askGroup = async (group) => {
+    const data = group.length === 1 && group[0].pngBase64
+      ? group[0].pngBase64                                   // 單行直接用裁好的
+      : await cropEssayColumnGroup(imageBuffer, group)
+    if (!data) return group.map(() => null)
+    const resp = await executeStage({
+      apiKey,
+      model,
+      payload: { ...payload, ...ESSAY_TRANSCRIBE_GENERATION_CONFIG },
+      timeoutMs: 90_000,
+      routeHint,
+      routeKey: ESSAY_ROUTES.transcribe,
+      stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/png', data } }] }],
+    })
+    if (!resp?.ok) {
+      log(`[Essay] 第${group[0].page}頁第${group[0].col}~${group[group.length - 1].col}行 抄寫未成功（status=${resp?.status ?? '?'}）`)
       return null
     }
+    return parseEssayTranscribeColumns(extractCandidateText(resp.data) || '')
+  }
+
+  // ⛔ 回傳筆數 ≠ 送出行數時**絕對不能照位置硬對**：少一行會讓後面每一行全部位移，
+  //   整篇錯位卻沒有任何錯誤訊息（N=23 實驗漏 12 行就是這樣崩的）。一律退回逐行重抄。
+  const texts = new Array(written.length).fill(null)
+  await pool(groups, TRANSCRIBE_CONCURRENCY, async (group) => {
+    let arr = null
+    try {
+      arr = await askGroup(group)
+    } catch (err) {
+      log(`[Essay] 第${group[0].page}頁第${group[0].col}行起 抄寫例外：${err?.message || err}`)
+    }
+    if (!Array.isArray(arr) || arr.length !== group.length) {
+      if (group.length > 1) {
+        regrouped++
+        log(`[Essay] 第${group[0].page}頁第${group[0].col}~${group[group.length - 1].col}行 回傳 ${Array.isArray(arr) ? arr.length : '解析失敗'} 筆 ≠ 送出 ${group.length} 筆 → 退回逐行重抄`)
+        const singles = await pool(group, TRANSCRIBE_CONCURRENCY, async (c) => {
+          try {
+            const one = await askGroup([c])
+            return Array.isArray(one) && one.length === 1 ? one[0] : null
+          } catch { return null }
+        })
+        group.forEach((c, i) => { texts[written.indexOf(c)] = singles[i] ?? null })
+        transcribeErrors += singles.filter((x) => x == null).length
+        return
+      }
+      transcribeErrors++
+      texts[written.indexOf(group[0])] = null
+      return
+    }
+    group.forEach((c, i) => { texts[written.indexOf(c)] = applyColumnIndent(arr[i], c.inkRows) })
   })
+  log(`[Essay] 抄寫：${written.length} 行 / ${groups.length} 次呼叫（每次 ${TRANSCRIBE_GROUP} 行）`)
+  if (regrouped) log(`[Essay] 其中 ${regrouped} 組筆數不符、已退回逐行重抄`)
   if (transcribeErrors) log(`[Essay] 抄寫共 ${transcribeErrors}/${written.length} 行失敗（標低信心、不中斷批改）`)
 
   const columns = cut.map((c) => {

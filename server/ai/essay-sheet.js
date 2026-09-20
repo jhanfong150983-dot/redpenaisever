@@ -276,8 +276,43 @@ function cellHasInk(raw, W, H, rect, darkThreshold = 110, ratio = 0.004) {
 }
 
 /**
+ * 把「同一頁、連號的數行」裁成一張圖（合成抄寫用）。
+ * ⛔ col 越大越靠左（直書由右往左）→ 左界取 group 最後一行、右界取第一行。
+ * bbox 已經是**合併圖**的 normalized 座標，所以直接對原圖裁就對了，不必再算頁偏移。
+ */
+export async function cropEssayColumnGroup(imageBuffer, group) {
+  if (!group?.length) return ''
+  const meta = await sharp(imageBuffer).metadata()
+  const W = meta.width
+  const H = meta.height
+  const leftBox = group[group.length - 1].bbox
+  const rightBox = group[0].bbox
+  const left = Math.max(0, Math.round(leftBox.x * W))
+  const top = Math.max(0, Math.round(rightBox.y * H))
+  const width = Math.min(W - left, Math.round((rightBox.x + rightBox.w - leftBox.x) * W))
+  const height = Math.min(H - top, Math.round(rightBox.h * H))
+  if (width < 4 || height < 4) return ''
+  const png = await sharp(imageBuffer).extract({ left, top, width, height }).png().toBuffer()
+  return png.toString('base64')
+}
+
+/**
+ * 行首縮排改由程式決定：行首連續幾格沒墨跡就是空幾格。
+ * ⛔ 不能靠 AI 抄——逐格輸出會直接吃掉行首空格，段落就被黏在一起
+ *   （分段判準是 columnsToParagraphs 的 /^[\s　]+/）。
+ */
+export function applyColumnIndent(text, inkRows) {
+  const body = String(text ?? '').replace(/^[\s　]+/, '')
+  if (!body || !Array.isArray(inkRows)) return body
+  let lead = 0
+  while (lead < inkRows.length && !inkRows[lead]) lead++
+  if (lead >= inkRows.length) return body
+  return '　'.repeat(lead) + body
+}
+
+/**
  * 學生卷 → 逐直行裁圖＋每行的「有墨格數」。
- * @returns {Promise<{columns: Array<{page:number,col:number,pngBase64:string,inkCells:number,blank:boolean}>, pages:number}>}
+ * @returns {Promise<{columns: Array<{page:number,col:number,pngBase64:string,inkCells:number,inkRows:boolean[],blank:boolean}>, pages:number}>}
  */
 export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
   if (!isEssayLayout(layout)) throw new Error('不是作文稿紙版面')
@@ -306,11 +341,18 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
     const W = info.width
     const H = info.height
     for (let c = 1; c <= g.cols; c++) {
-      let inkCells = 0
+      // ⭐ 逐格墨跡本來就算過，只是以前只留總數。留下每一格的結果，
+      //   行首縮排就能純用程式決定（行首連續幾格沒墨跡＝空幾格），不必靠 AI 抄——
+      //   實測「逐格輸出」的抄寫會直接吃掉行首空格，害段落被黏在一起。
+      const inkRows = []
+      const inkRatios = []     // 每格墨水密度：塗改／重寫的格子會異常高，可零 AI 標低信心
       for (let r = 1; r <= g.rows; r++) {
         const rect = byId.get(`c${c}r${r}`)
-        if (rect && cellHasInk(gray, W, H, rect).inked) inkCells++
+        const ink = rect ? cellHasInk(gray, W, H, rect) : null
+        inkRows.push(!!ink?.inked)
+        inkRatios.push(ink && ink.total > 0 ? ink.dark / ink.total : 0)
       }
+      const inkCells = inkRows.filter(Boolean).length
       const rect = byId.get(`c${c}`)
       if (!rect) continue
       const blank = inkCells === 0
@@ -329,6 +371,8 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
         col: c,
         pngBase64,
         inkCells,
+        inkRows,
+        inkRatios,
         blank,
         // 這一行在「學生合併圖」上的位置（normalized）→ 檢討單直接照著畫紅字，不必在前端重做對齊
         bbox: { x: rect.x, y: pageY0 + rect.y * pageSpan, w: rect.w, h: rect.h * pageSpan },
