@@ -129,7 +129,8 @@ export async function runEssayTranscribe({
     version: 'essay-1',
     columns,
     // 一行幾格：前端要靠它把「第幾格」換算成 bbox 裡的 y 偏移（低信心清單裁那個字）
-    rows: g.rows,
+    //   ⛔ 這裡沒有 g（那是 cutEssayColumns 內部的變數）——2026-09-20 寫成 g.rows 讓 10 份全炸
+    rows: layout?.essay?.rows,
     paragraphs: paras,
     chars: totalChars,
     lowConfidenceColumns: lowCount,
