@@ -299,6 +299,9 @@ export function buildEssayGradingResult(questionId, essayResult) {
   const badRatio = written > 0 ? lowCols / written : 0
   const reasons = []
   if (lowTypos.length) reasons.push(`有 ${lowTypos.length} 個疑似錯別字字典無法確認，請老師判斷`)
+  // ⚠ needsReview／reviewReasons 是 2026-06-01 就退役的舊旗標（「需要複核」橫幅已移除），
+  //   這裡保留只為相容。**真正活著的入口是頂欄「低信心檢視」modal**，它聚合 systemConfidence<70 的格。
+  //   作文一份卷只有一格 → 接不上「每個錯別字一筆」，所以另外把數量帶在 detail 上給前端聚合。
   // 抄本落差過半＝掃描歪掉／拍糊／寫出格線，整份的眉批與級分都不能信 → 這種才值得吵老師
   if (badRatio > 0.4) reasons.push(`這份有 ${lowCols}/${written} 行抄寫落差偏大，建議看一下原卷再採信級分`)
   const detail = {
@@ -312,6 +315,8 @@ export function buildEssayGradingResult(questionId, essayResult) {
     errorType: qr.errorType,
     reason: qr.scoringReason,
     confidence: qr.scoreConfidence,
+    // 低信心檢視 modal 要用的：這份卷有幾個待確認的錯別字（0 就不會進清單）
+    essayLowTypoCount: lowTypos.length,
     essayResult,
   }
   return {
