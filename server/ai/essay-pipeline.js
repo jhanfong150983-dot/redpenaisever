@@ -235,7 +235,9 @@ export async function runEssayFeedback({
     columns,
     paragraphs: paras,
     chars: totalChars,
-    lowConfidenceColumns: lowCount,
+    // ⛔ 拆 Phase A／B 時漏改的：lowCount 定義在 runEssayTranscribe，這支拿不到 → ReferenceError
+    //   （09-20 實測：眉批與級分都跑完了，最後組回傳值才爆，9 份全挂）。一律從 draft 取。
+    lowConfidenceColumns: draft?.lowConfidenceColumns ?? columns.filter((c) => c.lowConfidence).length,
     feedback,
     level: {
       suggested,
