@@ -282,9 +282,18 @@ function cellHasInk(raw, W, H, rect, darkThreshold = 110, ratio = 0.004) {
 export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
   if (!isEssayLayout(layout)) throw new Error('不是作文稿紙版面')
   const g = layout.essay
-  const pageBufs = await splitPages(imageBuffer, pageBreaks)
+  let pageBufs = await splitPages(imageBuffer, pageBreaks)
   if (pageBufs.length < g.pages) {
-    throw new Error(`作文卷需要 ${g.pages} 頁，這份只有 ${pageBufs.length} 頁——請確認正反面都掃進來了`)
+    // pageBreaks 是「優化」不是「前提」：作文稿紙每頁等高，合併圖平均切就對了。
+    //   實測 client 沒把 pageBreaks 存進 DB 時（2026-09-20 的老卷），平均切出來的兩頁
+    //   格線偵測都是 23/23。真的只掃了一頁的話，平均切會把一頁劈成兩半 →
+    //   下面 detectGridBoxes 的「格區列數」守門會大聲擋下，不會無聲批錯。
+    const even = Array.from({ length: g.pages - 1 }, (_, i) => (i + 1) / g.pages)
+    const retry = await splitPages(imageBuffer, even)
+    if (retry.length < g.pages) {
+      throw new Error(`作文卷需要 ${g.pages} 頁，這份只有 ${pageBufs.length} 頁——請確認正反面都掃進來了`)
+    }
+    pageBufs = retry
   }
   const columns = []
   const byoMode = g.source === 'byo'
