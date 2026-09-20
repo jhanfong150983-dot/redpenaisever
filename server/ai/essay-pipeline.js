@@ -5,7 +5,7 @@
 //   低信心＝「該行有墨格數 ≠ 抄本字數」：實驗0 實測抓到全部漏字／多字／疊字行，交老師補。
 //   ⛔ 別在這裡改 prompt——prompt 在 essay-grader.js，且改了要升 JUDGE_PROMPT_VERSIONS。
 import { cutEssayColumns, cropEssayColumnGroup, applyColumnIndent, isEssayLayout } from './essay-sheet.js'
-import { bucketTypos } from './essay-typo-dict.js'
+import { bucketTypos, detectSimplifiedChars } from './essay-typo-dict.js'
 import {
   ESSAY_ROUTES,
   ESSAY_TRANSCRIBE_GENERATION_CONFIG,
@@ -33,6 +33,11 @@ const TRANSCRIBE_CONCURRENCY = 6
  * 設 ESSAY_TRANSCRIBE_GROUP=1 可退回逐行抄寫。
  */
 const TRANSCRIBE_GROUP = Math.max(1, Number(process.env.ESSAY_TRANSCRIBE_GROUP ?? 8) || 8)
+/**
+ * 一份卷的抄本出現幾個簡體字就判定「這是 AI 壞掉」而不是「學生寫的」。
+ * 實測 10 份卷的簡體字 100% 是 AI 吐的，而且一發作就是整段十幾個；學生零星寫一兩個才有可能。
+ */
+const SIMPLIFIED_GATE = Math.max(1, Number(process.env.ESSAY_SIMPLIFIED_GATE ?? 5) || 5)
 
 async function pool(items, n, fn) {
   const out = new Array(items.length)
@@ -147,6 +152,40 @@ export async function runEssayTranscribe({
   if (regrouped) log(`[Essay] 其中 ${regrouped} 組筆數不符、已退回逐行重抄`)
   if (transcribeErrors) log(`[Essay] 抄寫共 ${transcribeErrors}/${written.length} 行失敗（標低信心、不中斷批改）`)
 
+  // ── 2b) 品質閘門：抄本吐出大量簡體字 ──────────────────────────────────
+  // 實測：合成 8 行時，某一份卷會整段切換成簡體（一份 15~30 個字），逐行抄則只有 2 個。
+  // user 09-20 拍板：「≥5 個就重跑，至少 retry 一次，還是不行就直接失敗，
+  //   不要讓這種東西落到老師眼睛裡」（學生真的寫這麼多簡體，老師改錯時自己會發現）。
+  // ⛔ retry 不能原樣重送：temperature=0，同樣的圖會得到一模一樣的結果。
+  //   要換輸入——把出問題的行**拆開逐行重抄**（逐行本來就幾乎不吐簡體）。
+  const countSimp = () => texts.reduce((n, t) => n + detectSimplifiedChars(t).length, 0)
+  let simpTotal = countSimp()
+  if (simpTotal >= SIMPLIFIED_GATE) {
+    const bad = written.filter((c, i) => detectSimplifiedChars(texts[i]).length > 0)
+    log(`[Essay] 抄本出現 ${simpTotal} 個簡體字（${bad.length} 行）→ 這些行拆開逐行重抄`)
+    await pool(bad, TRANSCRIBE_CONCURRENCY, async (c) => {
+      try {
+        const one = await askGroup([c])
+        if (Array.isArray(one) && one.length === 1 && one[0] != null) {
+          texts[written.indexOf(c)] = applyColumnIndent(one[0], c.inkRows)
+        }
+      } catch { /* 重抄失敗就維持原文，下面的總數檢查會擋 */ }
+    })
+    simpTotal = countSimp()
+    log(`[Essay] 重抄後剩 ${simpTotal} 個簡體字`)
+    if (simpTotal >= SIMPLIFIED_GATE) {
+      throw new Error(`抄寫品質不合格：抄本出現 ${simpTotal} 個簡體字，重抄後仍未改善`)
+    }
+  }
+  // 沒到閘門值的零星簡體字 → 留著給低信心清單（可能是學生真的寫簡體）
+  const simplified = []
+  written.forEach((c, i) => {
+    for (const s of detectSimplifiedChars(texts[i])) {
+      simplified.push({ page: c.page, col: c.col, row: s.index + 1, char: s.char })
+    }
+  })
+  if (simplified.length) log(`[Essay] 零星簡體字 ${simplified.length} 個 → 標低信心交老師判斷`)
+
   const columns = cut.map((c) => {
     const k = written.indexOf(c)
     const text = k >= 0 ? (texts[k] ?? '') : ''
@@ -180,6 +219,8 @@ export async function runEssayTranscribe({
     paragraphs: paras,
     chars: totalChars,
     lowConfidenceColumns: lowCount,
+    // 零星簡體字（未達閘門值）：可能是 AI 抄錯、也可能是學生真的寫簡體 → 交老師判
+    simplified,
     feedback: null,
     level: gate ? { suggested: gate.level, final: gate.level, reason: gate.reason, dimensions: [] } : null,
     gate: gate ? gate.reason : null,
@@ -303,6 +344,8 @@ export async function runEssayFeedback({
     // ⛔ 拆 Phase A／B 時漏改的：lowCount 定義在 runEssayTranscribe，這支拿不到 → ReferenceError
     //   （09-20 實測：眉批與級分都跑完了，最後組回傳值才爆，9 份全挂）。一律從 draft 取。
     lowConfidenceColumns: draft?.lowConfidenceColumns ?? columns.filter((c) => c.lowConfidence).length,
+    // 零星簡體字也是 Phase A 算的 → 一律從 draft 取，別在這裡重算
+    simplified: draft?.simplified ?? [],
     feedback,
     level: {
       suggested,

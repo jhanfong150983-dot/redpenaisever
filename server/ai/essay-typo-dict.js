@@ -56,6 +56,37 @@ function sameSound(a, b) {
 }
 
 /**
+ * 正體異體字白名單：合法但沒有單字注音條目，會被下面的偵測誤判成簡體。
+ * （16,992 字實測，誤報只有 樑 裏 癡 三個；其餘是同類型的常見異體字，先一併放行。）
+ */
+const TRAD_VARIANTS = new Set([...'樑裏癡着牀麪踪綫羣峯咏'])
+
+/**
+ * 找出抄本裡的簡體字（零 AI）。
+ *
+ * 字集＝字典的注音表（有單字注音條目的 9,828 個正體字）。
+ * ⛔ 不可以改用「教育部辭典全部詞條用字」：**很多簡體字本來就是古代異體字**
+ *   （当 时 声 众 画 过 断 戏 对 动…辭典都收）→ 那份字集漏抓一半。
+ *   注音表這個較窄的集合剛好切在對的位置：實測 16,992 個漢字抓到 30 種簡體字、
+ *   誤報只有 3 種 8 次（0.05%，且已列入白名單）。
+ * ⚠ 郁／吁 這類**本身就是正體字**的不會被抓（郁≠鬱、吁≠籲）——那屬於用錯字，
+ *   本來就該由眉批的錯別字偵測處理，不是簡體問題。
+ *
+ * @returns {Array<{char:string, index:number}>} index＝在傳入字串中的位置（＝格號）
+ */
+export function detectSimplifiedChars(text) {
+  const d = load()
+  if (!Object.keys(d.sound).length) return []      // fail-open：字典掛了就不擋
+  const out = []
+  ;[...String(text ?? '')].forEach((c, index) => {
+    if (!/[一-鿿]/.test(c)) return
+    if (d.sound[c] || TRAD_VARIANTS.has(c)) return
+    out.push({ char: c, index })
+  })
+  return out
+}
+
+/**
  * 字典是否同意 AI 的這個錯別字判定。
  * @param {string} wrong AI 說學生寫錯的字／詞
  * @param {string} correct AI 建議的正確字／詞
