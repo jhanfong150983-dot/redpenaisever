@@ -45,7 +45,8 @@ const flat = (s) => String(s ?? '').replace(/[\s　]/g, '').replaceAll('〔?〕'
  * @param {Buffer} p.imageBuffer 學生合併圖
  * @param {number[]|null} p.pageBreaks
  * @param {object} p.layout answer_key_templates.generated_sheet（含 essay 幾何）
- * @param {Array<{inlineData:{data:string,mimeType:string}}>} p.bookletImages 題本圖（最多 2 頁）
+ * @param {Array<{mimeType:string,data:string}>} p.bookletImages 題本圖（最多 2 頁）
+ *   ⚠ 形狀是 {mimeType,data}（proxy 的 fetchQuestionBookletImages 產出），不是 {inlineData}
  * @returns {Promise<object>} essayResult
  */
 export async function runEssayGrading({
@@ -139,7 +140,14 @@ export async function runEssayGrading({
   }
 
   // ── 4) 眉批與建議級分（並行；題目一律送題本圖）──
-  const bookletParts = bookletImages.slice(0, 2).map((im) => ({ inlineData: im.inlineData }))
+  // ⛔ questionBookletImages 的元素是 `{ mimeType, data }`，**不是** `{ inlineData }`
+  //   （慣例見 staged-grading.js 的 questionBookletImageParts）。原本寫 im.inlineData → undefined
+  //   → 送出一個空的圖片欄位，Gemini 直接回 **400**，眉批與級分兩支同時陣亡（實測 09-20）。
+  //   兩種形狀都收，沒有 data 的直接丟掉，避免再把空 part 送上去。
+  const bookletParts = bookletImages.slice(0, 2)
+    .map((im) => ({ inlineData: im?.inlineData ?? { mimeType: im?.mimeType || 'image/webp', data: im?.data } }))
+    .filter((p) => p.inlineData?.data)
+  if (bookletImages.length && !bookletParts.length) log('[Essay] ⚠ 題本圖有拿到但組不出 inlineData，這次不附題目圖')
   // 眉批／級分任一失敗也不該讓整份卷炸掉 → allSettled，缺的那段留 null 交老師處理
   const [fbSettled, lvSettled] = await Promise.allSettled([
     executeStage({
@@ -165,8 +173,14 @@ export async function runEssayGrading({
   if (lvSettled.status === 'rejected') log(`[Essay] 級分失敗：${lvSettled.reason?.message || lvSettled.reason}`)
   const fbResp = fbSettled.status === 'fulfilled' ? fbSettled.value : null
   const lvResp = lvSettled.status === 'fulfilled' ? lvSettled.value : null
-  if (fbResp && !fbResp.ok) log(`[Essay] 眉批未成功 status=${fbResp.status ?? '?'}`)
-  if (lvResp && !lvResp.ok) log(`[Essay] 級分未成功 status=${lvResp.status ?? '?'}`)
+  // 只印 status 看不出所以然（09-20 的 400 查了半天才知道是圖片欄位空的）→ 把 API 回的訊息也印出來
+  const errOf = (r) => {
+    const d = r?.data
+    const msg = d?.error?.message ?? (typeof d === 'string' ? d : JSON.stringify(d ?? {}))
+    return String(msg).slice(0, 300)
+  }
+  if (fbResp && !fbResp.ok) log(`[Essay] 眉批未成功 status=${fbResp.status ?? '?'}｜${errOf(fbResp)}`)
+  if (lvResp && !lvResp.ok) log(`[Essay] 級分未成功 status=${lvResp.status ?? '?'}｜${errOf(lvResp)}`)
   const fb = fbResp?.ok ? parseJsonLoose(extractCandidateText(fbResp.data) || '') : null
   const lv = lvResp?.ok ? parseJsonLoose(extractCandidateText(lvResp.data) || '') : null
 
