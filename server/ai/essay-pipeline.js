@@ -72,18 +72,33 @@ export async function runEssayGrading({
 
   // ── 2) 逐行抄寫 ──
   const prompt = buildEssayTranscribePrompt()
+  // ⛔ 單行抄寫失敗不可以炸掉整份卷：設計上「抄不出來」＝低信心、交老師補（下面 lowConfidence 會標）。
+  //   原本沒接 catch，pool 裡任何一行 throw 就整個 Phase A 失敗、老師只看到「擷取失敗」。
+  let transcribeErrors = 0
   const texts = await pool(written, TRANSCRIBE_CONCURRENCY, async (c) => {
-    const resp = await executeStage({
-      apiKey,
-      model,
-      payload: { ...payload, ...ESSAY_TRANSCRIBE_GENERATION_CONFIG },
-      timeoutMs: 60_000,
-      routeHint,
-      routeKey: ESSAY_ROUTES.transcribe,
-      stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/png', data: c.pngBase64 } }] }],
-    })
-    return resp?.ok ? parseEssayTranscribeColumn(extractCandidateText(resp.data) || '') : null
+    try {
+      const resp = await executeStage({
+        apiKey,
+        model,
+        payload: { ...payload, ...ESSAY_TRANSCRIBE_GENERATION_CONFIG },
+        timeoutMs: 60_000,
+        routeHint,
+        routeKey: ESSAY_ROUTES.transcribe,
+        stageContents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/png', data: c.pngBase64 } }] }],
+      })
+      if (!resp?.ok) {
+        transcribeErrors++
+        log(`[Essay] 第${c.page}頁第${c.col}行 抄寫未成功（status=${resp?.status ?? '?'}）→ 標低信心`)
+        return null
+      }
+      return parseEssayTranscribeColumn(extractCandidateText(resp.data) || '')
+    } catch (err) {
+      transcribeErrors++
+      log(`[Essay] 第${c.page}頁第${c.col}行 抄寫例外：${err?.message || err} → 標低信心`)
+      return null
+    }
   })
+  if (transcribeErrors) log(`[Essay] 抄寫共 ${transcribeErrors}/${written.length} 行失敗（標低信心、不中斷批改）`)
 
   const columns = cut.map((c) => {
     const k = written.indexOf(c)
@@ -125,7 +140,8 @@ export async function runEssayGrading({
 
   // ── 4) 眉批與建議級分（並行；題目一律送題本圖）──
   const bookletParts = bookletImages.slice(0, 2).map((im) => ({ inlineData: im.inlineData }))
-  const [fbResp, lvResp] = await Promise.all([
+  // 眉批／級分任一失敗也不該讓整份卷炸掉 → allSettled，缺的那段留 null 交老師處理
+  const [fbSettled, lvSettled] = await Promise.allSettled([
     executeStage({
       apiKey,
       model,
@@ -145,6 +161,12 @@ export async function runEssayGrading({
       stageContents: [{ role: 'user', parts: [{ text: buildEssayLevelPrompt(paras, totalChars) }, ...bookletParts] }],
     }),
   ])
+  if (fbSettled.status === 'rejected') log(`[Essay] 眉批失敗：${fbSettled.reason?.message || fbSettled.reason}`)
+  if (lvSettled.status === 'rejected') log(`[Essay] 級分失敗：${lvSettled.reason?.message || lvSettled.reason}`)
+  const fbResp = fbSettled.status === 'fulfilled' ? fbSettled.value : null
+  const lvResp = lvSettled.status === 'fulfilled' ? lvSettled.value : null
+  if (fbResp && !fbResp.ok) log(`[Essay] 眉批未成功 status=${fbResp.status ?? '?'}`)
+  if (lvResp && !lvResp.ok) log(`[Essay] 級分未成功 status=${lvResp.status ?? '?'}`)
   const fb = fbResp?.ok ? parseJsonLoose(extractCandidateText(fbResp.data) || '') : null
   const lv = lvResp?.ok ? parseJsonLoose(extractCandidateText(lvResp.data) || '') : null
 
