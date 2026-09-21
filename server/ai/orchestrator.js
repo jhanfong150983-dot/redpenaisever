@@ -14,6 +14,7 @@ import {
 } from './staged-grading.js'
 import { runEssayTranscribe, runEssayFeedback, essayResultToQuestionResult, buildEssayGradingResult } from './essay-pipeline.js'
 import { isEssayLayout } from './essay-sheet.js'
+import { essayGsatRubricOf } from './essay-grader.js'
 import { persistPhaseAState, loadPhaseAState } from './stage-log-writer.js'
 
 async function executeSinglePipelineCall({
@@ -334,6 +335,8 @@ export async function runAiPipeline({
         routeHint,
         draft: hit.essayResult,
         bookletImages: internalContext?.questionBookletImages ?? [],
+        // 學測國寫：每卷專屬的評分原則存在版面資料的 items 裡；會考沒有 → null → 走原本的會考判官
+        gsatRubric: essayGsatRubricOf(essayLayout),
         log: (m) => console.log(`${logPrefix} ${m}`),
       })
     const finalResult = buildEssayGradingResult(String(hit.questionId ?? '1'), essayResult)

@@ -137,12 +137,20 @@ export function columnsToParagraphs(columns) {
 }
 
 /** 逐句眉批＋四向度診斷（實驗2 v3 原文；題目以圖片附在後面） */
-export function buildEssayFeedbackPrompt(paras, gradeLabel) {
-  return `你是一位資深的國中國文老師，正在批改學生的作文。批改的目的是幫助學生精進寫作能力，所以重點不是打分數，而是「具體指出哪一句可以更好、建議怎麼改」。
+/**
+ * @param {object} [gsatRubric] 學測國寫的每卷專屬評分原則（essay.items[].rubric）。
+ *   ⛔ 不給＝會考，輸出必須與過去**逐字元相同**（local-only/essay/_cap_prompt_hashes.json 有凍結的雜湊可比對）。
+ *   給了＝學測：只換「老師的學段」與「評分依據」兩處，眉批的向度與規準用語表沿用（那是通用的寫作診斷語彙，
+ *   也是檢討模式分組的依據）。
+ */
+export function buildEssayFeedbackPrompt(paras, gradeLabel, gsatRubric) {
+  const stage = gsatRubric ? '高中' : '國中'
+  const rubricBlock = gsatRubric ? formatGsatRubric(gsatRubric) : CAP_RUBRIC
+  return `你是一位資深的${stage}國文老師，正在批改學生的作文。批改的目的是幫助學生精進寫作能力，所以重點不是打分數，而是「具體指出哪一句可以更好、建議怎麼改」。
 作文內容是由手寫稿紙逐字抄錄的文字，錯別字已照學生原樣保留。
 作文題目見附圖：請先閱讀圖中的題目、引導材料與圖片${gradeLabel ? `。學生是${gradeLabel}` : ''}。
 
-${CAP_RUBRIC}
+${rubricBlock}
 【學生作文】（每段前的 [n] 是段落編號，不是學生寫的）
 ${paras.map((p, i) => `[${i + 1}] ${p}`).join('\n')}
 
@@ -191,6 +199,76 @@ ${paras.join('\n')}
 
 只輸出 JSON：
 {"dimensions":[{"name":"立意取材","level":0,"comment":"...","quotes":["..."]},{"name":"結構組織","level":0,"comment":"...","quotes":["..."]},{"name":"遣詞造句","level":0,"comment":"...","quotes":["..."]},{"name":"錯別字、格式與標點符號","level":0,"comment":"...","quotes":["..."]}],"overall":0,"reason":"..."}`
+}
+
+// ═══ 學測國寫（format:'gsat'）的等第判官 ═════════════════════════════════════
+// 與會考的差別：①規準是**每份卷專屬**的（官方評分原則的「作答情形」逐級描述了這一題要寫到什麼），
+//   建卷時由 AI 起草、老師修改，存在 generated_sheet.essay.items[].rubric；
+//   ②輸出是六等第 A+／A／B+／B／C+／C（＋0），不是 1~6 級分。層數相同 → 內部沿用 0~6 的 level，只換顯示標籤。
+// 2026-09-21 實驗（115 第二大題、6 份官方佳作＋反向對照，local-only/essay/_gsat_level_exp.mjs）：
+//   佳作 6/6 判 A+；截斷成 251／95 字 → C+；別題的會考作文 3 篇 → 0、0、C。
+//   那個 C 的判官理由明明寫「嚴重離題」卻沒給 0 → 加 onTopic 欄位、由 code 定 0（分類交給明確欄位，不靠判官自己換算）。
+//   ⚠ 真值只有佳作：高分端與方向性驗過，B／C 之間的刻度**沒有驗證**。
+
+/** level(0~6) ↔ 學測等第 */
+export const GSAT_GRADES = ['0', 'C', 'C+', 'B', 'B+', 'A', 'A+']
+
+/** 版面資料 → 這一項的學測評分原則（不是學測、或資料不完整 → null＝走會考） */
+export function essayGsatRubricOf(layout) {
+  const item = layout?.essay?.items?.[0]
+  const r = item?.scoring === 'gsat' ? item.rubric : null
+  if (!r || !Array.isArray(r.bands) || !r.bands.length) return null
+  return r
+}
+
+function formatGsatRubric(rubric) {
+  const bands = (rubric.bands ?? []).map((b) => `${String(b[0]).padEnd(2)}：${b[1]}`).join('\n')
+  return `【本題評分原則】（學科能力測驗・國語文寫作能力測驗${rubric.title ? `；本題題目「${rubric.title}」` : ''}）
+${bands}`
+}
+
+export function buildGsatLevelPrompt(rubric, paras, chars) {
+  const elements = Array.isArray(rubric.elements) ? rubric.elements.filter(Boolean) : []
+  return `你是大學入學考試中心「學科能力測驗・國語文寫作能力測驗」的閱卷委員。請依本題的評分原則，為下面這篇考生作答評定等第。
+作答內容是由手寫答題卷逐字抄錄的文字，錯別字已照考生原樣保留；抄錄過程可能有極少數漏字或多字，請勿因此降等。
+試題見附圖：請先閱讀圖中的題目、引導文字與圖片。
+
+${formatGsatRubric(rubric)}
+
+【評分方式】（依大考中心閱卷程序）
+1. 先判斷這篇作答**是不是在寫本題**（onTopic）。寫的不是本題要求的內容、空白、或僅抄錄題目 → onTopic 填 false。
+2. ${elements.length ? `逐項檢核本題要求的內容有沒有寫到、寫到什麼程度，並引用作答原句為證（逐字引用、每則 30 字以內）：\n${elements.map((e, i) => `   ${i + 1}) ${e}`).join('\n')}` : '檢核本題要求的內容有沒有寫到、寫到什麼程度，並引用作答原句為證（逐字引用、每則 30 字以內）。'}
+3. 再看結構與文辭。
+4. 先判定屬於 A、B、C 哪一等，再依表現高下決定是原級還是＋級。
+5. 錯別字與標點只在**明顯偏多**時才影響等第；零星錯字不降等。
+6. 依作答**實際寫出來的內容**評定：文章沒寫完、內容單薄，就照評分原則給對應的等第，不要因為開頭寫得好就推測後面也好。
+
+【受評作答】（共 ${chars} 字、${paras.length} 段）
+${paras.join('\n')}
+
+只輸出 JSON：
+{"onTopic":true,"elements":[{"name":"...","degree":"具體|明確|大致|簡略|稍觸及|未觸及","quote":"..."}],"structure":"...","diction":"...","band":"A|B|C|0","grade":"A+|A|B+|B|C+|C|0","reason":"..."}`
+}
+
+/**
+ * 判官回覆 → 管線通用的 level 形狀（overall 0~6／reason／dimensions），外加 grade 與 onTopic。
+ * ⛔ 離題一律 0：由 code 依 onTopic 決定，不看判官自己填的 grade
+ *   （實測判官會寫「嚴重離題，故評為 C 等」——理由對、換算錯）。
+ */
+export function normalizeGsatLevel(json) {
+  if (!json || typeof json !== 'object') return null
+  const onTopic = json.onTopic !== false
+  const idx = GSAT_GRADES.indexOf(String(json.grade ?? '').trim().toUpperCase())
+  const overall = !onTopic ? 0 : idx >= 0 ? idx : null
+  const dims = (Array.isArray(json.elements) ? json.elements : []).map((e) => ({
+    name: String(e?.name ?? ''),
+    comment: String(e?.degree ?? ''),
+    quotes: e?.quote ? [String(e.quote)] : [],
+  }))
+  for (const [name, v] of [['結構', json.structure], ['文辭', json.diction]]) {
+    if (v) dims.push({ name, comment: String(v), quotes: [] })
+  }
+  return { overall, grade: overall == null ? null : GSAT_GRADES[overall], onTopic, reason: String(json.reason ?? ''), dimensions: dims }
 }
 
 export function parseJsonLoose(text) {

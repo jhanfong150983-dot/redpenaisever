@@ -14,6 +14,8 @@ import {
   buildEssayTranscribePrompt,
   buildEssayFeedbackPrompt,
   buildEssayLevelPrompt,
+  buildGsatLevelPrompt,
+  normalizeGsatLevel,
   parseEssayTranscribeColumns,
   parseJsonLoose,
   columnsToParagraphs,
@@ -245,6 +247,8 @@ export async function runEssayFeedback({
   draft,
   bookletImages = [],
   gradeLabel,
+  // 學測國寫的每卷專屬評分原則（essayGsatRubricOf(layout)）。沒有＝會考，下面兩支 prompt 與過去逐字元相同。
+  gsatRubric = null,
   log = () => {},
 }) {
   const t0 = Date.now()
@@ -275,7 +279,7 @@ export async function runEssayFeedback({
       timeoutMs: 180_000,
       routeHint,
       routeKey: ESSAY_ROUTES.feedback,
-      stageContents: [{ role: 'user', parts: [{ text: buildEssayFeedbackPrompt(paras, gradeLabel) }, ...bookletParts] }],
+      stageContents: [{ role: 'user', parts: [{ text: buildEssayFeedbackPrompt(paras, gradeLabel, gsatRubric ?? undefined) }, ...bookletParts] }],
     }),
     executeStage({
       apiKey,
@@ -284,7 +288,7 @@ export async function runEssayFeedback({
       timeoutMs: 90_000,
       routeKey: ESSAY_ROUTES.level,
       routeHint,
-      stageContents: [{ role: 'user', parts: [{ text: buildEssayLevelPrompt(paras, totalChars) }, ...bookletParts] }],
+      stageContents: [{ role: 'user', parts: [{ text: gsatRubric ? buildGsatLevelPrompt(gsatRubric, paras, totalChars) : buildEssayLevelPrompt(paras, totalChars) }, ...bookletParts] }],
     }),
   ])
   if (fbSettled.status === 'rejected') log(`[Essay] 眉批失敗：${fbSettled.reason?.message || fbSettled.reason}`)
@@ -300,7 +304,9 @@ export async function runEssayFeedback({
   if (fbResp && !fbResp.ok) log(`[Essay] 眉批未成功 status=${fbResp.status ?? '?'}｜${errOf(fbResp)}`)
   if (lvResp && !lvResp.ok) log(`[Essay] 級分未成功 status=${lvResp.status ?? '?'}｜${errOf(lvResp)}`)
   const fb = fbResp?.ok ? parseJsonLoose(extractCandidateText(fbResp.data) || '') : null
-  const lv = lvResp?.ok ? parseJsonLoose(extractCandidateText(lvResp.data) || '') : null
+  const lvRaw = lvResp?.ok ? parseJsonLoose(extractCandidateText(lvResp.data) || '') : null
+  // 學測：判官回的是等第 → 換成管線通用的 level 形狀（overall 0~6）；離題由 code 定 0。會考原樣。
+  const lv = gsatRubric ? normalizeGsatLevel(lvRaw) : lvRaw
 
   // ── 5) 引用句 code 驗證＋定位回直行（驗不過＝判官幻覺，標記但不丟棄，交老師看）──
   const withLoc = (arr, key) => (Array.isArray(arr) ? arr : []).map((x) => {
@@ -353,6 +359,8 @@ export async function runEssayFeedback({
       final: suggested,
       reason: String(lv?.reason ?? ''),
       dimensions: Array.isArray(lv?.dimensions) ? lv.dimensions : [],
+      // 學測才有：前端據此把 0~6 顯示成等第（A+…C），並知道 dimensions 是「題旨要素」不是會考四向度
+      ...(gsatRubric ? { scale: 'gsat', grade: lv?.grade ?? null, onTopic: lv?.onTopic ?? null } : {}),
     },
     gate: null,
     ms: (draft?.ms ?? 0) + (Date.now() - t0),
