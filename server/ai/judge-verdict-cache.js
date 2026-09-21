@@ -32,7 +32,7 @@ export const JUDGE_PROMPT_VERSIONS = {
   level: 'level-2026-08-14-element-x1',     // 逐要素 1 次呼叫、code 彙總級分
   rubric: 'rubric-2026-09-04-v1',           // 看圖逐維度判分（evidence 先於 score）
   // 2026-09-19 作文（P3）：三段各自一個版本號——抄寫／眉批／級分 prompt 任一有改都要升，否則舊卷重批跑的是舊邏輯
-  essayTranscribe: 'essay-tr-2026-09-20-cell8',    // 8 行合成一張圖＋「描圖不讀句」忠實規則＋逐格「｜」分隔輸出
+  essayTranscribe: 'essay-tr-2026-09-21-cell8-symfix', // 8 行合成＋逐格「｜」輸出；09-21 抄本淨化加「角狀符號→引號」與「亂碼→?」（prompt 沒變、抄本會變）
   essayFeedback: 'essay-fb-2026-09-20-wordtypo',   // 逐句眉批 v4：錯別字改**以詞為單位**輸出（單字看不出對錯）
   essayLevel: 'essay-lv-2026-09-19-generic',       // 建議級分（只給通用規準、題目送圖）
 }
