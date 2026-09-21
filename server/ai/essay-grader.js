@@ -256,12 +256,38 @@ ${paras.join('\n')}
 /** level(0~6) ↔ 學測等第 */
 export const GSAT_GRADES = ['0', 'C', 'C+', 'B', 'B+', 'A', 'A+']
 
-/** 版面資料 → 這一項的學測評分原則（不是學測、或資料不完整 → null＝走會考） */
+/**
+ * 學測國寫的**通用**六等第階梯——固定寫死，地位等同會考的 CAP_RUBRIC；老師不必經手。
+ *
+ * 官方評分原則其實是兩層：跟題目有關的只有中間那一句（這一題要寫什麼），
+ *   程度階梯（具體／明確／大致／簡略／稍能觸及）與結構、文辭用語是固定的（115 的兩張表用同一套）。
+ *   這裡留下固定那層，「本題的寫作要求」讓判官自己從題目圖讀——跟會考判官的做法一致。
+ * 2026-09-21 實測（user 問「不能像會考一樣直接用嗎」→ 同一批 14 個案例對比，local-only/essay/_gsat_generic_rubric.mjs）：
+ *   通用階梯 14/14 符合預期、每卷專屬規準（115 官方原文）13/14；
+ *   判官自己從題目圖讀出的要求＝「隔閡的原因｜看待心結與換位思考｜提出回應」，與官方列的三項一致；
+ *   離題的那篇（皮影戲）專屬版放水給 C+、通用版正確給 0。→ **不需要每卷專屬規準、建卷不必多一步。**
+ */
+export const GSAT_GENERIC_RUBRIC = {
+  bands: [
+    ['A+', '能具體而深入地完成本題的寫作要求，內容切合題旨。結構嚴謹，文辭暢達。'],
+    ['A', '能明確完成本題的寫作要求，內容切合題旨。結構完整，文辭流暢。'],
+    ['B+', '能大致完成本題的寫作要求。結構適當，文辭通順。'],
+    ['B', '能簡略完成本題的寫作要求，唯想法較為粗淺，或僅泛論。結構尚可，文辭平順。'],
+    ['C+', '稍能觸及本題的寫作要求，然內容空洞，結構鬆散，文辭欠通順。'],
+    ['C', '敘寫雜亂，文句不通。'],
+    ['0', '空白卷、文不對題，或僅抄錄題幹、題目。'],
+  ],
+}
+
+/**
+ * 版面資料 → 這份卷要用的學測評分原則。不是學測（沒有明確的 format:'gsat'）→ null＝走會考判官。
+ *   學測預設用內建的通用階梯；items[0].rubric 有填才覆蓋（保留給日後第一大題那種有標準答案的知性題）。
+ */
 export function essayGsatRubricOf(layout) {
-  const item = layout?.essay?.items?.[0]
-  const r = item?.scoring === 'gsat' ? item.rubric : null
-  if (!r || !Array.isArray(r.bands) || !r.bands.length) return null
-  return r
+  const g = layout?.essay
+  if (g?.format !== 'gsat') return null
+  const r = g.items?.[0]?.rubric
+  return r && Array.isArray(r.bands) && r.bands.length ? r : GSAT_GENERIC_RUBRIC
 }
 
 function formatGsatRubric(rubric) {
