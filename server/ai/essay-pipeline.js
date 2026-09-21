@@ -41,6 +41,28 @@ const TRANSCRIBE_GROUP = Math.max(1, Number(process.env.ESSAY_TRANSCRIBE_GROUP ?
  */
 const SIMPLIFIED_GATE = Math.max(1, Number(process.env.ESSAY_SIMPLIFIED_GATE ?? 5) || 5)
 
+/**
+ * 找出「文字疑似被對調」的相鄰兩行（零 AI）。
+ * 判準（寫成字面、刻意保守）：同一頁、行號相連；兩行 |字數−墨格數| 合計 ≥4；互換後合計至少少 3。
+ *   一行只會被配對一次（命中就跳過下一行），避免 A↔B、B↔C 連環誤判。
+ * @param {Array} written 有字的行（含 page／col／inkCells），依書寫順序
+ * @param {Array<string|null>} texts 與 written 同索引的抄本
+ * @returns {Array<[object, object]>}
+ */
+export function findSwappedPairs(written, texts) {
+  const len = (t) => flat(t).length
+  const out = []
+  for (let i = 0; i < written.length - 1; i++) {
+    const a = written[i], b = written[i + 1]
+    if (texts[i] == null || texts[i + 1] == null) continue
+    if (a.page !== b.page || b.col !== a.col + 1) continue
+    const now = Math.abs(len(texts[i]) - a.inkCells) + Math.abs(len(texts[i + 1]) - b.inkCells)
+    const sw = Math.abs(len(texts[i + 1]) - a.inkCells) + Math.abs(len(texts[i]) - b.inkCells)
+    if (now >= 4 && sw <= now - 3) { out.push([a, b]); i++ }
+  }
+  return out
+}
+
 async function pool(items, n, fn) {
   const out = new Array(items.length)
   let i = 0
@@ -153,6 +175,24 @@ export async function runEssayTranscribe({
   log(`[Essay] 抄寫：${written.length} 行 / ${groups.length} 次呼叫（每次 ${TRANSCRIBE_GROUP} 行）`)
   if (regrouped) log(`[Essay] 其中 ${regrouped} 組筆數不符、已退回逐行重抄`)
   if (transcribeErrors) log(`[Essay] 抄寫共 ${transcribeErrors}/${written.length} 行失敗（標低信心、不中斷批改）`)
+
+  // ── 2a) 相鄰兩行被 AI 對調 ─────────────────────────────────────────────
+  // 實測（115 學測原卷2-1 第 6↔7 行，user 看 crop 對不上才查出來）：一組 8 行裡相鄰兩行的文字被調換，
+  //   回傳筆數仍對 → 上面的筆數守門抓不到；後果是段落文意錯亂、眉批引用句錯位。
+  // 零 AI 偵測：兩行的字數與墨格數都對不上，互換之後卻明顯吻合。
+  //   全庫掃描：學測 221 對相鄰行中 2 處、**會考線上 209 對中 0 處**（學測 38 行無窄欄、行貼行才會發生）。
+  // ⛔ 偵測到**不可以直接互換文字**：那也可能是別種錯（漏字＋多字剛好互補）。把這兩行拆開逐行重抄才是確實的。
+  const swapped = findSwappedPairs(written, texts)
+  if (swapped.length) {
+    log(`[Essay] 疑似相鄰行對調 ${swapped.length} 處（${swapped.map(([a, b]) => `第${a.page}頁第${a.col}↔${b.col}行`).join('、')}）→ 拆開逐行重抄`)
+    const redo = [...new Set(swapped.flat())]
+    await pool(redo, TRANSCRIBE_CONCURRENCY, async (c) => {
+      try {
+        const one = await askGroup([c])
+        if (Array.isArray(one) && one.length === 1 && one[0] != null) texts[written.indexOf(c)] = applyColumnIndent(one[0], c.inkRows)
+      } catch { /* 重抄失敗就維持原文；這兩行字數對不上，下面本來就會標低信心 */ }
+    })
+  }
 
   // ── 2b) 品質閘門：抄本吐出大量簡體字 ──────────────────────────────────
   // 實測：合成 8 行時，某一份卷會整段切換成簡體（一份 15~30 個字），逐行抄則只有 2 個。
