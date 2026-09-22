@@ -714,14 +714,17 @@ async function detectGridBoxes(pageBuffer, g) {
 }
 
 /** 一格是不是「有墨」：暗像素數超過門檻。門檻隨格子面積縮放（低解析度掃描墨點數會等比變少） */
-function cellHasInk(raw, W, H, rect, darkThreshold = 110, ratio = 0.004) {
+// 2026-09-22 墨跡門檻改成「紙白相對」：user 用黑白影印稿紙＋鉛筆寫的真卷，筆畫亮度 150~190、
+//   寫死 <110 一格都抓不到（整份被判空白）。實測寫了字的格 <190 佔 2~17%、空格（內縮 15% 後）0%。
+//   門檻＝min(190, 紙白−40)；內縮 12%→15%（黑白影印的格線是深灰、要多避一點）。ESSAY_INK_MODE=old 退回。
+function cellHasInk(raw, W, H, rect, darkThreshold = 110, ratio = 0.004, inset = 0.12) {
   const x0 = Math.max(0, Math.round(rect.x * W))
   const y0 = Math.max(0, Math.round(rect.y * H))
   const x1 = Math.min(W, Math.round((rect.x + rect.w) * W))
   const y1 = Math.min(H, Math.round((rect.y + rect.h) * H))
-  // 內縮 12%：避開印刷格線本身
-  const padX = Math.round((x1 - x0) * 0.12)
-  const padY = Math.round((y1 - y0) * 0.12)
+  // 內縮：避開印刷格線本身
+  const padX = Math.round((x1 - x0) * inset)
+  const padY = Math.round((y1 - y0) * inset)
   let dark = 0
   let total = 0
   for (let y = y0 + padY; y < y1 - padY; y++) {
@@ -852,6 +855,15 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
     const { data: gray, info } = await sharp(buf).greyscale().raw().toBuffer({ resolveWithObject: true })
     const W = info.width
     const H = info.height
+    // 紙白（亮度第 80 百分位）→ 墨跡門檻（見 cellHasInk 註解）
+    let inkThr = 110, inkInset = 0.12
+    if (process.env.ESSAY_INK_MODE !== 'old') {
+      const hist = new Uint32Array(256)
+      for (let i = 0; i < gray.length; i++) hist[gray[i]]++
+      let acc = 0, paper = 250
+      for (let l = 0; l < 256; l++) { acc += hist[l]; if (acc >= gray.length * 0.8) { paper = l; break } }
+      inkThr = Math.max(110, Math.min(190, paper - 40)); inkInset = 0.15
+    }
     for (let c = 1; c <= g.cols; c++) {
       // ⭐ 逐格墨跡本來就算過，只是以前只留總數。留下每一格的結果，
       //   行首縮排就能純用程式決定（行首連續幾格沒墨跡＝空幾格），不必靠 AI 抄——
@@ -860,7 +872,7 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
       const inkRatios = []     // 每格墨水密度：塗改／重寫的格子會異常高，可零 AI 標低信心
       for (let r = 1; r <= g.rows; r++) {
         const rect = byId.get(`c${c}r${r}`)
-        const ink = rect ? cellHasInk(gray, W, H, rect) : null
+        const ink = rect ? cellHasInk(gray, W, H, rect, inkThr, 0.004, inkInset) : null
         inkRows.push(!!ink?.inked)
         inkRatios.push(ink && ink.total > 0 ? ink.dark / ink.total : 0)
       }
