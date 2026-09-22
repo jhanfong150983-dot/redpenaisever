@@ -489,14 +489,28 @@ async function detectGsatGridOnPage(data, info, opts = {}, measure = 'color') {
 //   失敗（沒設 URL／服務掛／守門不過）→ 退回原本的格線偵測，行為與過去相同。
 
 /** 模板某頁的格子（模板頁 normalized）：由老師框的格區＋行列數均分。第 1 行在最右邊；窄欄在每行右側 */
-export function essayTemplateCells(g, pageIdx) {
+/**
+ * 某一頁的稿紙規格（2026-09-22 user：兩頁的行數／格數可能不同，例如背面滿版）：
+ *   template.grids[頁] 可帶自己的 cols／rows／gutterRatio，沒有＝沿用整份的 g.cols／g.rows／template.gutterRatio。
+ *   找不到該頁的 grid ＝ 沿用第 1 頁（老師只框第 1 頁）。
+ */
+export function essayPageSpec(g, pageIdx) {
   const grids = Array.isArray(g?.template?.grids) ? g.template.grids : []
-  const grid = grids.find((x) => Number(x?.page) === pageIdx + 1) ?? grids[0]
-  const box = grid?.box
+  const grid = grids.find((x) => Number(x?.page) === pageIdx + 1) ?? grids[0] ?? null
+  const cols = Number(grid?.cols) > 0 ? Number(grid.cols) : g.cols
+  const rows = Number(grid?.rows) > 0 ? Number(grid.rows) : g.rows
+  const r0 = grid?.gutterRatio ?? g.template?.gutterRatio ?? (g.cellMm && g.gutterMm != null ? g.cellMm / (g.cellMm + g.gutterMm) : 0.8)
+  const ratio = Number(r0) > 0 && Number(r0) <= 1 ? Number(r0) : 1
+  return { cols, rows, ratio, box: grid?.box ?? null }
+}
+
+export function essayTemplateCells(g, pageIdx) {
+  const spec = essayPageSpec(g, pageIdx)
+  const box = spec.box
   if (!box || !(box.w > 0) || !(box.h > 0)) return null
-  const cols = g.cols, rows = g.rows
+  const cols = spec.cols, rows = spec.rows
   const pitch = box.w / cols
-  const ratio = Number(g.template?.gutterRatio) > 0 && Number(g.template.gutterRatio) <= 1 ? Number(g.template.gutterRatio) : 1
+  const ratio = spec.ratio
   const cellW = pitch * ratio
   const cellH = box.h / rows
   const out = []
@@ -506,7 +520,7 @@ export function essayTemplateCells(g, pageIdx) {
       out.push({ id: `c${c}r${r}`, page: 0, bbox: { x: right - pitch, y: box.y + (r - 1) * cellH, w: cellW, h: cellH }, manual: true })
     }
   }
-  return { cells: out, pitch, ratio, cellH, box }
+  return { cells: out, pitch, ratio, cellH, box, cols, rows }
 }
 
 /** 呼叫疊合服務（單頁）。回 Map id→bbox（該頁 normalized）或 null */
@@ -547,7 +561,7 @@ export async function registerEssayPage(pageBuffer, templateB64, cells, log) {
 export async function refineProjectedGrid(pageBuffer, g, tpl, projected, log) {
   const { data, info } = await sharp(pageBuffer).raw().toBuffer({ resolveWithObject: true })
   const W = info.width, H = info.height, ch = info.channels
-  const cols = g.cols, rows = g.rows
+  const cols = tpl.cols ?? g.cols, rows = tpl.rows ?? g.rows
   // 每行的右緣（第 1 行最右）＝ c{i}r* 的 x+w 最大值；上下界＝所有格的 y 極值
   const rights = [], lefts = [], tops = [], bottoms = []
   for (let c = 1; c <= cols; c++) {
@@ -726,9 +740,10 @@ function fallbackDetectorFormat(g) {
 }
 
 /** 自備稿紙：偵測到的格線 → 與錨點版同樣的 byId 結構（cN＝整行、cNrM＝單格） */
-async function detectGridBoxes(pageBuffer, g) {
+async function detectGridBoxes(pageBuffer, g, spec = null) {
+  const cols = spec?.cols ?? g.cols, rows = spec?.rows ?? g.rows
   // format 只來自版面資料裡明確寫的欄位（學測模式建卷時寫 'gsat'）；沒寫＝會考，行為與過去完全相同
-  const grid = await detectEssayGridOnPage(pageBuffer, { cols: g.cols, rows: g.rows, format: fallbackDetectorFormat(g) })
+  const grid = await detectEssayGridOnPage(pageBuffer, { cols, rows, format: fallbackDetectorFormat(g) })
   if (!grid) {
     throw new Error(fallbackDetectorFormat(g) === 'gsat'
       ? '這一頁找不到學測稿紙的綠色格線——請用彩色掃描（黑白掃描或影印的公版卷目前抓不到格線）、整張掃進去不要裁到格區，或改用系統製作的作文稿紙'
@@ -743,12 +758,12 @@ async function detectGridBoxes(pageBuffer, g) {
   const byId = new Map()
   grid.cols.forEach((c, i) => {
     byId.set(`c${i + 1}`, { x: c.x, y: c.y, w: c.w, h: c.h })
-    const cellH = c.h / g.rows
+    const cellH = c.h / rows
     // 單格寬＝扣掉右側窄欄後的字格（偵測到的 w 含窄欄）
     //   ⚠ gutterMm 可以是 0（學測稿紙沒有窄欄、整行就是字格）→ 不可用 `g.gutterMm &&` 判斷，
-    //     否則 0 會掉進 0.8 的 fallback、每格白白裁掉兩成。
-    const cellW = c.w * (g.cellMm && g.gutterMm != null ? g.cellMm / (g.cellMm + g.gutterMm) : 0.8)
-    for (let r = 1; r <= g.rows; r++) {
+    //     否則 0 會掉進 0.8 的 fallback、每格白白裁掉兩成。自備稿紙逐頁的 gutterRatio 優先。
+    const cellW = c.w * (spec ? spec.ratio : (g.cellMm && g.gutterMm != null ? g.cellMm / (g.cellMm + g.gutterMm) : 0.8))
+    for (let r = 1; r <= rows; r++) {
       byId.set(`c${i + 1}r${r}`, { x: c.x, y: c.y + (r - 1) * cellH, w: cellW, h: cellH })
     }
   })
@@ -894,7 +909,9 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
       }
     }
     locate.push({ page: p + 1, method: byId ? 'registration' : byoMode ? 'grid' : 'anchor' })
-    if (!byId) byId = byoMode ? await detectGridBoxes(buf, g) : (await alignColumns(buf, layout)).byId
+    // 這一頁的行數／格數（自備稿紙可逐頁不同；其他＝整份設定）
+    const spec = byoMode ? essayPageSpec(g, p) : { cols: g.cols, rows: g.rows }
+    if (!byId) byId = byoMode ? await detectGridBoxes(buf, g, spec) : (await alignColumns(buf, layout)).byId
     const { data: gray, info } = await sharp(buf).greyscale().raw().toBuffer({ resolveWithObject: true })
     const W = info.width
     const H = info.height
@@ -907,13 +924,13 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
       for (let l = 0; l < 256; l++) { acc += hist[l]; if (acc >= gray.length * 0.8) { paper = l; break } }
       inkThr = Math.max(110, Math.min(190, paper - 40)); inkInset = 0.15
     }
-    for (let c = 1; c <= g.cols; c++) {
+    for (let c = 1; c <= spec.cols; c++) {
       // ⭐ 逐格墨跡本來就算過，只是以前只留總數。留下每一格的結果，
       //   行首縮排就能純用程式決定（行首連續幾格沒墨跡＝空幾格），不必靠 AI 抄——
       //   實測「逐格輸出」的抄寫會直接吃掉行首空格，害段落被黏在一起。
       const inkRows = []
       const inkRatios = []     // 每格墨水密度：塗改／重寫的格子會異常高，可零 AI 標低信心
-      for (let r = 1; r <= g.rows; r++) {
+      for (let r = 1; r <= spec.rows; r++) {
         const rect = byId.get(`c${c}r${r}`)
         const ink = rect ? cellHasInk(gray, W, H, rect, inkThr, 0.004, inkInset) : null
         inkRows.push(!!ink?.inked)
@@ -936,6 +953,7 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
       columns.push({
         page: p + 1,
         col: c,
+        rows: spec.rows,
         pngBase64,
         inkCells,
         inkRows,
