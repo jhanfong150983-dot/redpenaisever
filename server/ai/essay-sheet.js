@@ -304,7 +304,9 @@ function detectCapGridOnPage(data, info, opts, measure) {
   //      → 無聲批錯。彩色路徑不加此守門（與基準逐頁一致的承諾）。列高也要≈行距×0.8（10mm 格／12.5mm 行距）。
   if (measure === 'gray') {
     if (medW < 0.024 || medW > 0.05) reasons.push(`灰階後備：行距 ${(medW * 100).toFixed(1)}% 不是稿紙尺度（應為圖寬的 2.4~5%）`)
-    if (rowPitch > 0 && Math.abs(rowPitch / (medW * W) - 0.8) > 0.15) reasons.push('灰階後備：列高與行距的比例不對（應≈0.8）')
+    // 列高／行距＝字格／行距比例：會考 0.8；自備稿紙用建卷時實測的 spec.ratio（A4 500 字稿紙 0.72，寫死 0.8 會在這裡被擋）
+    const wantRatio = Number(opts.ratio) > 0 && Number(opts.ratio) <= 1 ? Number(opts.ratio) : 0.8
+    if (rowPitch > 0 && Math.abs(rowPitch / (medW * W) - wantRatio) > 0.15) reasons.push(`灰階後備：列高與行距的比例不對（應≈${wantRatio}）`)
   }
   return { rows: wantRows, cols, detectedCols: detected, incomplete: reasons.length > 0, reasons, measure }
 }
@@ -743,7 +745,7 @@ function fallbackDetectorFormat(g) {
 async function detectGridBoxes(pageBuffer, g, spec = null) {
   const cols = spec?.cols ?? g.cols, rows = spec?.rows ?? g.rows
   // format 只來自版面資料裡明確寫的欄位（學測模式建卷時寫 'gsat'）；沒寫＝會考，行為與過去完全相同
-  const grid = await detectEssayGridOnPage(pageBuffer, { cols, rows, format: fallbackDetectorFormat(g) })
+  const grid = await detectEssayGridOnPage(pageBuffer, { cols, rows, format: fallbackDetectorFormat(g), ratio: spec?.ratio })
   if (!grid) {
     throw new Error(fallbackDetectorFormat(g) === 'gsat'
       ? '這一頁找不到學測稿紙的綠色格線——請用彩色掃描（黑白掃描或影印的公版卷目前抓不到格線）、整張掃進去不要裁到格區，或改用系統製作的作文稿紙'
