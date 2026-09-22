@@ -842,7 +842,14 @@ export default async function handler(req, res) {
             generatedSheetLayout = tpl.generated_sheet
             console.log(`📝 [Essay] 作文稿紙 ${generatedSheetLayout.version}（${tpl.generated_sheet.essay.source ?? 'generated'}）→ Phase A 走作文管線`)
             // 自備稿紙（有 template 幾何）：抓老師上傳的空白稿紙頁圖給疊合用；抓不到就不疊合、退回格線偵測
-            const paths = Array.isArray(tpl.answer_sheet_image_paths) ? tpl.answer_sheet_image_paths : []
+            let paths = Array.isArray(tpl.answer_sheet_image_paths) ? tpl.answer_sheet_image_paths : []
+            // 2026-09-22 欄位可能是 null（頁圖上傳時模板列還沒 sync 上來 → server 寫不進欄位、client 補寫也可能沒推上來；
+            //   TEST 卷實例）：頁圖本身在 Storage 固定路徑，照 essay.pages 直接推路徑（同 fetchAnswerSheetImagesForClassify 的 fallback）
+            if (!paths.length && tpl.generated_sheet.essay.source === 'byo' && tpl.generated_sheet.essay.template) {
+              const n = Math.max(1, Math.min(2, Number(tpl.generated_sheet.essay.pages) || 1))
+              paths = Array.from({ length: n }, (_, i) => `template-answer-sheets/${a.answer_key_template_id}/page-${i}.webp`)
+              console.log(`[Essay] answer_sheet_image_paths 空 → 依 pages=${n} 推 Storage 路徑`)
+            }
             if (tpl.generated_sheet.essay.source === 'byo' && tpl.generated_sheet.essay.template && paths.length && process.env.REGISTRATION_URL) {
               const bucket = supabaseAdmin.storage.from('homework-images')
               const settled = await Promise.allSettled(paths.map(async (p) => {
