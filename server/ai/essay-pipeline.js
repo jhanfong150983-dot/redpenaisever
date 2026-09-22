@@ -26,6 +26,7 @@ import {
   gsatScoreOf,
   GSAT_ITEM_KINDS,
   GSAT_GRADES,
+  essayIsShort,
 } from './essay-grader.js'
 
 const ESSAY_MAX_LEVEL = 6
@@ -287,6 +288,8 @@ export async function runEssayTranscribe({
     feedback: null,
     level: gate ? { suggested: gate.level, final: gate.level, reason: gate.reason, dimensions: [], ...(gsatLevelFields(layout, gate.level) ?? {}) } : null,
     gate: gate ? gate.reason : null,
+    // 字數過少（<30 字）：Phase B 只叫級分判官、不做眉批
+    shortContent: essayIsShort(totalChars),
     ms: Date.now() - t0,
   }
 }
@@ -334,8 +337,11 @@ export async function runEssayFeedback({
     .filter((p) => p.inlineData?.data)
   if (bookletImages.length && !bookletParts.length) log('[Essay] ⚠ 題本圖有拿到但組不出 inlineData，這次不附題目圖')
   // 眉批／級分任一失敗也不該讓整份卷炸掉 → allSettled，缺的那段留 null 交老師處理
+  // 字數過少：跳過眉批（沒東西可批），級分判官照跑——由它依規準判 0（抄題／離題）或 1
+  const shortContent = !!draft?.shortContent
+  if (shortContent) log(`[Essay] 字數過少（${totalChars} 字）→ 只送級分判官、不做眉批`)
   const [fbSettled, lvSettled] = await Promise.allSettled([
-    executeStage({
+    shortContent ? Promise.resolve(null) : executeStage({
       apiKey,
       model,
       payload: { ...payload, ...ESSAY_FEEDBACK_GENERATION_CONFIG },

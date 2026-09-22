@@ -449,13 +449,16 @@ export function locateTypoCell(columns, context, wrong) {
 }
 
 /** 零 AI 閘門：空白卷／字數過少／與題幹高度重疊（抄題幹）→ 不送眉批、直接給候選級分 */
-export function essayZeroAiGate(columns, opts = {}) {
+// 2026-09-22 user 拍板：字數過少**不能**零 AI 直接給 1 級分——17 字的「測驗用紙。測驗用紙。」照會考規準是
+//   「僅抄寫題目／完全離題」＝0，要不要 0 得看內容。只有真正空白才零 AI 給 0；字數過少的卷仍送級分判官（不做眉批）。
+export function essayZeroAiGate(columns) {
   const chars = columns.reduce((n, c) => n + flat(c.text).length, 0)
   if (chars === 0) return { level: 0, reason: '空白卷：整份稿紙沒有任何手寫內容' }
-  const minChars = opts.minChars ?? 30
-  if (chars < minChars) return { level: 1, reason: `內容過少（僅 ${chars} 字）：無法判斷各項能力` }
   return null
 }
+/** 字數過少：只送級分判官、不做逐句眉批（沒東西可批、省一次呼叫） */
+export const ESSAY_SHORT_CHARS = 30
+export function essayIsShort(chars) { return chars > 0 && chars < ESSAY_SHORT_CHARS }
 
 export const ESSAY_ROUTES = {
   transcribe: AI_ROUTE_KEYS.GRADING_ESSAY_TRANSCRIBE,
