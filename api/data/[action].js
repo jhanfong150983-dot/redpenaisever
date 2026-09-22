@@ -6793,13 +6793,16 @@ async function handleStudentOverview(req, res) {
         // 查答案卷模板的 pageOrientations
         const templateIds = [...new Set((assignmentsResult.data || []).map(a => a.answer_key_template_id).filter(Boolean))]
         const templateOrientationsMap = new Map()
+        const templateEssayMap = new Map() // template id → 'cap' | 'gsat'（作文稿紙代別）
         if (templateIds.length > 0) {
           const { data: tplRows } = await supabaseDb
             .from('answer_key_templates')
-            .select('id, page_orientations')
+            // 2026-09-22 作文卷：只取 generated_sheet 裡的 essay 子物件（幾何很小；⛔ 不拉整個 generated_sheet JSONB）
+            .select('id, page_orientations, essay:generated_sheet->essay')
             .in('id', templateIds)
           for (const row of tplRows || []) {
             if (row.page_orientations) templateOrientationsMap.set(row.id, row.page_orientations)
+            if (row.essay && typeof row.essay === 'object') templateEssayMap.set(row.id, row.essay.format === 'gsat' ? 'gsat' : 'cap')
           }
         }
 
@@ -7020,6 +7023,8 @@ async function handleStudentOverview(req, res) {
             classroomKey,
             title: assignment.title,
             totalPages: effectiveTotalPages,
+            // 作文卷（會考／學測稿紙）：學生端轉圖要用作文解析度（會考 2800／學測 3240），否則格線抓不到、別字被改正
+            essaySheet: templateEssayMap.has(assignment.answer_key_template_id) ? { format: templateEssayMap.get(assignment.answer_key_template_id) } : undefined,
             studentUploadEnabled: assignment.student_upload_enabled ?? true,
             // 學生自助 AI 批改（預設關閉）+ 次數上限/已用次數，控制學生端「批改」入口
             allowStudentAiGrading: assignment.allow_student_ai_grading ?? false,

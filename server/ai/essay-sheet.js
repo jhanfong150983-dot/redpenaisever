@@ -85,25 +85,85 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
   //   只認**明確的** format:'gsat'，不從行數／顏色去猜——猜錯的後果是拿錯的偵測器「碰巧成功」。
   //   下面整段會考邏輯一個字元都沒動；學測走完全獨立的 detectGsatGridOnPage。
   //   雙向隔離由 local-only/essay/_grid_isolation_regression.mjs 把關（四個象限）。
-  if (opts.format === 'gsat') return detectGsatGridOnPage(pageBuffer, opts)
+  //
+  // 2026-09-22 灰階後備（user：老師的稿紙可能是黑白影印、掃描也一定是黑白）：
+  //   兩支偵測器都先用「顏色」找線（行為與過去逐字元相同）；找不到或不完整時，再用「暗度」找一次。
+  //   ⛔ 單調規則：彩色能過的頁結果不變；只有原本會失敗的頁才可能被灰階救回，且灰階同樣要過全部守門。
+  //   暗度＝紙白 0、灰線／黑筆都有值：筆跡只散在格子裡、格線是整條，投影／梳子把整條線積分出來後差得很遠。
+  const { data, info } = await sharp(pageBuffer).raw().toBuffer({ resolveWithObject: true })
+  if (!info.width || !info.height || info.channels < 3) return null
+  if (opts.format === 'gsat') {
+    // ⛔ 學測**不開**灰階後備：模擬黑白掃描 12 頁裡 4 頁「守門全過、但整把梳子偏 1～2 行」（公版右側說明框的黑框線
+    //   被當成格線，梳子鎖到它上面）——那是無聲批錯，比直接失敗危險。等拿到真實黑白樣卷、能驗證再開。
+    //   （detectGsatGridOnPage 的 measure='gray' 路徑保留給日後實驗。）
+    return detectGsatGridOnPage(data, info, opts, 'color')
+  }
+  const color = detectCapGridOnPage(data, info, opts, 'color')
+  if (color && !color.incomplete) return color
+  const gray = detectCapGridOnPage(data, info, opts, 'gray')
+  if (gray && !gray.incomplete) return gray
+  return color ?? gray
+}
+
+/**
+ * 灰階後備的證據圖：「長直線的暗度」。
+ *   黑白影印的格線跟黑筆一樣都是暗的，單看暗度分不開（實測：會考卷 50 頁只救回 8 頁、學測 0/12——
+ *   筆跡把格心撐到跟格線一樣高）。差別在**形狀**：格線是貫穿整個格區的長直線，筆跡再直也只在一格內。
+ *   → 只保留「連續暗像素長度 ≥ minRun（約 1.2 格）」的直線段：vert 給直行投影、horz 給橫列投影。
+ *   值＝暗度（紙白 0、上限 40），紙白／短筆畫／散點都是 0。
+ */
+function longRunDarkness(data, W, H, ch, minRun) {
+  const N = W * H
+  const lum = new Uint8Array(N)
+  const hist = new Uint32Array(256)
+  for (let i = 0, p = 0; i < N; i++, p += ch) { const l = (data[p] * 77 + data[p + 1] * 151 + data[p + 2] * 28) >> 8; lum[i] = l; hist[l]++ }
+  // 門檻固定「亮度 < 207」（＝比 215 暗 8 以上）。⛔ 試過「比紙白暗 ≥10」＋容許斷點：會考灰階從 50/50 掉到 43/50
+  //   （更多筆跡與浮水印被算進去、多抓出 33~46 條線）→ 不採用。這版在 50 張灰階會考卷上行位與彩色完全一致。
+  void hist
+  const dark = new Uint8Array(N)
+  for (let i = 0; i < N; i++) { const d = 215 - lum[i]; dark[i] = d > 8 ? (d > 40 ? 40 : d) : 0 }
+  const GAP = 0
+  const vert = new Float32Array(N)
+  const horz = new Float32Array(N)
+  const sweep = (len, idx, out) => {
+    let st = -1, last = -1
+    for (let t = 0; t <= len; t++) {
+      const on = t < len && dark[idx(t)] > 0
+      if (on) { if (st < 0) st = t; last = t; continue }
+      if (st >= 0 && (t - last > GAP || t === len)) {
+        if (last - st + 1 >= minRun) for (let k = st; k <= last; k++) { const i = idx(k); if (dark[i]) out[i] = dark[i] }
+        st = -1
+      }
+    }
+  }
+  for (let x = 0; x < W; x++) sweep(H, (y) => y * W + x, vert)
+  for (let y = 0; y < H; y++) sweep(W, (x) => y * W + x, horz)
+  return { vert, horz }
+}
+
+/** 會考自備稿紙（粉紅格線）。measure='color'＝原本的彩度遮罩；'gray'＝長直線暗度（黑白影印後備） */
+function detectCapGridOnPage(data, info, opts, measure) {
   const wantCols = opts.cols ?? 23
   const wantRows = opts.rows ?? 22
-  const { data, info } = await sharp(pageBuffer).raw().toBuffer({ resolveWithObject: true })
   const W = info.width
   const H = info.height
   const ch = info.channels
-  if (!W || !H || ch < 3) return null
   // 印刷格線＝「有顏色」的像素：會考是粉紅、學測是綠，所以不能只認紅色。
   //   判準＝彩度夠高（max-min）且不太暗（排除黑字與定位方塊）、不太亮（排除紙白）。
   //   學生筆跡是黑／深藍、又不成整條線，後面的投影門檻會把它濾掉。
-  //   ⚠ 已知限制：**灰階掃描**會把彩色格線變成灰線，此法失效（見 docs 實驗紀錄）。
+  //   灰階後備：黑白影印的格線是灰線，改認「不是紙白的像素」（亮度 < 200；黑筆一起算進去、靠投影濾掉）。
   const colSum = new Float64Array(W)
   const rowSum = new Float64Array(H)
-  for (let i = 0, p = 0; i < W * H; i++, p += ch) {
-    const r = data[p], g = data[p + 1], b = data[p + 2]
-    const mx = r > g ? (r > b ? r : b) : (g > b ? g : b)
-    const mn = r < g ? (r < b ? r : b) : (g < b ? g : b)
-    if (mx - mn > 28 && mx > 80 && mn < 235) { colSum[i % W]++; rowSum[(i / W) | 0]++ }
+  if (measure === 'gray') {
+    const { vert, horz } = longRunDarkness(data, W, H, ch, Math.max(24, Math.round(W * 0.02)))
+    for (let i = 0; i < W * H; i++) { if (vert[i]) colSum[i % W]++; if (horz[i]) rowSum[(i / W) | 0]++ }
+  } else {
+    for (let i = 0, p = 0; i < W * H; i++, p += ch) {
+      const r = data[p], g = data[p + 1], b = data[p + 2]
+      const mx = r > g ? (r > b ? r : b) : (g > b ? g : b)
+      const mn = r < g ? (r < b ? r : b) : (g < b ? g : b)
+      if (mx - mn > 28 && mx > 80 && mn < 235) { colSum[i % W]++; rowSum[(i / W) | 0]++ }
+    }
   }
   // 9px 帶狀加總：掃描微歪斜時一條線會跨好幾個像素列
   const band = (arr) => {
@@ -239,7 +299,14 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
   if (detected > wantCols + 2) {
     reasons.push(`找到 ${detected} 行格線，明顯多於這種稿紙應有的 ${wantCols} 行——這張可能不是這種稿紙`)
   }
-  return { rows: wantRows, cols, detectedCols: detected, incomplete: reasons.length > 0, reasons }
+  //   ⑤（只在灰階後備）行距必須是「稿紙尺度」：B4 橫式 12.5mm 行距／364mm 紙寬＝圖寬 3.4%（裁到只剩格區 4.3%、A3 掃 3.0%）。
+  //      實測 115-1-02（彩色路徑本來就不過的頁）灰階鎖到 43px 的週期結構（＝圖寬 1.8%）、23 行等寬、22 列全過守門
+  //      → 無聲批錯。彩色路徑不加此守門（與基準逐頁一致的承諾）。列高也要≈行距×0.8（10mm 格／12.5mm 行距）。
+  if (measure === 'gray') {
+    if (medW < 0.024 || medW > 0.05) reasons.push(`灰階後備：行距 ${(medW * 100).toFixed(1)}% 不是稿紙尺度（應為圖寬的 2.4~5%）`)
+    if (rowPitch > 0 && Math.abs(rowPitch / (medW * W) - 0.8) > 0.15) reasons.push('灰階後備：列高與行距的比例不對（應≈0.8）')
+  }
+  return { rows: wantRows, cols, detectedCols: detected, incomplete: reasons.length > 0, reasons, measure }
 }
 
 /**
@@ -258,35 +325,46 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
  *   ③列距由行距推得（正方格，容許掃描器 ±4% 的縱橫比誤差）→ 不必偵測出每一條橫線。
  * @returns 與 detectEssayGridOnPage 相同的結構（cols 由右至左、normalized）
  */
-async function detectGsatGridOnPage(pageBuffer, opts = {}) {
+async function detectGsatGridOnPage(data, info, opts = {}, measure = 'color') {
   const wantCols = opts.cols ?? 38
   const wantRows = opts.rows ?? 22
-  const { data, info } = await sharp(pageBuffer).raw().toBuffer({ resolveWithObject: true })
   const W = info.width
   const H = info.height
   const ch = info.channels
-  if (!W || !H || ch < 3) return null
 
   // 綠色強度圖（一次算好，後面在不同範圍上重複投影）。
   // ⛔ 不可用「過門檻才算 1」的二值遮罩：真實掃描的綠線又細又淡（縮圖＋WebP 後 g−max(r,b) 常只有 3~10），
   //   二值化後一條線只剩 ~9% 的像素被算到（實測 115 原卷2-1），證據低到跟雜訊分不開。
   //   改累加**連續的綠色強度** max(0, g−max(r,b))：淡線靠整條線的長度積分出來；
   //   筆跡是灰黑（≈0）、筆跡邊緣的色邊偏紅（負值→0）、紙白≈0，都不貢獻。上限 40 防止少數鮮綠像素獨大。
-  const green = new Float32Array(W * H)
-  for (let i = 0, p = 0; i < W * H; i++, p += ch) {
-    const r = data[p], g = data[p + 1], b = data[p + 2]
-    // 2026-09-22 改「紅色赤字＋藍色赤字」2g−r−b（不再取 min）：115 原卷 2-1 的格線是藍綠色 (164,186,183)，
-    //   g−max(r,b) 只剩 3、其他卷 11 → 右框線證據跟雜訊分不開、線上第一份學測卷就掛在這裡；
-    //   改成和之後三卷都是 25~26。藍色原子筆 b≫g → 負值→0，紅色頁碼 r≫g → 0，黑筆/紙白 ≈0，性質不變。
-    const v = 2 * g - r - b
-    if (v > 4 && g > 90 && g >= b - 8) green[i] = v > 40 ? 40 : v
+  let green = null, mapCol = null, mapRow = null
+  if (measure === 'gray') {
+    // 黑白影印後備：直行投影只看長直的直線段、橫列投影只看長直的橫線段（見 longRunDarkness）
+    const lr = longRunDarkness(data, W, H, ch, Math.max(24, Math.round(W * 0.02)))
+    mapCol = lr.vert
+    mapRow = lr.horz
+  } else {
+    green = new Float32Array(W * H)
+    for (let i = 0, p = 0; i < W * H; i++, p += ch) {
+      const r = data[p], g = data[p + 1], b = data[p + 2]
+      // 2026-09-22 改「紅色赤字＋藍色赤字」2g−r−b（不再取 min）：115 原卷 2-1 的格線是藍綠色 (164,186,183)，
+      //   g−max(r,b) 只剩 3、其他卷 11 → 右框線證據跟雜訊分不開、線上第一份學測卷就掛在這裡；
+      //   改成和之後三卷都是 25~26。藍色原子筆 b≫g → 負值→0，紅色頁碼 r≫g → 0，黑筆/紙白 ≈0，性質不變。
+      const v = 2 * g - r - b
+      if (v > 4 && g > 90 && g >= b - 8) green[i] = v > 40 ? 40 : v
+    }
+    mapCol = green
+    mapRow = green
   }
   const project = (x0, x1, y0, y1) => {
     const col = new Float64Array(W)
     const row = new Float64Array(H)
     for (let y = y0; y < y1; y++) {
       const base = y * W
-      for (let x = x0; x < x1; x++) { const v = green[base + x]; if (v) { col[x] += v; row[y] += v } }
+      for (let x = x0; x < x1; x++) {
+        const v = mapCol[base + x]; if (v) col[x] += v
+        const u = mapRow[base + x]; if (u) row[y] += u
+      }
     }
     return { col, row }
   }
@@ -395,9 +473,9 @@ async function detectGsatGridOnPage(pageBuffer, opts = {}) {
     const xLeft = cx.o + (wantCols - 1 - i) * cx.P
     cols.push({ x: xLeft / W, y: cy.o / H, w: cx.P / W, h: gridH / H })
   }
-  const out = { rows: wantRows, cols, detectedCols: wantCols, incomplete: reasons.length > 0, reasons }
+  const out = { rows: wantRows, cols, detectedCols: wantCols, incomplete: reasons.length > 0, reasons, measure }
   // 只給回歸／診斷腳本用（production 不帶 debug）
-  if (opts.debug) out._debug = { W, H, colPitch: cx.P, rowPitch: cy.P, x0: cx.o, y0: cy.o, evX, evY, bgX, bgY }
+  if (opts.debug) out._debug = { W, H, colPitch: cx.P, rowPitch: cy.P, x0: cx.o, y0: cy.o, evX, evY, bgX, bgY, measure }
   return out
 }
 
@@ -406,7 +484,9 @@ async function detectGridBoxes(pageBuffer, g) {
   // format 只來自版面資料裡明確寫的欄位（學測模式建卷時寫 'gsat'）；沒寫＝會考，行為與過去完全相同
   const grid = await detectEssayGridOnPage(pageBuffer, { cols: g.cols, rows: g.rows, format: g.format })
   if (!grid) {
-    throw new Error('這一頁找不到稿紙的格線——請確認掃描完整、格線清楚，或改用系統製作的作文稿紙')
+    throw new Error(g.format === 'gsat'
+      ? '這一頁找不到學測稿紙的綠色格線——請用彩色掃描（黑白掃描或影印的公版卷目前抓不到格線）、整張掃進去不要裁到格區，或改用系統製作的作文稿紙'
+      : '這一頁找不到稿紙的格線——請確認掃描完整、格線清楚，或改用系統製作的作文稿紙')
   }
   // ⛔ 抓不全一定要擋：少抓的行會讓整段文字無聲消失，比直接失敗危險得多
   if (grid.incomplete) {
