@@ -337,10 +337,11 @@ export async function runAiPipeline({
         bookletImages: internalContext?.questionBookletImages ?? [],
         // 學測國寫：每卷專屬的評分原則存在版面資料的 items 裡；會考沒有 → null → 走原本的會考判官
         gsatRubric: essayGsatRubricOf(essayLayout),
+        layout: essayLayout,
         log: (m) => console.log(`${logPrefix} ${m}`),
       })
     const finalResult = buildEssayGradingResult(String(hit.questionId ?? '1'), essayResult)
-    console.log(`${logPrefix} [Essay] Phase B 完成（級分 ${finalResult.totalScore}）`)
+    console.log(`${logPrefix} [Essay] Phase B 完成（${essayLayout?.essay?.format === 'gsat' ? '分數' : '級分'} ${finalResult.totalScore}）`)
     pipelineResult = {
       status: 200,
       data: { candidates: [{ content: { parts: [{ text: JSON.stringify(finalResult) }] } }] },

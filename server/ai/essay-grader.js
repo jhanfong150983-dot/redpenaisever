@@ -256,6 +256,29 @@ ${paras.join('\n')}
 /** level(0~6) ↔ 學測等第 */
 export const GSAT_GRADES = ['0', 'C', 'C+', 'B', 'B+', 'A', 'A+']
 
+// 2026-09-22 user 拍板：學測**以分數計、不以等第計**（知性題 25＝(一)4＋(二)21、情意題 25，方便老師事後加減分）。
+//   判官仍判等第（14/14 驗證過的那一步），程式再對到官方分數帶的**中間值**；等第只當參考顯示。
+//   官方分數帶（115 評分原則）：情意題 A+25-22／A21-18／B+17-14／B13-10／C+9-6／C5-1；
+//   知性題(二) A+21-19／A18-15／B+14-12／B11-8／C+7-5／C4-1；知性題(一) A4-3／B2／C1。
+//   index 對齊 GSAT_GRADES：[0, C, C+, B, B+, A, A+]
+export const GSAT_ITEM_KINDS = {
+  affective: { label: '情意題', maxScore: 25, scores: [0, 3, 8, 12, 16, 20, 24] },
+  expository2: { label: '知性題(二)', maxScore: 21, scores: [0, 3, 6, 10, 13, 17, 20] },
+  // (一) 只有 A／B／C 三級：C+→C、B+→B、A+→A
+  expository1: { label: '知性題(一)', maxScore: 4, scores: [0, 1, 1, 2, 2, 4, 4] },
+}
+/** 學測寫作題的種類（essay.items[0].kind）；沒填＝情意題（第一期只開這一種） */
+export function essayGsatItemKind(layout) {
+  const k = layout?.essay?.items?.[0]?.kind
+  return GSAT_ITEM_KINDS[k] ? k : 'affective'
+}
+/** 等第 index（0~6）→ 分數 */
+export function gsatScoreOf(levelIdx, kind = 'affective') {
+  const t = GSAT_ITEM_KINDS[kind] ?? GSAT_ITEM_KINDS.affective
+  const i = Math.min(6, Math.max(0, Number(levelIdx) || 0))
+  return t.scores[i]
+}
+
 /**
  * 學測國寫的**通用**六等第階梯——固定寫死，地位等同會考的 CAP_RUBRIC；老師不必經手。
  *

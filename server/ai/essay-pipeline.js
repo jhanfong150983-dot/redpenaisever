@@ -22,9 +22,26 @@ import {
   locateQuote,
   locateTypoCell,
   essayZeroAiGate,
+  essayGsatItemKind,
+  gsatScoreOf,
+  GSAT_ITEM_KINDS,
+  GSAT_GRADES,
 } from './essay-grader.js'
 
 const ESSAY_MAX_LEVEL = 6
+
+/**
+ * 學測國寫（2026-09-22 user 拍板「以分數計、不以等第計」）：等第 index → level 欄位。
+ *   suggested／final＝分數（情意題 0~25）、maxScore＝該題滿分、grade＝等第（只當參考顯示）。
+ *   會考卷（layout 沒有 format:'gsat'）回 null → 呼叫端照舊用級分，行為零改變。
+ */
+function gsatLevelFields(layout, levelIdx, onTopic = null) {
+  if (layout?.essay?.format !== 'gsat') return null
+  const kind = essayGsatItemKind(layout)
+  const idx = Number.isInteger(levelIdx) ? Math.min(6, Math.max(0, levelIdx)) : null
+  const score = idx == null ? null : gsatScoreOf(idx, kind)
+  return { suggested: score, final: score, scale: 'gsat', kind, maxScore: GSAT_ITEM_KINDS[kind].maxScore, grade: idx == null ? null : GSAT_GRADES[idx], onTopic }
+}
 /** 抄寫的並行數（一篇約 25~45 行、合成後約 4~6 組；Phase A 有 300s 預算） */
 const TRANSCRIBE_CONCURRENCY = 6
 /**
@@ -264,7 +281,7 @@ export async function runEssayTranscribe({
     // 零星簡體字（未達閘門值）：可能是 AI 抄錯、也可能是學生真的寫簡體 → 交老師判
     simplified,
     feedback: null,
-    level: gate ? { suggested: gate.level, final: gate.level, reason: gate.reason, dimensions: [] } : null,
+    level: gate ? { suggested: gate.level, final: gate.level, reason: gate.reason, dimensions: [], ...(gsatLevelFields(layout, gate.level) ?? {}) } : null,
     gate: gate ? gate.reason : null,
     ms: Date.now() - t0,
   }
@@ -289,6 +306,8 @@ export async function runEssayFeedback({
   gradeLabel,
   // 學測國寫的每卷專屬評分原則（essayGsatRubricOf(layout)）。沒有＝會考，下面兩支 prompt 與過去逐字元相同。
   gsatRubric = null,
+  // 版面資料（學測用：分數表要知道是情意題還是知性題）
+  layout = null,
   log = () => {},
 }) {
   const t0 = Date.now()
@@ -400,7 +419,8 @@ export async function runEssayFeedback({
       reason: String(lv?.reason ?? ''),
       dimensions: Array.isArray(lv?.dimensions) ? lv.dimensions : [],
       // 學測才有：前端據此把 0~6 顯示成等第（A+…C），並知道 dimensions 是「題旨要素」不是會考四向度
-      ...(gsatRubric ? { scale: 'gsat', grade: lv?.grade ?? null, onTopic: lv?.onTopic ?? null } : {}),
+      // 學測：suggested／final 改成分數、附 maxScore；grade 只當參考
+      ...(gsatRubric ? (gsatLevelFields(layout, suggested, lv?.onTopic ?? null) ?? { scale: 'gsat', grade: lv?.grade ?? null, onTopic: lv?.onTopic ?? null }) : {}),
     },
     gate: null,
     ms: (draft?.ms ?? 0) + (Date.now() - t0),
@@ -413,15 +433,17 @@ export async function runEssayGrading(p) {
   return runEssayFeedback({ ...p, draft })
 }
 
-/** essayResult → 批改結果的單題 detail（滿分＝6 級分、級分即分數） */
+/** essayResult → 批改結果的單題 detail（會考：滿分＝6 級分、級分即分數；學測：level.maxScore＝該題滿分、level 已是分數） */
 export function essayResultToQuestionResult(questionId, essayResult) {
   const lvl = essayResult?.level?.final ?? essayResult?.level?.suggested
   const score = Number.isInteger(lvl) ? lvl : 0
+  const maxScore = Number(essayResult?.level?.maxScore) > 0 ? Number(essayResult.level.maxScore) : ESSAY_MAX_LEVEL
   return {
     questionId,
-    isCorrect: score >= 4,
+    // 會考 4 級分以上算「達標」；學測比照 2/3（25 分卷＝17 分＝B+ 以上）
+    isCorrect: score >= (maxScore === ESSAY_MAX_LEVEL ? 4 : Math.round(maxScore * 2 / 3)),
     score,
-    maxScore: ESSAY_MAX_LEVEL,
+    maxScore,
     errorType: 'concept',
     scoringReason: essayResult?.gate || essayResult?.level?.reason || '作文：AI 建議級分，請老師確認',
     scoreConfidence: essayResult?.gate ? 95 : 70,
