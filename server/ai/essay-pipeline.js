@@ -35,11 +35,11 @@ const ESSAY_MAX_LEVEL = 6
  *   suggested／final＝分數（情意題 0~25）、maxScore＝該題滿分、grade＝等第（只當參考顯示）。
  *   會考卷（layout 沒有 format:'gsat'）回 null → 呼叫端照舊用級分，行為零改變。
  */
-function gsatLevelFields(layout, levelIdx, onTopic = null) {
+function gsatLevelFields(layout, levelIdx, onTopic = null, rawScore = null) {
   if (layout?.essay?.format !== 'gsat') return null
   const kind = essayGsatItemKind(layout)
   const idx = Number.isInteger(levelIdx) ? Math.min(6, Math.max(0, levelIdx)) : null
-  const score = idx == null ? null : gsatScoreOf(idx, kind)
+  const score = idx == null ? null : gsatScoreOf(idx, kind, rawScore)
   return { suggested: score, final: score, scale: 'gsat', kind, maxScore: GSAT_ITEM_KINDS[kind].maxScore, grade: idx == null ? null : GSAT_GRADES[idx], onTopic }
 }
 /** 抄寫的並行數（一篇約 25~45 行、合成後約 4~6 組；Phase A 有 300s 預算） */
@@ -347,7 +347,7 @@ export async function runEssayFeedback({
       timeoutMs: 90_000,
       routeKey: ESSAY_ROUTES.level,
       routeHint,
-      stageContents: [{ role: 'user', parts: [{ text: gsatRubric ? buildGsatLevelPrompt(gsatRubric, paras, totalChars) : buildEssayLevelPrompt(paras, totalChars) }, ...bookletParts] }],
+      stageContents: [{ role: 'user', parts: [{ text: gsatRubric ? buildGsatLevelPrompt(gsatRubric, paras, totalChars, essayGsatItemKind(layout)) : buildEssayLevelPrompt(paras, totalChars) }, ...bookletParts] }],
     }),
   ])
   if (fbSettled.status === 'rejected') log(`[Essay] 眉批失敗：${fbSettled.reason?.message || fbSettled.reason}`)
@@ -365,7 +365,7 @@ export async function runEssayFeedback({
   const fb = fbResp?.ok ? parseJsonLoose(extractCandidateText(fbResp.data) || '') : null
   const lvRaw = lvResp?.ok ? parseJsonLoose(extractCandidateText(lvResp.data) || '') : null
   // 學測：判官回的是等第 → 換成管線通用的 level 形狀（overall 0~6）；離題由 code 定 0。會考原樣。
-  const lv = gsatRubric ? normalizeGsatLevel(lvRaw) : lvRaw
+  const lv = gsatRubric ? normalizeGsatLevel(lvRaw, essayGsatItemKind(layout)) : lvRaw
 
   // ── 5) 引用句 code 驗證＋定位回直行（驗不過＝判官幻覺，標記但不丟棄，交老師看）──
   const withLoc = (arr, key) => (Array.isArray(arr) ? arr : []).map((x) => {
@@ -420,7 +420,7 @@ export async function runEssayFeedback({
       dimensions: Array.isArray(lv?.dimensions) ? lv.dimensions : [],
       // 學測才有：前端據此把 0~6 顯示成等第（A+…C），並知道 dimensions 是「題旨要素」不是會考四向度
       // 學測：suggested／final 改成分數、附 maxScore；grade 只當參考
-      ...(gsatRubric ? (gsatLevelFields(layout, suggested, lv?.onTopic ?? null) ?? { scale: 'gsat', grade: lv?.grade ?? null, onTopic: lv?.onTopic ?? null }) : {}),
+      ...(gsatRubric ? (gsatLevelFields(layout, suggested, lv?.onTopic ?? null, lv?.score ?? null) ?? { scale: 'gsat', grade: lv?.grade ?? null, onTopic: lv?.onTopic ?? null }) : {}),
     },
     gate: null,
     ms: (draft?.ms ?? 0) + (Date.now() - t0),

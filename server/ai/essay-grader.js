@@ -257,26 +257,31 @@ ${paras.join('\n')}
 export const GSAT_GRADES = ['0', 'C', 'C+', 'B', 'B+', 'A', 'A+']
 
 // 2026-09-22 user 拍板：學測**以分數計、不以等第計**（知性題 25＝(一)4＋(二)21、情意題 25，方便老師事後加減分）。
-//   判官仍判等第（14/14 驗證過的那一步），程式再對到官方分數帶的**中間值**；等第只當參考顯示。
+//   照大考中心閱卷程序：判官先定等第（14/14 驗證過的那一步）、再在該等第的**分數帶內給一個整數分**；
+//   code 只負責①離題一律 0 ②分數落在帶外就夾回帶的邊界 ③判官沒給分數就取帶的中間值。
+//   ⛔ 不可用帶的中間值當分數（user 09-22：那樣永遠拿不到滿分或帶內其他分數）。
 //   官方分數帶（115 評分原則）：情意題 A+25-22／A21-18／B+17-14／B13-10／C+9-6／C5-1；
-//   知性題(二) A+21-19／A18-15／B+14-12／B11-8／C+7-5／C4-1；知性題(一) A4-3／B2／C1。
-//   index 對齊 GSAT_GRADES：[0, C, C+, B, B+, A, A+]
+//   知性題(二) A+21-19／A18-15／B+14-12／B11-8／C+7-5／C4-1；知性題(一) A4-3／B2／C1（(一)只有三等：+級併入）。
+//   index 對齊 GSAT_GRADES：[0, C, C+, B, B+, A, A+]，每格＝[最低, 最高]
 export const GSAT_ITEM_KINDS = {
-  affective: { label: '情意題', maxScore: 25, scores: [0, 3, 8, 12, 16, 20, 24] },
-  expository2: { label: '知性題(二)', maxScore: 21, scores: [0, 3, 6, 10, 13, 17, 20] },
-  // (一) 只有 A／B／C 三級：C+→C、B+→B、A+→A
-  expository1: { label: '知性題(一)', maxScore: 4, scores: [0, 1, 1, 2, 2, 4, 4] },
+  affective: { label: '情意題', maxScore: 25, bands: [[0, 0], [1, 5], [6, 9], [10, 13], [14, 17], [18, 21], [22, 25]] },
+  expository2: { label: '知性題(二)', maxScore: 21, bands: [[0, 0], [1, 4], [5, 7], [8, 11], [12, 14], [15, 18], [19, 21]] },
+  expository1: { label: '知性題(一)', maxScore: 4, bands: [[0, 0], [1, 1], [1, 1], [2, 2], [2, 2], [3, 4], [3, 4]] },
 }
 /** 學測寫作題的種類（essay.items[0].kind）；沒填＝情意題（第一期只開這一種） */
 export function essayGsatItemKind(layout) {
   const k = layout?.essay?.items?.[0]?.kind
   return GSAT_ITEM_KINDS[k] ? k : 'affective'
 }
-/** 等第 index（0~6）→ 分數 */
-export function gsatScoreOf(levelIdx, kind = 'affective') {
+/** 等第 index（0~6）＋判官給的帶內分數 → 最終分數（帶外夾回；沒給＝帶的中間值） */
+export function gsatScoreOf(levelIdx, kind = 'affective', rawScore = null) {
   const t = GSAT_ITEM_KINDS[kind] ?? GSAT_ITEM_KINDS.affective
   const i = Math.min(6, Math.max(0, Number(levelIdx) || 0))
-  return t.scores[i]
+  const [lo, hi] = t.bands[i]
+  if (rawScore == null || rawScore === '') return Math.round((lo + hi) / 2)
+  const n = Number(rawScore)
+  if (!Number.isFinite(n)) return Math.round((lo + hi) / 2)
+  return Math.min(hi, Math.max(lo, Math.round(n)))
 }
 
 /**
@@ -313,33 +318,38 @@ export function essayGsatRubricOf(layout) {
   return r && Array.isArray(r.bands) && r.bands.length ? r : GSAT_GENERIC_RUBRIC
 }
 
-function formatGsatRubric(rubric) {
-  const bands = (rubric.bands ?? []).map((b) => `${String(b[0]).padEnd(2)}：${b[1]}`).join('\n')
+function formatGsatRubric(rubric, kind = null) {
+  // 帶上分數帶（kind 給了才印）：判官要在帶內給分
+  const t = kind ? GSAT_ITEM_KINDS[kind] : null
+  const range = (g) => { if (!t) return ''; const i = GSAT_GRADES.indexOf(String(g)); if (i < 0) return ''; const [lo, hi] = t.bands[i]; return lo === hi ? `（${lo} 分）` : `（${lo}～${hi} 分）` }
+  const bands = (rubric.bands ?? []).map((b) => `${String(b[0]).padEnd(2)}${range(b[0])}：${b[1]}`).join('\n')
   return `【本題評分原則】（學科能力測驗・國語文寫作能力測驗${rubric.title ? `；本題題目「${rubric.title}」` : ''}）
 ${bands}`
 }
 
-export function buildGsatLevelPrompt(rubric, paras, chars) {
+export function buildGsatLevelPrompt(rubric, paras, chars, kind = 'affective') {
   const elements = Array.isArray(rubric.elements) ? rubric.elements.filter(Boolean) : []
+  const t = GSAT_ITEM_KINDS[kind] ?? GSAT_ITEM_KINDS.affective
   return `你是大學入學考試中心「學科能力測驗・國語文寫作能力測驗」的閱卷委員。請依本題的評分原則，為下面這篇考生作答評定等第。
 作答內容是由手寫答題卷逐字抄錄的文字，錯別字已照考生原樣保留；抄錄過程可能有極少數漏字或多字，請勿因此降等。
 試題見附圖：請先閱讀圖中的題目、引導文字與圖片。
 
-${formatGsatRubric(rubric)}
+${formatGsatRubric(rubric, kind)}
 
-【評分方式】（依大考中心閱卷程序）
+【評分方式】（依大考中心閱卷程序；本題滿分 ${t.maxScore} 分）
 1. 先判斷這篇作答**是不是在寫本題**（onTopic）。寫的不是本題要求的內容、空白、或僅抄錄題目 → onTopic 填 false。
 2. ${elements.length ? `逐項檢核本題要求的內容有沒有寫到、寫到什麼程度，並引用作答原句為證（逐字引用、每則 30 字以內）：\n${elements.map((e, i) => `   ${i + 1}) ${e}`).join('\n')}` : '檢核本題要求的內容有沒有寫到、寫到什麼程度，並引用作答原句為證（逐字引用、每則 30 字以內）。'}
 3. 再看結構與文辭。
 4. 先判定屬於 A、B、C 哪一等，再依表現高下決定是原級還是＋級。
 5. 錯別字與標點只在**明顯偏多**時才影響等第；零星錯字不降等。
 6. 依作答**實際寫出來的內容**評定：文章沒寫完、內容單薄，就照評分原則給對應的等第，不要因為開頭寫得好就推測後面也好。
+7. 定了等第之後，**在該等第的分數帶內給一個整數分數**（score）：帶內高低依表現決定——各項要求都寫得深入、結構文辭都到位就給帶的上限，勉強達到該等就給帶的下限。分數帶見上表。
 
 【受評作答】（共 ${chars} 字、${paras.length} 段）
 ${paras.join('\n')}
 
 只輸出 JSON：
-{"onTopic":true,"elements":[{"name":"...","degree":"具體|明確|大致|簡略|稍觸及|未觸及","quote":"..."}],"structure":"...","diction":"...","band":"A|B|C|0","grade":"A+|A|B+|B|C+|C|0","reason":"..."}`
+{"onTopic":true,"elements":[{"name":"...","degree":"具體|明確|大致|簡略|稍觸及|未觸及","quote":"..."}],"structure":"...","diction":"...","band":"A|B|C|0","grade":"A+|A|B+|B|C+|C|0","score":0,"reason":"..."}`
 }
 
 /**
@@ -347,11 +357,13 @@ ${paras.join('\n')}
  * ⛔ 離題一律 0：由 code 依 onTopic 決定，不看判官自己填的 grade
  *   （實測判官會寫「嚴重離題，故評為 C 等」——理由對、換算錯）。
  */
-export function normalizeGsatLevel(json) {
+export function normalizeGsatLevel(json, kind = 'affective') {
   if (!json || typeof json !== 'object') return null
   const onTopic = json.onTopic !== false
   const idx = GSAT_GRADES.indexOf(String(json.grade ?? '').trim().toUpperCase())
   const overall = !onTopic ? 0 : idx >= 0 ? idx : null
+  // 分數：判官在帶內給的整數；帶外夾回、離題 0、沒等第 null
+  const score = overall == null ? null : gsatScoreOf(overall, kind, onTopic ? json.score : 0)
   const dims = (Array.isArray(json.elements) ? json.elements : []).map((e) => ({
     name: String(e?.name ?? ''),
     comment: String(e?.degree ?? ''),
@@ -360,7 +372,7 @@ export function normalizeGsatLevel(json) {
   for (const [name, v] of [['結構', json.structure], ['文辭', json.diction]]) {
     if (v) dims.push({ name, comment: String(v), quotes: [] })
   }
-  return { overall, grade: overall == null ? null : GSAT_GRADES[overall], onTopic, reason: String(json.reason ?? ''), dimensions: dims }
+  return { overall, score, grade: overall == null ? null : GSAT_GRADES[overall], onTopic, reason: String(json.reason ?? ''), dimensions: dims }
 }
 
 export function parseJsonLoose(text) {
