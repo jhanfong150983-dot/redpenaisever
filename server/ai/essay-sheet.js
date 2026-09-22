@@ -275,8 +275,11 @@ async function detectGsatGridOnPage(pageBuffer, opts = {}) {
   const green = new Float32Array(W * H)
   for (let i = 0, p = 0; i < W * H; i++, p += ch) {
     const r = data[p], g = data[p + 1], b = data[p + 2]
-    const v = g - (r > b ? r : b)
-    if (v > 2 && g > 90) green[i] = v > 40 ? 40 : v
+    // 2026-09-22 改「紅色赤字＋藍色赤字」2g−r−b（不再取 min）：115 原卷 2-1 的格線是藍綠色 (164,186,183)，
+    //   g−max(r,b) 只剩 3、其他卷 11 → 右框線證據跟雜訊分不開、線上第一份學測卷就掛在這裡；
+    //   改成和之後三卷都是 25~26。藍色原子筆 b≫g → 負值→0，紅色頁碼 r≫g → 0，黑筆/紙白 ≈0，性質不變。
+    const v = 2 * g - r - b
+    if (v > 4 && g > 90 && g >= b - 8) green[i] = v > 40 ? 40 : v
   }
   const project = (x0, x1, y0, y1) => {
     const col = new Float64Array(W)
@@ -504,7 +507,16 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
   if (!isEssayLayout(layout)) throw new Error('不是作文稿紙版面')
   const g = layout.essay
   let pageBufs = await splitPages(imageBuffer, pageBreaks)
-  if (pageBufs.length < g.pages) {
+  // 2026-09-22 只掃了一頁（學測情意題常見：學生只寫一面、老師只掃那一面）：
+  //   合併圖的長寬比就是一頁橫式稿紙（B4 257/364、A3 297/420 都 ≈0.707；兩頁上下疊 ≈1.41）
+  //   → 當作只有第 1 頁，缺的頁直接跳過（等同該頁空白）。⛔ 以前是平均切→把一頁劈成兩半→格線找不到→整份失敗。
+  const meta = await sharp(imageBuffer).metadata()
+  const aspect = meta.width && meta.height ? meta.height / meta.width : 0
+  //   判準用「高<寬」：一頁橫式稿紙不管怎麼裁邊都是扁的（實測掃描檔 0.59~0.71），兩頁上下疊一定 >1.2
+  const onePage = pageBufs.length === 1 && aspect > 0 && aspect < 1.0
+  if (onePage && g.pages > 1) {
+    console.log(`[Essay] 只收到 1 頁（長寬比 ${aspect.toFixed(3)}）、稿紙有 ${g.pages} 頁 → 缺的頁當空白`)
+  } else if (pageBufs.length < g.pages) {
     // pageBreaks 是「優化」不是「前提」：作文稿紙每頁等高，合併圖平均切就對了。
     //   實測 client 沒把 pageBreaks 存進 DB 時（2026-09-20 的老卷），平均切出來的兩頁
     //   格線偵測都是 23/23。真的只掃了一頁的話，平均切會把一頁劈成兩半 →
@@ -519,7 +531,9 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
   const columns = []
   const byoMode = g.source === 'byo'
   const graded = essayGradedPages(g)
+  if (graded && ![...graded].some((p) => pageBufs[p - 1])) throw new Error(`這份只掃到 ${pageBufs.length} 頁，但要批的是第 ${[...graded].join('、')} 頁——請確認正反面都掃進來了`)
   for (let p = 0; p < g.pages; p++) {
+    if (!pageBufs[p]) continue
     // 不在批改範圍的頁整頁跳過：不偵測格線、不裁行、不產生任何 column
     //   （學測第一階段只批背面的第二大題；正面的第一大題是另一篇文章，混進來會被當成同一篇批）
     if (graded && !graded.has(p + 1)) continue
