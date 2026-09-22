@@ -135,8 +135,29 @@ export async function runAiPipeline({
   //   client 的 gradePhaseA 有「舊版相容：server 一次跑完」路徑（phaseAComplete=true 即直接採用），
   //   所以 phase_a 與 phase_a_classify 都回同一份完整結果；後續 Phase B 由 essayResult 直接算分、不再叫 AI。
   const essayLayout = isEssayLayout(internalContext?.generatedSheetLayout) ? internalContext.generatedSheetLayout : null
+  // 2026-09-22 user：「任何 classify、疊合的失敗前端 UI 都不會顯示原因」。作文管線丟出的例外原本走 proxy 的 500
+  //   → client 換成「AI 剛剛有點忙」那句、真因藏在 technical。改成走既有的 pipelineFailure 路徑：
+  //   我們自己寫的中文訊息（找不到格線／稿紙設定不符／抄寫品質不合格／頁數不夠…）就是給老師看的，原文帶到 userMessage。
+  const essayFailure = (err, stage) => {
+    const msg = String(err?.message || err)
+    const teacherFacing = /[一-鿿]/.test(msg) && !/status=|Gemini|fetch|ECONN|timeout/i.test(msg)
+    const failure = {
+      stage,
+      reasonCode: err?.code || (teacherFacing ? 'ESSAY_FAILED' : 'ESSAY_EXCEPTION'),
+      userMessage: teacherFacing ? msg : '🙂 作文批改剛剛出了點差錯。再批一次，通常就好了。',
+      userAction: teacherFacing ? '' : '',
+      technical: { metrics: { errorMessage: msg.slice(0, 300) } },
+    }
+    console.warn(`${logPrefix} [Essay] 失敗 → pipelineFailure ${failure.reasonCode}：${msg.slice(0, 200)}`)
+    return {
+      status: 500,
+      data: { candidates: [{ content: { parts: [{ text: JSON.stringify({ phaseAComplete: false, pipelineFailure: failure }) }] } }] },
+      pipelineMeta: { pipeline: 'grading-essay-failure', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: { reasonCode: failure.reasonCode } },
+    }
+  }
   if (essayLayout && (isPhaseA || isPhaseAClassify)) {
     const t0 = Date.now()
+    try {
     const inline = (contents ?? [])
       .flatMap((c) => c?.parts ?? [])
       .find((part) => part?.inlineData?.data)
@@ -183,6 +204,7 @@ export async function runAiPipeline({
       data: { candidates: [{ content: { parts: [{ text: JSON.stringify(result) }] } }] },
       pipelineMeta: { pipeline: 'grading-essay', prepareLatencyMs: 0, modelLatencyMs: Date.now() - t0, warnings: [], metrics: { columns: essayResult.columns.length, lowConfidence: essayResult.lowConfidenceColumns } },
     }
+    } catch (err) { return essayFailure(err, 'classify') }
   }
 
   if (isPhaseA || isPhaseAClassify) {
@@ -309,6 +331,7 @@ export async function runAiPipeline({
       }
     }
   } else if (essayLayout && (isPhaseB || isPhaseBAccessor)) {
+    try {
     // 作文卷：分數在 Phase A 就定了（級分即分數）→ Phase B 不叫任何 AI，只把結果組成最終形狀。
     //   essayResult 由 client 原樣帶回（gradePhaseB 會送整份 phaseAResult）。
     const qrs = payload?.phaseAResult?.questionResults ?? internalContext?.phaseAResult?.questionResults ?? []
@@ -348,6 +371,7 @@ export async function runAiPipeline({
       data: { candidates: [{ content: { parts: [{ text: JSON.stringify(finalResult) }] } }] },
       pipelineMeta: { pipeline: 'grading-essay-phase-b', prepareLatencyMs: 0, modelLatencyMs: 0, warnings: [], metrics: {} },
     }
+    } catch (err) { return essayFailure(err, 'phase_b') }
   } else if (isPhaseB || isPhaseBAccessor || isPhaseBExplain) {
     // 2026-05-17: 支援 fromCache 模式（重新批改）——payload.fromCache=true 時、不需要 phaseAResult、
     // 由 runStagedGradingPhaseB 內部從 submissions.phase_a_state 讀。

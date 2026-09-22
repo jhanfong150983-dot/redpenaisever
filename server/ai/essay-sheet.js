@@ -621,13 +621,17 @@ export async function refineProjectedGrid(pageBuffer, g, tpl, projected, log) {
   }
   const band = (arr, i, half) => { let s = 0; for (let k = -half; k <= half; k++) { const j = i + k; if (j >= 0 && j < arr.length) s += arr[j] } return s }
   // 每條預期線：±0.3 格內找峰；峰要明顯高於 ±0.5 格窗內的平均才算「吸到」
-  const snapLines = (prof, expect, step, dbg = null) => {
+  // pair＝有窄欄的稿紙：每行右緣往左 pair px 還有一條窄欄線（會考 0.2 行距）。⛔ 單線吸附會在兩條線之間亂吸
+  //   （09-22 實測：各行隨機吸到不同那條、擬合落在中間、整片偏 12px、黑白影印的深灰線落進格子被當墨跡）。
+  //   成對比對：候選偏移 d 的分數＝證據(右緣+d)＋證據(右緣−pair+d)，吸錯一條只拿到一半分數，正確的 d 才是峰。
+  const snapLines = (prof, expect, step, dbg = null, pair = 0) => {
     const hits = []
     for (let k = 0; k < expect.length; k++) {
       const e = expect[k]
       const lo = Math.round(e - 0.3 * step), hi = Math.round(e + 0.3 * step)
+      const ev = (i) => band(prof, i, 2) + (pair > 0 && k < expect.length - 1 ? band(prof, Math.round(i - pair), 2) : 0)
       let best = -1, bv = 0, sum = 0, n = 0
-      for (let i = Math.round(e - 0.5 * step); i <= Math.round(e + 0.5 * step); i++) { if (i < 0 || i >= prof.length) continue; const v = band(prof, i, 2); sum += v; n++; if (i >= lo && i <= hi && v > bv) { bv = v; best = i } }
+      for (let i = Math.round(e - 0.5 * step); i <= Math.round(e + 0.5 * step); i++) { if (i < 0 || i >= prof.length) continue; const v = ev(i); sum += v; n++; if (i >= lo && i <= hi && v > bv) { bv = v; best = i } }
       const mean = n ? sum / n : 0
       if (dbg && (k === 0 || k === expect.length - 1)) dbg.push(`k${k}@${e.toFixed(0)}: peak ${bv.toFixed(0)}@${best} mean ${mean.toFixed(0)}`)
       if (best >= 0 && bv > 0 && bv >= mean * 1.3) hits.push([k, best])
@@ -637,7 +641,7 @@ export async function refineProjectedGrid(pageBuffer, g, tpl, projected, log) {
   const expectX = Array.from({ length: cols + 1 }, (_, k) => fx.o - k * pitch)
   const expectY = Array.from({ length: rows + 1 }, (_, k) => fy.o + k * fy.P)
   const dbg = []
-  const hx = snapLines(colProf, expectX, pitch, dbg)
+  const hx = snapLines(colProf, expectX, pitch, dbg, tpl.ratio < 0.98 ? pitch * (1 - tpl.ratio) : 0)
   const hy = snapLines(rowProf, expectY, fy.P, dbg)
   let ox = fx.o, px = pitch, oy = fy.o, py = fy.P
   let used = 'projection'
@@ -649,14 +653,48 @@ export async function refineProjectedGrid(pageBuffer, g, tpl, projected, log) {
     // ⛔ 不用最小平方重新擬合行距：命中的峰會被筆跡拉歪（實測校正後誤差從 0.02~0.10 格變 0.16~0.38）。
     //   投影本身已經很準（每格 ≤0.1 格），這裡只做兩件事：①驗證（外框＋內部線吸得到）②用命中線偏移的**中位數**做整體平移。
     const med = (arr) => { const v = [...arr].sort((p, q) => p - q); return v.length ? v[v.length >> 1] : 0 }
+    // ⛔ 行數／每行格數填錯的守門（09-22 user 把會考稿紙填成 23×20：外框照樣吸到、內部線也吸到 17/21 → 放行 → 整份格子錯）。
+    //   「吸到的線擬合間距」抓不到這種錯（吸附只在預期位置 ±0.3 格找，間距錯 10% 也會被就近吸掉）→ 直接**數**格區內有幾條線：
+    //   外框之間的峰數必須＝行數＋1／列數＋1（±1）。直行有窄欄時字格右緣與窄欄線相距 0.2 行距 → 用 0.6 行距的最小間距把它們併成一個峰。
+    const countPeaks = (prof, a, b, minSep) => {
+      const lo = Math.round(Math.min(a, b)), hi = Math.round(Math.max(a, b))
+      let mx = 0
+      for (let i = lo; i <= hi; i++) mx = Math.max(mx, band(prof, i, 2))
+      const thr = mx * 0.25
+      const peaks = []
+      for (let i = lo; i <= hi; i++) {
+        const v = band(prof, i, 2)
+        if (v < thr) continue
+        let isMax = true
+        for (let k = 1; k <= 3; k++) { if (band(prof, i - k, 2) > v || band(prof, i + k, 2) > v) { isMax = false; break } }
+        if (!isMax) continue
+        if (peaks.length && i - peaks[peaks.length - 1].i < minSep) { if (v > peaks[peaks.length - 1].v) peaks[peaks.length - 1] = { i, v }; continue }
+        peaks.push({ i, v })
+      }
+      return peaks.length
+    }
+    const nX = countPeaks(colProf, hx.find(([k]) => k === 0)[1], hx.find(([k]) => k === cols)[1], pitch * 0.6)
+    const nY = countPeaks(rowProf, hy.find(([k]) => k === 0)[1], hy.find(([k]) => k === rows)[1], fy.P * 0.5)
+    if (Math.abs(nX - (cols + 1)) > 1 || Math.abs(nY - (rows + 1)) > 1) {
+      log(`[Essay] 格區內數到 ${nX} 條直線、${nY} 條橫線，與稿紙設定（${cols} 行、${rows} 格）不符 → 行數／每行格數可能填錯`)
+      const err = new Error(`稿紙設定與學生卷不符：格區內數到 ${nX - 1} 行、每行 ${nY - 1} 格，但答案卷填的是 ${cols} 行、每行 ${rows} 格——請到答案卷編輯稿紙設定（行數／每行格數／窄欄）`)
+      err.code = 'ESSAY_SHEET_MISMATCH'
+      throw err
+    }
+    // 校正：吸到 ≥60% 的線 → 用最小平方重擬「間距＋位移」（老師框的格區有 1~2% 誤差時，行距累積到最後一行會偏 0.3 格，
+    //   黑白影印的深灰格線就落進字格被當成墨跡）；不足 60% 只做中位平移。
+    //   ⛔ 擬合的證據已排除墨水（淡線帶通＋墨水膨脹排除），之前「被筆跡拉歪」是純暗度時代的事。仍守門：間距差 ≤4%、位移 ≤0.4 格。
     const dx = med(hx.map(([k, v]) => v - expectX[k]))
     const dy = med(hy.map(([k, v]) => v - expectY[k]))
-    // 平移超過 0.4 格＝投影其實偏了 → 不敢用
     if (Math.abs(dx) > pitch * 0.4 || Math.abs(dy) > fy.P * 0.4) {
       log(`[Essay] 疊合校正平移過大（${dx.toFixed(1)}, ${dy.toFixed(1)}px）→ 疊合不可信`)
       return null
     }
-    ox = fx.o + dx; oy = fy.o + dy; used = `verified ${hx.length}/${cols + 1}×${hy.length}/${rows + 1}, shift ${dx.toFixed(1)},${dy.toFixed(1)}px`
+    ox = fx.o + dx; oy = fy.o + dy
+    let how = 'shift'
+    if (hx.length >= Math.ceil((cols + 1) * 0.6)) { const r = fit(hx); if (Math.abs(-r.P - pitch) <= pitch * 0.04) { ox = r.o; px = -r.P; how = 'fit' } }
+    if (hy.length >= Math.ceil((rows + 1) * 0.6)) { const r = fit(hy); if (Math.abs(r.P - fy.P) <= fy.P * 0.04) { oy = r.o; py = r.P; how += '+fit' } }
+    used = `verified ${hx.length}/${cols + 1}×${hy.length}/${rows + 1}, ${how}, shift ${dx.toFixed(1)},${dy.toFixed(1)}px, pitch ${pitch.toFixed(1)}→${px.toFixed(1)}/${fy.P.toFixed(1)}→${py.toFixed(1)}`
   } else {
     // 吸不到一半以上的線：投影本身可能就偏了（純格子沒特徵時 SIFT 會鎖錯）→ 不敢用
     log(`[Essay] 疊合後吸到 ${hx.length}/${cols + 1} 條直線、${hy.length}/${rows + 1} 條橫線、外框${edgesOk ? '齊' : '缺'} → 疊合不可信；外框證據 ${dbg.join(" ｜ ")}`)
@@ -681,7 +719,9 @@ export async function refineProjectedGrid(pageBuffer, g, tpl, projected, log) {
 /** 退回格線偵測時用哪一支：學測公版／無窄欄的自備稿紙＝梳子；會考公版／有窄欄＝串鏈 */
 function fallbackDetectorFormat(g) {
   if (g.sheet === 'gsat') return 'gsat'
-  if (g.sheet === 'custom') return (Number(g.template?.gutterRatio) || 1) >= 0.98 ? 'gsat' : undefined
+  // 自備稿紙一律走會考型串鏈偵測（它本來就同時處理「字格＋窄欄」與「均勻格線」，而且有灰階後備）；
+  //   梳子那支只認學測公版的綠線，黑白影印會直接死（09-22 user 的自備會考卷第 2 頁就是這樣報錯）。
+  if (g.sheet === 'custom') return undefined
   return g.format === 'gsat' ? 'gsat' : undefined
 }
 
@@ -696,7 +736,9 @@ async function detectGridBoxes(pageBuffer, g) {
   }
   // ⛔ 抓不全一定要擋：少抓的行會讓整段文字無聲消失，比直接失敗危險得多
   if (grid.incomplete) {
-    throw new Error(`這一頁的稿紙格線抓得不完整（${grid.reasons.join('；')}）——格線太淡或掃描不清，請提高掃描品質、整張掃進去不要裁到格線，或改用系統製作的作文稿紙`)
+    throw new Error(g.sheet === 'custom'
+      ? `這一頁的稿紙格線與答案卷的稿紙設定對不起來（${grid.reasons.join('；')}）——請確認稿紙設定的行數／每行格數／窄欄是否與這張稿紙相同，並整張掃進去不要裁到格線`
+      : `這一頁的稿紙格線抓得不完整（${grid.reasons.join('；')}）——格線太淡或掃描不清，請提高掃描品質、整張掃進去不要裁到格線，或改用系統製作的作文稿紙`)
   }
   const byId = new Map()
   grid.cols.forEach((c, i) => {
@@ -847,6 +889,7 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
       }
       if (best) {
         if (cand.length > 1) log(`[Essay] 模板第 ${best.ti + 1} 頁疊合最好（inliers ${best.reg.inliers}）`)
+        // 稿紙設定與學生卷不符（行數／格數填錯）是老師要改設定的事，直接往上丟、不退回偵測（偵測也會用同一組錯的行列數）
         byId = await refineProjectedGrid(buf, g, best.tpl, best.reg.boxes, log)
       }
     }
