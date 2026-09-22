@@ -123,7 +123,7 @@ export async function runEssayTranscribe({
   const t0 = Date.now()
 
   // ── 1) 裁行＋數格子（零 AI）──
-  const { columns: cut } = await cutEssayColumns(imageBuffer, layout, pageBreaks, { templatePages, log })
+  const { columns: cut, locate } = await cutEssayColumns(imageBuffer, layout, pageBreaks, { templatePages, log })
   const written = cut.filter((c) => !c.blank && c.pngBase64)
   log(`[Essay] 裁行完成：${cut.length} 行、有字 ${written.length} 行（零 AI，${Date.now() - t0}ms）`)
 
@@ -277,6 +277,8 @@ export async function runEssayTranscribe({
     // 一行幾格：前端要靠它把「第幾格」換算成 bbox 裡的 y 偏移（低信心清單裁那個字）
     //   ⛔ 這裡沒有 g（那是 cutEssayColumns 內部的變數）——2026-09-20 寫成 g.rows 讓 10 份全炸
     rows: layout?.essay?.rows,
+    // 每頁定位方式：registration＝疊合到老師的空白稿紙、grid＝在學生卷上偵測格線、anchor＝系統稿紙的四角錨點
+    locate: locate ?? [],
     paragraphs: paras,
     chars: totalChars,
     lowConfidenceColumns: lowCount,
@@ -406,6 +408,7 @@ export async function runEssayFeedback({
     version: 'essay-1',
     columns,
     rows: draft?.rows,
+    locate: draft?.locate ?? [],
     paragraphs: paras,
     chars: totalChars,
     // ⛔ 拆 Phase A／B 時漏改的：lowCount 定義在 runEssayTranscribe，這支拿不到 → ReferenceError

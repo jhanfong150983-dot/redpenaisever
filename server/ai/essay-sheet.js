@@ -819,6 +819,8 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
   }
   const columns = []
   const byoMode = g.source === 'byo'
+  // 每頁定位方式（給前端複核面板顯示，user 09-22：驗收要看得到走了哪一條）
+  const locate = []
   const graded = essayGradedPages(g)
   if (graded && ![...graded].some((p) => pageBufs[p - 1])) throw new Error(`這份只掃到 ${pageBufs.length} 頁，但要批的是第 ${[...graded].join('、')} 頁——請確認正反面都掃進來了`)
   for (let p = 0; p < g.pages; p++) {
@@ -845,6 +847,7 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
         byId = await refineProjectedGrid(buf, g, best.tpl, best.reg.boxes, log)
       }
     }
+    locate.push({ page: p + 1, method: byId ? 'registration' : byoMode ? 'grid' : 'anchor' })
     if (!byId) byId = byoMode ? await detectGridBoxes(buf, g) : (await alignColumns(buf, layout)).byId
     const { data: gray, info } = await sharp(buf).greyscale().raw().toBuffer({ resolveWithObject: true })
     const W = info.width
@@ -888,5 +891,5 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}
       })
     }
   }
-  return { columns, pages: g.pages }
+  return { columns, pages: g.pages, locate }
 }
