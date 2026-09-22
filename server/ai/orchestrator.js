@@ -155,6 +155,7 @@ export async function runAiPipeline({
       imageBuffer: Buffer.from(inline.inlineData.data, 'base64'),
       pageBreaks: payload?.pageBreaks ?? null,
       layout: essayLayout,
+      templatePages: internalContext?.essayTemplatePages ?? [],
       log: (m) => console.log(`${logPrefix} ${m}`),
     })
     const qr = essayResultToQuestionResult(essayQuestionId, essayResult)

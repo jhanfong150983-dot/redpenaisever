@@ -277,7 +277,7 @@ def _cell_probe(warped_edge: np.ndarray, stu_edge: np.ndarray, x0: float, y0: fl
 def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
              page_breaks: Optional[List[float]] = None,
              min_consistency: float = DEFAULT_MIN_CONSISTENCY,
-             snap: str = 'cell') -> dict:
+             snap: str = 'cell', min_structure: Optional[float] = None) -> dict:
     """
     boxes: [{id, page, bbox:{x,y,w,h}}]（模板頁 normalized）
     snap: 'cell'（預設：以中心找學生卷包圍格；找不到退 lines）| 'lines'（逐邊吸最近印刷線、沒線用 NCC 位移）| 'ncc' | 'none'
@@ -301,8 +301,9 @@ def register(template_pages: List[bytes], boxes: List[dict], student: bytes,
             pr.reason = f'inliers {inl} < {MIN_INLIERS}'
             page_results.append(pr); continue
         pr.structure = _structure_score(tpl, stu, H)
-        if pr.structure < MIN_STRUCTURE:
-            pr.reason = f'structure {pr.structure:.2f} < {MIN_STRUCTURE}'
+        ms_ = MIN_STRUCTURE if min_structure is None else float(min_structure)
+        if pr.structure < ms_:
+            pr.reason = f'structure {pr.structure:.2f} < {ms_}'
             page_results.append(pr); continue
         # 兩段式：pass 1 逐格 NCC 量位移 → 以整頁中位位移修正 H（SIFT/RANSAC 的 H 跨平台可差 1~2mm：
         #   同資料本機 0.9mm、Cloud Run 2.4mm）→ pass 2 用修正後的 H 重量、用「原始位移」判逐格一致。

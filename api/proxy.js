@@ -801,6 +801,7 @@ export default async function handler(req, res) {
   // 重踩 feedback_dont_infer_total_pages_from_question_ids.md 的雷。
   let generatedSheetLayout = null
   let registrationTemplate = null  // 2026-09-14 疊合免 classify：模板頁圖＋模板格位
+  let essayTemplatePages = []      // 2026-09-22 自備作文稿紙：老師上傳的空白稿紙頁圖（疊合定位用）
   const needsAnswerKeyImagesAndTotalPages =
     routeKey === 'grading.phase_a' || routeKey === 'grading.phase_a_classify'
   if (needsAnswerKeyImagesAndTotalPages && payload?.assignmentId) {
@@ -826,7 +827,7 @@ export default async function handler(req, res) {
         try {
           const { data: tpl } = await supabaseAdmin
             .from('answer_key_templates')
-            .select('generated_sheet')
+            .select('generated_sheet, answer_sheet_image_paths')
             .eq('id', a.answer_key_template_id)
             .maybeSingle()
           if (tpl?.generated_sheet?.boxes?.length) {
@@ -840,6 +841,19 @@ export default async function handler(req, res) {
             //   classify，回 CLASSIFY_BBOX_SIZE_ANOMALY。user 09-20 實測第一份就踩到。
             generatedSheetLayout = tpl.generated_sheet
             console.log(`📝 [Essay] 作文稿紙 ${generatedSheetLayout.version}（${tpl.generated_sheet.essay.source ?? 'generated'}）→ Phase A 走作文管線`)
+            // 自備稿紙（有 template 幾何）：抓老師上傳的空白稿紙頁圖給疊合用；抓不到就不疊合、退回格線偵測
+            const paths = Array.isArray(tpl.answer_sheet_image_paths) ? tpl.answer_sheet_image_paths : []
+            if (tpl.generated_sheet.essay.source === 'byo' && tpl.generated_sheet.essay.template && paths.length && process.env.REGISTRATION_URL) {
+              const bucket = supabaseAdmin.storage.from('homework-images')
+              const settled = await Promise.allSettled(paths.map(async (p) => {
+                const { data, error } = await bucket.download(p)
+                if (error || !data) return null
+                return Buffer.from(await data.arrayBuffer()).toString('base64')
+              }))
+              essayTemplatePages = settled.map((r) => (r.status === 'fulfilled' ? r.value : null))
+              if (essayTemplatePages.some((p) => !p)) { console.warn(`[Essay] 空白稿紙頁圖不全（${essayTemplatePages.filter(Boolean).length}/${paths.length}）→ 不疊合`); essayTemplatePages = [] }
+              else console.log(`📐 [Essay] 空白稿紙 ${essayTemplatePages.length} 頁 → 疊合定位`)
+            }
           }
         } catch (e) {
           console.warn('[GeneratedSheet] fetch generated_sheet failed:', e?.message)
@@ -984,6 +998,7 @@ export default async function handler(req, res) {
             submissionId: payload?.submissionId || undefined,
             assignmentTotalPages,  // 🆕 給 staged-grading 判定 ID 自動切頁
             generatedSheetLayout: generatedSheetLayout || undefined,  // 生成作答卷定版版面（免 classify）
+            essayTemplatePages,  // 自備作文稿紙的空白頁圖（疊合定位；空＝格線偵測）
             registrationTemplate: registrationTemplate || undefined  // 疊合免 classify（模板頁圖＋格位）
           }
         })

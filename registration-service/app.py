@@ -38,6 +38,8 @@ class RegisterReq(BaseModel):
     student_image: str
     page_breaks: Optional[List[float]] = None
     min_consistency: float = register_core.DEFAULT_MIN_CONSISTENCY
+    # 2026-09-22 作文稿紙：結構分閘門可由呼叫端放寬（作文卷自己有格線驗證）；不傳＝原本的 MIN_STRUCTURE
+    min_structure: Optional[float] = None
     snap: str = 'cell'  # 'cell' | 'lines' | 'ncc' | 'none'
 
 
@@ -59,7 +61,7 @@ def register(req: RegisterReq):
     try:
         result = register_core.register(
             pages, [b.model_dump() for b in req.boxes], student,
-            page_breaks=req.page_breaks, min_consistency=req.min_consistency, snap=req.snap,
+            page_breaks=req.page_breaks, min_consistency=req.min_consistency, snap=req.snap, min_structure=req.min_structure,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

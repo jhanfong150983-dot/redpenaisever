@@ -115,13 +115,15 @@ export async function runEssayTranscribe({
   imageBuffer,
   pageBreaks,
   layout,
+  // 老師上傳的空白稿紙頁圖（base64）：自備稿紙走疊合定位用；沒有＝格線偵測
+  templatePages = [],
   log = () => {},
 }) {
   if (!isEssayLayout(layout)) throw new Error('這份考卷不是作文稿紙版面')
   const t0 = Date.now()
 
   // ── 1) 裁行＋數格子（零 AI）──
-  const { columns: cut } = await cutEssayColumns(imageBuffer, layout, pageBreaks)
+  const { columns: cut } = await cutEssayColumns(imageBuffer, layout, pageBreaks, { templatePages, log })
   const written = cut.filter((c) => !c.blank && c.pngBase64)
   log(`[Essay] 裁行完成：${cut.length} 行、有字 ${written.length} 行（零 AI，${Date.now() - t0}ms）`)
 

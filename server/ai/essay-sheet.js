@@ -112,7 +112,7 @@ export async function detectEssayGridOnPage(pageBuffer, opts = {}) {
  *   → 只保留「連續暗像素長度 ≥ minRun（約 1.2 格）」的直線段：vert 給直行投影、horz 給橫列投影。
  *   值＝暗度（紙白 0、上限 40），紙白／短筆畫／散點都是 0。
  */
-function longRunDarkness(data, W, H, ch, minRun) {
+export function longRunDarkness(data, W, H, ch, minRun) {
   const N = W * H
   const lum = new Uint8Array(N)
   const hist = new Uint32Array(256)
@@ -479,12 +479,218 @@ async function detectGsatGridOnPage(data, info, opts = {}, measure = 'color') {
   return out
 }
 
+// ═══ 2026-09-22 自備稿紙「疊合」定位（user 拍板：老師上傳題本＋空白稿紙 → 疊合 → 套 bbox）═══
+//   老師在空白稿紙上框格區＋填行列數（公版一鍵帶入）→ 存成 essay.template.grids（模板頁 normalized）；
+//   批改時每頁：疊合服務（registration-service，SIFT+RANSAC）把模板格子投到學生卷 → 窄範圍校正 → 守門。
+//   實測（local-only/essay/_register_exp.py）：學測 6 份原卷 6/6、每格誤差中位 0.01~0.07 格、黑白掃描結果相同。
+//   ⛔ 作文參數與一般卷不同：min_consistency=0（每格都有字，對空白模板格的 NCC 一致率必低）、
+//     snap='none'（吸附交給我們自己的窄範圍校正）、逐格送（整行細長框判不了）、min_structure=0.12（服務預設 0.25 會擋掉
+//     淡線／黑白的稿紙，實測 2-4 灰階 0.12~0.23；結構分只是粗篩，真正的守門是下面的格線驗證）。
+//   失敗（沒設 URL／服務掛／守門不過）→ 退回原本的格線偵測，行為與過去相同。
+
+/** 模板某頁的格子（模板頁 normalized）：由老師框的格區＋行列數均分。第 1 行在最右邊；窄欄在每行右側 */
+export function essayTemplateCells(g, pageIdx) {
+  const grids = Array.isArray(g?.template?.grids) ? g.template.grids : []
+  const grid = grids.find((x) => Number(x?.page) === pageIdx + 1) ?? grids[0]
+  const box = grid?.box
+  if (!box || !(box.w > 0) || !(box.h > 0)) return null
+  const cols = g.cols, rows = g.rows
+  const pitch = box.w / cols
+  const ratio = Number(g.template?.gutterRatio) > 0 && Number(g.template.gutterRatio) <= 1 ? Number(g.template.gutterRatio) : 1
+  const cellW = pitch * ratio
+  const cellH = box.h / rows
+  const out = []
+  for (let c = 1; c <= cols; c++) {
+    const right = box.x + box.w - (c - 1) * pitch
+    for (let r = 1; r <= rows; r++) {
+      out.push({ id: `c${c}r${r}`, page: 0, bbox: { x: right - pitch, y: box.y + (r - 1) * cellH, w: cellW, h: cellH }, manual: true })
+    }
+  }
+  return { cells: out, pitch, ratio, cellH, box }
+}
+
+/** 呼叫疊合服務（單頁）。回 Map id→bbox（該頁 normalized）或 null */
+export async function registerEssayPage(pageBuffer, templateB64, cells, log) {
+  const url = process.env.REGISTRATION_URL
+  if (!url || process.env.REGISTRATION_ENABLED === '0' || !templateB64 || !cells?.length) return null
+  const timeoutMs = Number(process.env.REGISTRATION_TIMEOUT_MS) || 30000
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  const t0 = Date.now()
+  try {
+    // 服務內部統一縮到寬 1200 處理，送 webp q85 即可（3240px 的 png 轉 base64 會到 10MB）
+    const stu = (await sharp(pageBuffer).webp({ quality: 85 }).toBuffer()).toString('base64')
+    const resp = await fetch(`${url.replace(/\/$/, '')}/register`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal,
+      body: JSON.stringify({ template_id: 'essay', template_pages: [templateB64], boxes: cells.map(({ id, page, bbox, manual }) => ({ id, page, bbox, manual })), student_image: stu, page_breaks: null, min_consistency: 0, snap: 'none', min_structure: 0.12 }),
+    })
+    if (!resp.ok) { log(`[Essay] 疊合服務回 ${resp.status} → 退回格線偵測`); return null }
+    const data = await resp.json()
+    const pg = data?.pages?.[0]
+    if (data?.decision !== 'aligned' || !Array.isArray(data.boxes) || !data.boxes.length) {
+      log(`[Essay] 疊合退回格線偵測：${data?.reason || 'no boxes'}（inliers ${pg?.inliers ?? '?'}、${Date.now() - t0}ms）`)
+      return null
+    }
+    log(`[Essay] 疊合成功 ${data.boxes.length} 格（inliers ${pg?.inliers}、structure ${pg?.structure}、${Date.now() - t0}ms）`)
+    return { boxes: new Map(data.boxes.map((b) => [b.id, b.bbox])), inliers: Number(pg?.inliers) || 0, structure: Number(pg?.structure) || 0 }
+  } catch (err) {
+    log(`[Essay] 疊合例外 ${err?.name === 'AbortError' ? 'timeout' : err?.message} → 退回格線偵測`)
+    return null
+  } finally { clearTimeout(timer) }
+}
+
+/**
+ * 投影後的窄範圍校正＋守門：把疊合投出來的格子整理成「等距的行線＋等距的列線」，再用學生卷自己的長直線暗度
+ * 在 ±0.3 格內把每條線吸到實際印刷線上（顏色無關，黑白也行）；吸到的線太少或吸完偏太多＝疊合不可信 → 回 null。
+ * @returns byId（cN／cNrM，normalized）或 null
+ */
+export async function refineProjectedGrid(pageBuffer, g, tpl, projected, log) {
+  const { data, info } = await sharp(pageBuffer).raw().toBuffer({ resolveWithObject: true })
+  const W = info.width, H = info.height, ch = info.channels
+  const cols = g.cols, rows = g.rows
+  // 每行的右緣（第 1 行最右）＝ c{i}r* 的 x+w 最大值；上下界＝所有格的 y 極值
+  const rights = [], lefts = [], tops = [], bottoms = []
+  for (let c = 1; c <= cols; c++) {
+    let r0 = -Infinity, l0 = Infinity
+    for (let r = 1; r <= rows; r++) {
+      const b = projected.get(`c${c}r${r}`)
+      if (!b) return null
+      // 投影的是「字格」（寬＝pitch×ratio）；行的右緣＝字格右緣＋窄欄
+      const right = (b.x + b.w) * W + (1 - tpl.ratio) * (b.w / tpl.ratio) * W
+      r0 = Math.max(r0, right); l0 = Math.min(l0, b.x * W)
+      if (r === 1) tops.push(b.y * H)
+      if (r === rows) bottoms.push((b.y + b.h) * H)
+    }
+    rights.push(r0); lefts.push(l0)
+  }
+  // 最小平方擬合等距線：x_k = o − k·P（k=0..cols；k=cols＝最後一行左緣）
+  const fit = (pts) => { // pts: [[k, v]]
+    const n = pts.length
+    let sk = 0, sv = 0, skk = 0, skv = 0
+    for (const [k, v] of pts) { sk += k; sv += v; skk += k * k; skv += k * v }
+    const P = (n * skv - sk * sv) / (n * skk - sk * sk)
+    return { o: (sv - P * sk) / n, P }
+  }
+  const xPts = rights.map((v, i) => [i, v]); xPts.push([cols, lefts[cols - 1]])
+  const fx = fit(xPts)            // fx.P 為負（往左）
+  const yTop = tops.reduce((a, b) => a + b, 0) / tops.length
+  const yBot = bottoms.reduce((a, b) => a + b, 0) / bottoms.length
+  const fy = { o: yTop, P: (yBot - yTop) / rows }
+  const pitch = -fx.P
+  if (!(pitch > 4) || !(fy.P > 4)) return null
+
+  // 學生卷自己的證據：**純暗度**投影（紙白 0、上限 40）。⛔ 不可用長直線濾波：學測淡綠線縮圖後斷成 ≤46px 的小段，
+  //   逐像素欄的連續段全部不到門檻、證據圖整片是 0（實測 2-1／2-4）。這裡只在已知位置 ±0.3 格內找峰、
+  //   而且要求峰值 ≥ 窗內平均 ×1.3，筆跡散在格子中間、不會在格線位置形成整條的峰，純暗度就夠用（實測比值 1.3~3.3）。
+  //   直行投影只看格區 y 範圍、橫列只看 x 範圍。
+  const y0 = Math.max(0, Math.floor(fy.o)), y1 = Math.min(H, Math.ceil(fy.o + rows * fy.P))
+  const x1 = Math.min(W, Math.ceil(fx.o)), x0 = Math.max(0, Math.floor(fx.o - cols * pitch))
+  // ⛔ 純暗度也不行：寫滿的頁，直豎筆畫在 ±0.3 格內比淡線還暗，峰被筆跡搶走（實測平移被拉 0.3 格）。
+  //   證據＝「淡線帶通」（亮度 115~207：印刷淡線在這一段、墨水 <115 排除、紙白 >207 排除）
+  //       ＋「長直線暗度」（黑白影印的實線是黑的、會被帶通排除，但它是整條直線，靠這個補）。
+  const lr = longRunDarkness(data, W, H, ch, Math.max(24, Math.round(fy.P * 1.2)))
+  const N = W * H
+  const lum = new Uint8Array(N)
+  const hist = new Uint32Array(256)
+  for (let i = 0, p = 0; i < N; i++, p += ch) { const l = (data[p] * 77 + data[p + 1] * 151 + data[p + 2] * 28) >> 8; lum[i] = l; hist[l]++ }
+  let acc = 0, paper = 250
+  for (let l = 0; l < 256; l++) { acc += hist[l]; if (acc >= N * 0.8) { paper = l; break } }
+  // 淡線帶的上限跟紙白相對（實測 2-4 的綠線亮度中位 232、紙 255；寫死 207 會把它排掉）
+  const faintHi = Math.min(240, paper - 8)
+  // ⛔ 墨水暈圈排除：深色筆畫的抗鋸齒邊緣亮度也落在淡線帶（實測 2-4 深咖啡色墨、字大，暈圈在離格線 22px 處形成假峰）。
+  //   做法：亮度 <110 的像素（墨）往四周膨脹 5px 當排除遮罩，淡線證據只算遮罩外的像素。
+  const R = 5
+  const ink = new Uint8Array(N)
+  for (let i = 0; i < N; i++) if (lum[i] < 110) ink[i] = 1
+  const ex = new Uint8Array(N)
+  for (let y = 0; y < H; y++) { const base = y * W; let last = -1e9; for (let x = 0; x < W; x++) { if (ink[base + x]) last = x; if (x - last <= R) ex[base + x] = 1 } last = 1e9; for (let x = W - 1; x >= 0; x--) { if (ink[base + x]) last = x; if (last - x <= R) ex[base + x] = 1 } }
+  for (let x = 0; x < W; x++) { let last = -1e9; for (let y = 0; y < H; y++) { const i = y * W + x; if (ink[i]) last = y; if (y - last <= R) ex[i] = 1 } last = 1e9; for (let y = H - 1; y >= 0; y--) { const i = y * W + x; if (ink[i]) last = y; if (last - y <= R) ex[i] = 1 } }
+  const colProf = new Float64Array(W), rowProf = new Float64Array(H)
+  for (let y = 0; y < H; y++) {
+    const base = y * W
+    const inY = y >= y0 && y < y1
+    let rs = 0
+    for (let x = 0; x < W; x++) {
+      const i = base + x
+      const l = lum[i]
+      const v = !ex[i] && l >= 115 && l <= faintHi ? Math.min(40, 250 - l) : 0
+      if (inY) { const u = lr.vert[i]; colProf[x] += v + (u || 0) }
+      if (x >= x0 && x < x1) { const u = lr.horz[i]; rs += v + (u || 0) }
+    }
+    rowProf[y] = rs
+  }
+  const band = (arr, i, half) => { let s = 0; for (let k = -half; k <= half; k++) { const j = i + k; if (j >= 0 && j < arr.length) s += arr[j] } return s }
+  // 每條預期線：±0.3 格內找峰；峰要明顯高於 ±0.5 格窗內的平均才算「吸到」
+  const snapLines = (prof, expect, step, dbg = null) => {
+    const hits = []
+    for (let k = 0; k < expect.length; k++) {
+      const e = expect[k]
+      const lo = Math.round(e - 0.3 * step), hi = Math.round(e + 0.3 * step)
+      let best = -1, bv = 0, sum = 0, n = 0
+      for (let i = Math.round(e - 0.5 * step); i <= Math.round(e + 0.5 * step); i++) { if (i < 0 || i >= prof.length) continue; const v = band(prof, i, 2); sum += v; n++; if (i >= lo && i <= hi && v > bv) { bv = v; best = i } }
+      const mean = n ? sum / n : 0
+      if (dbg && (k === 0 || k === expect.length - 1)) dbg.push(`k${k}@${e.toFixed(0)}: peak ${bv.toFixed(0)}@${best} mean ${mean.toFixed(0)}`)
+      if (best >= 0 && bv > 0 && bv >= mean * 1.3) hits.push([k, best])
+    }
+    return hits
+  }
+  const expectX = Array.from({ length: cols + 1 }, (_, k) => fx.o - k * pitch)
+  const expectY = Array.from({ length: rows + 1 }, (_, k) => fy.o + k * fy.P)
+  const dbg = []
+  const hx = snapLines(colProf, expectX, pitch, dbg)
+  const hy = snapLines(rowProf, expectY, fy.P, dbg)
+  let ox = fx.o, px = pitch, oy = fy.o, py = fy.P
+  let used = 'projection'
+  // ⛔ 格區的四條外框線一定要吸到：純格子上 SIFT 若鎖到「整把偏一格」，內部線照樣對得上（週期結構），
+  //   只有外框線會落在沒線的地方。內部線吸到 ≥30% 即可（淡線、被字蓋住都正常）。
+  const hasK = (hits, k) => hits.some(([kk]) => kk === k)
+  const edgesOk = hasK(hx, 0) && hasK(hx, cols) && hasK(hy, 0) && hasK(hy, rows)
+  if (edgesOk && hx.length >= Math.ceil((cols + 1) * 0.3) && hy.length >= Math.ceil((rows + 1) * 0.3)) {
+    // ⛔ 不用最小平方重新擬合行距：命中的峰會被筆跡拉歪（實測校正後誤差從 0.02~0.10 格變 0.16~0.38）。
+    //   投影本身已經很準（每格 ≤0.1 格），這裡只做兩件事：①驗證（外框＋內部線吸得到）②用命中線偏移的**中位數**做整體平移。
+    const med = (arr) => { const v = [...arr].sort((p, q) => p - q); return v.length ? v[v.length >> 1] : 0 }
+    const dx = med(hx.map(([k, v]) => v - expectX[k]))
+    const dy = med(hy.map(([k, v]) => v - expectY[k]))
+    // 平移超過 0.4 格＝投影其實偏了 → 不敢用
+    if (Math.abs(dx) > pitch * 0.4 || Math.abs(dy) > fy.P * 0.4) {
+      log(`[Essay] 疊合校正平移過大（${dx.toFixed(1)}, ${dy.toFixed(1)}px）→ 疊合不可信`)
+      return null
+    }
+    ox = fx.o + dx; oy = fy.o + dy; used = `verified ${hx.length}/${cols + 1}×${hy.length}/${rows + 1}, shift ${dx.toFixed(1)},${dy.toFixed(1)}px`
+  } else {
+    // 吸不到一半以上的線：投影本身可能就偏了（純格子沒特徵時 SIFT 會鎖錯）→ 不敢用
+    log(`[Essay] 疊合後吸到 ${hx.length}/${cols + 1} 條直線、${hy.length}/${rows + 1} 條橫線、外框${edgesOk ? '齊' : '缺'} → 疊合不可信；外框證據 ${dbg.join(" ｜ ")}`)
+    return null
+  }
+  // 格區必須落在圖內（含 2% 餘裕）
+  if (ox > W * 1.02 || ox - cols * px < -W * 0.02 || oy < -H * 0.02 || oy + rows * py > H * 1.02) return null
+  // 列高／行距比例要像稿紙（10mm 格：會考 0.8、學測 1.0）；差 15% 以上＝投影歪了
+  const expectRatio = tpl.ratio
+  if (Math.abs(py / px - expectRatio) > 0.15 * expectRatio) { log(`[Essay] 列高/行距 ${(py / px).toFixed(2)} 不像稿紙（應≈${expectRatio}）→ 疊合不可信`); return null }
+  const byId = new Map()
+  const cellW = px * tpl.ratio
+  for (let c = 1; c <= cols; c++) {
+    const right = ox - (c - 1) * px
+    byId.set(`c${c}`, { x: (right - px) / W, y: oy / H, w: px / W, h: (rows * py) / H })
+    for (let r = 1; r <= rows; r++) byId.set(`c${c}r${r}`, { x: (right - px) / W, y: (oy + (r - 1) * py) / H, w: cellW / W, h: py / H })
+  }
+  log(`[Essay] 疊合定位採用（${used}；行距 ${px.toFixed(1)}px、列高 ${py.toFixed(1)}px）`)
+  return byId
+}
+
+/** 退回格線偵測時用哪一支：學測公版／無窄欄的自備稿紙＝梳子；會考公版／有窄欄＝串鏈 */
+function fallbackDetectorFormat(g) {
+  if (g.sheet === 'gsat') return 'gsat'
+  if (g.sheet === 'custom') return (Number(g.template?.gutterRatio) || 1) >= 0.98 ? 'gsat' : undefined
+  return g.format === 'gsat' ? 'gsat' : undefined
+}
+
 /** 自備稿紙：偵測到的格線 → 與錨點版同樣的 byId 結構（cN＝整行、cNrM＝單格） */
 async function detectGridBoxes(pageBuffer, g) {
   // format 只來自版面資料裡明確寫的欄位（學測模式建卷時寫 'gsat'）；沒寫＝會考，行為與過去完全相同
-  const grid = await detectEssayGridOnPage(pageBuffer, { cols: g.cols, rows: g.rows, format: g.format })
+  const grid = await detectEssayGridOnPage(pageBuffer, { cols: g.cols, rows: g.rows, format: fallbackDetectorFormat(g) })
   if (!grid) {
-    throw new Error(g.format === 'gsat'
+    throw new Error(fallbackDetectorFormat(g) === 'gsat'
       ? '這一頁找不到學測稿紙的綠色格線——請用彩色掃描（黑白掃描或影印的公版卷目前抓不到格線）、整張掃進去不要裁到格區，或改用系統製作的作文稿紙'
       : '這一頁找不到稿紙的格線——請確認掃描完整、格線清楚，或改用系統製作的作文稿紙')
   }
@@ -583,9 +789,12 @@ export function essayGradedPages(g) {
  * 學生卷 → 逐直行裁圖＋每行的「有墨格數」。
  * @returns {Promise<{columns: Array<{page:number,col:number,pngBase64:string,inkCells:number,inkRows:boolean[],blank:boolean}>, pages:number}>}
  */
-export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
+export async function cutEssayColumns(imageBuffer, layout, pageBreaks, opts = {}) {
   if (!isEssayLayout(layout)) throw new Error('不是作文稿紙版面')
   const g = layout.essay
+  const log = typeof opts.log === 'function' ? opts.log : (m) => console.log(m)
+  // 老師上傳的空白稿紙頁圖（base64、依頁序）——proxy 從 answer_sheet_image_paths 抓；沒有＝不疊合
+  const templatePages = Array.isArray(opts.templatePages) ? opts.templatePages : []
   let pageBufs = await splitPages(imageBuffer, pageBreaks)
   // 2026-09-22 只掃了一頁（學測情意題常見：學生只寫一面、老師只掃那一面）：
   //   合併圖的長寬比就是一頁橫式稿紙（B4 257/364、A3 297/420 都 ≈0.707；兩頁上下疊 ≈1.41）
@@ -619,8 +828,24 @@ export async function cutEssayColumns(imageBuffer, layout, pageBreaks) {
     if (graded && !graded.has(p + 1)) continue
     const { buf, y0: pageY0, y1: pageY1 } = pageBufs[p]
     const pageSpan = pageY1 - pageY0
-    // 自備稿紙沒有四角定位方塊 → 直接在學生卷上偵測印刷格線（純 code；實驗證實 102 張真實樣卷 100% 抓對）
-    const byId = byoMode ? await detectGridBoxes(buf, g) : (await alignColumns(buf, layout)).byId
+    // 自備稿紙：①疊合到老師的空白稿紙（有模板才做）②失敗退回在學生卷上偵測印刷格線（純 code；102 張真實樣卷 100%）
+    let byId = null
+    if (byoMode && g.template && templatePages.length) {
+      // 兩頁都掃＝頁序對應模板頁；只掃一頁時不知道是正面還背面（公版正反面格區位置差一格）→ 每頁都試、取 inliers 最高
+      const cand = onePage ? templatePages.map((_, i) => i).sort((a, b) => (a === p ? -1 : b === p ? 1 : a - b)) : [Math.min(p, templatePages.length - 1)]
+      let best = null
+      for (const ti of cand) {
+        const tpl = essayTemplateCells(g, ti)
+        if (!tpl || !templatePages[ti]) continue
+        const reg = await registerEssayPage(buf, templatePages[ti], tpl.cells, log)
+        if (reg && (!best || reg.inliers > best.reg.inliers)) best = { reg, tpl, ti }
+      }
+      if (best) {
+        if (cand.length > 1) log(`[Essay] 模板第 ${best.ti + 1} 頁疊合最好（inliers ${best.reg.inliers}）`)
+        byId = await refineProjectedGrid(buf, g, best.tpl, best.reg.boxes, log)
+      }
+    }
+    if (!byId) byId = byoMode ? await detectGridBoxes(buf, g) : (await alignColumns(buf, layout)).byId
     const { data: gray, info } = await sharp(buf).greyscale().raw().toBuffer({ resolveWithObject: true })
     const W = info.width
     const H = info.height
