@@ -24,9 +24,14 @@ import {
   essayZeroAiGate,
   essayGsatItemKind,
   gsatScoreOf,
-  GSAT_ITEM_KINDS,
+  gsatMaxScoreOf,
   GSAT_GRADES,
   essayIsShort,
+  essayGsatItems,
+  essayGsatItemRubric,
+  buildGsatQ1Prompt,
+  normalizeGsatQ1,
+  splitExpositoryColumns,
 } from './essay-grader.js'
 
 const ESSAY_MAX_LEVEL = 6
@@ -36,12 +41,14 @@ const ESSAY_MAX_LEVEL = 6
  *   suggested／final＝分數（情意題 0~25）、maxScore＝該題滿分、grade＝等第（只當參考顯示）。
  *   會考卷（layout 沒有 format:'gsat'）回 null → 呼叫端照舊用級分，行為零改變。
  */
-function gsatLevelFields(layout, levelIdx, onTopic = null, rawScore = null) {
+function gsatLevelFields(layout, levelIdx, onTopic = null, rawScore = null, item = null) {
   if (layout?.essay?.format !== 'gsat') return null
-  const kind = essayGsatItemKind(layout)
+  // 情意題（item 給了就用它的配分；知性題不走這裡、由 gradeExpositoryItem 組）
+  const kind = item ? 'affective' : essayGsatItemKind(layout)
+  const maxScore = gsatMaxScoreOf(kind, item?.maxScore ?? null)
   const idx = Number.isInteger(levelIdx) ? Math.min(6, Math.max(0, levelIdx)) : null
-  const score = idx == null ? null : gsatScoreOf(idx, kind, rawScore)
-  return { suggested: score, final: score, scale: 'gsat', kind, maxScore: GSAT_ITEM_KINDS[kind].maxScore, grade: idx == null ? null : GSAT_GRADES[idx], onTopic }
+  const score = idx == null ? null : gsatScoreOf(idx, kind, rawScore, maxScore)
+  return { suggested: score, final: score, scale: 'gsat', kind, maxScore, grade: idx == null ? null : GSAT_GRADES[idx], onTopic }
 }
 /** 抄寫的並行數（一篇約 25~45 行、合成後約 4~6 組；Phase A 有 300s 預算） */
 const TRANSCRIBE_CONCURRENCY = 6
@@ -301,83 +308,8 @@ export async function runEssayTranscribe({
  *   ②抄本先落地（phase_a_state），眉批失敗不會連抄寫成果一起白費
  * @param {object} draft runEssayTranscribe 的產出
  */
-export async function runEssayFeedback({
-  executeStage,
-  extractCandidateText,
-  apiKey,
-  model,
-  payload = {},
-  routeHint = {},
-  draft,
-  bookletImages = [],
-  gradeLabel,
-  // 學測國寫的每卷專屬評分原則（essayGsatRubricOf(layout)）。沒有＝會考，下面兩支 prompt 與過去逐字元相同。
-  gsatRubric = null,
-  // 版面資料（學測用：分數表要知道是情意題還是知性題）
-  layout = null,
-  log = () => {},
-}) {
-  const t0 = Date.now()
-  const columns = draft?.columns ?? []
-  const paras = draft?.paragraphs ?? []
-  const totalChars = draft?.chars ?? 0
-  // 零 AI 閘門在 Phase A 就判定了（空白卷／字數過少）→ 這裡直接原樣回傳，不叫 AI
-  if (draft?.gate) {
-    log(`[Essay] 零 AI 閘門（${draft.gate}）→ Phase B 不叫 AI`)
-    return { ...draft, ms: (draft.ms ?? 0) + (Date.now() - t0) }
-  }
-
-  // ── 4) 眉批與建議級分（並行；題目一律送題本圖）──
-  // ⛔ questionBookletImages 的元素是 `{ mimeType, data }`，**不是** `{ inlineData }`
-  //   （慣例見 staged-grading.js 的 questionBookletImageParts）。原本寫 im.inlineData → undefined
-  //   → 送出一個空的圖片欄位，Gemini 直接回 **400**，眉批與級分兩支同時陣亡（實測 09-20）。
-  //   兩種形狀都收，沒有 data 的直接丟掉，避免再把空 part 送上去。
-  const bookletParts = bookletImages.slice(0, 2)
-    .map((im) => ({ inlineData: im?.inlineData ?? { mimeType: im?.mimeType || 'image/webp', data: im?.data } }))
-    .filter((p) => p.inlineData?.data)
-  if (bookletImages.length && !bookletParts.length) log('[Essay] ⚠ 題本圖有拿到但組不出 inlineData，這次不附題目圖')
-  // 眉批／級分任一失敗也不該讓整份卷炸掉 → allSettled，缺的那段留 null 交老師處理
-  // 字數過少：跳過眉批（沒東西可批），級分判官照跑——由它依規準判 0（抄題／離題）或 1
-  const shortContent = !!draft?.shortContent
-  if (shortContent) log(`[Essay] 字數過少（${totalChars} 字）→ 只送級分判官、不做眉批`)
-  const [fbSettled, lvSettled] = await Promise.allSettled([
-    shortContent ? Promise.resolve(null) : executeStage({
-      apiKey,
-      model,
-      payload: { ...payload, ...ESSAY_FEEDBACK_GENERATION_CONFIG },
-      timeoutMs: 180_000,
-      routeHint,
-      routeKey: ESSAY_ROUTES.feedback,
-      stageContents: [{ role: 'user', parts: [{ text: buildEssayFeedbackPrompt(paras, gradeLabel, gsatRubric ?? undefined) }, ...bookletParts] }],
-    }),
-    executeStage({
-      apiKey,
-      model,
-      payload: { ...payload, ...ESSAY_LEVEL_GENERATION_CONFIG },
-      timeoutMs: 90_000,
-      routeKey: ESSAY_ROUTES.level,
-      routeHint,
-      stageContents: [{ role: 'user', parts: [{ text: gsatRubric ? buildGsatLevelPrompt(gsatRubric, paras, totalChars, essayGsatItemKind(layout)) : buildEssayLevelPrompt(paras, totalChars) }, ...bookletParts] }],
-    }),
-  ])
-  if (fbSettled.status === 'rejected') log(`[Essay] 眉批失敗：${fbSettled.reason?.message || fbSettled.reason}`)
-  if (lvSettled.status === 'rejected') log(`[Essay] 級分失敗：${lvSettled.reason?.message || lvSettled.reason}`)
-  const fbResp = fbSettled.status === 'fulfilled' ? fbSettled.value : null
-  const lvResp = lvSettled.status === 'fulfilled' ? lvSettled.value : null
-  // 只印 status 看不出所以然（09-20 的 400 查了半天才知道是圖片欄位空的）→ 把 API 回的訊息也印出來
-  const errOf = (r) => {
-    const d = r?.data
-    const msg = d?.error?.message ?? (typeof d === 'string' ? d : JSON.stringify(d ?? {}))
-    return String(msg).slice(0, 300)
-  }
-  if (fbResp && !fbResp.ok) log(`[Essay] 眉批未成功 status=${fbResp.status ?? '?'}｜${errOf(fbResp)}`)
-  if (lvResp && !lvResp.ok) log(`[Essay] 級分未成功 status=${lvResp.status ?? '?'}｜${errOf(lvResp)}`)
-  const fb = fbResp?.ok ? parseJsonLoose(extractCandidateText(fbResp.data) || '') : null
-  const lvRaw = lvResp?.ok ? parseJsonLoose(extractCandidateText(lvResp.data) || '') : null
-  // 學測：判官回的是等第 → 換成管線通用的 level 形狀（overall 0~6）；離題由 code 定 0。會考原樣。
-  const lv = gsatRubric ? normalizeGsatLevel(lvRaw, essayGsatItemKind(layout)) : lvRaw
-
-  // ── 5) 引用句 code 驗證＋定位回直行（驗不過＝判官幻覺，標記但不丟棄，交老師看）──
+/** 眉批 JSON → 引用句 code 驗證＋定位回直行、錯別字定位到格＋分桶（驗不過＝判官幻覺，標記但不丟棄，交老師看） */
+function shapeFeedback(fb, columns, log = () => {}) {
   const withLoc = (arr, key) => (Array.isArray(arr) ? arr : []).map((x) => {
     const loc = locateQuote(columns, x?.[key])
     return { ...x, loc: loc.ok ? { page: loc.page, col: loc.col, toCol: loc.toCol } : null, quoteVerified: loc.ok }
@@ -395,7 +327,7 @@ export async function runEssayFeedback({
   })
   const bucketed = bucketTypos(typosLocated)
   if (fb) log(`[Essay] 錯別字 ${bucketed.typos.length} 個：高信心 ${bucketed.highCount}、低信心 ${bucketed.lowCount}`)
-  const feedback = fb ? {
+  return fb ? {
     typos: bucketed.typos,
     sentenceFeedback: withLoc(fb.sentenceFeedback, 'quote'),
     paragraphFeedback: Array.isArray(fb.paragraphFeedback) ? fb.paragraphFeedback : [],
@@ -403,6 +335,170 @@ export async function runEssayFeedback({
     dimensionDiagnosis: Array.isArray(fb.dimensionDiagnosis) ? fb.dimensionDiagnosis : [],
     summary: String(fb.summary ?? ''),
   } : null
+}
+
+/**
+ * 學測知性題（2026-09-23；沙盒 `local-only/essay/_gsat_q1_exp.mjs` 19/21）：
+ *   一篇作答區靠學生自己標的「(二)」切成 (一)(二) → (一) 依老師參考要點判 A/B/C、(二) 通用階梯＋老師的寫作要求；
+ *   眉批只給 (二)（(一) 是簡答）；分數＝兩小題相加、各自帶內給分；沒標「(二)」＝(二) 0 分（user 拍板：學生的問題）。
+ */
+async function gradeExpositoryItem({ executeStage, extractCandidateText, apiKey, model, payload, routeHint, draft, columns, bookletParts, gradeLabel, item, log, t0 }) {
+  const tag = `[Essay][第${item.id}題]`
+  const { how, q1, q2 } = splitExpositoryColumns(columns)
+  const parasOf = (cols) => columnsToParagraphs(cols.map((c) => c.text))
+  const charsOf = (cols) => cols.reduce((n, c) => n + String(c.text ?? '').replace(/[\s　]/g, '').replaceAll('〔?〕', '').length, 0)
+  const p1 = parasOf(q1), p2 = parasOf(q2), n1 = charsOf(q1), n2 = charsOf(q2)
+  log(`${tag} 知性題切段（${how}）：(一) ${q1.length} 行 ${n1} 字、(二) ${q2.length} 行 ${n2} 字`)
+  const rubric2 = essayGsatItemRubric(item)
+  const max1 = item.sub.q1.maxScore, max2 = item.sub.q2.maxScore
+  const call = (cfg, text, routeKey, timeoutMs) => executeStage({ apiKey, model, payload: { ...payload, ...cfg }, timeoutMs, routeHint, routeKey, stageContents: [{ role: 'user', parts: [{ text }, ...bookletParts] }] })
+  const short2 = essayIsShort(n2)
+  if (short2) log(`${tag} (二) 字數過少（${n2} 字）→ 只送判官、不做眉批`)
+  const [s1, s2, sf] = await Promise.allSettled([
+    n1 > 0 ? call(ESSAY_LEVEL_GENERATION_CONFIG, buildGsatQ1Prompt(item.sub.q1.points, p1, n1, max1), ESSAY_ROUTES.level, 90_000) : Promise.resolve(null),
+    n2 > 0 ? call(ESSAY_LEVEL_GENERATION_CONFIG, buildGsatLevelPrompt(rubric2, p2, n2, 'expository2', max2), ESSAY_ROUTES.level, 90_000) : Promise.resolve(null),
+    n2 > 0 && !short2 ? call(ESSAY_FEEDBACK_GENERATION_CONFIG, buildEssayFeedbackPrompt(p2, gradeLabel, rubric2), ESSAY_ROUTES.feedback, 180_000) : Promise.resolve(null),
+  ])
+  const pick = (s, label) => {
+    if (s.status === 'rejected') { log(`${tag} ${label}失敗：${s.reason?.message || s.reason}`); return null }
+    const r = s.value
+    if (r && !r.ok) { log(`${tag} ${label}未成功 status=${r.status ?? '?'}`); return null }
+    return r?.ok ? parseJsonLoose(extractCandidateText(r.data) || '') : null
+  }
+  const empty = { grade: null, score: null, onTopic: null, reason: '', dimensions: [] }
+  const r1 = n1 > 0
+    ? (normalizeGsatQ1(pick(s1, '(一)判官'), max1) ?? { ...empty, reason: '判官沒有回覆，請老師自行評分' })
+    : { grade: '0', score: 0, onTopic: false, reason: '沒有 (一) 的作答', dimensions: [] }
+  const r2 = n2 > 0
+    ? (normalizeGsatLevel(pick(s2, '(二)判官'), 'expository2', { maxScore: max2, elementsCount: rubric2.elements?.length ?? 0 }) ?? { ...empty, reason: '判官沒有回覆，請老師自行評分' })
+    : { grade: '0', score: 0, onTopic: false, reason: how === 'none' ? '沒找到「(二)」的標記，整篇當 (一) 作答；(二) 依規定 0 分（學生若有寫但沒標，請老師手動改分）' : '沒有 (二) 的作答', dimensions: [] }
+  const feedback = shapeFeedback(pick(sf, '眉批'), q2, log)
+  const total = (r1.score == null && r2.score == null) ? null : (r1.score ?? 0) + (r2.score ?? 0)
+  const g = (r) => r.grade ?? '—'
+  const reason = `（一）${g(r1)}${r1.score != null ? ` ${r1.score}/${max1} 分` : ''}：${r1.reason}\n（二）${g(r2)}${r2.score != null ? ` ${r2.score}/${max2} 分` : ''}：${r2.reason}`
+  log(`${tag} (一) ${g(r1)} ${r1.score ?? '—'}/${max1}、(二) ${g(r2)} ${r2.score ?? '—'}/${max2} → ${total ?? '—'}/${item.maxScore}；眉批 ${feedback?.sentenceFeedback?.length ?? 0} 則、共 ${Date.now() - t0}ms`)
+  return {
+    version: 'essay-1', columns, rows: draft?.rows, locate: draft?.locate ?? [],
+    paragraphs: [...p1, ...p2], chars: n1 + n2,
+    lowConfidenceColumns: columns.filter((c) => c.lowConfidence).length,
+    simplified: (draft?.simplified ?? []).filter((s) => columns.some((c) => c.page === s.page && c.col === s.col)),
+    feedback,
+    level: {
+      suggested: total, final: total, reason,
+      dimensions: [...r1.dimensions.map((d) => ({ ...d, name: `（一）${d.name}` })), ...r2.dimensions.map((d) => ({ ...d, name: `（二）${d.name}` }))],
+      scale: 'gsat', kind: 'expository', maxScore: item.maxScore, grade: r2.grade ?? null, onTopic: r2.onTopic ?? null,
+    },
+    // 知性題兩小題各自的結果（前端複核畫面顯示；split.how＝marker／blankGap／none，後兩者要老師看一眼）
+    sub: {
+      split: { how, rows1: q1.length, rows2: q2.length, chars1: n1, chars2: n2 },
+      q1: { grade: r1.grade, score: r1.score, maxScore: max1, reason: r1.reason, dimensions: r1.dimensions },
+      q2: { grade: r2.grade, score: r2.score, maxScore: max2, reason: r2.reason, dimensions: r2.dimensions },
+    },
+    gate: null, itemId: item.id, ms: (draft?.ms ?? 0) + (Date.now() - t0),
+  }
+}
+
+export async function runEssayFeedback({
+  executeStage,
+  extractCandidateText,
+  apiKey,
+  model,
+  payload = {},
+  routeHint = {},
+  draft,
+  bookletImages = [],
+  gradeLabel,
+  // 學測國寫的每卷專屬評分原則（essayGsatRubricOf(layout)）。沒有＝會考，下面兩支 prompt 與過去逐字元相同。
+  gsatRubric = null,
+  // 版面資料（學測用：分數表要知道是情意題還是知性題）
+  layout = null,
+  // 2026-09-23 學測一張卷不只一題（essayGsatItems 的一項）：只批這一項所在的頁；null＝整份卷一篇（會考／舊卷）
+  item = null,
+  log = () => {},
+}) {
+  const t0 = Date.now()
+  const allColumns = draft?.columns ?? []
+  const pageSet = item?.pages?.length ? new Set(item.pages.map(Number)) : null
+  const columns = pageSet ? allColumns.filter((c) => pageSet.has(Number(c.page))) : allColumns
+  const paras = pageSet ? columnsToParagraphs(columns.map((c) => c.text)) : (draft?.paragraphs ?? [])
+  const totalChars = pageSet ? columns.reduce((n, c) => n + String(c.text ?? '').replace(/[\s　]/g, '').replaceAll('〔?〕', '').length, 0) : (draft?.chars ?? 0)
+  const tag = item ? `[Essay][第${item.id}題]` : '[Essay]'
+  // 零 AI 閘門在 Phase A 就判定了（空白卷／字數過少）→ 這裡直接原樣回傳，不叫 AI
+  if (draft?.gate) {
+    log(`${tag} 零 AI 閘門（${draft.gate}）→ Phase B 不叫 AI`)
+    const lv = draft.level ? { ...draft.level, ...(item ? { maxScore: item.maxScore, kind: item.kind } : {}) } : draft.level
+    return { ...draft, level: lv, itemId: item?.id ?? null, ms: (draft.ms ?? 0) + (Date.now() - t0) }
+  }
+  // 逐題的零 AI 閘門：這一題所在的頁全空白（兩題皆考、學生只寫了一題）→ 0 分、不叫 AI
+  if (item && totalChars === 0) {
+    log(`${tag} 這一題所在頁沒有字 → 0 分、不叫 AI`)
+    const reason = '空白卷（這一題的作答區沒有字）'
+    return {
+      version: 'essay-1', columns, rows: draft?.rows, locate: draft?.locate ?? [], paragraphs: [], chars: 0,
+      lowConfidenceColumns: 0, simplified: [], feedback: null,
+      level: { suggested: 0, final: 0, reason, dimensions: [], scale: 'gsat', kind: item.kind, maxScore: item.maxScore, grade: '0', onTopic: false },
+      gate: reason, itemId: item.id, ms: (draft?.ms ?? 0) + (Date.now() - t0),
+    }
+  }
+
+  // ── 4) 眉批與建議級分（並行；題目一律送題本圖）──
+  // ⛔ questionBookletImages 的元素是 `{ mimeType, data }`，**不是** `{ inlineData }`
+  //   （慣例見 staged-grading.js 的 questionBookletImageParts）。原本寫 im.inlineData → undefined
+  //   → 送出一個空的圖片欄位，Gemini 直接回 **400**，眉批與級分兩支同時陣亡（實測 09-20）。
+  //   兩種形狀都收，沒有 data 的直接丟掉，避免再把空 part 送上去。
+  const bookletParts = bookletImages.slice(0, 2)
+    .map((im) => ({ inlineData: im?.inlineData ?? { mimeType: im?.mimeType || 'image/webp', data: im?.data } }))
+    .filter((p) => p.inlineData?.data)
+  if (bookletImages.length && !bookletParts.length) log('[Essay] ⚠ 題本圖有拿到但組不出 inlineData，這次不附題目圖')
+  // 學測知性題：(一)(二) 兩小題各自判、眉批只給 (二)
+  if (item?.kind === 'expository') {
+    return gradeExpositoryItem({ executeStage, extractCandidateText, apiKey, model, payload, routeHint, draft, columns, bookletParts, gradeLabel, item, log, t0 })
+  }
+  // 學測情意題：有 item 就用它的評分原則與配分
+  if (item && layout?.essay?.format === 'gsat') gsatRubric = essayGsatItemRubric(item)
+  // 眉批／級分任一失敗也不該讓整份卷炸掉 → allSettled，缺的那段留 null 交老師處理
+  // 字數過少：跳過眉批（沒東西可批），級分判官照跑——由它依規準判 0（抄題／離題）或 1
+  const shortContent = item ? essayIsShort(totalChars) : !!draft?.shortContent
+  if (shortContent) log(`${tag} 字數過少（${totalChars} 字）→ 只送級分判官、不做眉批`)
+  const [fbSettled, lvSettled] = await Promise.allSettled([
+    shortContent ? Promise.resolve(null) : executeStage({
+      apiKey,
+      model,
+      payload: { ...payload, ...ESSAY_FEEDBACK_GENERATION_CONFIG },
+      timeoutMs: 180_000,
+      routeHint,
+      routeKey: ESSAY_ROUTES.feedback,
+      stageContents: [{ role: 'user', parts: [{ text: buildEssayFeedbackPrompt(paras, gradeLabel, gsatRubric ?? undefined) }, ...bookletParts] }],
+    }),
+    executeStage({
+      apiKey,
+      model,
+      payload: { ...payload, ...ESSAY_LEVEL_GENERATION_CONFIG },
+      timeoutMs: 90_000,
+      routeKey: ESSAY_ROUTES.level,
+      routeHint,
+      stageContents: [{ role: 'user', parts: [{ text: gsatRubric ? buildGsatLevelPrompt(gsatRubric, paras, totalChars, item ? 'affective' : essayGsatItemKind(layout), item?.maxScore ?? null) : buildEssayLevelPrompt(paras, totalChars) }, ...bookletParts] }],
+    }),
+  ])
+  if (fbSettled.status === 'rejected') log(`[Essay] 眉批失敗：${fbSettled.reason?.message || fbSettled.reason}`)
+  if (lvSettled.status === 'rejected') log(`[Essay] 級分失敗：${lvSettled.reason?.message || lvSettled.reason}`)
+  const fbResp = fbSettled.status === 'fulfilled' ? fbSettled.value : null
+  const lvResp = lvSettled.status === 'fulfilled' ? lvSettled.value : null
+  // 只印 status 看不出所以然（09-20 的 400 查了半天才知道是圖片欄位空的）→ 把 API 回的訊息也印出來
+  const errOf = (r) => {
+    const d = r?.data
+    const msg = d?.error?.message ?? (typeof d === 'string' ? d : JSON.stringify(d ?? {}))
+    return String(msg).slice(0, 300)
+  }
+  if (fbResp && !fbResp.ok) log(`[Essay] 眉批未成功 status=${fbResp.status ?? '?'}｜${errOf(fbResp)}`)
+  if (lvResp && !lvResp.ok) log(`[Essay] 級分未成功 status=${lvResp.status ?? '?'}｜${errOf(lvResp)}`)
+  const fb = fbResp?.ok ? parseJsonLoose(extractCandidateText(fbResp.data) || '') : null
+  const lvRaw = lvResp?.ok ? parseJsonLoose(extractCandidateText(lvResp.data) || '') : null
+  // 學測：判官回的是等第 → 換成管線通用的 level 形狀（overall 0~6）；離題由 code 定 0。會考原樣。
+  const lv = gsatRubric ? normalizeGsatLevel(lvRaw, item ? 'affective' : essayGsatItemKind(layout), { maxScore: item?.maxScore ?? null, elementsCount: gsatRubric?.elements?.length ?? 0 }) : lvRaw
+
+  // ── 5) 引用句 code 驗證＋定位回直行（驗不過＝判官幻覺，標記但不丟棄，交老師看）──
+  const feedback = shapeFeedback(fb, columns, log)
 
   const suggested = Number.isInteger(lv?.overall) && lv.overall >= 0 && lv.overall <= ESSAY_MAX_LEVEL
     ? lv.overall
@@ -431,9 +527,10 @@ export async function runEssayFeedback({
       dimensions: Array.isArray(lv?.dimensions) ? lv.dimensions : [],
       // 學測才有：前端據此把 0~6 顯示成等第（A+…C），並知道 dimensions 是「題旨要素」不是會考四向度
       // 學測：suggested／final 改成分數、附 maxScore；grade 只當參考
-      ...(gsatRubric ? (gsatLevelFields(layout, suggested, lv?.onTopic ?? null, lv?.score ?? null) ?? { scale: 'gsat', grade: lv?.grade ?? null, onTopic: lv?.onTopic ?? null }) : {}),
+      ...(gsatRubric ? (gsatLevelFields(layout, suggested, lv?.onTopic ?? null, lv?.score ?? null, item) ?? { scale: 'gsat', grade: lv?.grade ?? null, onTopic: lv?.onTopic ?? null }) : {}),
     },
     gate: null,
+    itemId: item?.id ?? null,
     ms: (draft?.ms ?? 0) + (Date.now() - t0),
   }
 }

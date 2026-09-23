@@ -273,15 +273,117 @@ export function essayGsatItemKind(layout) {
   const k = layout?.essay?.items?.[0]?.kind
   return GSAT_ITEM_KINDS[k] ? k : 'affective'
 }
-/** 等第 index（0~6）＋判官給的帶內分數 → 最終分數（帶外夾回；沒給＝帶的中間值） */
-export function gsatScoreOf(levelIdx, kind = 'affective', rawScore = null) {
+/** 某等第的分數帶（老師配分 maxScore 與官方滿分不同時等比縮放；user 09-23：配分看老師，4／21 只是題本預設） */
+export function gsatBandOf(levelIdx, kind = 'affective', maxScore = null) {
   const t = GSAT_ITEM_KINDS[kind] ?? GSAT_ITEM_KINDS.affective
   const i = Math.min(6, Math.max(0, Number(levelIdx) || 0))
   const [lo, hi] = t.bands[i]
+  const max = Number(maxScore) > 0 ? Number(maxScore) : t.maxScore
+  if (max === t.maxScore) return [lo, hi]
+  const s = max / t.maxScore
+  return [Math.round(lo * s), Math.round(hi * s)]
+}
+/** 等第 index（0~6）＋判官給的帶內分數 → 最終分數（帶外夾回；沒給＝帶的中間值） */
+export function gsatScoreOf(levelIdx, kind = 'affective', rawScore = null, maxScore = null) {
+  const [lo, hi] = gsatBandOf(levelIdx, kind, maxScore)
   if (rawScore == null || rawScore === '') return Math.round((lo + hi) / 2)
   const n = Number(rawScore)
   if (!Number.isFinite(n)) return Math.round((lo + hi) / 2)
   return Math.min(hi, Math.max(lo, Math.round(n)))
+}
+/** 該題種的滿分（老師配分優先） */
+export function gsatMaxScoreOf(kind = 'affective', maxScore = null) {
+  const t = GSAT_ITEM_KINDS[kind] ?? GSAT_ITEM_KINDS.affective
+  return Number(maxScore) > 0 ? Number(maxScore) : t.maxScore
+}
+
+// ── 學測第一大題（知性題；2026-09-23 沙盒 `local-only/essay/_gsat_q1_exp.mjs` 19/21）──
+//   版面 items[].kind==='expository'：一篇作答區裡有 (一)(二) 兩小題，靠學生自己標的「(二)」切開（user 拍板：不預設行數、沒標是學生的問題）；
+//   (一)＝依老師給的參考要點判 A/B/C（官方 4-3／2／1／0，不逐條算分）、(二)＝通用階梯＋老師給的寫作要求（同情意題判官）。
+//   sub: { q1: { maxScore, points[] }, q2: { maxScore, elements[] } }；配分老師可改、分數帶等比縮放。
+/** 版面 → 這份卷要批的題目（沒有 items＝整份一篇；每項補齊 kind／maxScore／pages） */
+export function essayGsatItems(layout) {
+  const g = layout?.essay
+  const list = Array.isArray(g?.items) && g.items.length ? g.items : [{ id: '1', pages: null, kind: 'affective' }]
+  return list.map((it, i) => {
+    const kind = it?.kind === 'expository' ? 'expository' : 'affective'
+    const sub = kind === 'expository' ? {
+      q1: { maxScore: gsatMaxScoreOf('expository1', it?.sub?.q1?.maxScore), points: (Array.isArray(it?.sub?.q1?.points) ? it.sub.q1.points : []).map((p) => String(p ?? '').trim()).filter(Boolean) },
+      q2: { maxScore: gsatMaxScoreOf('expository2', it?.sub?.q2?.maxScore), elements: (Array.isArray(it?.sub?.q2?.elements) ? it.sub.q2.elements : []).map((p) => String(p ?? '').trim()).filter(Boolean) },
+    } : null
+    const maxScore = kind === 'expository' ? sub.q1.maxScore + sub.q2.maxScore : gsatMaxScoreOf('affective', it?.maxScore)
+    return { id: String(it?.id ?? i + 1), pages: Array.isArray(it?.pages) && it.pages.length ? it.pages.map(Number) : null, kind, maxScore, sub, rubric: it?.rubric ?? null }
+  })
+}
+export const GSAT_Q1_BANDS = { A: [3, 4], B: [2, 2], C: [1, 1], 0: [0, 0] }
+function gsatQ1Band(grade, maxScore) {
+  const [lo, hi] = GSAT_Q1_BANDS[grade] ?? [0, 0]
+  const s = (Number(maxScore) > 0 ? Number(maxScore) : 4) / 4
+  return [Math.round(lo * s), Math.round(hi * s)]
+}
+export function buildGsatQ1Prompt(points, paras, chars, maxScore = 4) {
+  const band = (g) => { const [a, b] = gsatQ1Band(g, maxScore); return a === b ? `${a} 分` : `${a}～${b} 分` }
+  const pts = (Array.isArray(points) ? points : []).filter(Boolean)
+  return `你是大學入學考試中心「學科能力測驗・國語文寫作能力測驗」的閱卷委員。本題是第一大題的問題（一）：依據文本說明理由的簡答題，滿分 ${maxScore} 分。
+作答內容是由手寫答題卷逐字抄錄的文字，錯別字已照考生原樣保留；抄錄過程可能有極少數漏字或多字，請勿因此降等。
+試題見附圖：請先閱讀圖中的文章與問題（一）。
+
+【參考要點】（老師提供；考生用自己的話寫到同樣意思就算寫到，不必用相同字眼）
+${pts.length ? pts.map((p, i) => `${i + 1}) ${p}`).join('\n') : '（老師未提供；請依附圖文章自行歸納問題（一）的答案要點，並逐條列出）'}
+
+【評分原則】
+A（${band('A')}）：能確切說明理由，內容完整（參考要點都寫到），表達清晰。
+B（${band('B')}）：能大致說明理由，內容不夠完整（只寫到部分要點，或說明含糊）。
+C（${band('C')}）：解讀錯誤，敘述混亂。
+0（0 分）：空白卷、文不對題，或僅抄錄題幹。
+
+【評分方式】
+1. 先判斷這段作答**是不是在回答問題（一）**（onTopic）。寫的不是本題、空白、或僅抄錄題幹 → onTopic 填 false。
+2. 逐條檢核參考要點有沒有寫到（hit：完整／部分／未提及），並引用作答原句為證（逐字引用、每則 30 字以內）。
+3. 依要點命中情形與表達清晰度定等第 A／B／C；要點全都寫到但表達含糊可給 A 的下限，要點只寫到一半給 B。
+4. 定了等第之後，在該等第的分數帶內給一個整數分數（score）。
+5. 錯別字只在明顯偏多時才影響等第；字數是否超過限制**不在這裡扣分**（由老師斟酌）。
+
+【受評作答】（共 ${chars} 字、${paras.length} 段）
+${paras.join('\n')}
+
+只輸出 JSON：
+{"onTopic":true,"points":[{"name":"...","hit":"完整|部分|未提及","quote":"..."}],"grade":"A|B|C|0","score":0,"reason":"..."}`
+}
+/** (一) 判官回覆 → { grade, score, onTopic, reason, dimensions }（離題由 code 定 0；帶外夾回） */
+export function normalizeGsatQ1(json, maxScore = 4) {
+  if (!json || typeof json !== 'object') return null
+  const onTopic = json.onTopic !== false
+  const g0 = String(json.grade ?? '').trim().toUpperCase()
+  const grade = !onTopic ? '0' : ['A', 'B', 'C', '0'].includes(g0) ? g0 : null
+  const dims = (Array.isArray(json.points) ? json.points : []).map((p) => ({ name: String(p?.name ?? ''), comment: String(p?.hit ?? ''), quotes: p?.quote ? [String(p.quote)] : [] }))
+  if (!grade) return { grade: null, score: null, onTopic, reason: String(json.reason ?? ''), dimensions: dims }
+  const [lo, hi] = gsatQ1Band(grade, maxScore)
+  const raw = Number(json.score)
+  const score = grade === '0' ? 0 : Number.isFinite(raw) ? Math.min(hi, Math.max(lo, Math.round(raw))) : Math.round((lo + hi) / 2)
+  return { grade, score, onTopic, reason: String(json.reason ?? ''), dimensions: dims }
+}
+// 切段：找「(二)」標記行（括號含直排形 ︵︶ U+FE35/FE36——1-1 的「(一)」抄成「︵一︶」；「二、」「2.」也認）。
+//   (一) 的標記不必找（1-2 的被抄寫吞掉、1-1 的在獨立一行），分界只看 (二)。
+//   沒標記 → 後備：前 6 行內有整行空白、之後還有字 → 從空行後切、標 blankGap（交老師確認）；再沒有 → 整篇當 (一)、(二) 0 分（how:'none'）。
+const GSAT_MARK1 = /^[\s　]*[（(︵]?\s*[一1]\s*[）)︶、.]/
+const GSAT_MARK2 = /^[\s　]*[（(︵]?\s*[二2]\s*[）)︶、.]/
+const stripGsatMark = (s) => String(s ?? '').replace(/^[\s　]*[（(︵]?\s*[一二12]\s*[）)︶、.：:]*/, '')
+export function splitExpositoryColumns(columns) {
+  const written = (columns ?? []).filter((c) => c && String(c.text ?? '').replace(/[\s　]/g, ''))
+  const texts = written.map((c) => String(c.text ?? ''))
+  let i2 = texts.findIndex((t) => GSAT_MARK2.test(t))
+  let how = i2 >= 0 ? 'marker' : 'none'
+  if (i2 < 0) {
+    for (let k = 1; k < Math.min(7, written.length); k++) {
+      if (written[k].page === written[k - 1].page && written[k].col - written[k - 1].col >= 2) { i2 = k; how = 'blankGap'; break }
+    }
+  }
+  const seg1 = i2 >= 0 ? written.slice(0, i2) : written
+  const seg2 = i2 >= 0 ? written.slice(i2) : []
+  const q1 = seg1.map((c) => (GSAT_MARK1.test(String(c.text ?? '')) ? { ...c, text: stripGsatMark(c.text) } : c))
+  const q2 = seg2.map((c, k) => (k === 0 && how === 'marker' ? { ...c, text: stripGsatMark(c.text) } : c))
+  return { how, q1, q2 }
 }
 
 /**
@@ -317,24 +419,30 @@ export function essayGsatRubricOf(layout) {
   const r = g.items?.[0]?.rubric
   return r && Array.isArray(r.bands) && r.bands.length ? r : GSAT_GENERIC_RUBRIC
 }
+/** 某一題（essayGsatItems 的一項）的評分原則：情意題＝通用階梯；知性題 (二)＝通用階梯＋老師給的寫作要求（逐項引證，離題才擋得住） */
+export function essayGsatItemRubric(item) {
+  if (item?.kind === 'expository') return { ...GSAT_GENERIC_RUBRIC, elements: item?.sub?.q2?.elements ?? [] }
+  const r = item?.rubric
+  return r && Array.isArray(r.bands) && r.bands.length ? r : GSAT_GENERIC_RUBRIC
+}
 
-function formatGsatRubric(rubric, kind = null) {
-  // 帶上分數帶（kind 給了才印）：判官要在帶內給分
+function formatGsatRubric(rubric, kind = null, maxScore = null) {
+  // 帶上分數帶（kind 給了才印）：判官要在帶內給分；老師配分不同時等比縮放
   const t = kind ? GSAT_ITEM_KINDS[kind] : null
-  const range = (g) => { if (!t) return ''; const i = GSAT_GRADES.indexOf(String(g)); if (i < 0) return ''; const [lo, hi] = t.bands[i]; return lo === hi ? `（${lo} 分）` : `（${lo}～${hi} 分）` }
+  const range = (g) => { if (!t) return ''; const i = GSAT_GRADES.indexOf(String(g)); if (i < 0) return ''; const [lo, hi] = gsatBandOf(i, kind, maxScore); return lo === hi ? `（${lo} 分）` : `（${lo}～${hi} 分）` }
   const bands = (rubric.bands ?? []).map((b) => `${String(b[0]).padEnd(2)}${range(b[0])}：${b[1]}`).join('\n')
   return `【本題評分原則】（學科能力測驗・國語文寫作能力測驗${rubric.title ? `；本題題目「${rubric.title}」` : ''}）
 ${bands}`
 }
 
-export function buildGsatLevelPrompt(rubric, paras, chars, kind = 'affective') {
+export function buildGsatLevelPrompt(rubric, paras, chars, kind = 'affective', maxScore = null) {
   const elements = Array.isArray(rubric.elements) ? rubric.elements.filter(Boolean) : []
-  const t = GSAT_ITEM_KINDS[kind] ?? GSAT_ITEM_KINDS.affective
+  const t = { maxScore: gsatMaxScoreOf(kind, maxScore) }
   return `你是大學入學考試中心「學科能力測驗・國語文寫作能力測驗」的閱卷委員。請依本題的評分原則，為下面這篇考生作答評定等第。
 作答內容是由手寫答題卷逐字抄錄的文字，錯別字已照考生原樣保留；抄錄過程可能有極少數漏字或多字，請勿因此降等。
 試題見附圖：請先閱讀圖中的題目、引導文字與圖片。
 
-${formatGsatRubric(rubric, kind)}
+${formatGsatRubric(rubric, kind, maxScore)}
 
 【評分方式】（依大考中心閱卷程序；本題滿分 ${t.maxScore} 分）
 1. 先判斷這篇作答**是不是在寫本題**（onTopic）。寫的不是本題要求的內容、空白、或僅抄錄題目 → onTopic 填 false。
@@ -357,13 +465,17 @@ ${paras.join('\n')}
  * ⛔ 離題一律 0：由 code 依 onTopic 決定，不看判官自己填的 grade
  *   （實測判官會寫「嚴重離題，故評為 C 等」——理由對、換算錯）。
  */
-export function normalizeGsatLevel(json, kind = 'affective') {
+export function normalizeGsatLevel(json, kind = 'affective', opts = {}) {
   if (!json || typeof json !== 'object') return null
-  const onTopic = json.onTopic !== false
+  const els = Array.isArray(json.elements) ? json.elements : []
+  // 2026-09-23 沙盒：判官 reason 寫「完全離題」卻把 onTopic 填 true、給 C 3 分 → 有列寫作要求（elementsCount>0）且
+  //   每一項都「未觸及」＝文不對題，由 code 定 0（官方：文不對題 0）。沒列要求的情意題不套（沒有東西可逐項對）。
+  const allUntouched = Number(opts.elementsCount) > 0 && els.length >= Number(opts.elementsCount) && els.every((e) => /未觸及/.test(String(e?.degree ?? '')))
+  const onTopic = json.onTopic !== false && !allUntouched
   const idx = GSAT_GRADES.indexOf(String(json.grade ?? '').trim().toUpperCase())
   const overall = !onTopic ? 0 : idx >= 0 ? idx : null
-  // 分數：判官在帶內給的整數；帶外夾回、離題 0、沒等第 null
-  const score = overall == null ? null : gsatScoreOf(overall, kind, onTopic ? json.score : 0)
+  // 分數：判官在帶內給的整數；帶外夾回、離題 0、沒等第 null；老師配分不同時分數帶等比縮放
+  const score = overall == null ? null : gsatScoreOf(overall, kind, onTopic ? json.score : 0, opts.maxScore ?? null)
   const dims = (Array.isArray(json.elements) ? json.elements : []).map((e) => ({
     name: String(e?.name ?? ''),
     comment: String(e?.degree ?? ''),

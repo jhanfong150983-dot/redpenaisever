@@ -835,16 +835,19 @@ export function applyColumnIndent(text, inkRows) {
  *
  * 2026-09-21 學測國寫：一張答題卷上有**不只一篇**（正面第一大題、背面第二大題），
  *   版面資料用 essay.items 描述「哪一項寫在哪幾頁」。會考沒有 items → 行為與過去完全相同。
- * ⛔ 目前只支援**一個** item（第一階段只批第二大題）。多個 item 需要逐項分開抄寫／眉批／評分，
- *   那一段還沒做——這裡直接擋下，不可以默默把多篇合成一篇批（那正是高中自備卷一直被鎖住的原因）。
+ * 2026-09-23 多個 item（兩題皆考：正面知性題、背面情意題）：Phase A 抄寫所有 item 的頁（聯集），
+ *   Phase B 由 essay-pipeline 依每個 item 的 pages 分開判（不會合成一篇）。每個 item 都要指定頁。
  */
 export function essayGradedPages(g) {
   const items = Array.isArray(g?.items) ? g.items : null
   if (!items || !items.length) return null
-  if (items.length > 1) throw new Error('這份作文卷有多個寫作題，目前只支援一題（多題分開批改尚未開放）')
-  const pages = (Array.isArray(items[0]?.pages) ? items[0].pages : []).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= g.pages)
-  if (!pages.length) throw new Error('作文卷的寫作題沒有指定頁面（essay.items[0].pages）')
-  return new Set(pages)
+  const all = new Set()
+  items.forEach((it, i) => {
+    const pages = (Array.isArray(it?.pages) ? it.pages : []).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= g.pages)
+    if (!pages.length) throw new Error(`作文卷的寫作題沒有指定頁面（essay.items[${i}].pages）`)
+    pages.forEach((p) => all.add(p))
+  })
+  return all
 }
 
 /**

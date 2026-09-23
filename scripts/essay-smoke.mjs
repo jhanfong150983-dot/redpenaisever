@@ -48,6 +48,14 @@ const fakeStage = async ({ routeKey, stageContents }) => {
       summary: '總評',
     }) } }
   }
+  // 學測判官：(一) 簡答判官回 grade+points、(二)／情意題回 grade+score+elements；會考回 overall
+  const prompt = stageContents?.[0]?.parts?.find((p) => typeof p.text === 'string')?.text ?? ''
+  if (prompt.includes('問題（一）：依據文本說明理由的簡答題')) {
+    return { ok: true, status: 200, data: { __text: JSON.stringify({ onTopic: true, points: [{ name: 'p1', hit: '完整', quote: '假的' }], grade: 'A', score: 4, reason: 'r1' }) } }
+  }
+  if (prompt.includes('學科能力測驗')) {
+    return { ok: true, status: 200, data: { __text: JSON.stringify({ onTopic: true, elements: [{ name: 'e1', degree: '明確', quote: '假的' }], structure: 's', diction: 'd', band: 'A', grade: 'A', score: 16, reason: 'r2' }) } }
+  }
   return { ok: true, status: 200, data: { __text: JSON.stringify({ overall: 4, reason: 'r', dimensions: [{ name: '立意取材', level: 4, comment: 'c' }] }) } }
 }
 const fakeExtract = (d) => d?.__text ?? ''
@@ -152,11 +160,33 @@ let extra = 1
       if (written < 36) throw new Error(`有字行只有 ${written}（這份原卷應該 37~38 行）`)
       if (trCalls > 6) throw new Error(`抄寫呼叫 ${trCalls} 次，38 行每 8 行一組應該 5 次上下`)
       console.log(`✅ 學測（只批背面）：只出現第 2 頁、${draft.columns.length} 行、有字 ${written} 行、抄寫 ${trCalls} 次呼叫`)
-      // 多個寫作題還沒支援 → 必須大聲失敗，不可默默合成一篇
-      let threw = false
-      try { await cutEssayColumns(merged, { essay: { ...gsat, items: [{ id: '1', pages: [1] }, { id: '2', pages: [2] }] } }, breaks) } catch { threw = true }
-      if (!threw) throw new Error('多個寫作題沒有被擋下')
-      console.log('✅ 學測（多題）：正確擋下、沒有默默合成一篇')
+      // 2026-09-23 兩題皆考：正面知性題（(一)(二) 靠「(二)」標記切）、背面情意題 → Phase A 抄兩頁、Phase B 逐題各自判
+      const both = { ...gsat, items: [
+        { id: '1', pages: [1], kind: 'expository', sub: { q1: { maxScore: 4, points: ['要點一'] }, q2: { maxScore: 21, elements: ['要求一'] } } },
+        { id: '2', pages: [2], kind: 'affective', maxScore: 25 },
+      ] }
+      const d2 = await runEssayTranscribe({
+        executeStage: stage, extractCandidateText: fakeExtract, apiKey: 'x', model: 'x',
+        payload: {}, routeHint: {}, log: () => {}, imageBuffer: merged, pageBreaks: breaks, layout: { essay: both },
+      })
+      const pg2 = [...new Set(d2.columns.map((c) => c.page))].sort()
+      if (pg2.join(',') !== '1,2') throw new Error(`兩題皆考應該抄兩頁，實際第 ${pg2.join(',')} 頁`)
+      // 樣卷正面可能是空白的、假 AI 也不會寫標記 → 直接在第 1 頁前 10 行塞抄本、第 6 行開頭「（二）」模擬學生標記
+      const p1cols = d2.columns.filter((c) => c.page === 1).slice(0, 10)
+      if (p1cols.length < 10) throw new Error(`第 1 頁只有 ${p1cols.length} 行`)
+      p1cols.forEach((c, k) => { c.text = (k === 5 ? '（二）' : '') + '這是一行假的抄本內容用來測試流程拾'; c.lowConfidence = false })
+      const { essayGsatItems } = await import('../server/ai/essay-grader.js')
+      const items = essayGsatItems({ essay: both })
+      const common2 = { executeStage: stage, extractCandidateText: fakeExtract, apiKey: 'x', model: 'x', payload: {}, routeHint: {}, log: () => {} }
+      const r1 = await runEssayFeedback({ ...common2, draft: d2, layout: { essay: both }, item: items[0], bookletImages: [{ mimeType: 'image/webp', data: 'AA==' }] })
+      const r2 = await runEssayFeedback({ ...common2, draft: d2, layout: { essay: both }, item: items[1], bookletImages: [{ mimeType: 'image/webp', data: 'AA==' }] })
+      if (r1.sub?.split?.how !== 'marker' || r1.sub.split.rows1 !== 5) throw new Error(`知性題切段錯：${JSON.stringify(r1.sub?.split)}`)
+      if (r1.sub.q1.score !== 4 || r1.sub.q2.score !== 16 || r1.level.final !== 20 || r1.level.maxScore !== 25) throw new Error(`知性題分數錯：${JSON.stringify({ q1: r1.sub.q1.score, q2: r1.sub.q2.score, total: r1.level.final, max: r1.level.maxScore })}`)
+      if (!r1.feedback?.sentenceFeedback?.length || r1.columns.some((c) => c.page !== 1)) throw new Error('知性題眉批缺、或混到第 2 頁的行')
+      if (r2.level.final !== 18 || r2.level.maxScore !== 25 || r2.itemId !== '2' || r2.columns.some((c) => c.page !== 2)) throw new Error(`情意題結果錯（A 帶 18~21、假判官給 16 應夾成 18）：${JSON.stringify({ final: r2.level.final, max: r2.level.maxScore, itemId: r2.itemId })}`)
+      const merged2 = buildEssayGradingResult('1', r1)
+      if (merged2.totalScore !== 20 || merged2.details[0].essayResult.sub.q1.grade !== 'A') throw new Error('知性題 detail 組錯')
+      console.log(`✅ 學測（兩題皆考）：抄兩頁、知性題 (一)${r1.sub.q1.score}+(二)${r1.sub.q2.score}=${r1.level.final}/25（切段 ${r1.sub.split.how}）、情意題 ${r2.level.final}/25`)
     } catch (e) {
       fail++
       console.log(`⛔ 學測案例：${e.message}`)

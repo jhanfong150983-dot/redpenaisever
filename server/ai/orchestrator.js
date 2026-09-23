@@ -14,7 +14,7 @@ import {
 } from './staged-grading.js'
 import { runEssayTranscribe, runEssayFeedback, essayResultToQuestionResult, buildEssayGradingResult } from './essay-pipeline.js'
 import { isEssayLayout } from './essay-sheet.js'
-import { essayGsatRubricOf } from './essay-grader.js'
+import { essayGsatRubricOf, essayGsatItems } from './essay-grader.js'
 import { persistPhaseAState, loadPhaseAState } from './stage-log-writer.js'
 
 async function executeSinglePipelineCall({
@@ -348,9 +348,7 @@ export async function runAiPipeline({
     if (!hit) throw new Error('作文 Phase B：找不到 Phase A 的批改結果（phaseAResult 與 phase_a_state 都沒有）——請重新批改')
     // Phase B＝眉批＋建議級分（對應 loading 第四格）。Phase A 已把抄本算好、這裡只吃文字＋題本圖。
     //   舊卷（Phase A 就已經跑完眉批的那批）draft.feedback 已存在 → 不重跑、直接組結果。
-    const essayResult = hit.essayResult?.feedback || hit.essayResult?.gate
-      ? hit.essayResult
-      : await runEssayFeedback({
+    const runOne = (item) => runEssayFeedback({
         executeStage,
         extractCandidateText,
         apiKey,
@@ -362,9 +360,26 @@ export async function runAiPipeline({
         // 學測國寫：每卷專屬的評分原則存在版面資料的 items 裡；會考沒有 → null → 走原本的會考判官
         gsatRubric: essayGsatRubricOf(essayLayout),
         layout: essayLayout,
+        item,
         log: (m) => console.log(`${logPrefix} ${m}`),
       })
-    const finalResult = buildEssayGradingResult(String(hit.questionId ?? '1'), essayResult)
+    // 2026-09-23 學測一張卷可以不只一題（知性題／兩題皆考）：Phase A 抄的是整張卷，Phase B 逐題（依頁）各自判、各自一筆 detail
+    const gsatItems = essayLayout?.essay?.format === 'gsat' ? essayGsatItems(essayLayout) : null
+    let finalResult
+    if (!gsatItems || (gsatItems.length === 1 && gsatItems[0].kind === 'affective')) {
+      const essayResult = hit.essayResult?.feedback || hit.essayResult?.gate ? hit.essayResult : await runOne(gsatItems?.[0] ?? null)
+      finalResult = buildEssayGradingResult(String(hit.questionId ?? gsatItems?.[0]?.id ?? '1'), essayResult)
+    } else {
+      const parts = []
+      for (const item of gsatItems) parts.push(buildEssayGradingResult(item.id, await runOne(item)))
+      finalResult = {
+        totalScore: parts.reduce((n, p) => n + (Number(p.totalScore) || 0), 0),
+        details: parts.flatMap((p) => p.details),
+        mistakes: [], weaknesses: [], suggestions: [],
+        needsReview: parts.some((p) => p.needsReview),
+        reviewReasons: parts.flatMap((p) => p.reviewReasons),
+      }
+    }
     console.log(`${logPrefix} [Essay] Phase B 完成（${essayLayout?.essay?.format === 'gsat' ? '分數' : '級分'} ${finalResult.totalScore}）`)
     pipelineResult = {
       status: 200,

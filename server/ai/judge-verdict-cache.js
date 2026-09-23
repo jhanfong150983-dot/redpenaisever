@@ -34,7 +34,7 @@ export const JUDGE_PROMPT_VERSIONS = {
   // 2026-09-19 作文（P3）：三段各自一個版本號——抄寫／眉批／級分 prompt 任一有改都要升，否則舊卷重批跑的是舊邏輯
   essayTranscribe: 'essay-tr-2026-09-21-cell8-symfix', // 8 行合成＋逐格「｜」輸出；09-21 抄本淨化加「角狀符號→引號」與「亂碼→?」（prompt 沒變、抄本會變）
   essayFeedback: 'essay-fb-2026-09-20-wordtypo',   // 逐句眉批 v4：錯別字改**以詞為單位**輸出（單字看不出對錯）
-  essayLevel: 'essay-lv-2026-09-22-gsat-score',    // 建議級分（只給通用規準、題目送圖）；09-22 學測判官加帶內分數（會考 prompt 沒變）
+  essayLevel: 'essay-lv-2026-09-23-gsat-expository',    // 建議級分（只給通用規準、題目送圖）；09-22 學測判官加帶內分數（會考 prompt 沒變）
 }
 
 const sha1 = (s) => crypto.createHash('sha1').update(String(s ?? '')).digest('hex')

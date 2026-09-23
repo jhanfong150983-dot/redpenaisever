@@ -70,6 +70,7 @@ export const STAGE_MODEL = Object.freeze({
   [AI_ROUTE_KEYS.GRADING_ESSAY_TRANSCRIBE]: MODEL_PRO,
   [AI_ROUTE_KEYS.GRADING_ESSAY_FEEDBACK]: MODEL_PRO,
   [AI_ROUTE_KEYS.GRADING_ESSAY_LEVEL]: MODEL_PRO,
+  [AI_ROUTE_KEYS.ANSWER_KEY_ESSAY_GSAT_RUBRIC]: MODEL_PRO, // 2026-09-23 學測知性題規準起草（讀題本圖、一次性建卷）
   [AI_ROUTE_KEYS.GRADING_RUBRIC_JUDGE]: MODEL_PRO,     // rubric 判官（社會/自然看圖逐維度判分）
   // 2026-05-23: 紙張四角偵測切到 FLASH
   // 原因：(1) 老師端 AssignmentImport 已 skip、只剩學生拍照觸發

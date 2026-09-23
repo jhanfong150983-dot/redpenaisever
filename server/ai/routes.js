@@ -38,6 +38,7 @@ export const AI_ROUTE_KEYS = Object.freeze({
   ANSWER_KEY_LOCATE: 'answer_key.locate',
   ANSWER_KEY_REANALYZE: 'answer_key.reanalyze',
   ANSWER_KEY_TAG_CONCEPTS: 'answer_key.tag_concepts',
+  ANSWER_KEY_ESSAY_GSAT_RUBRIC: 'answer_key.essay_gsat_rubric', // 2026-09-23 學測知性題：從題本起草 (一) 參考要點／(二) 寫作要求／配分（老師可改）
   REPORT_TEACHER_SUMMARY: 'report.teacher_summary',
   REPORT_DOMAIN_DIAGNOSIS: 'report.domain_diagnosis',
   REPORT_QUESTION_ERROR_FEATURES: 'report.question_error_features',  // 2026-07-16 開放題錯誤特徵 AI 歸納（on-demand）

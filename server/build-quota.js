@@ -12,6 +12,7 @@ export const BUILD_ROUTES = [
   'answer_key.reanalyze',
   'answer_key.solve',
   'answer_key.read_reference',
+  'answer_key.essay_gsat_rubric', // 2026-09-23 學測知性題規準起草（每卷一次）
 ]
 export const TEACHER_WEEKLY_BUILD_CAP = 10 // 科任/個人：≈5 份（1 份 2 run）＋重解析餘裕
 export const ADMIN_WEEKLY_BUILD_CAP = 80   // 學校行政：一次設多年級全科綽綽有餘
